@@ -1,0 +1,355 @@
+OBJECT Codeunit 137503 SCM Qty on Comb. Invoice
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text001@1013 : TextConst 'ENU=must have the same sign as';
+      Text002@1012 : TextConst 'ENU=The quantity that you are trying to invoice is greater than the quantity';
+      LibraryInventory@1004 : Codeunit 132201;
+      LibraryPurchase@1003 : Codeunit 130512;
+      LibrarySales@1002 : Codeunit 130509;
+      Assert@1001 : Codeunit 130000;
+      isInitialized@1000 : Boolean;
+
+    LOCAL PROCEDURE CreateItem@14(VAR Item@1000 : Record 27;VAR ItemUnitOfMeasure@1001 : Record 5404);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItemUnitOfMeasureCode(ItemUnitOfMeasure,Item."No.",1);
+    END;
+
+    LOCAL PROCEDURE Initialize@5();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    PROCEDURE TestPurchaseInvoice@2();
+    VAR
+      Item@1006 : Record 27;
+      ItemUnitOfMeasure@1004 : Record 5404;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      PurchRcptLine@1002 : Record 121;
+      InvoiceNo@1003 : Code[20];
+      VendorNo@1005 : Code[20];
+    BEGIN
+      Initialize;
+      CreateItem(Item,ItemUnitOfMeasure);
+      CreatePurchaseOrder(PurchaseHeader,Item."No.");
+      VendorNo := PurchaseHeader."Buy-from Vendor No.";
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+      PurchRcptLine.SETCURRENTKEY("Order No.","Order Line No.");
+      PurchRcptLine.SETRANGE("Order No.",PurchaseHeader."No.");
+
+      InvoiceNo := CreatePurchaseInvoice(PurchRcptLine,VendorNo);
+
+      COMMIT;
+
+      PurchaseLineVerify(PurchaseLine."Document Type"::Invoice,InvoiceNo,ItemUnitOfMeasure.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@4(VAR PurchaseHeader@1000 : Record 38;ItemNo@1003 : Code[20]);
+    VAR
+      PurchaseLine@1001 : Record 39;
+      Quantity@1004 : Integer;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+
+      Quantity := 10;
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,-Quantity);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseInvoice@30(VAR PurchRcptLine@1003 : Record 121;VendorNo@1004 : Code[20]) : Code[20];
+    VAR
+      PurchaseHeaderInvoice@1001 : Record 38;
+      PurchGetReceipt@1002 : Codeunit 74;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeaderInvoice,PurchaseHeaderInvoice."Document Type"::Invoice,VendorNo);
+
+      PurchGetReceipt.SetPurchHeader(PurchaseHeaderInvoice);
+      PurchGetReceipt.CreateInvLines(PurchRcptLine);
+
+      EXIT(PurchaseHeaderInvoice."No.");
+    END;
+
+    LOCAL PROCEDURE PurchaseLineVerify@20(DocumentType@1003 : Option;DocumentNo@1004 : Code[20];AlternateUOMCode@1001 : Code[10]);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",DocumentType);
+      PurchaseLine.SETRANGE("Document No.",DocumentNo);
+      PurchaseLine.SETRANGE(Type,PurchaseLine.Type::Item);
+      PurchaseLine.FINDSET;
+
+      // Test first the positive quantity line, then the negative quantity line
+      REPEAT
+        // Exercise
+        IF PurchaseLine.Quantity < 0 THEN
+          ASSERTERROR PurchaseLine.VALIDATE(Quantity,PurchaseLine.Quantity - 0.00001)
+        ELSE
+          ASSERTERROR PurchaseLine.VALIDATE(Quantity,PurchaseLine.Quantity + 0.00001);
+
+        // Verify
+        Assert.ExpectedError(Text002);
+
+        // Exercise
+        ASSERTERROR PurchaseLine.VALIDATE(Quantity,-PurchaseLine.Quantity);
+
+        // Verify
+        Assert.ExpectedError(Text001);
+
+        // Exercise
+        ASSERTERROR PurchaseLine.VALIDATE("Unit of Measure Code",AlternateUOMCode);
+
+        // Verify
+        IF DocumentType = PurchaseLine."Document Type"::Invoice THEN
+          Assert.ExpectedError(PurchaseLine.FIELDCAPTION("Receipt No."))
+        ELSE
+          Assert.ExpectedError(PurchaseLine.FIELDCAPTION("Return Shipment No."));
+
+        // Exercise + Positive Test
+        IF PurchaseLine.Quantity < 0 THEN
+          PurchaseLine.VALIDATE(Quantity,PurchaseLine.Quantity + 1)
+        ELSE
+          PurchaseLine.VALIDATE(Quantity,PurchaseLine.Quantity - 1);
+      UNTIL PurchaseLine.NEXT = 0;
+    END;
+
+    [Test]
+    PROCEDURE TestPurchaseCrMemo@3();
+    VAR
+      Item@1007 : Record 27;
+      ItemUnitOfMeasure@1005 : Record 5404;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      ReturnShptLine@1002 : Record 6651;
+      CrMemoNo@1003 : Code[20];
+      VendorNo@1006 : Code[20];
+    BEGIN
+      Initialize;
+      CreateItem(Item,ItemUnitOfMeasure);
+      CreatePurchaseRetOrder(PurchaseHeader,Item."No.");
+      VendorNo := PurchaseHeader."Buy-from Vendor No.";
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+      ReturnShptLine.SETCURRENTKEY("Return Order No.","Return Order Line No.");
+      ReturnShptLine.SETRANGE("Return Order No.",PurchaseHeader."No.");
+
+      CrMemoNo := CreatePurchaseCreditMemo(ReturnShptLine,VendorNo);
+
+      COMMIT;
+
+      PurchaseLineVerify(PurchaseLine."Document Type"::"Credit Memo",CrMemoNo,ItemUnitOfMeasure.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseRetOrder@6(VAR PurchaseHeader@1000 : Record 38;ItemNo@1003 : Code[20]);
+    VAR
+      PurchaseLine@1001 : Record 39;
+      Quantity@1004 : Decimal;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Return Order",'');
+
+      Quantity := 10;
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,-Quantity);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseCreditMemo@28(VAR ReturnShptLine@1003 : Record 6651;VendorNo@1001 : Code[20]) : Code[20];
+    VAR
+      PurchaseHeaderCrMemo@1000 : Record 38;
+      PurchGetReturnShipments@1002 : Codeunit 6648;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeaderCrMemo,PurchaseHeaderCrMemo."Document Type"::"Credit Memo",VendorNo);
+
+      PurchGetReturnShipments.SetPurchHeader(PurchaseHeaderCrMemo);
+      PurchGetReturnShipments.CreateInvLines(ReturnShptLine);
+
+      EXIT(PurchaseHeaderCrMemo."No.");
+    END;
+
+    [Test]
+    PROCEDURE TestSalesInvoice@7();
+    VAR
+      Item@1006 : Record 27;
+      ItemUnitOfMeasure@1003 : Record 5404;
+      Customer@1007 : Record 18;
+      SalesHdrOrder@1000 : Record 36;
+      SalesLine@1004 : Record 37;
+      SalesShptLine@1001 : Record 111;
+      InvoiceNo@1002 : Code[20];
+    BEGIN
+      Initialize;
+      CreateItem(Item,ItemUnitOfMeasure);
+      LibrarySales.CreateCustomer(Customer);
+
+      CreateSalesOrder(SalesHdrOrder,Customer."No.",Item."No.");
+
+      LibrarySales.PostSalesDocument(SalesHdrOrder,TRUE,FALSE);
+      SalesShptLine.SETCURRENTKEY("Order No.","Order Line No.");
+      SalesShptLine.SETRANGE("Order No.",SalesHdrOrder."No.");
+
+      InvoiceNo := CreateSalesInvoice(SalesShptLine,Customer."No.");
+
+      COMMIT;
+
+      SalesLineVerify(SalesLine."Document Type"::Invoice,InvoiceNo,ItemUnitOfMeasure.Code);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@9(VAR SalesHdrOrder@1000 : Record 36;CustomerNo@1002 : Code[20];ItemNo@1003 : Code[20]);
+    VAR
+      SalesLineOrder@1001 : Record 37;
+      Quantity@1004 : Decimal;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHdrOrder,SalesHdrOrder."Document Type"::Order,CustomerNo);
+
+      Quantity := 10;
+      LibrarySales.CreateSalesLine(SalesLineOrder,SalesHdrOrder,SalesLineOrder.Type::Item,ItemNo,Quantity);
+      LibrarySales.CreateSalesLine(SalesLineOrder,SalesHdrOrder,SalesLineOrder.Type::Item,ItemNo,-Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateSalesInvoice@1(VAR SalesShptLine@1001 : Record 111;CustomerNo@1004 : Code[20]) : Code[20];
+    VAR
+      SalesHeaderInvoice@1002 : Record 36;
+      SalesGetShipment@1003 : Codeunit 64;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeaderInvoice,SalesHeaderInvoice."Document Type"::Invoice,CustomerNo);
+
+      SalesGetShipment.SetSalesHeader(SalesHeaderInvoice);
+      SalesGetShipment.CreateInvLines(SalesShptLine);
+
+      EXIT(SalesHeaderInvoice."No.");
+    END;
+
+    LOCAL PROCEDURE SalesLineVerify@33(DocumentType@1001 : Option;DocumentNo@1002 : Code[20];AlternateUOMCode@1004 : Code[10]);
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      SalesLine.SETRANGE("Document Type",DocumentType);
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+      SalesLine.FINDSET;
+      // Test first the positive quantity line, then the negative quantity line
+      REPEAT
+        // Exercise
+        IF SalesLine.Quantity < 0 THEN
+          ASSERTERROR SalesLine.VALIDATE(Quantity,SalesLine.Quantity - 0.00001)
+        ELSE
+          ASSERTERROR SalesLine.VALIDATE(Quantity,SalesLine.Quantity + 0.00001);
+
+        // Verify
+        Assert.ExpectedError(Text002);
+
+        // Exercise
+        ASSERTERROR SalesLine.VALIDATE(Quantity,-SalesLine.Quantity);
+
+        // Verify
+        Assert.ExpectedError(Text001);
+
+        // Exercise
+        ASSERTERROR SalesLine.VALIDATE("Unit of Measure Code",AlternateUOMCode);
+
+        // Verify
+        IF DocumentType = SalesLine."Document Type"::Invoice THEN
+          Assert.ExpectedError(SalesLine.FIELDCAPTION("Shipment No."))
+        ELSE
+          Assert.ExpectedError(SalesLine.FIELDCAPTION("Return Receipt No."));
+
+        // Exercise + Positive Test
+        IF SalesLine.Quantity < 0 THEN
+          SalesLine.VALIDATE(Quantity,SalesLine.Quantity + 1)
+        ELSE
+          SalesLine.VALIDATE(Quantity,SalesLine.Quantity - 1);
+      UNTIL SalesLine.NEXT = 0;
+    END;
+
+    [Test]
+    PROCEDURE TestSalesCrMemo@8();
+    VAR
+      Item@1007 : Record 27;
+      ItemUnitOfMeasure@1005 : Record 5404;
+      Customer@1004 : Record 18;
+      SalesHdrRetOrder@1000 : Record 36;
+      SalesLine@1003 : Record 37;
+      ReturnRcptLine@1001 : Record 6661;
+      CrMemoNo@1002 : Code[20];
+    BEGIN
+      Initialize;
+      CreateItem(Item,ItemUnitOfMeasure);
+      LibrarySales.CreateCustomer(Customer);
+
+      CreateSalesRetOrder(SalesHdrRetOrder,Customer."No.",Item."No.");
+
+      LibrarySales.PostSalesDocument(SalesHdrRetOrder,TRUE,FALSE);
+      ReturnRcptLine.SETCURRENTKEY("Return Order No.","Return Order Line No.");
+      ReturnRcptLine.SETRANGE("Return Order No.",SalesHdrRetOrder."No.");
+
+      CrMemoNo := CreateSalesCreditMemo(ReturnRcptLine,Customer."No.");
+
+      COMMIT;
+
+      SalesLineVerify(SalesLine."Document Type"::"Credit Memo",CrMemoNo,ItemUnitOfMeasure.Code);
+    END;
+
+    LOCAL PROCEDURE CreateSalesRetOrder@10(VAR SalesHdrRetOrder@1000 : Record 36;CustomerNo@1002 : Code[20];ItemNo@1003 : Code[20]);
+    VAR
+      SalesLineRetOrder@1001 : Record 37;
+      Quantity@1004 : Integer;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHdrRetOrder,SalesHdrRetOrder."Document Type"::"Return Order",CustomerNo);
+
+      Quantity := 10;
+      LibrarySales.CreateSalesLine(SalesLineRetOrder,SalesHdrRetOrder,SalesLineRetOrder.Type::Item,ItemNo,Quantity);
+      LibrarySales.CreateSalesLine(SalesLineRetOrder,SalesHdrRetOrder,SalesLineRetOrder.Type::Item,ItemNo,-Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateSalesCreditMemo@12(VAR ReturnRcptLine@1002 : Record 6661;CustomerNo@1004 : Code[20]) : Code[20];
+    VAR
+      SalesHeaderCrMemo@1000 : Record 36;
+      SalesGetReturnReceipts@1003 : Codeunit 6638;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeaderCrMemo,SalesHeaderCrMemo."Document Type"::"Credit Memo",CustomerNo);
+
+      SalesGetReturnReceipts.SetSalesHeader(SalesHeaderCrMemo);
+      SalesGetReturnReceipts.CreateInvLines(ReturnRcptLine);
+
+      EXIT(SalesHeaderCrMemo."No.");
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Quantity] [Unit Of Measure] [SCM]
+      This codeunit tests that the user is not able to manually increase the quantity or change the UoM code in invoice lines, when it has been created out of a shipment.
+
+      The 4 test functions are:
+       - TestPurchaseInvoice - It executes the tests for purchase invoices
+       - TestPurchaseCrMemo - It executes the tests for purchase credit memos
+       - TestSalesInvoice - It executes the tests for sales invoices
+       - TestSalesCrMemo - It executes the tests for sales credit memos
+    }
+    END.
+  }
+}
+

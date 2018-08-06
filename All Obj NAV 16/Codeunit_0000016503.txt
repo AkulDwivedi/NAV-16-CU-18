@@ -1,0 +1,1204 @@
+OBJECT Codeunit 16503 VAT Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=03-08-16;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00.46621;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      NewLocation@1500011 : Record 14;
+      VATAdjustmentBuffer@1500000 : Record 16481;
+      DimMgt@1500009 : Codeunit 408;
+      Interstate@1500003 : Boolean;
+      NextDetTaxEntryNo@1500006 : Integer;
+      Text001@1500002 : TextConst 'ENU=VAT Adjustment Entry;ENN=VAT Adjustment Entry';
+      JnlLineNo@1500008 : Integer;
+      JnlBatchName@1500005 : Code[10];
+      JnlTemplateName@1500007 : Code[10];
+      Ratio@1500010 : Decimal;
+      Text004@1500012 : TextConst 'ENU=Quantity Adjusted %1 must not be greater than remaining quantity %2 for Detailed Tax Entry No %3.;ENN=Quantity Adjusted %1 must not be greater than remaining quantity %2 for Detailed Tax Entry No %3.';
+      RemQuantity@1500013 : Decimal;
+
+    PROCEDURE AdjustDetailedTaxEntry@1500013(VAR GenJnlLine@1500007 : Record 81;InsertRecord@1500004 : Boolean;VAR TaxJnlLine@1500008 : Record 16587);
+    VAR
+      DetailedTaxEntry@1500000 : Record 16522;
+      DetailedTaxEntry2@1500005 : Record 16522;
+      OriginalLocation@1500002 : Record 14;
+      CompanyInfo@1500006 : Record 79;
+      OrgStateCode@1500003 : Code[10];
+      AmountAdjusted@1500001 : Decimal;
+      TotalAmountLoadedonItem@1500009 : Decimal;
+    BEGIN
+      WITH TaxJnlLine DO BEGIN
+        AmountAdjusted := 0;
+        TotalAmountLoadedonItem := 0;
+        Ratio := 0;
+        IF NOT "VAT Adjustment Entry" THEN
+          EXIT;
+
+        TESTFIELD("VAT Adjustment Type");
+        TESTFIELD("Document No.");
+        TESTFIELD("Quantity to be Adjusted");
+
+        CASE "VAT Adjustment Type" OF
+          "VAT Adjustment Type"::"Branch Transfer":
+            BEGIN
+              TESTFIELD("Location Code");
+              TESTFIELD("Original Location");
+              IF "Original Location" <> '' THEN BEGIN
+                OriginalLocation.GET("Original Location");
+                OriginalLocation.TESTFIELD("State Code");
+                OrgStateCode := OriginalLocation."State Code";
+              END ELSE BEGIN
+                CompanyInfo.GET;
+                CompanyInfo.TESTFIELD(State);
+                OrgStateCode := CompanyInfo.State;
+              END;
+              NewLocation.GET("Location Code");
+
+              IF OrgStateCode = NewLocation."State Code" THEN BEGIN
+                Interstate := FALSE;
+                VALIDATE("Account No.","Bal. Account No.");
+              END ELSE
+                Interstate := TRUE;
+            END;
+          "VAT Adjustment Type"::"Lost/Destroy":
+            BEGIN
+              TESTFIELD("Non ITC Claimable Usage %",0);
+              TESTFIELD("Credit Memo Adjustment in VAT",0);
+            END;
+          "VAT Adjustment Type"::Consumed:
+            BEGIN
+              TESTFIELD("Non ITC Claimable Usage %",0);
+              TESTFIELD("Credit Memo Adjustment in VAT",0);
+            END;
+        END;
+
+        DetailedTaxEntry.GET("VAT Transaction No.");
+        VATAdjustmentBuffer.RESET;
+        VATAdjustmentBuffer.SETRANGE("Item Ledger Entry No.",DetailedTaxEntry."Item Ledger Entry No.");
+        IF VATAdjustmentBuffer.FINDSET THEN BEGIN
+          REPEAT
+            DetailedTaxEntry.GET(VATAdjustmentBuffer."Entry No.");
+            IF DetailedTaxEntry.Deferment THEN
+              ReverseCapitalGoodTaxEntry(GenJnlLine,DetailedTaxEntry,InsertRecord,TaxJnlLine)
+            ELSE
+              ReverseItemTaxEntry(GenJnlLine,DetailedTaxEntry,InsertRecord,TaxJnlLine);
+
+            IF DetailedTaxEntry.Deferment AND (DetailedTaxEntry."Primary Deferment Entry No." <> 0)
+            THEN BEGIN
+              DetailedTaxEntry2.SETRANGE("Entry Type",DetailedTaxEntry2."Entry Type"::Adjustment);
+              DetailedTaxEntry2.SETRANGE("Primary Deferment Entry No.",DetailedTaxEntry."Primary Deferment Entry No.");
+              IF DetailedTaxEntry2.FIND('-') THEN
+                REPEAT
+                  IF (DetailedTaxEntry2."Reversed by Entry No." <> 0) AND (NOT DetailedTaxEntry2.Adjusted)THEN BEGIN
+                    DetailedTaxEntry.GET(DetailedTaxEntry2."Reversed by Entry No.");
+                    IF DetailedTaxEntry."Remaining Quantity" <> 0 THEN
+                      DetailedTaxEntry."Remaining Quantity" := DetailedTaxEntry."Remaining Quantity" + DetailedTaxEntry2.Quantity;
+                    DetailedTaxEntry."Remaining Tax Amount" := DetailedTaxEntry."Remaining Tax Amount" +
+                      DetailedTaxEntry2."Input Credit/Output Tax Amount";
+                    IF InsertRecord THEN
+                      DetailedTaxEntry.MODIFY;
+
+                    DetailedTaxEntry2.Adjusted := TRUE;
+                    IF InsertRecord THEN
+                      DetailedTaxEntry2.MODIFY;
+                  END;
+                UNTIL DetailedTaxEntry2.NEXT = 0;
+            END ELSE BEGIN
+              DetailedTaxEntry."Remaining Quantity" := DetailedTaxEntry."Remaining Quantity" - "Quantity to be Adjusted";
+              IF InsertRecord THEN
+                DetailedTaxEntry.MODIFY;
+            END;
+            AmountAdjusted += VATAdjustmentBuffer."Amount to be Adjusted";
+            TotalAmountLoadedonItem += VATAdjustmentBuffer."Amount Loaded on Item";
+            VATAdjustmentBuffer.MODIFY;
+          UNTIL VATAdjustmentBuffer.NEXT = 0;
+          IF NOT InsertRecord THEN
+            VALIDATE(Amount,AmountAdjusted);
+
+          IF DetailedTaxEntry.Deferment THEN
+            ReverseCapitalGoodTaxEntry2(GenJnlLine,DetailedTaxEntry,InsertRecord,TaxJnlLine)
+          ELSE
+            ReverseItemTaxEntry2(GenJnlLine,DetailedTaxEntry,InsertRecord,TaxJnlLine);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetNextDetTaxEntryNo@1500004() : Integer;
+    VAR
+      DetailedTaxEntry@1500000 : Record 16522;
+    BEGIN
+      IF NextDetTaxEntryNo = 0 THEN BEGIN
+        IF DetailedTaxEntry.FINDLAST THEN
+          NextDetTaxEntryNo := DetailedTaxEntry."Entry No." + 1
+        ELSE
+          NextDetTaxEntryNo := 1;
+      END ELSE
+        NextDetTaxEntryNo := NextDetTaxEntryNo + 1;
+      EXIT(NextDetTaxEntryNo);
+    END;
+
+    PROCEDURE ApplyDefermentEntries@1500005(VAR DetailedTaxEntry@1500000 : Record 16522);
+    VAR
+      DetailedTaxEntry2@1500001 : Record 16522;
+      DetailedTaxEntry3@1500004 : Record 16522;
+      PrimaryDetTaxEntry@1500007 : Record 16522;
+      SaleQuantity@1500002 : Decimal;
+      Quantity@1500005 : Decimal;
+      TotalITC@1500006 : Decimal;
+    BEGIN
+      IF DetailedTaxEntry."Product Type" <> DetailedTaxEntry."Product Type"::"Capital Goods" THEN
+        EXIT;
+
+      SaleQuantity := DetailedTaxEntry.Quantity;
+      DetailedTaxEntry2.RESET;
+      DetailedTaxEntry2.SETRANGE("Entry Type",DetailedTaxEntry2."Entry Type"::"Initial Entry");
+      DetailedTaxEntry2.SETRANGE(Type,DetailedTaxEntry.Type);
+      DetailedTaxEntry2.SETRANGE("No.",DetailedTaxEntry."No.");
+      DetailedTaxEntry2.SETRANGE(Deferment,TRUE);
+      DetailedTaxEntry2.SETRANGE(Settlement,FALSE);
+      DetailedTaxEntry2.SETRANGE(Positive,TRUE);
+      IF DetailedTaxEntry2.FIND('-') THEN
+        REPEAT
+          IF DetailedTaxEntry2."Remaining Quantity" > 0 THEN BEGIN
+            IF DetailedTaxEntry2."Remaining Quantity" < SaleQuantity THEN
+              Quantity := DetailedTaxEntry2."Remaining Quantity"
+            ELSE
+              Quantity := SaleQuantity;
+
+            TotalITC := 0;
+
+            PrimaryDetTaxEntry.GET(DetailedTaxEntry2."Primary Deferment Entry No.");
+            DetailedTaxEntry3.RESET;
+            DetailedTaxEntry3.SETRANGE("Entry Type",DetailedTaxEntry3."Entry Type"::"Initial Entry");
+            DetailedTaxEntry3.SETRANGE("Primary Deferment Entry No.",DetailedTaxEntry2."Primary Deferment Entry No.");
+            DetailedTaxEntry3.SETRANGE(Settlement,FALSE);
+            IF DetailedTaxEntry3.FIND('-') THEN
+              REPEAT
+                DetailedTaxEntry := DetailedTaxEntry3;
+                DetailedTaxEntry."Entry No." := GetNextDetTaxEntryNo;
+                DetailedTaxEntry."Entry Type" := DetailedTaxEntry."Entry Type"::Adjustment;
+                IF DetailedTaxEntry."Tax Base Amount" <> 0 THEN
+                  DetailedTaxEntry."Tax Base Amount" :=
+                    -(DetailedTaxEntry."Tax Base Amount" / PrimaryDetTaxEntry.Quantity) * Quantity;
+                IF DetailedTaxEntry."Tax Amount" <> 0 THEN
+                  DetailedTaxEntry."Tax Amount" := -(PrimaryDetTaxEntry."Tax Amount" / DetailedTaxEntry.Quantity) * Quantity;
+                IF DetailedTaxEntry."Input Credit/Output Tax Amount" <> 0 THEN
+                  DetailedTaxEntry."Input Credit/Output Tax Amount" :=
+                    -(DetailedTaxEntry."Input Credit/Output Tax Amount" / PrimaryDetTaxEntry.Quantity) * Quantity;
+                DetailedTaxEntry.Quantity := -Quantity;
+                DetailedTaxEntry."Remaining Tax Amount" := 0;
+                DetailedTaxEntry."Remaining Quantity" := 0;
+                DetailedTaxEntry."Reversed by Entry No." := DetailedTaxEntry3."Entry No.";
+                DetailedTaxEntry.Positive := DetailedTaxEntry."Tax Amount" > 0;
+                DetailedTaxEntry.INSERT(TRUE);
+
+                TotalITC := TotalITC - DetailedTaxEntry."Input Credit/Output Tax Amount";
+              UNTIL DetailedTaxEntry3.NEXT = 0;
+
+            IF TotalITC <> 0 THEN BEGIN
+              DetailedTaxEntry := DetailedTaxEntry2;
+              DetailedTaxEntry."Entry No." := GetNextDetTaxEntryNo;
+              DetailedTaxEntry."Entry Type" := DetailedTaxEntry."Entry Type"::Adjustment;
+              IF DetailedTaxEntry."Tax Base Amount" <> 0 THEN
+                DetailedTaxEntry."Tax Base Amount" :=
+                  (DetailedTaxEntry."Tax Base Amount" / PrimaryDetTaxEntry.Quantity) * Quantity;
+              IF DetailedTaxEntry."Tax Amount" <> 0 THEN
+                DetailedTaxEntry."Tax Amount" := (DetailedTaxEntry."Tax Amount" / PrimaryDetTaxEntry.Quantity) * Quantity;
+              DetailedTaxEntry."Input Credit/Output Tax Amount" := TotalITC;
+              DetailedTaxEntry.Quantity := Quantity;
+              DetailedTaxEntry."Remaining Tax Amount" := 0;
+              DetailedTaxEntry."Remaining Quantity" := 0;
+              DetailedTaxEntry."Reversed by Entry No." := DetailedTaxEntry2."Entry No.";
+              DetailedTaxEntry.Positive := DetailedTaxEntry."Tax Amount" > 0;
+              DetailedTaxEntry.INSERT(TRUE);
+            END;
+
+            DetailedTaxEntry3.SETRANGE("Entry Type",DetailedTaxEntry3."Entry Type"::Adjustment);
+            DetailedTaxEntry3.SETRANGE("Primary Deferment Entry No.",DetailedTaxEntry2."Primary Deferment Entry No.");
+            IF DetailedTaxEntry3.FIND('-') THEN
+              REPEAT
+                IF (DetailedTaxEntry3."Reversed by Entry No." <> 0) AND (NOT DetailedTaxEntry3.Adjusted) THEN BEGIN
+                  DetailedTaxEntry.GET(DetailedTaxEntry3."Reversed by Entry No.");
+                  IF DetailedTaxEntry."Remaining Quantity" <> 0 THEN
+                    DetailedTaxEntry."Remaining Quantity" := DetailedTaxEntry."Remaining Quantity" + DetailedTaxEntry2.Quantity;
+                  IF DetailedTaxEntry."Remaining Tax Amount" <> 0 THEN
+                    DetailedTaxEntry."Remaining Tax Amount" := DetailedTaxEntry."Remaining Tax Amount" +
+                      DetailedTaxEntry3."Input Credit/Output Tax Amount";
+                  DetailedTaxEntry.MODIFY;
+                  DetailedTaxEntry := DetailedTaxEntry3;
+                  DetailedTaxEntry.Adjusted := TRUE;
+                  DetailedTaxEntry.MODIFY;
+                END;
+              UNTIL DetailedTaxEntry3.NEXT = 0;
+
+            SaleQuantity := SaleQuantity - Quantity;
+          END;
+        UNTIL (DetailedTaxEntry2.NEXT = 0) OR (SaleQuantity = 0);
+    END;
+
+    PROCEDURE UpdateTaxDetails@1500006(VAR DetailedTaxEntry@1500029 : Record 16522);
+    VAR
+      TaxDetail@1500004 : Record 322;
+      Location@1500000 : Record 14;
+      Vendor@1500002 : Record 23;
+      TaxJurisdiction@1500003 : Record 320;
+      CompanyInfo@1500001 : Record 79;
+      xTaxBaseAmount@1500018 : Decimal;
+      xTaxAmount@1500013 : Decimal;
+      RetenAmount@1500005 : Decimal;
+      RetenBaseAmount@1500006 : Decimal;
+      ItemRetenAmount@1500009 : Decimal;
+      JurRetenAmount@1500010 : Decimal;
+      ItemLevel@1500008 : Boolean;
+      JurisdictionLevel@1500007 : Boolean;
+      LocCompostion@1500011 : Boolean;
+      TaxAreaLine@1500012 : Record 319;
+    BEGIN
+      WITH DetailedTaxEntry DO BEGIN
+        TaxJurisdiction.GET("Tax Jurisdiction Code");
+        IF TaxJurisdiction."Tax Type" = TaxJurisdiction."Tax Type"::" " THEN
+          EXIT;
+
+        "Purch. Tax %" := 0;
+        "Purch. Tax Base Amount" := 0;
+        "Purch. Tax Amount" := 0;
+        "Purch. Amount on Item" := 0;
+        "Purch. IO Tax Amount" := 0;
+        "Input Credit/Output Tax Amount" := 0;
+        "Amount Loaded on Item" := 0;
+
+        TaxDetail.RESET;
+        TaxDetail.SETRANGE("Tax Jurisdiction Code","Tax Jurisdiction Code");
+        TaxDetail.SETRANGE("Tax Group Code","Tax Group Code");
+        TaxDetail.SETFILTER("Effective Date",'<=%1',"Posting Date");
+        IF NOT TaxJurisdiction."Forms Not Applicable" THEN
+          TaxDetail.SETRANGE("Form Code","Form Code")
+        ELSE
+          TaxDetail.SETRANGE("Forms Not Applicable",TRUE);
+        IF TaxDetail.FINDLAST THEN;
+        TaxAreaLine.GET("Tax Area Code","Tax Jurisdiction Code");
+        IF (TaxDetail."VAT able Purch. Tax %" <> 0) AND
+           (TaxJurisdiction."Tax Type" = TaxJurisdiction."Tax Type"::CST)
+        THEN BEGIN
+          "Purch. Tax %" := TaxDetail."VAT able Purch. Tax %";
+          IF TaxAreaLine."Incl. TaxBase-VPT Calc." THEN
+            "Purch. Tax Base Amount" := "Tax Base Amount" + "Tax Amount"
+          ELSE
+            "Purch. Tax Base Amount" := "Tax Amount";
+          "Purch. Tax Amount" := ROUND("Purch. Tax Base Amount" * "Purch. Tax %" / 100);
+          xTaxBaseAmount := "Purch. Tax Base Amount";
+          xTaxAmount := "Purch. Tax Amount";
+        END ELSE BEGIN
+          xTaxBaseAmount := "Tax Base Amount";
+          xTaxAmount := "Tax Amount";
+        END;
+
+        IF NOT "Input / Output Tax Applicable" THEN BEGIN
+          IF (TaxDetail."VAT able Purch. Tax %" <> 0) AND
+             (TaxJurisdiction."Tax Type" = TaxJurisdiction."Tax Type"::CST)
+          THEN
+            "Amount Loaded on Item" := xTaxAmount + "Tax Amount"
+          ELSE
+            "Amount Loaded on Item" := xTaxAmount;
+          EXIT;
+        END;
+
+        IF "Location Code" <> '' THEN BEGIN
+          Location.GET("Location Code");
+          LocCompostion := Location.Composition;
+        END ELSE BEGIN
+          CompanyInfo.GET;
+          LocCompostion := CompanyInfo.Composition;
+        END;
+        IF "Source Type" = "Source Type"::Vendor THEN
+          Vendor.GET("Source No.");
+        IF LocCompostion OR Vendor.Composition THEN BEGIN
+          "Amount Loaded on Item" := xTaxAmount;
+          "Input Credit/Output Tax Amount" := 0;
+          IF xTaxBaseAmount <> "Tax Base Amount" THEN BEGIN
+            "Purch. Amount on Item" := "Purch. Tax Amount";
+            "Purch. IO Tax Amount" := 0;
+          END;
+
+          Composition := TRUE;
+          EXIT;
+        END;
+
+        IF (TaxDetail."VAT able Purch. Tax %" = 0) AND (TaxJurisdiction."Tax Type" = TaxJurisdiction."Tax Type"::CST) THEN BEGIN
+          "Amount Loaded on Item" := xTaxAmount;
+          "Input Credit/Output Tax Amount" := 0;
+          EXIT;
+        END;
+
+        IF TaxDetail."VAT Retention Limit % on ITC" <> 0 THEN BEGIN
+          RetenAmount := xTaxBaseAmount * TaxDetail."VAT Retention Limit % on ITC" / 100;
+          RetenBaseAmount := xTaxAmount - RetenAmount;
+          "Amount Loaded on Item" := RetenAmount + RetenBaseAmount * "Non ITC Claimable Usage %" / 100;
+          "Amount Loaded on Item" := ROUND("Amount Loaded on Item");
+          "Input Credit/Output Tax Amount" := xTaxAmount - "Amount Loaded on Item";
+
+          ItemRetenAmount := RetenAmount;
+          ItemLevel := TRUE;
+        END;
+
+        IF TaxJurisdiction."Retention Limit % (ITC NTS)" <> 0 THEN
+          IF TaxJurisdiction."Retention Limit Loaded on Item" THEN BEGIN
+            RetenAmount := xTaxAmount * (TaxJurisdiction."Retention Limit % (ITC NTS)" / 100);
+            RetenBaseAmount := xTaxAmount - RetenAmount;
+
+            "Amount Loaded on Item" := RetenAmount + RetenBaseAmount * "Non ITC Claimable Usage %" / 100;
+            "Amount Loaded on Item" := ROUND("Amount Loaded on Item");
+            "Input Credit/Output Tax Amount" := xTaxAmount - "Amount Loaded on Item";
+
+            JurRetenAmount := RetenBaseAmount;
+            JurisdictionLevel := TRUE;
+          END ELSE BEGIN
+            RetenAmount := xTaxBaseAmount * TaxJurisdiction."Retention Limit % (ITC NTS)" / 100;
+            RetenBaseAmount := RetenAmount;
+
+            "Amount Loaded on Item" := RetenBaseAmount * "Non ITC Claimable Usage %" / 100;
+            "Amount Loaded on Item" := ROUND("Amount Loaded on Item");
+            "Input Credit/Output Tax Amount" := xTaxAmount - "Amount Loaded on Item";
+
+            JurRetenAmount := RetenAmount;
+            JurisdictionLevel := TRUE;
+          END;
+        IF "Document Type" = "Document Type"::Invoice THEN BEGIN
+          IF ItemLevel AND JurisdictionLevel THEN BEGIN
+            IF TaxJurisdiction."Retention Limit Loaded on Item" THEN BEGIN
+              IF xTaxAmount > ItemRetenAmount THEN BEGIN
+                "Amount Loaded on Item" := ItemRetenAmount + (xTaxAmount - ItemRetenAmount) *
+                  "Non ITC Claimable Usage %" / 100;
+                "Amount Loaded on Item" := ROUND("Amount Loaded on Item");
+                "Input Credit/Output Tax Amount" := xTaxAmount - "Amount Loaded on Item";
+              END ELSE BEGIN
+                "Amount Loaded on Item" := xTaxAmount;
+                "Input Credit/Output Tax Amount" := 0;
+              END;
+            END ELSE BEGIN
+              IF xTaxAmount - ItemRetenAmount <= 0 THEN BEGIN
+                "Amount Loaded on Item" := xTaxAmount;
+                "Input Credit/Output Tax Amount" := 0;
+              END ELSE
+                IF xTaxAmount - ItemRetenAmount > 0 THEN BEGIN
+                  "Amount Loaded on Item" := ItemRetenAmount + (xTaxAmount - ItemRetenAmount) *
+                    "Non ITC Claimable Usage %" / 100;
+                  "Amount Loaded on Item" := ROUND("Amount Loaded on Item");
+                  "Input Credit/Output Tax Amount" := xTaxAmount - "Amount Loaded on Item";
+                END;
+            END;
+          END;
+        END ELSE
+          IF "Document Type" = "Document Type"::"Credit Memo" THEN BEGIN
+            IF ItemLevel AND JurisdictionLevel THEN BEGIN
+              IF TaxJurisdiction."Retention Limit Loaded on Item" THEN BEGIN
+                IF xTaxAmount > ItemRetenAmount THEN BEGIN
+                  "Amount Loaded on Item" := xTaxAmount;
+                  "Input Credit/Output Tax Amount" := 0;
+                END ELSE BEGIN
+                  "Amount Loaded on Item" := ItemRetenAmount + (xTaxAmount - ItemRetenAmount) *
+                    "Non ITC Claimable Usage %" / 100;
+                  "Amount Loaded on Item" := ROUND("Amount Loaded on Item");
+                  "Input Credit/Output Tax Amount" := xTaxAmount - "Amount Loaded on Item";
+                END;
+              END ELSE BEGIN
+                IF xTaxAmount - ItemRetenAmount <= 0 THEN BEGIN
+                  "Amount Loaded on Item" := ItemRetenAmount + (xTaxAmount - ItemRetenAmount) *
+                    "Non ITC Claimable Usage %" / 100;
+                  "Amount Loaded on Item" := ROUND("Amount Loaded on Item");
+                  "Input Credit/Output Tax Amount" := xTaxAmount - "Amount Loaded on Item";
+                END ELSE
+                  IF xTaxAmount - ItemRetenAmount > 0 THEN BEGIN
+                    "Amount Loaded on Item" := xTaxAmount;
+                    "Input Credit/Output Tax Amount" := 0;
+                  END;
+              END;
+            END;
+          END;
+
+        IF NOT ItemLevel AND NOT JurisdictionLevel THEN BEGIN
+          "Amount Loaded on Item" := xTaxAmount * "Non ITC Claimable Usage %" / 100;
+          "Amount Loaded on Item" := ROUND("Amount Loaded on Item");
+          "Input Credit/Output Tax Amount" := xTaxAmount - "Amount Loaded on Item";
+        END;
+
+        IF (TaxDetail."VAT able Purch. Tax %" <> 0) AND
+           (TaxJurisdiction."Tax Type" = TaxJurisdiction."Tax Type"::CST)
+        THEN BEGIN
+          "Purch. IO Tax Amount" := "Input Credit/Output Tax Amount";
+          "Purch. Amount on Item" := "Amount Loaded on Item";
+          "Amount Loaded on Item" := "Amount Loaded on Item" + "Tax Amount";
+        END;
+      END;
+    END;
+
+    PROCEDURE PostFANegativeAcquisition@1500002(GenJnlLine@1500001 : Record 81;Amount@1500002 : Decimal;TaxEntryNo@1500000 : Integer;DimSetID@1500006 : Integer);
+    VAR
+      DetailedTaxEntry@1500003 : Record 16522;
+      GenPostLine@1500004 : Codeunit 12;
+      FAPostingGroup@1500005 : Record 5606;
+      DeprBook@1500007 : Record 5611;
+      FADeprBook@1500008 : Record 5612;
+    BEGIN
+      DetailedTaxEntry.GET(TaxEntryNo);
+      DetailedTaxEntry.TESTFIELD(Type,DetailedTaxEntry.Type::"Fixed Asset");
+
+      DeprBook.SETRANGE("FA Book Type",DeprBook."FA Book Type"::" ");
+      DeprBook.FINDFIRST;
+      FADeprBook.GET(DetailedTaxEntry."No.",DeprBook.Code);
+      FAPostingGroup.GET(FADeprBook."FA Posting Group");
+      FAPostingGroup.TESTFIELD("Acq. Cost Acc. on Disposal");
+
+      GenJnlLine.INIT;
+      GenJnlLine."Journal Template Name" := '';
+      GenJnlLine."Journal Batch Name" := '';
+      GenJnlLine."Document No." := DetailedTaxEntry."Document No.";
+      GenJnlLine."Posting Date" := DetailedTaxEntry."Posting Date";
+      GenJnlLine.VALIDATE("System-Created Entry",TRUE);
+      GenJnlLine.VALIDATE("Account Type",GenJnlLine."Account Type"::"Fixed Asset");
+      GenJnlLine.VALIDATE("Account No.",DetailedTaxEntry."No.");
+      GenJnlLine.VALIDATE("FA Posting Type",GenJnlLine."FA Posting Type"::"Acquisition Cost");
+      GenJnlLine.VALIDATE(Amount,Amount);
+      GenJnlLine.Description := Text001;
+      GenJnlLine.VALIDATE("Bal. Account Type",GenJnlLine."Account Type"::"G/L Account");
+      GenJnlLine.VALIDATE("Bal. Account No.",FAPostingGroup."Acq. Cost Acc. on Disposal");
+      GenJnlLine."Dimension Set ID" := DimSetID;
+      DimMgt.UpdateGlobalDimFromDimSetID(DimSetID,GenJnlLine."Shortcut Dimension 1 Code",GenJnlLine."Shortcut Dimension 2 Code");
+      GenPostLine.RunWithCheck(GenJnlLine);
+    END;
+
+    PROCEDURE PostNegativeAdjustment@1500001(Quantity@1500001 : Decimal;PostingDate@1500000 : Date;TaxEntryNo@1500004 : Integer;DimSetID@1500007 : Integer);
+    VAR
+      ItemJnlLine@1500002 : Record 83;
+      DetailedTaxEntry@1500003 : Record 16522;
+      SalesTaxTrackingEntry@1500009 : Record 16540;
+      ItemLedgerEntry@1500011 : Record 32;
+      ItemJnlPostLine@1500005 : Codeunit 22;
+      DimMgt@1500006 : Codeunit 408;
+      QtytoApply@1500012 : Decimal;
+    BEGIN
+      DetailedTaxEntry.GET(TaxEntryNo);
+
+      IF CheckQuantity(DetailedTaxEntry,Quantity) THEN
+        ERROR(Text004,Quantity,RemQuantity,DetailedTaxEntry."Entry No.");
+      QtytoApply := Quantity;
+      SalesTaxTrackingEntry.RESET;
+      SalesTaxTrackingEntry.SETCURRENTKEY("Main Component Entry No.");
+      SalesTaxTrackingEntry.SETRANGE("Main Component Entry No.",DetailedTaxEntry."Main Component Entry No.");
+      SalesTaxTrackingEntry.SETFILTER("Remaining Quantity",'<>%1',0);
+      IF SalesTaxTrackingEntry.FINDSET THEN
+        REPEAT
+          ItemJnlLine.INIT;
+          ItemJnlLine.VALIDATE("Entry Type",ItemJnlLine."Entry Type"::"Negative Adjmt.");
+          ItemJnlLine.VALIDATE("Item No.",DetailedTaxEntry."No.");
+          IF QtytoApply <= SalesTaxTrackingEntry."Remaining Quantity" THEN BEGIN
+            ItemJnlLine.VALIDATE(Quantity,QtytoApply);
+            SalesTaxTrackingEntry."Remaining Quantity" -= QtytoApply;
+            QtytoApply := 0;
+          END ELSE BEGIN
+            ItemJnlLine.VALIDATE(Quantity,SalesTaxTrackingEntry."Remaining Quantity");
+            QtytoApply -= SalesTaxTrackingEntry."Remaining Quantity";
+            SalesTaxTrackingEntry."Remaining Quantity" := 0;
+          END;
+          ItemJnlLine.VALIDATE("Posting Date",PostingDate);
+          ItemJnlLine.VALIDATE("Location Code",DetailedTaxEntry."Location Code");
+          ItemJnlLine.VALIDATE("Document No.",DetailedTaxEntry."Document No.");
+          ItemJnlLine.VALIDATE(Description,Text001);
+          ItemJnlLine."Applies-to Entry" := SalesTaxTrackingEntry."Item Ledger Entry No.";
+          ItemLedgerEntry.GET(SalesTaxTrackingEntry."Item Ledger Entry No.");
+          ItemJnlLine.VALIDATE("Serial No.",ItemLedgerEntry."Serial No.");
+          ItemJnlLine.VALIDATE("Lot No.",ItemLedgerEntry."Lot No.");
+          ItemJnlLine."Dimension Set ID" := DimSetID;
+          DimMgt.UpdateGlobalDimFromDimSetID(DimSetID,ItemJnlLine."Shortcut Dimension 1 Code",ItemJnlLine."Shortcut Dimension 2 Code");
+
+          IF (ItemJnlLine."Serial No." <> '') OR (ItemJnlLine."Lot No." <> '') THEN
+            CreateReservEntry(ItemJnlLine);
+          ItemJnlLine."Serial No." := '';
+          ItemJnlLine."Lot No." := '';
+
+          ItemJnlPostLine.RUN(ItemJnlLine);
+          SalesTaxTrackingEntry.MODIFY;
+        UNTIL (SalesTaxTrackingEntry.NEXT = 0) OR (QtytoApply = 0);
+    END;
+
+    PROCEDURE PostItemRevaluation@1500015(Amount@1500000 : Decimal;TaxEntryNo@1500004 : Integer;Quantity@1500006 : Decimal;LocationCode@1500005 : Code[10];DimSetID@1500010 : Integer);
+    VAR
+      DetailedTaxEntry@1500002 : Record 16522;
+      ItemJnlLine@1500003 : Record 83;
+      ItemCharge@1500007 : Record 5800;
+      GenSetup@1500008 : Record 98;
+      ItemLedgerEntry@1500012 : Record 32;
+      SalesTaxTrackingEntry@1500013 : Record 16540;
+      ItemJnlPostLine@1500009 : Codeunit 22;
+      DimMgt@1500001 : Codeunit 408;
+      QtytoApply@1500014 : Decimal;
+      TaxJnlLine@1500015 : Record 16587;
+    BEGIN
+      DetailedTaxEntry.GET(TaxEntryNo);
+
+
+
+
+
+
+      IF CheckQuantity(DetailedTaxEntry,Quantity) THEN
+        ERROR(Text004,Quantity,RemQuantity,DetailedTaxEntry."Entry No.");
+      QtytoApply := Quantity;
+      SalesTaxTrackingEntry.RESET;
+      SalesTaxTrackingEntry.SETCURRENTKEY("Main Component Entry No.");
+      SalesTaxTrackingEntry.SETRANGE("Main Component Entry No.",DetailedTaxEntry."Main Component Entry No.");
+      SalesTaxTrackingEntry.SETFILTER("Remaining Quantity",'<>%1',0);
+      IF SalesTaxTrackingEntry.FINDSET THEN
+        REPEAT
+          ItemJnlLine.INIT;
+          TaxJnlLine.SETRANGE("Document No.",DetailedTaxEntry."Document No.");
+          IF TaxJnlLine.FINDFIRST THEN
+            ItemJnlLine."Posting Date" := TaxJnlLine."Posting Date";
+          ItemJnlLine.VALIDATE("Item No.",DetailedTaxEntry."No.");
+          ItemJnlLine."Location Code" := LocationCode;
+          ItemJnlLine."Gen. Bus. Posting Group" := ' ';
+          GenSetup.GET;
+          GenSetup.TESTFIELD("Item Charge (VAT Adjustment)");
+          ItemCharge.GET(GenSetup."Item Charge (VAT Adjustment)");
+          ItemJnlLine."Gen. Prod. Posting Group" := ItemCharge."Gen. Prod. Posting Group";
+          ItemJnlLine."Entry Type" := ItemJnlLine."Entry Type"::Purchase;
+          ItemJnlLine."Document No." := DetailedTaxEntry."Document No.";
+          ItemJnlLine."Value Entry Type" := ItemJnlLine."Value Entry Type"::"Direct Cost";
+          ItemJnlLine."Applies-to Entry" := SalesTaxTrackingEntry."Item Ledger Entry No.";
+
+          IF QtytoApply <= SalesTaxTrackingEntry."Remaining Quantity" THEN BEGIN
+            ItemJnlLine.VALIDATE(Quantity,QtytoApply);
+            ItemJnlLine."Quantity (Base)" := QtytoApply;
+            ItemJnlLine."Invoiced Quantity" := QtytoApply;
+            ItemJnlLine."Invoiced Qty. (Base)" := QtytoApply;
+            ItemJnlLine.Amount := (Amount / Quantity) * QtytoApply;
+            SalesTaxTrackingEntry."Remaining Quantity" -= QtytoApply;
+            QtytoApply := 0;
+          END ELSE BEGIN
+            ItemJnlLine.VALIDATE(Quantity,SalesTaxTrackingEntry."Remaining Quantity");
+            ItemJnlLine."Quantity (Base)" := SalesTaxTrackingEntry."Remaining Quantity";
+            ItemJnlLine."Invoiced Quantity" := SalesTaxTrackingEntry."Remaining Quantity";
+            ItemJnlLine."Invoiced Qty. (Base)" := SalesTaxTrackingEntry."Remaining Quantity";
+            ItemJnlLine.Amount := (Amount / Quantity) * SalesTaxTrackingEntry."Remaining Quantity";
+            QtytoApply -= SalesTaxTrackingEntry."Remaining Quantity";
+            SalesTaxTrackingEntry."Remaining Quantity" := 0;
+          END;
+
+          ItemJnlLine."Applied Amount" := ItemJnlLine.Amount;
+          ItemJnlLine.VALIDATE("Item Charge No.",ItemCharge."No.");
+          ItemJnlLine."Source Type" := ItemJnlLine."Source Type"::Item;
+          ItemJnlLine."Source No." := DetailedTaxEntry."No.";
+          ItemJnlLine."Item Shpt. Entry No." := SalesTaxTrackingEntry."Item Ledger Entry No.";
+          ItemJnlLine.Description := Text001;
+          ItemLedgerEntry.GET(SalesTaxTrackingEntry."Item Ledger Entry No.");
+          ItemJnlLine.VALIDATE("Serial No.",ItemLedgerEntry."Serial No.");
+          ItemJnlLine.VALIDATE("Lot No.",ItemLedgerEntry."Lot No.");
+
+          ItemJnlLine."Dimension Set ID" := DimSetID;
+          DimMgt.UpdateGlobalDimFromDimSetID(DimSetID,ItemJnlLine."Shortcut Dimension 1 Code",ItemJnlLine."Shortcut Dimension 2 Code");
+
+          ItemJnlPostLine.RUN(ItemJnlLine);
+          SalesTaxTrackingEntry.MODIFY;
+        UNTIL (SalesTaxTrackingEntry.NEXT = 0) OR (QtytoApply = 0);
+    END;
+
+    PROCEDURE ReverseItemTaxEntry@1500000(VAR GenJnlLine@1500003 : Record 81;DetailedTaxEntry@1500000 : Record 16522;InsertRecord@1500008 : Boolean;VAR TaxJnlLine@1500012 : Record 16587);
+    VAR
+      NewDetailedTaxEntry@1500001 : Record 16522;
+      ToTransferLocation@1500009 : Record 16522;
+      Location@1500004 : Record 14;
+      State@1500005 : Record 13762;
+      AmountOnItemReversed@1500006 : Decimal;
+      UpdatedAmountOnItem@1500007 : Decimal;
+      x@1500002 : Decimal;
+      y@1500011 : Decimal;
+      AmountLoadedonItem@1500013 : Decimal;
+      z@1500014 : Decimal;
+    BEGIN
+      NewDetailedTaxEntry := DetailedTaxEntry;
+      WITH NewDetailedTaxEntry DO BEGIN
+        "Entry No." := GetNextDetTaxEntryNo;
+        "Entry Type" := "Entry Type"::Adjustment;
+        "Adjustment Type" := TaxJnlLine."VAT Adjustment Type";
+        Quantity := -TaxJnlLine."Quantity to be Adjusted";
+        "Tax Base Amount" :=
+          ("Tax Base Amount" / DetailedTaxEntry.Quantity) * Quantity;
+        "Tax Amount" :=
+          ("Tax Amount" / DetailedTaxEntry.Quantity) * Quantity;
+        "Non ITC Claimable Usage %" := TaxJnlLine."Original Non ITC Claim Usage %";
+        "Input Credit/Output Tax Amount" :=
+          ("Input Credit/Output Tax Amount" / DetailedTaxEntry.Quantity) * Quantity;
+        "Amount Loaded on Item" :=
+          ("Amount Loaded on Item" / DetailedTaxEntry.Quantity) * Quantity;
+        "Purch. Tax Base Amount" :=
+          ("Purch. Tax Base Amount" / DetailedTaxEntry.Quantity) * Quantity;
+        "Purch. Tax Amount" :=
+          ("Purch. Tax Amount" / DetailedTaxEntry.Quantity) * Quantity;
+        "Purch. IO Tax Amount" :=
+          ("Purch. IO Tax Amount" / DetailedTaxEntry.Quantity) * Quantity;
+        "Purch. Amount on Item" :=
+          ("Purch. Amount on Item" / DetailedTaxEntry.Quantity) * Quantity;
+        "Remaining Tax Amount" := "Input Credit/Output Tax Amount";
+        "Remaining Quantity" := 0;
+        Reversed := TRUE;
+        "Reversed by Entry No." := DetailedTaxEntry."Entry No.";
+        "User ID" := USERID;
+        "Posting Date" := TaxJnlLine."Posting Date";
+        Positive := "Tax Amount" > 0;
+        IF InsertRecord THEN
+          INSERT;
+        AmountOnItemReversed := -"Input Credit/Output Tax Amount";
+        ToTransferLocation := NewDetailedTaxEntry ;
+      END;
+
+      CASE TaxJnlLine."VAT Adjustment Type" OF
+        TaxJnlLine."VAT Adjustment Type"::"Change in Usage":
+          BEGIN
+            NewDetailedTaxEntry := DetailedTaxEntry;
+            WITH NewDetailedTaxEntry DO BEGIN
+              "Entry No." := GetNextDetTaxEntryNo;
+              Quantity := TaxJnlLine."Quantity to be Adjusted";
+              "Remaining Quantity" := Quantity;
+              "Entry Type" := "Entry Type"::Adjustment;
+              "Adjustment Type" := TaxJnlLine."VAT Adjustment Type";
+              "Tax Base Amount" := ("Tax Base Amount" / DetailedTaxEntry.Quantity) *
+                TaxJnlLine."Quantity to be Adjusted";
+              "Tax Amount" := ("Tax Amount" / DetailedTaxEntry.Quantity) *
+                TaxJnlLine."Quantity to be Adjusted" ;
+              "Input Credit/Output Tax Amount" := 0;
+              "Amount Loaded on Item" := 0;
+              "Non ITC Claimable Usage %" := TaxJnlLine."Non ITC Claimable Usage %";
+              "User ID" := USERID;
+              UpdateTaxDetails(NewDetailedTaxEntry);
+              "Remaining Tax Amount" := "Input Credit/Output Tax Amount";
+              "Remaining Quantity" := Quantity;
+              Positive := "Tax Amount" > 0;
+              Adjusted := TRUE;
+              "Adjusted by Entry No." := DetailedTaxEntry."Entry No.";
+              "Posting Date" := TaxJnlLine."Posting Date";
+              IF InsertRecord THEN
+                INSERT;
+              UpdatedAmountOnItem := "Input Credit/Output Tax Amount";
+              AmountLoadedonItem := "Amount Loaded on Item";
+            END;
+          END;
+        TaxJnlLine."VAT Adjustment Type"::"Branch Transfer":
+          IF NOT Interstate THEN BEGIN
+            NewDetailedTaxEntry := ToTransferLocation;
+            WITH NewDetailedTaxEntry DO BEGIN
+              "Entry No." := GetNextDetTaxEntryNo;
+              "Location Code" := TaxJnlLine."Location Code";
+              "Tax Base Amount" := -"Tax Base Amount";
+              "Tax Amount" := -"Tax Amount";
+              "Input Credit/Output Tax Amount" := -"Input Credit/Output Tax Amount";
+              "Amount Loaded on Item" := -"Amount Loaded on Item";
+              "Purch. Tax Amount" := -"Purch. Tax Amount";
+              "Purch. IO Tax Amount" := -"Purch. IO Tax Amount";
+              "Purch. Amount on Item" := -"Purch. Amount on Item";
+              "Purch. Tax Base Amount" := -"Purch. Tax Base Amount";
+              UpdatedAmountOnItem := "Input Credit/Output Tax Amount";
+              Positive := "Tax Amount" > 0;
+              "Remaining Quantity" := Quantity;
+              Adjusted := TRUE;
+              "Adjusted by Entry No." := DetailedTaxEntry."Entry No.";
+              AmountLoadedonItem := "Amount Loaded on Item";
+              IF InsertRecord THEN
+                INSERT;
+            END;
+          END ELSE BEGIN
+            WITH NewDetailedTaxEntry DO BEGIN
+              NewDetailedTaxEntry := ToTransferLocation;
+              "Entry No." := GetNextDetTaxEntryNo;
+              "Location Code" := TaxJnlLine."Original Location";
+              "Tax Base Amount" := -"Tax Base Amount";
+              "Tax Amount" := -"Tax Amount";
+              "Purch. Tax Base Amount" := -"Purch. Tax Base Amount";
+              State.GET(DetailedTaxEntry."State Code");
+              z := -"Input Credit/Output Tax Amount" - "Amount Loaded on Item";
+              IF "Tax Component" = '' THEN BEGIN
+                IF "Purch. Tax Amount" = 0 THEN
+                  x := ("Tax %" - State."Branch Transfer Retention %") / 100 * "Tax Base Amount"
+                ELSE
+                  x := ("Purch. Tax %" - State."Branch Transfer Retention %") / 100 * "Purch. Tax Base Amount";
+                Ratio := x / z;
+              END ELSE
+                x := z * Ratio;
+              y := -"Input Credit/Output Tax Amount";
+              IF x > 0 THEN BEGIN
+                "Input Credit/Output Tax Amount" := x;
+                "Amount Loaded on Item" := z - x;
+              END ELSE
+                IF x = 0 THEN BEGIN
+                  "Input Credit/Output Tax Amount" := 0;
+                  "Amount Loaded on Item" := 0;
+                END ELSE
+                  IF x < 0 THEN BEGIN
+                    "Input Credit/Output Tax Amount" := 0;
+                    "Amount Loaded on Item" := z;
+                  END;
+              AmountLoadedonItem := "Amount Loaded on Item";
+              "Purch. Tax Amount" := -"Purch. Tax Amount";
+              "Purch. IO Tax Amount" := -"Purch. IO Tax Amount";
+              "Purch. Amount on Item" := -"Purch. Amount on Item";
+              "Purch. Tax Base Amount" := -"Purch. Tax Base Amount";
+              "Tax Base Amount" := 0;
+              "Tax Amount" := 0;
+              UpdatedAmountOnItem := "Input Credit/Output Tax Amount";
+              Positive := "Tax Amount" > 0;
+              "Remaining Quantity" := Quantity;
+              Adjusted := TRUE;
+              "Adjusted by Entry No." := DetailedTaxEntry."Entry No.";
+              IF InsertRecord THEN
+                INSERT;
+            END;
+
+            WITH NewDetailedTaxEntry DO BEGIN
+              NewDetailedTaxEntry := ToTransferLocation;
+              "Entry No." := GetNextDetTaxEntryNo;
+              "Location Code" := TaxJnlLine."Location Code";
+              IF Location.GET("Location Code") THEN
+                "State Code" := Location."State Code";
+              "Tax Base Amount" := -"Tax Base Amount";
+              "Tax Amount" := -"Tax Amount";
+              "Input Credit/Output Tax Amount" := 0;
+              "Amount Loaded on Item" := 0;
+              "Purch. Tax Amount" := 0;
+              "Purch. IO Tax Amount" := 0;
+              "Purch. Amount on Item" := 0;
+              "Purch. Tax Base Amount" := 0;
+              Positive := "Tax Amount" > 0;
+              "Remaining Quantity" := Quantity;
+              Adjusted := TRUE;
+              "Adjusted by Entry No." := DetailedTaxEntry."Entry No.";
+              IF InsertRecord THEN
+                INSERT;
+            END;
+          END
+          ;
+      END;
+      IF NOT InsertRecord THEN BEGIN
+        VATAdjustmentBuffer.VALIDATE("Amount to be Adjusted",AmountOnItemReversed - UpdatedAmountOnItem);
+        VATAdjustmentBuffer.VALIDATE("Amount Loaded on Item",AmountLoadedonItem);
+        VATAdjustmentBuffer."Non ITC Claimable Usage %" := TaxJnlLine."Non ITC Claimable Usage %";
+      END
+    END;
+
+    PROCEDURE ReverseCapitalGoodTaxEntry@1500007(VAR GenJnlLine@1500018 : Record 81;DetailedTaxEntry@1500000 : Record 16522;InsertRecord@1500008 : Boolean;VAR TaxJnlLine@1500017 : Record 16587);
+    VAR
+      NewDetailedTaxEntry@1500001 : Record 16522;
+      State@1500005 : Record 13762;
+      Location@1500011 : Record 14;
+      AmountOnItemReversed@1500006 : Decimal;
+      UpdatedAmountOnItem@1500007 : Decimal;
+      TotalITC@1500009 : Decimal;
+      LoopCounter@1500014 : Integer;
+      x@1500015 : Decimal;
+      y@1500016 : Decimal;
+      PrevEntryNo@1500002 : Integer;
+      z@1500020 : Decimal;
+      AmountLoadedonItem@1500003 : Decimal;
+      TotalAmtLoadedonItem@1500019 : Decimal;
+    BEGIN
+      WITH NewDetailedTaxEntry DO BEGIN
+        RESET;
+        SETRANGE("Entry Type","Entry Type"::"Initial Entry");
+        SETRANGE("Primary Deferment Entry No.",DetailedTaxEntry."Primary Deferment Entry No.");
+        SETRANGE(Settlement,FALSE);
+        IF FINDLAST THEN
+          REPEAT
+            PrevEntryNo := "Entry No.";
+            "Entry No." := GetNextDetTaxEntryNo;
+            "Entry Type" := "Entry Type"::Adjustment;
+            "Adjustment Type" := TaxJnlLine."VAT Adjustment Type";
+            IF "Primary Deferment Entry No." = "Reversed by Entry No." THEN
+              Quantity := -TaxJnlLine."Quantity to be Adjusted";
+            "Tax Base Amount" := -("Tax Base Amount" / DetailedTaxEntry.Quantity) *
+              TaxJnlLine."Quantity to be Adjusted";
+            "Tax Amount" := -("Tax Amount" / DetailedTaxEntry.Quantity) *
+              TaxJnlLine."Quantity to be Adjusted" ;
+            "Non ITC Claimable Usage %" := TaxJnlLine."Original Non ITC Claim Usage %";
+            "Input Credit/Output Tax Amount" := -("Input Credit/Output Tax Amount" /
+                                                  DetailedTaxEntry.Quantity) * TaxJnlLine."Quantity to be Adjusted";
+            TotalITC += "Input Credit/Output Tax Amount";
+
+            "Amount Loaded on Item" := 0;
+            "Remaining Tax Amount" := 0;
+            "Remaining Quantity" := 0;
+            Reversed := TRUE;
+            "Reversed by Entry No." := PrevEntryNo;
+
+            Positive := "Tax Amount" > 0;
+            IF InsertRecord THEN
+              INSERT;
+            "Entry No." := PrevEntryNo;
+          UNTIL NEXT(-1) = 0;
+        AmountOnItemReversed := -TotalITC;
+      END;
+
+      CASE TaxJnlLine."VAT Adjustment Type" OF
+        TaxJnlLine."VAT Adjustment Type"::"Change in Usage":
+          WITH NewDetailedTaxEntry DO BEGIN
+            TotalITC := 0;
+            TotalAmtLoadedonItem := 0;
+            RESET;
+            SETRANGE("Entry Type","Entry Type"::"Initial Entry");
+            SETRANGE("Primary Deferment Entry No.",DetailedTaxEntry."Primary Deferment Entry No.");
+            LoopCounter := COUNT;
+            SETRANGE(Settlement,FALSE);
+            IF FINDLAST THEN
+              REPEAT
+                PrevEntryNo := "Entry No.";
+                "Entry No." := GetNextDetTaxEntryNo;
+                "Entry Type" := "Entry Type"::Adjustment;
+                "Adjustment Type" := TaxJnlLine."VAT Adjustment Type";
+                Quantity := TaxJnlLine."Quantity to be Adjusted";
+                "Tax Base Amount" := (DetailedTaxEntry."Tax Base Amount" / DetailedTaxEntry.Quantity) *
+                  TaxJnlLine."Quantity to be Adjusted";
+                "Tax Amount" := (DetailedTaxEntry."Tax Amount" / DetailedTaxEntry.Quantity) *
+                  TaxJnlLine."Quantity to be Adjusted";
+                "Non ITC Claimable Usage %" := TaxJnlLine."Non ITC Claimable Usage %";
+                UpdateTaxDetails(NewDetailedTaxEntry);
+                "Input Credit/Output Tax Amount" := "Input Credit/Output Tax Amount" / LoopCounter;
+                "Amount Loaded on Item" :=
+                  "Input Credit/Output Tax Amount" - "Input Credit/Output Tax Amount";
+                "Reversed by Entry No." := "Entry No.";
+                TotalITC += "Input Credit/Output Tax Amount";
+                TotalAmtLoadedonItem += "Amount Loaded on Item";
+                "Remaining Tax Amount" := 0;
+                Positive := "Tax Amount" > 0;
+                IF "Reversed by Entry No." = "Primary Deferment Entry No." THEN
+                  "Remaining Quantity" := Quantity;
+                IF "Entry No." <> "Primary Deferment Entry No." THEN BEGIN
+                  "Tax Base Amount" := 0;
+                  "Tax Amount" := 0;
+                  Quantity := 0;
+                END;
+                Adjusted := TRUE;
+                "Adjusted by Entry No." := PrevEntryNo;
+                IF InsertRecord THEN
+                  INSERT;
+                "Entry No." := PrevEntryNo;
+              UNTIL NEXT(-1) = 0;
+            UpdatedAmountOnItem := TotalITC;
+            AmountLoadedonItem := ABS(TotalAmtLoadedonItem);
+          END;
+        TaxJnlLine."VAT Adjustment Type"::"Branch Transfer":
+          BEGIN
+            IF NOT Interstate THEN BEGIN
+              WITH NewDetailedTaxEntry DO BEGIN
+                TotalITC := 0;
+                TotalAmtLoadedonItem := 0;
+                RESET;
+                SETRANGE("Entry Type","Entry Type"::"Initial Entry");
+                SETRANGE("Primary Deferment Entry No.",DetailedTaxEntry."Primary Deferment Entry No.");
+                LoopCounter := COUNT;
+                SETRANGE(Settlement,FALSE);
+                IF FINDLAST THEN
+                  REPEAT
+                    PrevEntryNo := "Entry No.";
+                    "Reversed by Entry No." := "Entry No.";
+                    "Entry No." := GetNextDetTaxEntryNo;
+                    "Entry Type" := "Entry Type"::Adjustment;
+                    "Adjustment Type" := TaxJnlLine."VAT Adjustment Type";
+                    Quantity := TaxJnlLine."Quantity to be Adjusted";
+                    "Tax Base Amount" := (DetailedTaxEntry."Tax Base Amount" / DetailedTaxEntry.Quantity) *
+                      TaxJnlLine."Quantity to be Adjusted";
+                    "Tax Amount" := (DetailedTaxEntry."Tax Amount" / DetailedTaxEntry.Quantity) *
+                      TaxJnlLine."Quantity to be Adjusted";
+                    "Non ITC Claimable Usage %" := TaxJnlLine."Non ITC Claimable Usage %";
+                    "Input Credit/Output Tax Amount" := ("Input Credit/Output Tax Amount" /
+                                                         DetailedTaxEntry.Quantity) * TaxJnlLine."Quantity to be Adjusted";
+                    "Location Code" := TaxJnlLine."Location Code";
+                    IF "Entry No." <> "Primary Deferment Entry No." THEN BEGIN
+                      "Tax Base Amount" := 0;
+                      "Tax Amount" := 0;
+                      Quantity := 0;
+                    END;
+                    "Amount Loaded on Item" := 0;
+                    TotalITC += "Input Credit/Output Tax Amount";
+                    TotalAmtLoadedonItem += "Amount Loaded on Item";
+                    "Remaining Tax Amount" := 0;
+                    IF "Reversed by Entry No." = "Primary Deferment Entry No." THEN
+                      "Remaining Quantity" := Quantity;
+                    Positive := "Tax Amount" > 0;
+                    Adjusted := TRUE;
+                    "Adjusted by Entry No." := PrevEntryNo;
+                    IF InsertRecord THEN
+                      INSERT;
+                    "Entry No." := PrevEntryNo;
+                  UNTIL NEXT(-1) = 0;
+              END;
+              UpdatedAmountOnItem := ABS(TotalITC);
+              AmountLoadedonItem := ABS(TotalAmtLoadedonItem);
+            END ELSE BEGIN
+              WITH NewDetailedTaxEntry DO BEGIN
+                TotalITC := 0;
+                RESET;
+                SETRANGE("Entry Type","Entry Type"::"Initial Entry");
+                SETRANGE("Primary Deferment Entry No.",DetailedTaxEntry."Primary Deferment Entry No.");
+                LoopCounter := COUNT;
+                SETRANGE(Settlement,FALSE);
+                IF FINDLAST THEN
+                  REPEAT
+                    PrevEntryNo := "Entry No.";
+                    "Reversed by Entry No." := "Entry No.";
+                    "Entry No." := GetNextDetTaxEntryNo;
+                    "Entry Type" := "Entry Type"::Adjustment;
+                    "Adjustment Type" := TaxJnlLine."VAT Adjustment Type";
+                    Quantity := TaxJnlLine."Quantity to be Adjusted";
+                    "Tax Base Amount" := (DetailedTaxEntry."Tax Base Amount" / DetailedTaxEntry.Quantity) *
+                      TaxJnlLine."Quantity to be Adjusted";
+                    "Tax Amount" := (DetailedTaxEntry."Tax Amount" / DetailedTaxEntry.Quantity) *
+                      TaxJnlLine."Quantity to be Adjusted";
+                    "Non ITC Claimable Usage %" := TaxJnlLine."Non ITC Claimable Usage %";
+                    "Location Code" := TaxJnlLine."Location Code";
+                    IF Location.GET("Location Code") THEN
+                      "State Code" := Location."State Code";
+                    Positive := "Tax Amount" > 0;
+                    TotalITC += "Input Credit/Output Tax Amount";
+                    TotalAmtLoadedonItem += "Amount Loaded on Item";
+                    "Input Credit/Output Tax Amount" := 0;
+                    "Amount Loaded on Item" := 0;
+                    "Remaining Tax Amount" := 0;
+                    IF "Entry No." <> "Primary Deferment Entry No." THEN BEGIN
+                      "Tax Base Amount" := 0;
+                      "Tax Amount" := 0;
+                      Quantity := 0;
+                    END;
+                    IF "Reversed by Entry No." = "Primary Deferment Entry No." THEN
+                      "Remaining Quantity" := Quantity;
+                    Adjusted := TRUE;
+                    "Adjusted by Entry No." := PrevEntryNo;
+                    IF InsertRecord THEN
+                      INSERT;
+                    "Entry No." := PrevEntryNo;
+                  UNTIL NEXT(-1) = 0;
+              END;
+
+              State.GET(DetailedTaxEntry."State Code");
+              UpdatedAmountOnItem := ABS(TotalITC);
+              AmountLoadedonItem := ABS(TotalAmtLoadedonItem);
+              z := ((UpdatedAmountOnItem + AmountLoadedonItem) / DetailedTaxEntry.Quantity) *
+                TaxJnlLine."Quantity to be Adjusted";
+              IF DetailedTaxEntry."Tax Component" = '' THEN BEGIN
+                IF DetailedTaxEntry."Purch. Tax Amount" <> 0 THEN
+                  x := ((DetailedTaxEntry."Purch. Tax %" - State."Branch Transfer Retention %") / 100) *
+                    (DetailedTaxEntry."Purch. Tax Base Amount" / DetailedTaxEntry.Quantity * TaxJnlLine."Quantity to be Adjusted")
+                ELSE
+                  x := ((DetailedTaxEntry."Tax %" - State."Branch Transfer Retention %") / 100) *
+                    (DetailedTaxEntry."Tax Base Amount" / DetailedTaxEntry.Quantity * TaxJnlLine."Quantity to be Adjusted");
+                Ratio := x / z;
+              END ELSE
+                x := z * Ratio;
+              WITH NewDetailedTaxEntry DO BEGIN
+                RESET;
+                SETRANGE("Entry Type","Entry Type"::"Initial Entry");
+                SETRANGE("Primary Deferment Entry No.",DetailedTaxEntry."Primary Deferment Entry No.");
+                SETRANGE(Settlement,TRUE);
+                IF FINDFIRST THEN
+                  REPEAT
+                    y := y + ("Input Credit/Output Tax Amount" / DetailedTaxEntry.Quantity *
+                              TaxJnlLine."Quantity to be Adjusted");
+                  UNTIL NEXT = 0;
+                IF x > 0 THEN BEGIN
+                  TotalITC := x;
+                  TotalAmtLoadedonItem := z - y
+                END ELSE
+                  IF x = 0 THEN BEGIN
+                    TotalITC := 0;
+                    TotalAmtLoadedonItem := 0;
+                  END ELSE
+                    IF x < 0 THEN BEGIN
+                      TotalITC := 0;
+                      TotalAmtLoadedonItem := z;
+                    END;
+                NewDetailedTaxEntry := DetailedTaxEntry;
+                "Reversed by Entry No." := "Entry No.";
+                "Entry No." := GetNextDetTaxEntryNo;
+                "Entry Type" := "Entry Type"::Adjustment;
+                "Adjustment Type" := TaxJnlLine."VAT Adjustment Type";
+                "Posting Date" := TaxJnlLine."Posting Date";
+                Quantity := TaxJnlLine."Quantity to be Adjusted";
+                "Tax Base Amount" := 0;
+                "Tax Amount" := 0;
+                "Non ITC Claimable Usage %" := 0;
+                "Location Code" := TaxJnlLine."Original Location";
+                Quantity := 0;
+                "Input Credit/Output Tax Amount" := TotalITC;
+                "Amount Loaded on Item" := 0;
+                TotalAmtLoadedonItem := "Amount Loaded on Item";
+                "Remaining Tax Amount" := 0;
+                IF "Reversed by Entry No." = "Primary Deferment Entry No." THEN
+                  "Remaining Quantity" := Quantity;
+                Positive := "Tax Amount" > 0;
+                IF InsertRecord THEN
+                  INSERT;
+              END;
+              UpdatedAmountOnItem := ABS(TotalITC);
+              AmountLoadedonItem := ABS(TotalAmtLoadedonItem);
+            END;
+          END;
+      END;
+      IF NOT InsertRecord THEN BEGIN
+        VATAdjustmentBuffer.VALIDATE("Amount to be Adjusted",AmountOnItemReversed - UpdatedAmountOnItem);
+        VATAdjustmentBuffer.VALIDATE("Amount Loaded on Item",AmountLoadedonItem);
+        VATAdjustmentBuffer."Non ITC Claimable Usage %" := TaxJnlLine."Non ITC Claimable Usage %";
+      END
+    END;
+
+    PROCEDURE PostAdjustmentJournal@1500003(VAR GenJnlLine@1500000 : Record 81);
+    BEGIN
+      // IF NOT CONFIRM(Text002) THEN
+      // ERROR('');
+
+      // IF GenJnlLine."VAT Adjustment Entry" THEN
+      // AdjustDetailedTaxEntry(GenJnlLine,TRUE);
+      // GenJnlPostLine.RunWithCheck(GenJnlLine,JnlLineDimTemp);
+      // GenJnlLine.DELETE(TRUE);
+      // MESSAGE(Text003);
+    END;
+
+    PROCEDURE ReverseItemTaxEntry2@1500014(VAR GenJnlLine@1500003 : Record 81;DetailedTaxEntry@1500000 : Record 16522;InsertRecord@1500008 : Boolean;VAR TaxJnlLine@1500012 : Record 16587);
+    BEGIN
+      IF InsertRecord THEN BEGIN
+        JnlBatchName := GenJnlLine."Journal Batch Name";
+        JnlTemplateName := GenJnlLine."Journal Template Name";
+        JnlLineNo := GenJnlLine."Line No.";
+
+        CASE TaxJnlLine."VAT Adjustment Type" OF
+          TaxJnlLine."VAT Adjustment Type"::"Lost/Destroy":
+            BEGIN
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::Item THEN
+                PostNegativeAdjustment(TaxJnlLine."Quantity to be Adjusted",TaxJnlLine."Posting Date",DetailedTaxEntry."Entry No.",
+                  TaxJnlLine."Dimension Set ID");
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::"Fixed Asset" THEN
+                PostFANegativeAcquisition(GenJnlLine,TaxJnlLine.Amount,DetailedTaxEntry."Entry No.",TaxJnlLine."Dimension Set ID");
+            END;
+          TaxJnlLine."VAT Adjustment Type"::Consumed:
+            BEGIN
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::Item THEN
+                PostNegativeAdjustment(TaxJnlLine."Quantity to be Adjusted",TaxJnlLine."Posting Date",DetailedTaxEntry."Entry No.",
+                  TaxJnlLine."Dimension Set ID");
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::"Fixed Asset" THEN
+                PostFANegativeAcquisition(GenJnlLine,TaxJnlLine.Amount,DetailedTaxEntry."Entry No.",TaxJnlLine."Dimension Set ID");
+            END;
+          TaxJnlLine."VAT Adjustment Type"::"Change in Usage":
+            BEGIN
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::Item THEN
+                PostItemRevaluation(TaxJnlLine.Amount,DetailedTaxEntry."Entry No.",
+                  TaxJnlLine."Quantity to be Adjusted",DetailedTaxEntry."Location Code",TaxJnlLine."Dimension Set ID");
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::"Fixed Asset" THEN
+                PostFANegativeAcquisition(GenJnlLine,TaxJnlLine.Amount,DetailedTaxEntry."Entry No.",TaxJnlLine."Dimension Set ID");
+            END
+        END;
+      END;
+    END;
+
+    PROCEDURE ReverseCapitalGoodTaxEntry2@1500009(VAR GenJnlLine@1500018 : Record 81;DetailedTaxEntry@1500000 : Record 16522;InsertRecord@1500008 : Boolean;VAR TaxJnlLine@1500017 : Record 16587);
+    VAR
+      AmountOnItemReversed@1500006 : Decimal;
+      UpdatedAmountOnItem@1500007 : Decimal;
+    BEGIN
+      IF InsertRecord THEN BEGIN
+        JnlBatchName := GenJnlLine."Journal Batch Name";
+        JnlTemplateName := GenJnlLine."Journal Template Name";
+        JnlLineNo := GenJnlLine."Line No.";
+
+        CASE TaxJnlLine."VAT Adjustment Type" OF
+          TaxJnlLine."VAT Adjustment Type"::"Lost/Destroy":
+            BEGIN
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::Item THEN
+                PostNegativeAdjustment(TaxJnlLine."Quantity to be Adjusted",TaxJnlLine."Posting Date",DetailedTaxEntry."Entry No.",
+                  TaxJnlLine."Dimension Set ID");
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::"Fixed Asset" THEN
+                PostFANegativeAcquisition(GenJnlLine,TaxJnlLine.Amount,DetailedTaxEntry."Entry No.",TaxJnlLine."Dimension Set ID");
+            END;
+          TaxJnlLine."VAT Adjustment Type"::Consumed:
+            BEGIN
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::Item THEN
+                PostNegativeAdjustment(TaxJnlLine."Quantity to be Adjusted",GenJnlLine."Posting Date",DetailedTaxEntry."Entry No.",
+                  TaxJnlLine."Dimension Set ID");
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::"Fixed Asset" THEN
+                PostFANegativeAcquisition(GenJnlLine,TaxJnlLine.Amount,DetailedTaxEntry."Entry No.",TaxJnlLine."Dimension Set ID");
+            END;
+          TaxJnlLine."VAT Adjustment Type"::"Change in Usage":
+            BEGIN
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::Item THEN
+                PostItemRevaluation(AmountOnItemReversed - UpdatedAmountOnItem,DetailedTaxEntry."Entry No.",
+                  TaxJnlLine."Quantity to be Adjusted",DetailedTaxEntry."Location Code",TaxJnlLine."Dimension Set ID");
+              IF DetailedTaxEntry.Type = DetailedTaxEntry.Type::"Fixed Asset" THEN
+                PostFANegativeAcquisition(GenJnlLine,TaxJnlLine.Amount,DetailedTaxEntry."Entry No.",TaxJnlLine."Dimension Set ID");
+            END
+        END;
+      END;
+    END;
+
+    PROCEDURE CheckQuantity@1500010(DetailedTaxEntry@1500000 : Record 16522;Quantity@1500001 : Decimal) : Boolean;
+    VAR
+      SalesTaxTrackingEntry@1500002 : Record 16540;
+    BEGIN
+      SalesTaxTrackingEntry.RESET;
+      SalesTaxTrackingEntry.SETCURRENTKEY("Main Component Entry No.");
+      SalesTaxTrackingEntry.SETRANGE("Main Component Entry No.",DetailedTaxEntry."Main Component Entry No.");
+      SalesTaxTrackingEntry.CALCSUMS("Remaining Quantity");
+      IF Quantity > SalesTaxTrackingEntry."Remaining Quantity" THEN BEGIN
+        RemQuantity := SalesTaxTrackingEntry."Remaining Quantity";
+        EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE CreateReservEntry@1500012(ItemJnlLine@1000 : Record 83);
+    VAR
+      ReservEntry@1500000 : Record 337;
+      LastEntryNo@1500001 : Integer;
+      QtyBase@1500003 : Decimal;
+    BEGIN
+      ReservEntry.RESET;
+      ReservEntry.LOCKTABLE;
+      IF ReservEntry.FINDLAST THEN
+        LastEntryNo := ReservEntry."Entry No.";
+
+      QtyBase := ItemJnlLine."Quantity (Base)";
+      IF QtyBase <> 0 THEN BEGIN
+        ReservEntry.INIT;
+        ReservEntry.VALIDATE("Source Type",DATABASE::"Item Journal Line");
+        ReservEntry.VALIDATE("Item No.",ItemJnlLine."Item No.");
+        ReservEntry.VALIDATE("Location Code",ItemJnlLine."Location Code");
+        ReservEntry.VALIDATE(Description,ItemJnlLine.Description);
+        ReservEntry.VALIDATE("Variant Code",ItemJnlLine."Variant Code");
+        ReservEntry.VALIDATE("Source Subtype",ItemJnlLine."Entry Type");
+        ReservEntry.VALIDATE("Source ID",ItemJnlLine."Journal Template Name");
+        ReservEntry.VALIDATE("Source Batch Name",ItemJnlLine."Journal Batch Name");
+        ReservEntry.VALIDATE("Source Prod. Order Line",0);
+        ReservEntry.VALIDATE("Source Ref. No.",ItemJnlLine."Line No.");
+        ReservEntry.VALIDATE("Qty. to Handle (Base)",ItemJnlLine."Quantity (Base)");
+        ReservEntry.VALIDATE("Qty. to Invoice (Base)",ItemJnlLine."Quantity (Base)");
+        ReservEntry.VALIDATE("Quantity Invoiced (Base)",0);
+        ReservEntry.VALIDATE("Qty. per Unit of Measure",ItemJnlLine."Qty. per Unit of Measure");
+        ReservEntry.VALIDATE("Serial No.",ItemJnlLine."Serial No.");
+        ReservEntry.VALIDATE("Lot No.",ItemJnlLine."Lot No.");
+        ReservEntry.VALIDATE("Reservation Status",ReservEntry."Reservation Status"::Prospect);
+        ReservEntry.VALIDATE("Quantity (Base)",-QtyBase);
+        ReservEntry.Positive := (ItemJnlLine."Quantity (Base)" > 0);
+        ReservEntry.VALIDATE("Entry No.",LastEntryNo + 1);
+        ReservEntry.INSERT;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

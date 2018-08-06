@@ -1,0 +1,841 @@
+OBJECT Codeunit 143003 Service Tax As Excise Helper
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1500005 : Codeunit 130000;
+      LibraryERM@1500004 : Codeunit 131300;
+      LibrarySales@1500000 : Codeunit 130509;
+      LibraryUtility@1500002 : Codeunit 131000;
+      LibraryInventory@1500011 : Codeunit 132201;
+      LibraryWarehouse@1500003 : Codeunit 132204;
+      LibraryPurchase@1500007 : Codeunit 130512;
+      LibraryAssembly@1500012 : Codeunit 132207;
+      ServiceTaxVerify@1500006 : Codeunit 143004;
+      ReverseServiceTaxHelper@1500001 : Codeunit 143006;
+      ExciseNotPaidErr@1500008 : TextConst 'ENU=Excise Entry should be Paid.';
+      NegativeEntriesErr@1500009 : TextConst 'ENU=Negative Entries should be %1.';
+      WrongExciseUtilizationErr@1500010 : TextConst 'ENU="Wrong total amount in ST As Excise Utilization. "';
+      LibraryRandom@1500013 : Codeunit 130440;
+
+    LOCAL PROCEDURE CalcSumRemainingCredit@1500078(GenJournalLine@1500000 : Record 81;VAR ServiceTaxEntryDetails@1500001 : Record 16474);
+    BEGIN
+      WITH ServiceTaxEntryDetails DO BEGIN
+        SETCURRENTKEY(Type,"Service Tax Registration No.");
+        SETRANGE(Type,Type::Purchase);
+        SETRANGE("Service Tax Registration No.",GenJournalLine."Service Tax Registration No.");
+        SETRANGE("Service Tax Group Code",GenJournalLine."Service Tax Group Code");
+        CALCSUMS("Remaining Credit","Remaining Credit (eCess)","Remaining Credit (SHECess)");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@1500006(VAR Customer@1500000 : Record 18;ExciseBusPostingGroup@1500001 : Code[10]);
+    BEGIN
+      Customer.GET(ReverseServiceTaxHelper.CreateCustomer);
+      Customer.VALIDATE("Excise Bus. Posting Group",ExciseBusPostingGroup);
+      Customer.VALIDATE("Tax Liable",TRUE);
+      Customer.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateECCNo@1500027() : Code[20];
+    VAR
+      ExciseNoSeries@1500001 : Record 16500;
+    BEGIN
+      EXIT(CreateECCNoAndSeries(ExciseNoSeries.Type::"RG23A Part I",'RG23AP1-A'));
+    END;
+
+    PROCEDURE CreateECCNoAndSeries@1500007(ExciseNoSeriesType@1500002 : Option;NoSeriesCode@1500003 : Code[10]) : Code[20];
+    VAR
+      ECCNosRec@1500000 : Record 13708;
+      ExciseNoSeries@1500001 : Record 16500;
+    BEGIN
+      WITH ECCNosRec DO BEGIN
+        INIT;
+        VALIDATE(Code,LibraryUtility.GenerateRandomCode(FIELDNO(Code),DATABASE::"E.C.C. Nos."));
+        VALIDATE(Description,Code);
+        VALIDATE("Type of Unit","Type of Unit"::" ");
+        INSERT(TRUE)
+      END;
+      WITH ExciseNoSeries DO BEGIN
+        INIT;
+        VALIDATE(Type,ExciseNoSeriesType);
+        VALIDATE("E.C.C. No.",ECCNosRec.Code);
+        VALIDATE(Description,ECCNosRec.Code);
+        VALIDATE("No. Series",NoSeriesCode);
+        INSERT(TRUE);
+      END;
+      EXIT(ECCNosRec.Code);
+    END;
+
+    LOCAL PROCEDURE CreateExcisePayment@1500093(ExciseEntry@1500000 : Record 13712;ServiceTaxEntryDetails@1500004 : Record 16474;VAR GenJournalLine@1500001 : Record 81);
+    VAR
+      GenJournalBatch@1500002 : Record 232;
+    BEGIN
+      WITH GenJournalLine DO BEGIN
+        ReverseServiceTaxHelper.CreateGenJournalBatch(GenJournalBatch);
+        LibraryERM.CreateGeneralJnlLine(
+          GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+          "Document Type"::Payment,"Account Type"::"G/L Account",ExciseEntry."Account No.",0);
+        VALIDATE("Posting Date",ExciseEntry."Posting Date");
+        VALIDATE("RG/Service Tax Set Off Date",ExciseEntry."Posting Date");
+        VALIDATE("PLA Set Off Date",ExciseEntry."Posting Date");
+        VALIDATE("Document No.",LibraryUtility.GenerateRandomCode(FIELDNO("Document No."),DATABASE::"Gen. Journal Line"));
+        VALIDATE("E.C.C. No.",ExciseEntry."E.C.C. No.");
+        VALIDATE("Service Tax Group Code",ServiceTaxEntryDetails."Service Tax Group Code");
+        VALIDATE("Service Tax Registration No.",ServiceTaxEntryDetails."Service Tax Registration No.");
+        // Amount and "Pay Excise" are set by Form 13701 Pay Excise."Apply Entries".OnPush
+        VALIDATE(Amount,InsertExciseCenvatClaim(GenJournalLine,ExciseEntry));
+        "Pay Excise" := TRUE;
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateExcisePaymentForDoc@1500001(VAR SalesHeader@1500001 : Record 36;VAR SalesLine@1500005 : Record 37;ServiceTaxGroupCode@1500006 : Code[20]);
+    VAR
+      ExciseEntry@1500002 : Record 13712;
+      GenJournalLine@1500003 : Record 81;
+      CompanyInfo@1500004 : Record 79;
+      LastLineNo@1500000 : Integer;
+    BEGIN
+      // Form43.MenuItem."Direct Debit To PLA / RG"
+      SalesLine.CalculateStructures(SalesHeader);
+      SalesLine.AdjustStructureAmounts(SalesHeader);
+      SalesLine.UpdateSalesLines(SalesHeader);
+
+      // Simulation of Tab36.OpenExciseCentvatClaimForm()
+      CompanyInfo.GET;
+      ExciseEntry.INIT;
+      ExciseEntry."E.C.C. No." := CompanyInfo."E.C.C. No.";
+      SalesLine.FIND;
+      SalesLine.VALIDATE("eCess Amount",0);
+      SalesLine.VALIDATE("SHE Cess Amount",0);
+      SalesLine.MODIFY(TRUE);
+      ExciseEntry."BED Amount" := SalesHeader.RoundExciseAmount(-SalesLine."BED Amount",1,1);
+      ExciseEntry."eCess Amount" := SalesHeader.RoundExciseAmount(-SalesLine."eCess Amount",1,1);
+      ExciseEntry."SHE Cess Amount" := SalesHeader.RoundExciseAmount(-SalesLine."SHE Cess Amount",1,1);
+
+      WITH GenJournalLine DO BEGIN
+        SETRANGE("Journal Template Name",'');
+        SETRANGE("Journal Batch Name",'');
+        IF FINDLAST THEN
+          LastLineNo := "Line No.";
+        INIT;
+        "Journal Template Name" := '';
+        "Journal Batch Name" := '';
+        "Line No." := LastLineNo + 10000;
+        "Document Type" := "Document Type"::Payment;
+        "Account Type" := "Account Type"::"G/L Account";
+        "System-Created Entry" := TRUE;
+        "Allow Application" := TRUE;
+        VALIDATE("Posting Date",SalesHeader."Posting Date");
+        VALIDATE("RG/Service Tax Set Off Date",SalesHeader."Posting Date");
+        VALIDATE("PLA Set Off Date",SalesHeader."Posting Date");
+        VALIDATE("Document No.",SalesHeader."No.");
+        VALIDATE("E.C.C. No.",ExciseEntry."E.C.C. No.");
+        VALIDATE("Service Tax Registration No.",SalesLine."Service Tax Registration No.");
+        VALIDATE("Service Tax Group Code",ServiceTaxGroupCode);
+        // Amount is set by Form 13701 Pay Excise."Apply Entries".OnPush
+        VALIDATE(Amount,InsertExciseCenvatClaim(GenJournalLine,ExciseEntry));
+        "Pay Excise" := TRUE;
+        INSERT;
+      END;
+    END;
+
+    PROCEDURE CreateGLAccount@1500011() : Code[20];
+    VAR
+      GLAccount@1500000 : Record 15;
+    BEGIN
+      LibraryERM.CreateGLAccount(GLAccount);
+      EXIT(GLAccount."No.");
+    END;
+
+    PROCEDURE CreateInventoryPostingSetup@1500136(ItemNo@1500000 : Code[20];LocationCode@1500001 : Code[10]);
+    VAR
+      Item@1500002 : Record 27;
+      InventoryPostingSetup@1500003 : Record 5813;
+    BEGIN
+      Item.GET(ItemNo);
+      LibraryAssembly.CreateInvtPostingSetup(
+        InventoryPostingSetup,
+        LocationCode,
+        Item."Inventory Posting Group",
+        CreateGLAccount,
+        CreateGLAccount,
+        CreateGLAccount,
+        CreateGLAccount,
+        CreateGLAccount,
+        CreateGLAccount);
+    END;
+
+    LOCAL PROCEDURE CreateItem@1500053(VAR Item@1500000 : Record 27;ExciseProdPostingGroup@1500003 : Code[10]) : Code[20];
+    VAR
+      GeneralPostingSetup@1500002 : Record 252;
+      VATProductPostingGroup@1500001 : Record 324;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryERM.FindGeneralPostingSetup(GeneralPostingSetup);
+      Item.VALIDATE("Gen. Prod. Posting Group",GeneralPostingSetup."Gen. Prod. Posting Group");
+      LibraryERM.FindVATProductPostingGroup(VATProductPostingGroup);
+      Item.VALIDATE("VAT Prod. Posting Group",VATProductPostingGroup.Code);
+      Item.VALIDATE("Excise Prod. Posting Group",ExciseProdPostingGroup);
+      Item.VALIDATE("Replenishment System",Item."Replenishment System"::"Prod. Order");
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    PROCEDURE CreateItemWithTaxGroup@1500010() : Code[20];
+    VAR
+      Item@1500000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Tax Group Code",CreateTaxGroup(TRUE));
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemWithTaxGroupAndExcise@1500018(VAR Item@1500000 : Record 27;ExciseProdPostingGroup@1500002 : Code[10]) : Code[20];
+    BEGIN
+      Item.GET(CreateItemWithTaxGroup);
+      WITH Item DO BEGIN
+        VALIDATE("Excise Prod. Posting Group",ExciseProdPostingGroup);
+        MODIFY(TRUE);
+        EXIT("No.")
+      END;
+    END;
+
+    PROCEDURE CreateLocationWithState@1500042(VAR Location@1500000 : Record 14;ExciseBusPostingGroup@1500003 : Code[10]);
+    VAR
+      ExciseNoSeries@1500001 : Record 16500;
+      ECCNo@1500005 : Code[20];
+    BEGIN
+      CreateLocationWithStateAndTINNo(Location);
+      ECCNo := CreateECCNoAndSeries(ExciseNoSeries.Type::RG23D,LibraryERM.CreateNoSeriesCode);
+
+      WITH Location DO BEGIN
+        UpdateStateAccounts("State Code");
+        VALIDATE("Trading Location",TRUE);
+        VALIDATE("E.C.C. No.",ECCNo);
+        VALIDATE("Excise Bus. Posting Group",ExciseBusPostingGroup);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateLocationWithStateAndTINNo@1500012(VAR Location@1500000 : Record 14);
+    VAR
+      State@1500001 : Record 13762;
+      T_I_N_Nos@1500002 : Record 13701;
+    BEGIN
+      LibraryERM.CreateState(State);
+      LibraryERM.CreateTINNo(T_I_N_Nos);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Location.VALIDATE("T.I.N. No.",T_I_N_Nos.Code);
+      Location.VALIDATE("State Code",State.Code);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocWithExcise@1500049(VAR SalesHeader@1500000 : Record 36;VAR SalesLine@1500001 : Record 37;PostingDate@1500003 : Date);
+    VAR
+      Customer@1500004 : Record 18;
+      ExcisePostingSetup@1500005 : Record 13711;
+      Item@1500006 : Record 27;
+    BEGIN
+      FindExcisePostingSetup(ExcisePostingSetup);
+      CreateCustomer(Customer,ExcisePostingSetup."Excise Bus. Posting Group");
+      CreateItem(Item,ExcisePostingSetup."Excise Prod. Posting Group");
+
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,Customer."No.");
+      SalesHeader.VALIDATE("Posting Date",PostingDate);
+      SalesHeader.VALIDATE(Structure,GetExciseStructureCode);
+      SalesHeader.MODIFY(TRUE);
+
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",1);
+    END;
+
+    PROCEDURE CreateStructure@1500008(Type@1500001 : Option) : Code[20];
+    VAR
+      StructureHeader@1500004 : Record 13792;
+      StructureDetails@1500000 : Record 13793;
+    BEGIN
+      LibraryERM.CreateStructureHeader(StructureHeader);
+      LibraryERM.CreateStructureDetails(StructureDetails,StructureHeader.Code,1,Type,'','');  // Value 1 for Calculation Order Field.
+      WITH StructureDetails DO BEGIN
+        VALIDATE("Include Base",TRUE);
+        VALIDATE("Include Line Discount",TRUE);
+        VALIDATE("Include Invoice Discount",TRUE);
+        MODIFY(TRUE);
+      END;
+      EXIT(StructureHeader.Code);
+    END;
+
+    PROCEDURE CreateStructureExciseSalesTax@1500031(SalesTaxBaseFormula@1500001 : Text[80]) : Code[20];
+    VAR
+      StructureHeader@1500000 : Record 13792;
+      StructureDetails@1500003 : Record 13793;
+    BEGIN
+      LibraryERM.CreateStructureHeader(StructureHeader);
+      WITH StructureDetails DO BEGIN
+        LibraryERM.CreateStructureDetails(StructureDetails,StructureHeader.Code,1,Type::Excise,'','');
+        VALIDATE("Include Base",TRUE);
+        MODIFY(TRUE);
+        LibraryERM.CreateStructureDetails(StructureDetails,StructureHeader.Code,1,Type::"Sales Tax",'','');
+        VALIDATE("Include Base",TRUE);
+        VALIDATE("Base Formula",SalesTaxBaseFormula);
+        MODIFY(TRUE);
+        EXIT(Code);
+      END;
+    END;
+
+    PROCEDURE CreateExciseSetupWithItemVendorAndLocation@1500032(VAR Vendor@1500000 : Record 23;VAR Location@1500002 : Record 14) ItemCode : Code[20];
+    VAR
+      Item@1500001 : Record 27;
+      ExcisePostingSetup@1500004 : Record 13711;
+    BEGIN
+      CreateAndUpdateAccountWithExciseSetup(ExcisePostingSetup);
+      ItemCode := CreateItemWithTaxGroupAndExcise(Item,ExcisePostingSetup."Excise Prod. Posting Group");
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("Excise Bus. Posting Group",ExcisePostingSetup."Excise Bus. Posting Group");
+      Vendor.MODIFY(TRUE);
+      CreateLocationWithState(Location,ExcisePostingSetup."Excise Bus. Posting Group");
+      Location.VALIDATE("E.C.C. No.",CreateECCNoAndSeries(0,LibraryERM.CreateNoSeriesCode));
+      Location.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreatePLAAccAndUpdateGLSetup@1500033() : Code[20];
+    VAR
+      GeneralLedgerSetup@1500000 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.VALIDATE("PLA Account",LibraryERM.CreateGLAccountNo);
+      GeneralLedgerSetup.MODIFY(TRUE);
+      EXIT(GeneralLedgerSetup."PLA Account");
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateAccountWithExciseSetup@1500034(VAR ExcisePostingSetup@1500000 : Record 13711);
+    BEGIN
+      WITH ExcisePostingSetup DO BEGIN
+        LibraryERM.CreateExcisePostingSetup(
+          ExcisePostingSetup,"BED Calculation Type"::"Excise %",LibraryRandom.RandDec(100,1),FALSE);
+        VALIDATE("Cenvat Cr. Receivable(Trading)",CreateGLAccount);
+        VALIDATE("Cenvat Cr. Receivable Account",CreateGLAccount);
+        VALIDATE("Cenvat Transfered(Trading)",CreateGLAccount);
+        VALIDATE("eCess %",LibraryRandom.RandDec(10,1));
+        VALIDATE("SHE Cess %",LibraryRandom.RandDec(10,1));
+        VALIDATE("Setoff available",TRUE);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateStateWithCForm@1500014(VAR State@1500001 : Record 13762);
+    BEGIN
+      LibraryERM.CreateState(State);
+      UpdateStateAccounts(State.Code);
+      CreateStateForms(State.Code,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateStateForms@1500045(StateCode@1500001 : Code[10];CForm@1500004 : Boolean;TransitDocument@1500000 : Boolean) : Code[10];
+    VAR
+      StateForms@1500002 : Record 13767;
+      FormCodes@1500003 : Record 13756;
+    BEGIN
+      FormCodes.SETRANGE("C Form",CForm);
+      FormCodes.FINDFIRST;
+      WITH StateForms DO BEGIN
+        INIT;
+        VALIDATE(State,StateCode);
+        VALIDATE("Form Code",FormCodes.Code);
+        VALIDATE("Transit Document",TransitDocument);
+        INSERT;
+        EXIT("Form Code");
+      END;
+    END;
+
+    PROCEDURE CreateTaxAreaLine@1500019(TaxArea@1500000 : Code[20];TaxJurisdiction@1500001 : Code[10]);
+    VAR
+      TaxAreaLine@1500002 : Record 319;
+    BEGIN
+      LibraryERM.CreateTaxAreaLine(TaxAreaLine,TaxArea,TaxJurisdiction);
+      TaxAreaLine.VALIDATE("Calculation Order",GetNextCalcOrdTaxAreaLine(TaxArea));
+      TaxAreaLine.VALIDATE("Include Tax Base",TRUE);
+      TaxAreaLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateTaxAreaLocations@1500056(LocationCode@1500000 : Code[20];StateCode@1500001 : Code[10];TaxAreaCode@1500002 : Code[20];TaxAreaLocationsType@1500006 : Option);
+    VAR
+      TaxAreaLocations@1500004 : Record 13761;
+    BEGIN
+      WITH TaxAreaLocations DO BEGIN
+        INIT;
+        VALIDATE(Type,TaxAreaLocationsType);
+        VALIDATE("Dispatch / Receiving Location",LocationCode);
+        VALIDATE("Customer / Vendor Location",StateCode);
+        VALIDATE("VAT Applicable",TRUE);
+        VALIDATE("Tax Area Code",TaxAreaCode);
+        INSERT;
+      END;
+    END;
+
+    PROCEDURE CreateTaxDetail@1500021(VAR TaxDetail@1500000 : Record 322;TaxJurisdictionCode@1500001 : Code[10];TaxGroupCode@1500002 : Code[10];TaxType@1500003 : Option;EffectiveDate@1500004 : Date;TaxBelowMax@1500005 : Decimal;FormCode@1500006 : Code[10]);
+    BEGIN
+      WITH TaxDetail DO BEGIN
+        INIT;
+        VALIDATE("Tax Jurisdiction Code",TaxJurisdictionCode);
+        VALIDATE("Tax Group Code",TaxGroupCode);
+        VALIDATE("Tax Type",TaxType);
+        VALIDATE("Effective Date",EffectiveDate);
+        VALIDATE("Form Code",FormCode);
+        VALIDATE("Tax Below Maximum",TaxBelowMax);
+        INSERT(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateTaxGroup@1500022(Applicable@1500001 : Boolean) : Code[10];
+    VAR
+      TaxGroup@1500000 : Record 321;
+    BEGIN
+      LibraryERM.CreateTaxGroup(TaxGroup);
+      TaxGroup.VALIDATE("VAT Applicable",Applicable);
+      TaxGroup.MODIFY(TRUE);
+      EXIT(TaxGroup.Code);
+    END;
+
+    PROCEDURE CreateTaxJurisdiction@1500023(VAR TaxJurisdiction@1500000 : Record 320;TaxType@1500001 : Option);
+    BEGIN
+      LibraryERM.CreateTaxJurisdiction(TaxJurisdiction);
+      WITH TaxJurisdiction DO BEGIN
+        VALIDATE("Tax Account (Sales)",CreateGLAccount);
+        VALIDATE("Tax Account (Purchases)",CreateGLAccount);
+        VALIDATE("Tax Type",TaxType);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateVendorWithTaxLiable@1500024(VAR Vendor@1500000 : Record 23;CurrencyCode@1500001 : Code[10];TaxLiable@1500002 : Boolean);
+    VAR
+      TaxArea@11500005 : Record 318;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryERM.CreateTaxArea(TaxArea);
+      WITH Vendor DO BEGIN
+        VALIDATE("Tax Area Code",TaxArea.Code);
+        VALIDATE("Tax Liable",TaxLiable);
+        VALIDATE("Currency Code",CurrencyCode);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetNextCalcOrdTaxAreaLine@1500009(TaxArea@1500000 : Code[20]) : Integer;
+    VAR
+      TaxAreaLine@1500001 : Record 319;
+    BEGIN
+      WITH TaxAreaLine DO BEGIN
+        SETFILTER("Tax Area",TaxArea);
+        SETCURRENTKEY("Tax Area","Calculation Order");
+        FINDFIRST;
+        EXIT("Calculation Order" + 1);
+      END;
+    END;
+
+    LOCAL PROCEDURE FindExciseEntry@1500044(VAR ExciseEntry@1500001 : Record 13712;DocumentNo@1500000 : Code[20]);
+    BEGIN
+      ExciseEntry.SETRANGE("Document No.",DocumentNo);
+      ExciseEntry.FINDLAST;
+    END;
+
+    LOCAL PROCEDURE FindExcisePostingSetup@1500002(VAR ExcisePostingSetup@1500000 : Record 13711);
+    BEGIN
+      WITH ExcisePostingSetup DO BEGIN
+        SETFILTER("Excise Bus. Posting Group",'<>%1','');
+        SETFILTER("Excise Prod. Posting Group",'<>%1','');
+        SETFILTER("AED(GSI) %",'<>0');
+        SETRANGE("AED(GSI) Calculation Type","AED(GSI) Calculation Type"::"Excise %");
+        SETRANGE("BED Calculation Type","BED Calculation Type"::"Excise %");
+        FINDFIRST;
+      END;
+    END;
+
+    PROCEDURE FindStateFormCode@1500020(StateCode@1500001 : Code[10]) : Code[10];
+    VAR
+      StateForms@1500000 : Record 13767;
+    BEGIN
+      WITH StateForms DO BEGIN
+        SETRANGE(State,StateCode);
+        FINDFIRST;
+        EXIT("Form Code");
+      END;
+    END;
+
+    LOCAL PROCEDURE GetExciseStructureCode@1500051() : Code[10];
+    VAR
+      StructureDetails@1500000 : Record 13793;
+    BEGIN
+      StructureDetails.SETRANGE(Type,StructureDetails.Type::Excise);
+      StructureDetails.SETRANGE(CVD,FALSE);
+      StructureDetails.FINDFIRST;
+      EXIT(StructureDetails.Code);
+    END;
+
+    LOCAL PROCEDURE InsertExciseCenvatClaim@1500055(GenJournalLine@1500001 : Record 81;ExciseEntry@1500000 : Record 13712) : Decimal;
+    VAR
+      ExciseCenvatClaim@1500002 : Record 16584;
+    BEGIN
+      // Amounts in ExciseCenvatClaim are set on the Form 13793 Excise Cenvat Claim
+      WITH ExciseCenvatClaim DO BEGIN
+        INIT;
+        "Journal Template Name" := GenJournalLine."Journal Template Name";
+        "Journal Batch Name" := GenJournalLine."Journal Batch Name";
+        "Line No." := GenJournalLine."Line No.";
+        "Document No." := GenJournalLine."Document No.";
+        "E.C.C. No." := ExciseEntry."E.C.C. No.";
+        "BED Amount" := -ExciseEntry."BED Amount";
+        "ST BED Amount" := "BED Amount";
+        "SHE Cess Amount" := -ExciseEntry."SHE Cess Amount";
+        "ST SHECess Amount" := "SHE Cess Amount";
+        "eCess Amount" := -ExciseEntry."eCess Amount";
+        "ST eCESS Amount" := "eCess Amount";
+        INSERT;
+
+        // ServiceTaxPmtBuffer is inserted by Form13793.OK.OnPush
+        InsertServiceTaxPmtBuffer(GenJournalLine,ExciseCenvatClaim);
+
+        EXIT("BED Amount" + "SHE Cess Amount" + "eCess Amount");
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertServiceTaxPmtBuffer@1500071(GenJournalLine@1500003 : Record 81;ExciseCenvatClaim@1500002 : Record 16584);
+    VAR
+      ServiceTaxPmtBuffer@1500001 : Record 16476;
+      ServiceTaxEntryDetails@1500000 : Record 16474;
+    BEGIN
+      CalcSumRemainingCredit(GenJournalLine,ServiceTaxEntryDetails);
+
+      WITH ServiceTaxPmtBuffer DO BEGIN
+        INIT;
+        "Document No." := GenJournalLine."Document No.";
+        "Service Tax Group Code" := GenJournalLine."Service Tax Group Code";
+        "Service Tax Registration No." := GenJournalLine."Service Tax Registration No.";
+        "Posting Date" := GenJournalLine."Posting Date";
+        Description := "Service Tax Group Code";
+        "Credit Available" := ServiceTaxEntryDetails."Remaining Credit";
+        "Credit Availed" := ExciseCenvatClaim."ST BED Amount";
+        "Credit Available (eCess)" := ServiceTaxEntryDetails."Remaining Credit (eCess)";
+        "Credit Availed (eCess)" := ExciseCenvatClaim."ST eCESS Amount";
+        "Credit Available (SHECess)" := ServiceTaxEntryDetails."Remaining Credit (SHECess)";
+        "Credit Availed (SHECess)" := ExciseCenvatClaim."ST SHECess Amount";
+        INSERT;
+      END;
+    END;
+
+    PROCEDURE OpenPurchaseOrderStatistics@1500028(PurchaseLine@1500001 : Record 39);
+    VAR
+      PurchasesPayablesSetup@1500000 : Record 312;
+      PurchaseHeader@1500002 : Record 38;
+    BEGIN
+      PurchasesPayablesSetup.GET;
+      WITH PurchaseLine DO BEGIN
+        PurchaseHeader.GET("Document Type","Document No.");
+        IF PurchasesPayablesSetup."Calc. Inv. Discount" THEN BEGIN
+          PurchaseHeader.CalcInvDiscForHeader;
+          COMMIT;
+        END;
+
+        IF PurchaseHeader.Structure <> '' THEN BEGIN
+          CalculateStructures(PurchaseHeader);
+          AdjustStructureAmounts(PurchaseHeader);
+          UpdatePurchLines(PurchaseHeader);
+        END;
+        CalculateTDS(PurchaseHeader);
+
+        COMMIT;
+        PAGE.RUNMODAL(PAGE::"Purchase Order Statistics",PurchaseHeader);
+      END;
+    END;
+
+    PROCEDURE OpenSalesOrderStatistics@1500029(VAR SalesLine@1500000 : Record 37);
+    VAR
+      SalesReceivablesSetup@1500001 : Record 311;
+      SalesHeader@1500002 : Record 36;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      WITH SalesLine DO BEGIN
+        SalesHeader.GET("Document Type","Document No.");
+        SalesHeader.CALCFIELDS("Price Inclusive of Taxes");
+        IF SalesReceivablesSetup."Calc. Inv. Discount" AND (NOT SalesHeader."Price Inclusive of Taxes") THEN BEGIN
+          SalesHeader.CalcInvDiscForHeader;
+          COMMIT
+        END;
+        IF SalesHeader."Price Inclusive of Taxes" THEN BEGIN
+          InitStrOrdDetail(SalesHeader);
+          GetSalesPriceExclusiveTaxes(SalesHeader);
+          UpdateSalesLinesPIT(SalesHeader);
+          COMMIT;
+        END;
+
+        IF SalesHeader.Structure <> '' THEN BEGIN
+          CalculateStructures(SalesHeader);
+          AdjustStructureAmounts(SalesHeader);
+          UpdateSalesLines(SalesHeader);
+        END;
+        CalculateTCS(SalesHeader);
+
+        COMMIT;
+        PAGE.RUNMODAL(PAGE::"Sales Order Statistics",SalesHeader);
+      END;
+    END;
+
+    PROCEDURE PostExcisePayment@1500025(PostedSalesInvoiceDocNo@1500001 : Code[20];ServiceTaxEntryDetails@1500000 : Record 16474);
+    VAR
+      GenJournalLine@1500002 : Record 81;
+      ExciseEntry@1500003 : Record 13712;
+    BEGIN
+      FindExciseEntry(ExciseEntry,PostedSalesInvoiceDocNo);
+      CreateExcisePayment(ExciseEntry,ServiceTaxEntryDetails,GenJournalLine);
+      // Form 13701 Pay Excise."Apply Entries".OnPush
+      ExciseEntry."Modvat Claimed Doc No." := GenJournalLine."Document No.";
+      ExciseEntry.MODIFY;
+
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    PROCEDURE PostSalesInvoiceDirectExcise@1500050(PostingDate@1500004 : Date;BaseAmount@1500003 : Decimal;ServiceTaxGroupCode@1500000 : Code[20]) PostedDocNo : Code[20];
+    VAR
+      SalesHeader@1500001 : Record 36;
+      SalesLine@1500005 : Record 37;
+      NoSeriesManagement@1500002 : Codeunit 396;
+    BEGIN
+      CreateSalesDocWithExcise(SalesHeader,SalesLine,PostingDate);
+      SalesLine.VALIDATE("Unit Price",BaseAmount);
+      SalesLine.VALIDATE("Direct Debit To PLA / RG",TRUE);
+      SalesLine.MODIFY(TRUE);
+
+      CreateExcisePaymentForDoc(SalesHeader,SalesLine,ServiceTaxGroupCode);
+
+      PostedDocNo := NoSeriesManagement.GetNextNo(SalesHeader."Posting No. Series",PostingDate,FALSE);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+    END;
+
+    PROCEDURE PostSalesInvoiceWithExcise@1500129(PostingDate@1500004 : Date;BaseAmount@1500003 : Decimal) PostedDocNo : Code[20];
+    VAR
+      SalesHeader@1500001 : Record 36;
+      SalesLine@1500005 : Record 37;
+      NoSeriesManagement@1500002 : Codeunit 396;
+    BEGIN
+      CreateSalesDocWithExcise(SalesHeader,SalesLine,PostingDate);
+      SalesLine.VALIDATE("Unit Price",BaseAmount);
+      SalesLine.MODIFY(TRUE);
+      SalesLine.CalculateStructures(SalesHeader);
+      SalesLine.AdjustStructureAmounts(SalesHeader);
+      SalesLine.UpdateSalesLines(SalesHeader);
+      SalesLine.FIND;
+      SalesLine.VALIDATE("eCess Amount",0);
+      SalesLine.VALIDATE("SHE Cess Amount",0);
+      SalesLine.MODIFY(TRUE);
+
+      PostedDocNo := NoSeriesManagement.GetNextNo(SalesHeader."Posting No. Series",PostingDate,FALSE);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+    END;
+
+    PROCEDURE RoundExciseAmount@1500016(ExciseDutyAmount@1280004 : Decimal) : Decimal;
+    VAR
+      ExciseRoundingDirection@1280002 : Text[1];
+      ExciseRoundingPrecision@1280001 : Decimal;
+      GLSetup@1500000 : Record 98;
+    BEGIN
+      WITH GLSetup DO BEGIN
+        GET;
+        CASE "Excise Rounding Type" OF
+          "Excise Rounding Type"::Nearest:
+            ExciseRoundingDirection := '=';
+          "Excise Rounding Type"::Up:
+            ExciseRoundingDirection := '>';
+          "Excise Rounding Type"::Down:
+            ExciseRoundingDirection := '<';
+        END;
+        IF "Excise Rounding Precision" <> 0 THEN
+          ExciseRoundingPrecision := "Excise Rounding Precision"
+        ELSE
+          ExciseRoundingPrecision := 0.01;
+        EXIT(ROUND(ExciseDutyAmount,ExciseRoundingPrecision,ExciseRoundingDirection));
+      END;
+    END;
+
+    PROCEDURE SetGlobalECCNo@1500000(NewECCNo@1500001 : Code[20]) OldECCNo : Code[20];
+    VAR
+      CompanyInfo@1500000 : Record 79;
+    BEGIN
+      WITH CompanyInfo DO BEGIN
+        GET;
+        OldECCNo := "E.C.C. No.";
+        VALIDATE("E.C.C. No.",NewECCNo);
+        MODIFY;
+      END;
+    END;
+
+    PROCEDURE SetNewGlobalECCNo@1500030() : Code[20];
+    BEGIN
+      EXIT(SetGlobalECCNo(CreateECCNo));
+    END;
+
+    PROCEDURE SetServiceTaxAsExciseCredit@1500092(ServiceTaxEntryDetails@1500000 : Record 16474);
+    BEGIN
+      ServiceTaxEntryDetails.SETRANGE("Service Tax Registration No.",ServiceTaxEntryDetails."Service Tax Registration No.");
+      ServiceTaxEntryDetails.SETFILTER("Remaining Credit",'<>0');
+      ServiceTaxEntryDetails.MODIFYALL("Service Tax as Excise",TRUE);
+    END;
+
+    PROCEDURE SetupItemLocationAndTaxes@1500017(VAR Item@1500001 : Record 27;VAR Location@1500002 : Record 14;ExcisePostingSetup@1500003 : Record 13711;FormCode@1500006 : Code[10];StateCode@1500007 : Code[10];TaxPercent@1500008 : Decimal);
+    VAR
+      TaxJurisdiction@1500004 : Record 320;
+      TaxAreaLocations@1500005 : Record 13761;
+    BEGIN
+      CreateItemWithTaxGroupAndExcise(Item,ExcisePostingSetup."Excise Prod. Posting Group");
+      CreateLocationWithState(Location,ExcisePostingSetup."Excise Bus. Posting Group");
+      SetupTaxes(Item."Tax Group Code",FormCode,Location.Code,StateCode,TaxPercent,
+        TaxJurisdiction."Tax Type"::CST,TaxAreaLocations.Type::Vendor);
+      SetupTaxes(Item."Tax Group Code",FormCode,Location.Code,StateCode,TaxPercent,
+        TaxJurisdiction."Tax Type"::CST,TaxAreaLocations.Type::Customer);
+    END;
+
+    PROCEDURE SetupSalesTax@1500013(TaxAreaCode@1500000 : Code[20];TaxGroupCode@1500005 : Code[10];TaxBelowMax@1500003 : Decimal;TaxType@1500004 : Option;FormCode@1500006 : Code[10]);
+    VAR
+      TaxDetail@1500001 : Record 322;
+      TaxJurisdiction@1500002 : Record 320;
+    BEGIN
+      CreateTaxJurisdiction(TaxJurisdiction,TaxType);
+      CreateTaxAreaLine(TaxAreaCode,TaxJurisdiction.Code);
+      CreateTaxDetail(
+        TaxDetail,TaxJurisdiction.Code,TaxGroupCode,TaxDetail."Tax Type"::"Sales Tax",WORKDATE,TaxBelowMax,FormCode);
+    END;
+
+    LOCAL PROCEDURE SetupTaxes@1500039(TaxGroupCode@1500001 : Code[10];FormCode@1500007 : Code[10];LocationCode@1500006 : Code[10];StateCode@1500005 : Code[10];TaxPercent@1500002 : Decimal;TaxType@1500003 : Option;TaxLocationType@1500004 : Option);
+    VAR
+      TaxArea@1500000 : Record 318;
+    BEGIN
+      LibraryERM.CreateTaxArea(TaxArea);
+      CreateTaxAreaLocations(LocationCode,StateCode,TaxArea.Code,TaxLocationType);
+      SetupSalesTax(TaxArea.Code,TaxGroupCode,TaxPercent,TaxType,FormCode);
+    END;
+
+    LOCAL PROCEDURE SumExciseEntries@1500094(VAR TotalExciseEntry@1500000 : Record 13712;LastTransactionNo@1500001 : Integer);
+    VAR
+      ExciseEntry@1500002 : Record 13712;
+    BEGIN
+      WITH TotalExciseEntry DO BEGIN
+        INIT;
+        SETFILTER("Transaction No.",'>%1',LastTransactionNo);
+        IF FINDSET THEN
+          REPEAT
+            "BED Amount" += ExciseEntry."BED Amount";
+            "eCess Amount" += ExciseEntry."eCess Amount";
+            "SHE Cess Amount" += ExciseEntry."SHE Cess Amount";
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE UpdateStateAccounts@1500015(StateCode@1500001 : Code[10]);
+    VAR
+      State@1500000 : Record 13762;
+    BEGIN
+      WITH State DO BEGIN
+        GET(StateCode);
+        VALIDATE("CST Account (Sales)",CreateGLAccount);
+        VALIDATE("Tax Account (Sales)",CreateGLAccount);
+        VALIDATE("Tax Account (Purchases)",CreateGLAccount);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyExciseIsPaid@1500026(LastTransactionNo@1500002 : Integer);
+    VAR
+      ExciseEntry@1500001 : Record 13712;
+    BEGIN
+      WITH ExciseEntry DO BEGIN
+        SETFILTER("Transaction No.",'>%1',LastTransactionNo);
+        IF FINDSET THEN
+          REPEAT
+            Assert.IsTrue(Paid,ExciseNotPaidErr);
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE VerifyExcisePaidByServiceTax@1500003(ServiceTaxEntryDetails@1500002 : Record 16474;LastTransactionNo@1500000 : Integer);
+    BEGIN
+      VerifyExciseIsPaid(LastTransactionNo);
+      VerifyExciseTookCredit(ServiceTaxEntryDetails,LastTransactionNo);
+      VerifyNegativeSTEntriesClosed(LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE VerifyExciseTookCredit@1500035(ServiceTaxEntryDetails@1500002 : Record 16474;LastTransactionNo@1500004 : Integer);
+    VAR
+      TotalExciseEntry@1500003 : Record 13712;
+      TotalSTEntryDetails@1500005 : Record 16474;
+      ServiceTaxSetup@1500001 : Record 16472;
+    BEGIN
+      TotalSTEntryDetails.SETRANGE("Reverse Charge",FALSE);
+      ServiceTaxVerify.CalcSTEntryDetailsBalances(LastTransactionNo,TotalSTEntryDetails);
+      SumExciseEntries(TotalExciseEntry,LastTransactionNo);
+      Assert.AreEqual(
+        TotalSTEntryDetails."Service Tax Amount" + TotalExciseEntry."BED Amount",
+        TotalSTEntryDetails."Remaining Credit",TotalSTEntryDetails.FIELDCAPTION("Remaining Credit"));
+      Assert.AreEqual(
+        TotalSTEntryDetails."Service Tax eCess Amount" + TotalExciseEntry."eCess Amount",
+        TotalSTEntryDetails."Remaining Credit (eCess)",TotalSTEntryDetails.FIELDCAPTION("Remaining Credit (eCess)"));
+      Assert.AreEqual(
+        TotalSTEntryDetails."Service Tax SHE Cess Amount" + TotalExciseEntry."SHE Cess Amount",
+        TotalSTEntryDetails."Remaining Credit (SHECess)",TotalSTEntryDetails.FIELDCAPTION("Remaining Credit (SHECess)"));
+
+      ServiceTaxSetup.FindOnDate(ServiceTaxEntryDetails."Service Tax Group Code",ServiceTaxEntryDetails."Posting Date");
+      ServiceTaxVerify.STRecAccBalance(ServiceTaxSetup,TotalSTEntryDetails.FullRemainingCredit);
+
+      VerifyExciseUtilisation(-TotalExciseEntry.Amount);
+    END;
+
+    LOCAL PROCEDURE VerifyExciseUtilisation@1500005(ExpectedUtilizedServiceTax@1500002 : Decimal);
+    VAR
+      STAsExciseUtilisation@1500001 : Record 16570;
+    BEGIN
+      WITH STAsExciseUtilisation DO BEGIN
+        FINDLAST;
+        SETCURRENTKEY("Service Tax Registration No.","Posting Date","Document No.");
+        SETRANGE("Document No.","Document No.");
+        CALCSUMS("ST as Excise Utilisation","ST eCess as Excise Utilisation","ST SHECess Excise Utilisation");
+        Assert.AreEqual(
+          ExpectedUtilizedServiceTax,
+          "ST as Excise Utilisation" + "ST eCess as Excise Utilisation" + "ST SHECess Excise Utilisation",
+          WrongExciseUtilizationErr);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyNegativeSTEntriesClosed@1500004(LastTransactionNo@1500000 : Integer);
+    VAR
+      ServiceTaxEntryDetails@1500001 : Record 16474;
+    BEGIN
+      WITH ServiceTaxEntryDetails DO BEGIN
+        SETFILTER("Transaction No.",'>%1',LastTransactionNo);
+        SETRANGE("Service Tax as Excise",TRUE);
+        SETFILTER("Service Tax Amount",'<0');
+        IF FINDSET THEN
+          REPEAT
+            Assert.IsTrue(Closed,STRSUBSTNO(NegativeEntriesErr,FIELDCAPTION(Closed)));
+            Assert.IsTrue("Closed (eCess)",STRSUBSTNO(NegativeEntriesErr,FIELDCAPTION("Closed (eCess)")));
+            Assert.IsTrue("Closed (SHECess)",STRSUBSTNO(NegativeEntriesErr,FIELDCAPTION("Closed (SHECess)")));
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,1754 @@
+OBJECT Codeunit 137390 SCM Kitting -  Reports
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      MfgSetup@1000 : Record 99000765;
+      SalesReceivablesSetup@1100 : Record 311;
+      InventorySetup@1027 : Record 313;
+      AssemblySetup@1015 : Record 905;
+      SourceCodeSetup@1008 : Record 242;
+      Item@1001 : Record 27;
+      LibraryERM@1016 : Codeunit 131300;
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryInventory@1003 : Codeunit 132201;
+      LibraryCosting@1005 : Codeunit 132200;
+      LibraryAssembly@1013 : Codeunit 132207;
+      LibraryManufacturing@1030 : Codeunit 132202;
+      LibraryReportDataset@1171 : Codeunit 131007;
+      LibraryERMCountryData@1042 : Codeunit 131305;
+      LibraryVariableStorage@1043 : Codeunit 131004;
+      LibrarySales@1029 : Codeunit 130509;
+      Assert@1002 : Codeunit 130000;
+      LibraryRandom@1007 : Codeunit 130440;
+      isInitialized@1006 : Boolean;
+      WorkDate2@1020 : Date;
+      AdjSource@1009 : 'Purchase,Revaluation,Item Card,Order Lines,Resource,None';
+      TopItemRepl@1031 : 'None,Prod. Order,Assembly';
+      PrintCostShare@1028 : 'Sales,Inventory,WIP Inventory';
+      ErrorCostShares@1010 : TextConst 'ENU=Wrong %1 in item %2.';
+      PostMethod@1025 : 'per Posting Group,per Entry';
+      WarningCaption@1033 : TextConst 'ENU=Warning!';
+      BlockType@1026 : 'Dimension,Dimension Value,Dimension Combination,None';
+      GlobalInventoryAdjmt@1032 : Decimal;
+      GlobalCapacityVariance@1034 : Decimal;
+      GlobalCOGS@1035 : Decimal;
+      ErrorGLRecon@1036 : TextConst 'ENU=Wrong %1 entry %2 in page 9297.';
+      GlobalMaterialVariance@1037 : Decimal;
+      DemandLabel@1012 : TextConst 'ENU=Demand';
+      AssemblyLabel@1011 : TextConst 'ENU=Assembly';
+      ActivityCode@1017 : TextConst 'ENU=Activity Code';
+      Code@1014 : TextConst 'ENU=Code';
+
+    LOCAL PROCEDURE Initialize@8();
+    BEGIN
+      // Initialize setup.
+      LibraryVariableStorage.Clear;
+      CLEARLASTERROR;
+      LibraryAssembly.UpdateAssemblySetup(AssemblySetup,'',AssemblySetup."Copy Component Dimensions from"::"Item/Resource Card",
+        LibraryUtility.GetGlobalNoSeriesCode);
+      LibraryAssembly.UpdateInventorySetup(InventorySetup,FALSE,TRUE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type"::"Item & Location & Variant",InventorySetup."Average Cost Period"::Day);
+
+      IF isInitialized THEN
+        EXIT;
+
+      // Setup Demonstration data.
+      isInitialized := TRUE;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateInventoryPostingSetup;
+      SalesReceivablesSetup.GET;
+      SourceCodeSetup.GET;
+      MfgSetup.GET;
+      WorkDate2 := CALCDATE(MfgSetup."Default Safety Lead Time",WORKDATE); // to avoid Due Date Before Work Date message.
+      COMMIT;
+    END;
+
+    [Normal]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    LOCAL PROCEDURE NormalPosting@164(VAR AssemblyHeader@1005 : Record 900;CostingMethod@1000 : Option;PartialPostFactor@1007 : Decimal;IndirectCost@1004 : Decimal;AdjustmentSource@1001 : Option;AssemblyPolicy@1006 : Option;MixedReplenishment@1010 : Option);
+    VAR
+      ItemJournalLine@1014 : Record 83;
+      ItemJournalBatch@1013 : Record 233;
+      ProductionOrder@1003 : Record 5405;
+      SalesHeader@1002 : Record 36;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+      ItemNo@1011 : ARRAY [10] OF Code[20];
+      ResourceNo@1012 : ARRAY [10] OF Code[20];
+      ItemFilter@1008 : Text[250];
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.SetupAssemblyData(
+        AssemblyHeader,WorkDate2,CostingMethod,CostingMethod,Item."Replenishment System"::Assembly,'',TRUE);
+      ATOSetup(AssemblyHeader,SalesHeader,AssemblyPolicy,PartialPostFactor);
+      MixedReplenishmentSetup(ProductionOrder,AssemblyHeader,MixedReplenishment);
+
+      ItemFilter := LibraryAssembly.GetCompsToAdjust(ItemNo,ResourceNo,AssemblyHeader);
+      LibraryAssembly.ModifyCostParams(AssemblyHeader."No.",FALSE,IndirectCost,0);
+      LibraryAssembly.ModifyItem(AssemblyHeader."Item No.",FALSE,IndirectCost * LibraryRandom.RandDec(10,2),0);
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,1);
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,PartialPostFactor,PartialPostFactor,TRUE,WorkDate2);
+
+      // Exercise.
+      IF AssemblyPolicy = Item."Assembly Policy"::"Assemble-to-Stock" THEN BEGIN
+        LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+
+        // If assembly item lies below a produced item, post the production order.
+        IF MixedReplenishment = TopItemRepl::"Prod. Order" THEN BEGIN
+          ItemJournalLine.DELETEALL;
+          CreatePostItemJournal(
+            AssemblyHeader."Item No.",ProductionOrder."No.",ItemJournalBatch."Template Type"::Consumption,
+            AssemblyHeader."Quantity to Assemble",AssemblyHeader."Posting Date");
+          CreatePostItemJournal(
+            ProductionOrder."Source No.",ProductionOrder."No.",ItemJournalBatch."Template Type"::Output,ProductionOrder.Quantity,
+            AssemblyHeader."Posting Date");
+        END;
+      END ELSE
+        LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      LibraryCosting.AdjustCostItemEntries(ItemFilter,'');
+      IF AdjustmentSource <> AdjSource::None THEN BEGIN
+        // Revalue the assembly item.
+        LibraryAssembly.CreateAdjustmentSource(AssemblyHeader,WorkDate2,TRUE,AdjustmentSource,'','');
+
+        // Revalue an item component.
+        LibraryAssembly.CreateAdjustmentSource(AssemblyHeader,WorkDate2,FALSE,AdjustmentSource,ItemNo[1],'');
+        LibraryCosting.AdjustCostItemEntries(ItemFilter,'');
+      END;
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValueFullPostingSTD@22();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValueFullPostingAVG@21();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValuePartialPostingSTD@20();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,59,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValuePartialPostingAVG@19();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,59,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValueRevalSTD@18();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValueRevalAVG@13();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValueFullPostingATOSTD@11();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Order",
+        TopItemRepl::None);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Sales);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValueIndCostAVG@3();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,12,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValueIndCostSTD@7();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,15,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValueTopItemProduced@10();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::"Prod. Order");
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ItemRegValueReqPageHandler)]
+    PROCEDURE ItemRegValueTopItemAssembly@9();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::Assembly);
+      VerifyItemRegValueForOrder(AssemblyHeader,SourceCodeSetup.Assembly);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecFullPostingSTD@40();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecFullPostingAVG@38();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecPartialPostingSTD@35();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,59,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecPartialPostingAVG@34();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,59,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecRevalSTD@33();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecRevalAVG@32();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecFullPostingATOSTD@31();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Order",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecFullPostingATOAvg@67();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Order",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecIndCostAVG@28();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,12,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecIndCostSTD@27();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,15,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecTopItemProduced@26();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::"Prod. Order");
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValCostSpecTopItemAssembly@24();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::Assembly);
+      VerifyInvtValCostSpecForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationFullPostingSTD@55();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationFullPostingAVG@54();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationPartialPostingSTD@53();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,59,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationPartialPostingAVG@52();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,59,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationRevalSTD@51();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationRevalAVG@50();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationFullPostingATOSTD@49();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Order",
+        TopItemRepl::None);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationIndCostAVG@46();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,12,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationIndCostSTD@45();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,15,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationTopItemProduced@44();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::"Prod. Order");
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,InvtValuationRequestPageHandler)]
+    PROCEDURE InvtValuationTopItemAssembly@43();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::Assembly);
+      VerifyInvtValuationForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,CostSharesBreakdownRequestPageHandler)]
+    PROCEDURE CostSharesRevalSTD@64();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyCostSharesBreakdown(AssemblyHeader,PrintCostShare::Inventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,CostSharesBreakdownRequestPageHandler)]
+    PROCEDURE CostSharesRevalAVG@63();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      ASSERTERROR VerifyCostSharesBreakdown(AssemblyHeader,PrintCostShare::Inventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AvailabilityWindowHandler,CostSharesBreakdownRequestPageHandler)]
+    PROCEDURE CostSharesATOSTD@62();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Order",
+        TopItemRepl::None);
+      ASSERTERROR VerifyCostSharesBreakdown(AssemblyHeader,PrintCostShare::Inventory);
+      VerifyCostSharesBreakdown(AssemblyHeader,PrintCostShare::Sales);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,CostSharesBreakdownRequestPageHandler)]
+    PROCEDURE CostSharesIndCostSTD@60();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,15,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyCostSharesBreakdown(AssemblyHeader,PrintCostShare::Inventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,CostSharesBreakdownRequestPageHandler)]
+    PROCEDURE CostSharesTopItemAssembly@58();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::Assembly);
+      VerifyCostSharesBreakdown(AssemblyHeader,PrintCostShare::Inventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestFullPostingSTD@23();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(AssemblyHeader,PostMethod::"per Entry",'','');
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestPartialAVG@74();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,75,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(AssemblyHeader,PostMethod::"per Entry",'','');
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestRevalAVG@75();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(AssemblyHeader,PostMethod::"per Entry",'','');
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestIndCostAVG@76();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,10,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(AssemblyHeader,PostMethod::"per Entry",'','');
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestRevalSTD@78();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(AssemblyHeader,PostMethod::"per Entry",'','');
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestIndCostSTD@77();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,10,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(AssemblyHeader,PostMethod::"per Entry",'','');
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestATOAVG@80();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Order",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(AssemblyHeader,PostMethod::"per Entry",'','');
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestATOSTD@79();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Order",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(AssemblyHeader,PostMethod::"per Entry",'','');
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestFullPostDimBlockCompSTD@81();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(
+        AssemblyHeader,PostMethod::"per Entry",
+        LibraryAssembly.BlockOrderDimensions(AssemblyHeader,BlockType::None,BlockType::Dimension),'');
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestFullPostDimValBlockCompAVG@83();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(
+        AssemblyHeader,PostMethod::"per Entry",
+        LibraryAssembly.BlockOrderDimensions(AssemblyHeader,BlockType::None,BlockType::"Dimension Value"),'');
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestFullPostDimBlockHeaderAVG@65();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(
+        AssemblyHeader,PostMethod::"per Entry",'',
+        LibraryAssembly.BlockOrderDimensions(AssemblyHeader,BlockType::Dimension,BlockType::None));
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostInvtCostToGLTestRequestPageHandler)]
+    PROCEDURE PostInvtToGLTestFullPostDimValBlockHeaderSTD@61();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyPostCostToGLTestForOrder(
+        AssemblyHeader,PostMethod::"per Entry",'',
+        LibraryAssembly.BlockOrderDimensions(AssemblyHeader,BlockType::"Dimension Value",BlockType::None));
+    END;
+
+    [Test]
+    [HandlerFunctions(InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecFullPostingAVG@94();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecPartialSTD@141();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,25,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecRevalAVG@143();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecRevalSTD@142();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::Revaluation,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecIndCostAVG@145();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,10,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecIndCostSTD@144();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,10,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecATOAVG@147();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Order",
+        TopItemRepl::None);
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecATOSTD@146();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Order",
+        TopItemRepl::None);
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecTopItemProducedAVG@149();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Average,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::"Prod. Order");
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvtGLReconciliationHandler,AvailabilityWindowHandler)]
+    PROCEDURE InvtGLRecTopItemAssemblySTD@148();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,100,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::Assembly);
+      VerifyInvtGLReconForOrder(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DemandOverviewSunshine@66();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,10,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::None);
+      VerifyDemandOverview(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DemandOverviewTopItemProduced@92();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,10,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::"Prod. Order");
+      VerifyDemandOverview(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DemandOverviewTopItemAssembly@93();
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      NormalPosting(
+        AssemblyHeader,Item."Costing Method"::Standard,10,0,AdjSource::None,Item."Assembly Policy"::"Assemble-to-Stock",
+        TopItemRepl::Assembly);
+      VerifyDemandOverview(AssemblyHeader);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ATOSetup@15(VAR AssemblyHeader@1005 : Record 900;VAR SalesHeader@1000 : Record 36;AssemblyPolicy@1001 : Option;PartialShipFactor@1007 : Decimal);
+    VAR
+      AssembleToOrderLink@1014 : Record 904;
+      SalesLine@1013 : Record 37;
+      Item@1002 : Record 27;
+    BEGIN
+      IF AssemblyPolicy = Item."Assembly Policy"::"Assemble-to-Stock" THEN
+        EXIT;
+      IF CONFIRM('') THEN; // workaround for GB = confirmation needed when posting date <> WORKDATE.
+
+      // ATO Setup.
+      Item.GET(AssemblyHeader."Item No.");
+      Item.VALIDATE("Assembly Policy",Item."Assembly Policy"::"Assemble-to-Order");
+      Item.MODIFY(TRUE);
+
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      UpdateActivityCode(SalesHeader);
+      SalesHeader.VALIDATE("Shipment Date",WorkDate2);
+      SalesHeader.VALIDATE("Posting Date",WorkDate2);
+      SalesHeader.VALIDATE("Posting No. Series",SalesReceivablesSetup."Posted Invoice Nos.");
+      SalesHeader.MODIFY(TRUE);
+
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(10,2));
+      SalesLine.VALIDATE("Qty. to Ship",SalesLine.Quantity * PartialShipFactor / 100);
+      SalesLine.VALIDATE("Qty. to Assemble to Order",SalesLine."Qty. to Ship");
+      SalesLine.MODIFY(TRUE);
+
+      AssembleToOrderLink.SETRANGE("Document Type",SalesHeader."Document Type");
+      AssembleToOrderLink.SETRANGE("Document No.",SalesHeader."No.");
+      AssembleToOrderLink.SETRANGE("Document Line No.",SalesLine."Line No.");
+      AssembleToOrderLink.FINDFIRST;
+      AssemblyHeader.GET(AssembleToOrderLink."Assembly Document Type",AssembleToOrderLink."Assembly Document No.");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE MixedReplenishmentSetup@30(VAR ProductionOrder@1007 : Record 5405;AssemblyHeader@1003 : Record 900;TopItemReplenishment@1000 : Option);
+    VAR
+      AssemblyLine@1001 : Record 901;
+      Item@1002 : Record 27;
+      ProductionBOMHeader@1004 : Record 99000771;
+      ProductionBOMLine@1006 : Record 99000772;
+      RoutingHeader@1008 : Record 99000763;
+    BEGIN
+      IF TopItemReplenishment = TopItemRepl::None THEN
+        EXIT;
+
+      // Setup a produced item.
+      LibraryAssembly.CreateItem(
+        Item,Item."Costing Method",Item."Replenishment System"::"Prod. Order",Item."Gen. Prod. Posting Group",
+        Item."Inventory Posting Group");
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,Item."Base Unit of Measure");
+
+      // Add the produced item as a component in the Assembly Order or viceversa.
+      IF TopItemReplenishment = TopItemRepl::Assembly THEN
+        LibraryAssembly.CreateAssemblyLine(
+          AssemblyHeader,AssemblyLine,AssemblyLine.Type::Item,Item."No.",Item."Base Unit of Measure",LibraryRandom.RandInt(10),1,'')
+      ELSE
+        LibraryManufacturing.CreateProductionBOMLine(
+          ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,AssemblyHeader."Item No.",
+          LibraryRandom.RandInt(10));
+
+      ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::Certified);
+      ProductionBOMHeader.MODIFY(TRUE);
+      RoutingHeader.SETRANGE(Status,RoutingHeader.Status::Certified);
+      IF RoutingHeader.FINDFIRST THEN
+        Item.VALIDATE("Routing No.",RoutingHeader."No.");
+      Item.VALIDATE("Production BOM No.",ProductionBOMHeader."No.");
+      Item.MODIFY(TRUE);
+
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,Item."No.",
+        LibraryRandom.RandInt(10));
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE GetItemRegister@37(VAR ItemRegister@1011 : Record 46;AssemblyHeader@1000 : Record 900;SourceCode@1004 : Code[10]);
+    VAR
+      CapacityLedgerEntry@1002 : Record 5832;
+      CapEntryMin@1009 : Integer;
+      CapEntryMax@1010 : Integer;
+    BEGIN
+      CapacityLedgerEntry.RESET;
+      CapacityLedgerEntry.SETRANGE("Order Type",CapacityLedgerEntry."Order Type"::Assembly);
+      CapacityLedgerEntry.SETRANGE("Order No.",AssemblyHeader."No.");
+      CapacityLedgerEntry.SETRANGE("Posting Date",AssemblyHeader."Posting Date");
+      IF CapacityLedgerEntry.FINDFIRST THEN
+        CapEntryMin := CapacityLedgerEntry."Entry No.";
+      IF CapacityLedgerEntry.FINDLAST THEN
+        CapEntryMax := CapacityLedgerEntry."Entry No.";
+
+      ItemRegister.RESET;
+      ItemRegister.SETRANGE("From Capacity Entry No.",CapEntryMin);
+      ItemRegister.SETRANGE("To Capacity Entry No.",CapEntryMax);
+      ItemRegister.SETRANGE("Source Code",SourceCode);
+      ItemRegister.FINDLAST;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE GetOrderValueEntries@1(VAR ValueEntry@1000 : Record 5802;AssemblyHeader@1001 : Record 900);
+    BEGIN
+      ValueEntry.RESET;
+      ValueEntry.SETRANGE("Order Type",ValueEntry."Order Type"::Assembly);
+      ValueEntry.SETRANGE("Order No.",AssemblyHeader."No.");
+      ValueEntry.SETRANGE("Source Code",SourceCodeSetup.Assembly);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE GetValueEntriesAmount@152(ItemNo@1001 : Code[20];FromEntryType@1003 : Option;ToEntryType@1005 : Option;FromILEType@1002 : Option;ToILEType@1004 : Option;VarianceType@1006 : Option) : Decimal;
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      CLEAR(ValueEntry);
+      ValueEntry.SETCURRENTKEY(
+        "Item No.","Posting Date","Item Ledger Entry Type","Entry Type","Variance Type","Item Charge No.","Location Code",
+        "Variant Code");
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.SETRANGE("Entry Type",FromEntryType,ToEntryType);
+      ValueEntry.SETRANGE("Item Ledger Entry Type",FromILEType,ToILEType);
+      ValueEntry.SETRANGE("Variance Type",VarianceType);
+      ValueEntry.CALCSUMS(ValueEntry."Cost Amount (Actual)");
+      EXIT(ValueEntry."Cost Amount (Actual)");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyItemRegValueForOrder@4(AssemblyHeader@1000 : Record 900;SourceCode@1005 : Code[10]);
+    VAR
+      ItemRegister@1003 : Record 46;
+      ValueEntry@1004 : Record 5802;
+    BEGIN
+      GetItemRegister(ItemRegister,AssemblyHeader,SourceCode);
+      GetOrderValueEntries(ValueEntry,AssemblyHeader);
+
+      COMMIT;
+      REPORT.RUN(REPORT::"Item Register - Value",TRUE,FALSE,ItemRegister);
+      VerifyItemRegisterValue(ValueEntry);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInvtValCostSpecForOrder@5(AssemblyHeader@1000 : Record 900);
+    VAR
+      PostedAssemblyHeader@1001 : Record 910;
+      PostedAssemblyLine@1002 : Record 911;
+    BEGIN
+      // Verify report for item component entries.
+      PostedAssemblyHeader.RESET;
+      PostedAssemblyHeader.SETRANGE("Order No.",AssemblyHeader."No.");
+      PostedAssemblyHeader.SETRANGE("Item No.",AssemblyHeader."Item No.");
+
+      IF PostedAssemblyHeader.FINDFIRST THEN BEGIN
+        PostedAssemblyLine.RESET;
+        PostedAssemblyLine.SETRANGE("Document No.",PostedAssemblyHeader."No.");
+        PostedAssemblyLine.SETRANGE(Type,PostedAssemblyLine.Type::Item);
+        IF PostedAssemblyLine.FINDSET THEN
+          REPEAT
+            VerifyInvtValuationCostSpec(PostedAssemblyLine."No.",PostedAssemblyHeader."Posting Date");
+          UNTIL PostedAssemblyLine.NEXT = 0;
+      END;
+
+      // Verify report for assembly item.
+      VerifyInvtValuationCostSpec(PostedAssemblyHeader."Item No.",PostedAssemblyHeader."Posting Date");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInvtValuationForOrder@6(AssemblyHeader@1000 : Record 900);
+    VAR
+      PostedAssemblyHeader@1001 : Record 910;
+      PostedAssemblyLine@1002 : Record 911;
+    BEGIN
+      // Verify report for item component entries.
+      PostedAssemblyHeader.RESET;
+      PostedAssemblyHeader.SETRANGE("Order No.",AssemblyHeader."No.");
+      PostedAssemblyHeader.SETRANGE("Item No.",AssemblyHeader."Item No.");
+      IF PostedAssemblyHeader.FINDFIRST THEN BEGIN
+        PostedAssemblyLine.RESET;
+        PostedAssemblyLine.SETRANGE("Document No.",PostedAssemblyHeader."No.");
+        PostedAssemblyLine.SETRANGE(Type,PostedAssemblyLine.Type::Item);
+        IF PostedAssemblyLine.FINDSET THEN
+          REPEAT
+            VerifyInventoryValuation(PostedAssemblyLine."No.",PostedAssemblyHeader."Posting Date",PostedAssemblyHeader."Posting Date");
+          UNTIL PostedAssemblyLine.NEXT = 0;
+      END;
+
+      // Verify reports for assembly item.
+      VerifyInventoryValuation(PostedAssemblyHeader."Item No.",PostedAssemblyHeader."Due Date",PostedAssemblyHeader."Posting Date");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyItemRegisterValue@14(VAR ValueEntry@1000 : Record 5802);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+
+      IF ValueEntry.FINDSET THEN
+        REPEAT
+          LibraryReportDataset.SetRange('EntryNo_ValueEntry',ValueEntry."Entry No.");
+
+          // Verify: Invoice quantity.
+          LibraryReportDataset.AssertElementWithValueExists('InvoicedQuantity_ValueEntry',ValueEntry."Invoiced Quantity");
+
+          // Unit cost.
+          LibraryReportDataset.AssertElementWithValueExists('CostperUnit_ValueEntry',ValueEntry."Cost per Unit");
+
+          // Cost amount - actual.
+          LibraryReportDataset.AssertElementWithValueExists('CostAmountActual1_ValueEntry',ValueEntry."Cost Amount (Actual)");
+
+          // Cost amount - expected.
+          LibraryReportDataset.AssertElementWithValueExists('CostAmountExpected1_ValueEntry',ValueEntry."Cost Amount (Expected)");
+
+        UNTIL ValueEntry.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInvtValuationCostSpec@2(ItemNo@1001 : Code[20];ReportDate@1004 : Date);
+    VAR
+      ValueEntry@1003 : Record 5802;
+      Item@1002 : Record 27;
+    BEGIN
+      Item.SETRANGE("No.",ItemNo);
+      Item.FINDFIRST;
+      Item.CALCFIELDS(Inventory);
+      COMMIT;
+      LibraryVariableStorage.Enqueue(ReportDate);
+      REPORT.RUN(REPORT::"Invt. Valuation - Cost Spec.",TRUE,FALSE,Item);
+
+      // Check the report aggregation for the main types of value entries.
+      ValueEntry.RESET;
+      ValueEntry.SETCURRENTKEY("Source Type","Source No.","Item No.","Posting Date","Entry Type",Adjustment);
+      ValueEntry.SETRANGE("Posting Date",0D,ReportDate);
+      ValueEntry.SETRANGE("Item No.",Item."No.");
+
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('No_Item',Item."No.");
+      CheckInvtValCostSpecFields(ValueEntry,Item,ValueEntry."Entry Type"::"Direct Cost");
+      CheckInvtValCostSpecFields(ValueEntry,Item,ValueEntry."Entry Type"::"Indirect Cost");
+      CheckInvtValCostSpecFields(ValueEntry,Item,ValueEntry."Entry Type"::Variance);
+      CheckInvtValCostSpecFields(ValueEntry,Item,ValueEntry."Entry Type"::Revaluation);
+      CheckInvtValCostSpecFields(ValueEntry,Item,ValueEntry."Entry Type"::Rounding);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CheckInvtValCostSpecFields@47(VAR ValueEntry@1005 : Record 5802;Item@1000 : Record 27;EntryType@1001 : 'Direct Cost,Revaluation,Rounding,Indirect Cost,Variance');
+    VAR
+      CostAmount@1004 : Decimal;
+      UnitCost@1003 : Decimal;
+    BEGIN
+      ValueEntry.SETRANGE("Entry Type",EntryType);
+      ValueEntry.CALCSUMS("Cost Amount (Actual)");
+      IF (ValueEntry."Cost Amount (Actual)" = 0) OR (Item.Inventory = 0) THEN
+        EXIT;
+
+      // Unit cost.
+      UnitCost := LibraryReportDataset.Sum('UnitCost' + FORMAT(EntryType + 1));
+      Assert.AreNearlyEqual(ValueEntry."Cost Amount (Actual)" / Item.Inventory,UnitCost,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ErrorCostShares,'unit cost',Item."No."));
+
+      // Cost amount.
+      CostAmount := LibraryReportDataset.Sum('TotalCostTotal' + FORMAT(EntryType + 1));
+      Assert.AreNearlyEqual(ValueEntry."Cost Amount (Actual)",CostAmount,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ErrorCostShares,'cost amount',Item."No."));
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInventoryValuation@12(ItemNo@1001 : Code[20];StartDate@1007 : Date;EndDate@1008 : Date);
+    VAR
+      ValueEntryBOP@1013 : Record 5802;
+      ValueEntryIncr@1000 : Record 5802;
+      ValueEntryDecr@1003 : Record 5802;
+      Item@1002 : Record 27;
+      ValueEOP@1004 : Decimal;
+      QtyEOP@1018 : Decimal;
+    BEGIN
+      Item.SETRANGE("No.",ItemNo);
+      Item.FINDFIRST;
+      Item.CALCFIELDS(Inventory);
+      COMMIT;
+      LibraryVariableStorage.Enqueue(StartDate);
+      LibraryVariableStorage.Enqueue(EndDate);
+      LibraryVariableStorage.Enqueue(TRUE);
+      REPORT.RUN(REPORT::"Inventory Valuation",TRUE,FALSE,Item);
+
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('ItemNo',ItemNo);
+
+      // Beginning of period.
+      VerifyInvtValTimeFrame(ValueEntryBOP,ItemNo,0D,StartDate - 1,'StartingInvoicedQty','StartingInvoicedValue');
+
+      // Increases in period.
+      ValueEntryIncr.SETFILTER("Item Ledger Entry Type",'%1|%2',
+        ValueEntryIncr."Item Ledger Entry Type"::"Positive Adjmt.",
+        ValueEntryIncr."Item Ledger Entry Type"::"Assembly Output");
+      VerifyInvtValTimeFrame(ValueEntryIncr,ItemNo,StartDate,EndDate,'IncreaseInvoicedQty','IncreaseInvoicedValue');
+
+      // Decreases in period.
+      ValueEntryDecr.SETFILTER("Item Ledger Entry Type",'%1|%2|%3|%4',
+        ValueEntryDecr."Item Ledger Entry Type"::"Negative Adjmt.",
+        ValueEntryDecr."Item Ledger Entry Type"::"Assembly Consumption",
+        ValueEntryDecr."Item Ledger Entry Type"::Sale,
+        ValueEntryDecr."Item Ledger Entry Type"::Consumption);
+      VerifyInvtValTimeFrame(ValueEntryDecr,ItemNo,StartDate,EndDate,'DecreaseInvoicedQty','DecreaseInvoicedValue');
+
+      // End of period.
+      QtyEOP := LibraryReportDataset.Sum('EndingInvoicedQty');
+      LibraryReportDataset.Reset;
+      ValueEOP := LibraryReportDataset.Sum('EndingInvoicedValue');
+      LibraryReportDataset.Reset;
+
+      Assert.AreNearlyEqual(ValueEntryBOP."Invoiced Quantity" + ValueEntryIncr."Invoiced Quantity" +
+        ValueEntryDecr."Invoiced Quantity",
+        QtyEOP,LibraryERM.GetUnitAmountRoundingPrecision,'Wrong end of period qty for item ' + ItemNo);
+      Assert.AreNearlyEqual(ValueEntryBOP."Cost Amount (Actual)" + ValueEntryIncr."Cost Amount (Actual)" +
+        ValueEntryDecr."Cost Amount (Actual)",
+        ValueEOP,LibraryERM.GetAmountRoundingPrecision,'Wrong end of period value for item ' + ItemNo);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInvtValTimeFrame@160(VAR ValueEntry@1005 : Record 5802;ItemNo@1007 : Code[20];FromDate@1003 : Date;ToDate@1004 : Date;QtyElement@1002 : Text;ValueElement@1006 : Text);
+    VAR
+      Qty@1001 : Decimal;
+      Value@1000 : Decimal;
+    BEGIN
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.SETRANGE("Posting Date",FromDate,ToDate);
+      ValueEntry.CALCSUMS("Cost Amount (Actual)","Invoiced Quantity");
+      Qty := LibraryReportDataset.Sum(QtyElement);
+      LibraryReportDataset.Reset;
+      Value := LibraryReportDataset.Sum(ValueElement);
+      LibraryReportDataset.Reset;
+      Assert.AreNearlyEqual(ABS(ValueEntry."Invoiced Quantity"),Qty,LibraryERM.GetUnitAmountRoundingPrecision,
+        'Wrong ' + QtyElement + ' for item ' + ItemNo);
+      Assert.AreNearlyEqual(ABS(ValueEntry."Cost Amount (Actual)"),Value,LibraryERM.GetAmountRoundingPrecision,
+        'Wrong ' + ValueElement + ' for item ' + ItemNo);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyPostCostToGLTestForOrder@41(AssemblyHeader@1000 : Record 900;PostingMethod@1001 : Option;CompDimErrorMsg@1004 : Text[1024];HdrDimErrorMsg@1006 : Text[1024]);
+    VAR
+      ValueEntry@1005 : Record 5802;
+      PostedAssemblyHeader@1002 : Record 910;
+      PostedAssemblyLine@1003 : Record 911;
+    BEGIN
+      GetOrderValueEntries(ValueEntry,AssemblyHeader);
+
+      // Verify report for item component entries.
+      PostedAssemblyHeader.RESET;
+      PostedAssemblyHeader.SETRANGE("Order No.",AssemblyHeader."No.");
+      PostedAssemblyHeader.SETRANGE("Item No.",AssemblyHeader."Item No.");
+      IF PostedAssemblyHeader.FINDFIRST THEN BEGIN
+        PostedAssemblyLine.RESET;
+        PostedAssemblyLine.SETRANGE("Document No.",PostedAssemblyHeader."No.");
+        PostedAssemblyLine.SETRANGE(Type,PostedAssemblyLine.Type::Item);
+        IF PostedAssemblyLine.FINDSET THEN
+          REPEAT
+            VerifyPostCostToGLTest(ValueEntry,PostedAssemblyLine."No.",PostingMethod,CompDimErrorMsg);
+          UNTIL PostedAssemblyLine.NEXT = 0;
+      END;
+
+      // Verify reports for assembly item.
+      VerifyPostCostToGLTest(ValueEntry,PostedAssemblyHeader."Item No.",PostingMethod,HdrDimErrorMsg);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyPostCostToGLTest@57(VAR ValueEntry@1000 : Record 5802;ItemNo@1005 : Code[20];PostingMethod@1001 : Option;DimensionErrorMessage@1010 : Text);
+    VAR
+      PostValueEntryToGL@1011 : Record 5811;
+      GeneralPostingSetup@1013 : Record 252;
+      InventoryPostingSetup@1008 : Record 5813;
+      Item@1002 : Record 27;
+      DocNo@1004 : Code[20];
+    BEGIN
+      PostValueEntryToGL.RESET;
+      PostValueEntryToGL.SETRANGE("Item No.",ItemNo);
+      Item.GET(ItemNo);
+      IF PostingMethod = PostMethod::"per Posting Group" THEN
+        DocNo := Item."No.";
+
+      COMMIT;
+      LibraryVariableStorage.Enqueue(PostingMethod);
+      LibraryVariableStorage.Enqueue(DocNo);
+      LibraryVariableStorage.Enqueue(TRUE);
+      LibraryVariableStorage.Enqueue(FALSE);
+      REPORT.RUN(REPORT::"Post Invt. Cost to G/L - Test",TRUE,FALSE,PostValueEntryToGL);
+
+      LibraryReportDataset.LoadDataSetFile;
+      IF PostValueEntryToGL.FINDSET THEN BEGIN
+        REPEAT
+          ValueEntry.GET(PostValueEntryToGL."Value Entry No.");
+          InventoryPostingSetup.GET(ValueEntry."Location Code",Item."Inventory Posting Group");
+          GeneralPostingSetup.GET(ValueEntry."Gen. Bus. Posting Group",ValueEntry."Gen. Prod. Posting Group");
+
+          // Verify: Account and amount.
+          LibraryReportDataset.SetRange('TempInvtPostToGLTestBuf__Value_Entry_No__',ValueEntry."Entry No.");
+          LibraryReportDataset.GetNextRow;
+          LibraryReportDataset.AssertCurrentRowValue('TempInvtPostToGLTestBuf_Amount',ValueEntry."Cost Amount (Actual)");
+
+          // Verify debiting and crediting accounts.
+          LibraryReportDataset.AssertCurrentRowValue('TempInvtPostToGLTestBuf__Account_No__',
+            InventoryPostingSetup."Inventory Account");
+        UNTIL PostValueEntryToGL.NEXT = 0;
+
+        // Check warning for dimensions, if the case.
+        IF DimensionErrorMessage <> '' THEN BEGIN
+          LibraryReportDataset.Reset;
+          LibraryReportDataset.AssertElementWithValueExists('ErrorText_Number_',DimensionErrorMessage);
+          LibraryReportDataset.AssertElementWithValueExists('ErrorText_Number_Caption',FORMAT(WarningCaption));
+        END;
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInvtGLReconForOrder@96(AssemblyHeader@1000 : Record 900);
+    VAR
+      PostedAssemblyHeader@1001 : Record 910;
+      PostedAssemblyLine@1002 : Record 911;
+    BEGIN
+      // Verify report for item component entries.
+      PostedAssemblyHeader.RESET;
+      PostedAssemblyHeader.SETRANGE("Order No.",AssemblyHeader."No.");
+      PostedAssemblyHeader.SETRANGE("Item No.",AssemblyHeader."Item No.");
+      IF PostedAssemblyHeader.FINDFIRST THEN BEGIN
+        PostedAssemblyLine.RESET;
+        PostedAssemblyLine.SETRANGE("Document No.",PostedAssemblyHeader."No.");
+        PostedAssemblyLine.SETRANGE(Type,PostedAssemblyLine.Type::Item);
+        IF PostedAssemblyLine.FINDSET THEN
+          REPEAT
+            VerifyInvtGLRecon(PostedAssemblyLine."No.");
+          UNTIL PostedAssemblyLine.NEXT = 0;
+      END;
+
+      // Verify reports for assembly item.
+      VerifyInvtGLRecon(PostedAssemblyHeader."Item No.");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInvtGLRecon@97(ItemNo@1000 : Code[20]);
+    VAR
+      ValueEntry@1001 : Record 5802;
+      InventoryGLReconciliation@1003 : TestPage 5845;
+    BEGIN
+      COMMIT; // Make sure the adjustment entries are commited, in order not to be rolled back after the error assertions in the page handler.
+
+      GlobalInventoryAdjmt :=
+        GetValueEntriesAmount(
+          ItemNo,ValueEntry."Entry Type"::"Direct Cost",ValueEntry."Entry Type"::Revaluation,
+          ValueEntry."Item Ledger Entry Type"::"Positive Adjmt.",ValueEntry."Item Ledger Entry Type"::"Assembly Output",
+          ValueEntry."Variance Type"::" ");
+      GlobalCapacityVariance :=
+        GetValueEntriesAmount(
+          ItemNo,ValueEntry."Entry Type"::Variance,ValueEntry."Entry Type"::Variance,ValueEntry."Item Ledger Entry Type"::Output,
+          ValueEntry."Item Ledger Entry Type"::"Assembly Output",
+          ValueEntry."Variance Type"::Capacity);
+      GlobalMaterialVariance :=
+        GetValueEntriesAmount(
+          ItemNo,ValueEntry."Entry Type"::Variance,ValueEntry."Entry Type"::Variance,ValueEntry."Item Ledger Entry Type"::Output,
+          ValueEntry."Item Ledger Entry Type"::"Assembly Output",
+          ValueEntry."Variance Type"::Material);
+      GlobalCOGS :=
+        GetValueEntriesAmount(
+          ItemNo,ValueEntry."Entry Type"::"Direct Cost",ValueEntry."Entry Type"::Revaluation,
+          ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Item Ledger Entry Type"::Sale,
+          ValueEntry."Variance Type"::" ");
+
+      InventoryGLReconciliation.OPENEDIT;
+      InventoryGLReconciliation.ItemFilter.SETVALUE(ItemNo);
+      InventoryGLReconciliation.Action19.INVOKE;
+      InventoryGLReconciliation.OK.INVOKE;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyDemandOverview@69(AssemblyHeader@1000 : Record 900);
+    VAR
+      Item@1004 : Record 27;
+      DemandOverview@1003 : TestPage 5830;
+      ItemNo@1001 : ARRAY [10] OF Code[20];
+      ResourceNo@1002 : ARRAY [10] OF Code[20];
+      count@1005 : Integer;
+    BEGIN
+      LibraryAssembly.GetCompsToAdjust(ItemNo,ResourceNo,AssemblyHeader);
+
+      DemandOverview.OPENEDIT;
+      DemandOverview.StartDate.SETVALUE(AssemblyHeader."Starting Date");
+      DemandOverview.EndDate.SETVALUE(AssemblyHeader."Ending Date");
+      DemandOverview.DemandType.SETVALUE(AssemblyLabel);
+      DemandOverview.DemandNoCtrl.SETVALUE(AssemblyHeader."No.");
+      DemandOverview.Calculate.INVOKE;
+
+      DemandOverview.FIRST;
+      count := 1;
+      WHILE ItemNo[count] <> '' DO BEGIN
+        Item.GET(ItemNo[count]);
+        Item.CALCFIELDS(
+          "Qty. on Asm. Component","Qty. on Assembly Order","Qty. on Prod. Order",Inventory,"Reserved Qty. on Inventory");
+        Assert.AreEqual(Item."No.",DemandOverview."Item No.".VALUE,'Wrong item no in demand overview.');
+
+        DemandOverview.EXPAND(TRUE);
+        DemandOverview.NEXT;
+        Assert.AreEqual(AssemblyHeader."Starting Date",DemandOverview.Date.ASDATE,'Wrong as of date in demand overview.');
+
+        DemandOverview.EXPAND(TRUE);
+        DemandOverview.NEXT;
+        Assert.AreEqual(FORMAT(DemandLabel),FORMAT(DemandOverview.Type.VALUE),'Wrong demand type.');
+        Assert.AreEqual(AssemblyHeader."Starting Date",DemandOverview.Date.ASDATE,'Wrong as of date in demand overview.');
+        Assert.AreEqual(FORMAT(AssemblyLabel),DemandOverview.SourceTypeText.VALUE,'Wrong source type.');
+        Assert.AreEqual(
+          -Item."Qty. on Asm. Component",DemandOverview.QuantityText.ASDECIMAL,'Wrong demanded qty for item ' + Item."No.");
+        Assert.AreEqual(
+          Item.Inventory +
+          Item."Qty. on Assembly Order" +
+          Item."Qty. on Prod. Order" - Item."Qty. on Asm. Component" - Item."Reserved Qty. on Inventory",
+          DemandOverview."Running Total".ASDECIMAL,'Wrong total for item ' + Item."No.");
+
+        count += 1;
+        IF ItemNo[count] <> '' THEN
+          DemandOverview.NEXT;
+      END;
+
+      Assert.IsFalse(DemandOverview.NEXT,'More rows than expected for assembly demand ' + AssemblyHeader."No.");
+      DemandOverview.OK.INVOKE;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyCostSharesBreakdown@17(AssemblyHeader@1000 : Record 900;CostSharePrint@1001 : Option);
+    VAR
+      Item@1002 : Record 27;
+      RepMaterialCost@1004 : Decimal;
+      RepCapacityCost@1005 : Decimal;
+      MaterialCost@1006 : Decimal;
+      ResourceCost@1007 : Decimal;
+      ResourceOvhd@1008 : Decimal;
+      AssemblyOvhd@1009 : Decimal;
+      RepResOvhd@1010 : Decimal;
+      RepMatOvhd@1011 : Decimal;
+      Qty@1012 : Decimal;
+      Sign@1013 : Integer;
+    BEGIN
+      Item.SETRANGE("No.",AssemblyHeader."Item No.");
+      Item.FINDFIRST;
+      COMMIT;
+      LibraryVariableStorage.Enqueue(AssemblyHeader."Posting Date");
+      LibraryVariableStorage.Enqueue(AssemblyHeader."Posting Date");
+      LibraryVariableStorage.Enqueue(CostSharePrint);
+      LibraryVariableStorage.Enqueue(FALSE);
+      REPORT.RUN(REPORT::"Cost Shares Breakdown",TRUE,FALSE,Item);
+      CalcPostedAOCostAmounts(MaterialCost,ResourceCost,ResourceOvhd,AssemblyOvhd,AssemblyHeader."No.");
+
+      // If the item is to be sold, the overhead is already embedded in the item cost and will not tracked separately.
+      // The values also show up as decreases (negative) in the report.
+      Sign := 1;
+      IF CostSharePrint = PrintCostShare::Sales THEN BEGIN
+        ResourceOvhd := 0;
+        AssemblyOvhd := 0;
+        Sign := -1
+      END;
+
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('CostShareBufItemNo',Item."No.");
+
+      // Verify: Material cost, Capacity cost, Capacity Overhead and Material overhead.
+      Qty := LibraryReportDataset.Sum('CostShareBufNewQuantity');
+      Assert.AreNearlyEqual(AssemblyHeader."Quantity to Assemble",Sign * Qty,LibraryERM.GetUnitAmountRoundingPrecision,
+        STRSUBSTNO(ErrorCostShares,'quantity',Item."No."));
+
+      RepMaterialCost := LibraryReportDataset.Sum('CostShareBufNewMaterial');
+      Assert.AreNearlyEqual(MaterialCost,Sign * RepMaterialCost,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ErrorCostShares,'material cost',Item."No."));
+
+      RepCapacityCost := LibraryReportDataset.Sum('CostShareBufNewCapacity');
+      Assert.AreNearlyEqual(ResourceCost,Sign * RepCapacityCost,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ErrorCostShares,'capacity cost',Item."No."));
+
+      RepResOvhd := LibraryReportDataset.Sum('CostShareBufNewCapOverhd');
+      Assert.AreNearlyEqual(ResourceOvhd,Sign * RepResOvhd,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ErrorCostShares,'capacity overhead',Item."No."));
+
+      RepMatOvhd := LibraryReportDataset.Sum('CostShareBufNewMatrlOverhd');
+      Assert.AreNearlyEqual(AssemblyOvhd,Sign * RepMatOvhd,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ErrorCostShares,'material overhead',Item."No."));
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CalcPostedAOCostAmounts@16(VAR MaterialCost@1009 : Decimal;VAR ResourceCost@1011 : Decimal;VAR ResourceOvhd@1012 : Decimal;VAR AssemblyOvhd@1006 : Decimal;AssemblyHeaderNo@1000 : Code[20]) : Decimal;
+    VAR
+      Item@1002 : Record 27;
+      PostedAssemblyLine@1003 : Record 911;
+      PostedAssemblyHeader@1004 : Record 910;
+      ExpectedCost@1001 : Decimal;
+      Overhead@1005 : Decimal;
+      IndirectCost@1007 : Decimal;
+      UnitCost@1008 : Decimal;
+      LineCost@1010 : Decimal;
+      LineOverhead@1013 : Decimal;
+    BEGIN
+      ExpectedCost := 0;
+      MaterialCost := 0;
+      ResourceCost := 0;
+      ResourceOvhd := 0;
+
+      PostedAssemblyLine.SETRANGE("Order No.",AssemblyHeaderNo);
+      PostedAssemblyLine.SETFILTER(Type,'<>%1',PostedAssemblyLine.Type::" ");
+      IF PostedAssemblyLine.FINDSET THEN
+        REPEAT
+          LibraryAssembly.GetCostInformation(UnitCost,Overhead,IndirectCost,PostedAssemblyLine.Type,PostedAssemblyLine."No.",'','');
+          LineOverhead := Overhead * PostedAssemblyLine.Quantity * PostedAssemblyLine."Qty. per Unit of Measure";
+          LineCost := PostedAssemblyLine."Unit Cost" * PostedAssemblyLine.Quantity ;
+          IF PostedAssemblyLine.Type = PostedAssemblyLine.Type::Item THEN
+            MaterialCost += LineCost
+          ELSE BEGIN
+            ResourceCost += LineCost;
+            ResourceOvhd += LineOverhead;
+          END
+        UNTIL PostedAssemblyLine.NEXT = 0;
+
+      PostedAssemblyHeader.SETRANGE("Order No.",AssemblyHeaderNo);
+      PostedAssemblyHeader.FINDFIRST;
+      Item.GET(PostedAssemblyHeader."Item No.");
+      AssemblyOvhd := Item."Indirect Cost %" / 100 * (MaterialCost + ResourceCost + ResourceOvhd) +
+        Item."Overhead Rate" * PostedAssemblyHeader.Quantity * PostedAssemblyHeader."Qty. per Unit of Measure";
+      ExpectedCost := MaterialCost + ResourceCost + ResourceOvhd + AssemblyOvhd;
+
+      IF Item."Costing Method" = Item."Costing Method"::Standard THEN
+        EXIT(
+          (Item."Standard Cost" * (100 + Item."Indirect Cost %") / 100 + Item."Overhead Rate") *
+          PostedAssemblyHeader.Quantity * PostedAssemblyHeader."Qty. per Unit of Measure");
+
+      EXIT(ROUND(ExpectedCost,LibraryERM.GetAmountRoundingPrecision));
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreatePostItemJournal@25(ItemNo@1002 : Code[20];ProductionOrderNo@1005 : Code[20];ItemJournalTemplateType@1004 : Option;QtyToPost@1006 : Decimal;PostingDate@1007 : Date);
+    VAR
+      ItemJournalBatch@1000 : Record 233;
+      ItemJournalLine@1003 : Record 83;
+    BEGIN
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo,ItemJournalTemplateType,ProductionOrderNo);
+      ItemJournalLine.SETRANGE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.SETRANGE("Journal Batch Name",ItemJournalBatch.Name);
+
+      IF ItemJournalLine.FINDFIRST THEN BEGIN
+        ItemJournalLine.VALIDATE(Quantity,QtyToPost);
+        ItemJournalLine.VALIDATE("Posting Date",PostingDate);
+        IF ItemJournalLine."Document No." = '' THEN
+          ItemJournalLine.VALIDATE(
+            "Document No.",LibraryUtility.GenerateRandomCode(ItemJournalLine.FIELDNO("Document No."),DATABASE::"Item Journal Line"));
+        ItemJournalLine.MODIFY(TRUE);
+      END;
+
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AvailabilityWindowHandler@48(VAR AsmAvailability@1000 : Page 908;VAR Response@1001 : Action);
+    BEGIN
+      Response := ACTION::Yes; // always confirm
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE InvtGLReconciliationHandler@100(VAR InventoryGLReconMatrix@1000 : TestPage 9297);
+    VAR
+      InventoryReportEntry@1001 : Record 5846;
+    BEGIN
+      InventoryGLReconMatrix.FIRST;
+
+      REPEAT
+        IF GlobalInventoryAdjmt <> 0 THEN
+          CheckGLReconMatrixValues(
+            InventoryGLReconMatrix,'inventory adjmt.',InventoryReportEntry.FIELDCAPTION("Inventory Adjmt."),
+            InventoryReportEntry.FIELDCAPTION("Capacity Variance"),InventoryReportEntry.FIELDCAPTION(COGS),
+            InventoryReportEntry.FIELDCAPTION("Material Variance"),GlobalInventoryAdjmt,
+            GlobalInventoryAdjmt + GlobalCapacityVariance + GlobalMaterialVariance + GlobalCOGS);
+
+        IF GlobalCapacityVariance <> 0 THEN
+          CheckGLReconMatrixValues(
+            InventoryGLReconMatrix,'capacity variance',InventoryReportEntry.FIELDCAPTION("Capacity Variance"),
+            InventoryReportEntry.FIELDCAPTION(COGS),InventoryReportEntry.FIELDCAPTION("Inventory Adjmt."),
+            InventoryReportEntry.FIELDCAPTION("Material Variance"),GlobalCapacityVariance,
+            GlobalInventoryAdjmt + GlobalCapacityVariance + GlobalMaterialVariance + GlobalCOGS);
+
+        IF GlobalMaterialVariance <> 0 THEN
+          CheckGLReconMatrixValues(
+            InventoryGLReconMatrix,'material variance',InventoryReportEntry.FIELDCAPTION("Material Variance"),
+            InventoryReportEntry.FIELDCAPTION(COGS),InventoryReportEntry.FIELDCAPTION("Inventory Adjmt."),
+            InventoryReportEntry.FIELDCAPTION("Capacity Variance"),GlobalMaterialVariance,
+            GlobalInventoryAdjmt + GlobalCapacityVariance + GlobalMaterialVariance + GlobalCOGS);
+
+        IF GlobalCOGS <> 0 THEN
+          CheckGLReconMatrixValues(
+            InventoryGLReconMatrix,'COGS',InventoryReportEntry.FIELDCAPTION(COGS),
+            InventoryReportEntry.FIELDCAPTION("Inventory Adjmt."),InventoryReportEntry.FIELDCAPTION("Capacity Variance"),
+            InventoryReportEntry.FIELDCAPTION("Material Variance"),GlobalCOGS,
+            GlobalInventoryAdjmt + GlobalCapacityVariance + GlobalMaterialVariance + GlobalCOGS);
+
+      UNTIL NOT InventoryGLReconMatrix.NEXT;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CheckGLReconMatrixValues@162(InventoryGLReconMatrix@1000 : TestPage 9297;ErrorMessage@1001 : Text;CheckedValue@1004 : Text;SkipValue1@1005 : Text;SkipValue2@1006 : Text;SkipValue3@1009 : Text;ExpAmount@1007 : Decimal;ExpTotalAmount@1008 : Decimal);
+    VAR
+      InventoryReportEntry@1002 : Record 5846;
+    BEGIN
+      CASE InventoryGLReconMatrix.Name.VALUE OF
+        CheckedValue:
+          BEGIN
+            Assert.AreEqual(ExpAmount,-InventoryGLReconMatrix.Field1.ASDECIMAL,STRSUBSTNO(ErrorGLRecon,ErrorMessage,''));
+            Assert.AreEqual(ExpAmount,-InventoryGLReconMatrix.Field4.ASDECIMAL,STRSUBSTNO(ErrorGLRecon,ErrorMessage,' - total '));
+          END;
+        InventoryReportEntry.FIELDCAPTION(Total):
+          BEGIN
+            IF ExpTotalAmount <> 0 THEN
+              Assert.AreEqual(ExpTotalAmount,InventoryGLReconMatrix.Field1.ASDECIMAL,STRSUBSTNO(ErrorGLRecon,'',' - total '))
+            ELSE
+              ASSERTERROR ExpAmount := InventoryGLReconMatrix.Field1.ASDECIMAL;
+            ASSERTERROR ExpAmount := InventoryGLReconMatrix.Field4.ASDECIMAL;
+          END;
+        SkipValue1,SkipValue2,SkipValue3:
+          ;
+        ELSE BEGIN
+          ASSERTERROR ExpAmount := InventoryGLReconMatrix.Field1.ASDECIMAL;
+          ASSERTERROR ExpAmount := InventoryGLReconMatrix.Field4.ASDECIMAL;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateActivityCode@1903(VAR SalesHeader@1000 : Record 36);
+    VAR
+      TableInformation@1909 : Record 2000000028;
+      RecRef@1905 : RecordRef;
+      RecRef1@1906 : RecordRef;
+      FieldRef@1907 : FieldRef;
+      FieldRef1@1908 : FieldRef;
+    BEGIN
+      // Change needed for IT database.
+      IF LibraryUtility.CheckFieldExistenceInTable(DATABASE::"Sales Header",ActivityCode) THEN BEGIN
+        RecRef.GETTABLE(SalesHeader);
+        FieldRef := RecRef.FIELD(LibraryUtility.FindFieldNoInTable(DATABASE::"Sales Header",ActivityCode));
+
+        TableInformation.SETRANGE("Table Name",ActivityCode);
+        IF TableInformation.FINDFIRST THEN BEGIN
+          RecRef1.OPEN(TableInformation."Table No.");
+          RecRef1.FINDFIRST;
+          FieldRef1 := RecRef1.FIELD(LibraryUtility.FindFieldNoInTable(TableInformation."Table No.",Code));
+          FieldRef.VALIDATE(FieldRef1.VALUE);
+        END;
+
+        RecRef.SETTABLE(SalesHeader);
+      END;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ItemRegValueReqPageHandler@70(VAR ItemRegisterValue@1174 : TestRequestPage 5805);
+    BEGIN
+      ItemRegisterValue.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InvtValuationCostSpecRequestPageHandler@86(VAR InvtValuationCostSpec@1174 : TestRequestPage 5801);
+    VAR
+      ReportDate@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ReportDate);
+      InvtValuationCostSpec.ValuationDate.SETVALUE(ReportDate);
+      InvtValuationCostSpec.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InvtValuationRequestPageHandler@110(VAR InventoryValuation@1174 : TestRequestPage 1001);
+    VAR
+      StartDate@1002 : Variant;
+      EndingDate@1000 : Variant;
+      IncludeExpectedCost@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(StartDate);
+      LibraryVariableStorage.Dequeue(EndingDate);
+      LibraryVariableStorage.Dequeue(IncludeExpectedCost);
+
+      InventoryValuation.StartingDate.SETVALUE(StartDate);
+      InventoryValuation.EndingDate.SETVALUE(EndingDate);
+      InventoryValuation.IncludeExpectedCost.SETVALUE(IncludeExpectedCost);
+      InventoryValuation.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CostSharesBreakdownRequestPageHandler@183(VAR CostSharesBreakdown@1174 : TestRequestPage 5848);
+    VAR
+      StartDate@1002 : Variant;
+      EndingDate@1000 : Variant;
+      CostSharePrint@1003 : Variant;
+      ShowDetails@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(StartDate);
+      LibraryVariableStorage.Dequeue(EndingDate);
+      LibraryVariableStorage.Dequeue(CostSharePrint);
+      LibraryVariableStorage.Dequeue(ShowDetails);
+
+      CostSharesBreakdown.Control5.SETVALUE(StartDate);
+      CostSharesBreakdown.Control3.SETVALUE(EndingDate);
+      CostSharesBreakdown.Control1.SETVALUE(CostSharePrint);
+      CostSharesBreakdown.Control9.SETVALUE(ShowDetails);
+      CostSharesBreakdown.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE PostInvtCostToGLTestRequestPageHandler@193(VAR PostInvtCostToGLTest@1174 : TestRequestPage 1003);
+    VAR
+      PostMethod@1002 : Variant;
+      DocNo@1000 : Variant;
+      ShowDim@1003 : Variant;
+      ShowOnlyWarnings@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(PostMethod);
+      LibraryVariableStorage.Dequeue(DocNo);
+      LibraryVariableStorage.Dequeue(ShowDim);
+      LibraryVariableStorage.Dequeue(ShowOnlyWarnings);
+
+      PostInvtCostToGLTest.PostingMethod.SETVALUE(PostMethod); // Post Method: per entry or per Posting Group.
+      PostInvtCostToGLTest.DocumentNo.SETVALUE(DocNo); // Doc No. required when posting per Posting Group.
+      PostInvtCostToGLTest.ShowDimensions.SETVALUE(ShowDim);
+      PostInvtCostToGLTest.ShowOnlyWarnings.SETVALUE(ShowOnlyWarnings);
+      PostInvtCostToGLTest.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@1170(Question@1171 : Text[1024];VAR Reply@1172 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Assembly] [Reports] [SCM]
+      This CU contains scenarios for the following reports:
+      REP5805 Item Register - Value
+      REP1001 Inventory Valuation
+      REP5848 Cost Shares Breakdown
+      REP5801 Invt. Valuation . Cost Specification
+      REP1003 Post Invt. Cost to G/L - Test
+      PAG9297 Inventory - G/L Reconciliation
+      PAG5830 Demand Overview
+    }
+    END.
+  }
+}
+

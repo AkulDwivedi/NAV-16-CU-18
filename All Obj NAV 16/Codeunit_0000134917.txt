@@ -1,0 +1,298 @@
+OBJECT Codeunit 134917 ERM Revert VAT On Payment
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 21=rimd;
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1006 : Codeunit 130000;
+      LibraryERM@1000 : Codeunit 131300;
+      LibraryPmtDiscSetup@1005 : Codeunit 131303;
+      LibraryPurchase@1004 : Codeunit 130512;
+      LibrarySales@1001 : Codeunit 130509;
+      LibraryRandom@1002 : Codeunit 130440;
+      IsInitialized@1003 : Boolean;
+      AmountError@1007 : TextConst 'ENU="%1 must be %2 in \\%3 %4=%5."';
+
+    LOCAL PROCEDURE Initialize@1();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateAccountInCustomerPostingGroup;
+      LibraryERMCountryData.UpdateAccountInVendorPostingGroups;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    PROCEDURE DiscountWithCurrencyOfCustomer@27();
+    VAR
+      GenJournalBatch@1006 : Record 232;
+      Customer@1005 : Record 18;
+      PaymentTerms@1004 : Record 3;
+      GenJournalLine@1003 : Record 81;
+      CustLedgerEntry@1007 : Record 21;
+      CustLedgerEntry2@1008 : Record 21;
+      Amount@1002 : Decimal;
+      AmountLCY@1012 : Decimal;
+      AmountToApply@1001 : Decimal;
+      DocumentNo@1000 : Code[20];
+    BEGIN
+      // Test invoice in foreign currency for Customer that allow payment discount.
+
+      // 1. Setup: Create Payment Terms and Currency. Create and post General Journal Line.
+      Initialize;
+      LibraryPmtDiscSetup.SetAdjustForPaymentDisc(TRUE);
+      CreatePaymentTerms(PaymentTerms);
+
+      // Create Customer with Currency and Payment Terms.
+      CustomerWithCurrency(Customer,PaymentTerms.Code);
+      Amount := LibraryRandom.RandDec(100,2);
+      AmountLCY := LibraryERM.ConvertCurrency(Amount,Customer."Currency Code",'',WORKDATE);
+      AmountToApply := Amount * (1 - (GetPaymentTermsDiscountPercentage(PaymentTerms) / 100));
+
+      CreateGeneralJournalBatch(GenJournalBatch);
+      // Apply refund to Credit Memo With random values.
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Account Type"::Customer,Customer."No.",-Amount);
+      UpdateGeneralJournalLine(GenJournalLine);
+      DocumentNo := GenJournalLine."Document No.";
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        GenJournalLine."Document Type"::Refund,GenJournalLine."Account Type"::Customer,Customer."No.",AmountToApply);
+      UpdateGeneralJournalLine(GenJournalLine);
+
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // 2. Exercise: Apply and post customer entry.
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,CustLedgerEntry."Document Type"::Refund,GenJournalLine."Document No.");
+      CustLedgerEntry.CALCFIELDS("Remaining Amount");
+      LibraryERM.SetApplyCustomerEntry(CustLedgerEntry,CustLedgerEntry."Remaining Amount");
+      LibraryERM.FindCustomerLedgerEntry(
+        CustLedgerEntry2,CustLedgerEntry2."Document Type"::"Credit Memo",DocumentNo);
+      LibraryERM.SetAppliestoIdCustomer(CustLedgerEntry2);
+      LibraryERM.PostCustLedgerApplication(CustLedgerEntry);
+
+      // 3. Verify: Verify Customer Ledger Entry for Amount and Amount LCY.
+      VerifyCustomerLedgerEntry(Customer."No.",DocumentNo,-Amount,-AmountLCY);
+      VerifyCustomerLedgerEntry(Customer."No.",GenJournalLine."Document No.",Amount,AmountLCY);
+    END;
+
+    [Test]
+    PROCEDURE DiscountWithCurrencyOfVendor@12();
+    VAR
+      Vendor@1005 : Record 23;
+      PaymentTerms@1004 : Record 3;
+      GenJournalLine@1003 : Record 81;
+      GenJournalBatch@1006 : Record 232;
+      VendorLedgerEntry@1008 : Record 25;
+      VendorLedgerEntry2@1009 : Record 25;
+      Amount@1002 : Decimal;
+      AmountLCY@1012 : Decimal;
+      AmountToApply@1001 : Decimal;
+      DocumentNo@1000 : Code[20];
+    BEGIN
+      // Test invoice in foreign currency for Vendor that allow payment discount.
+
+      // 1. Setup: Create Payment Terms and Currency. Create and post General Journal Line.
+      Initialize;
+      LibraryPmtDiscSetup.SetAdjustForPaymentDisc(TRUE);
+      CreatePaymentTerms(PaymentTerms);
+
+      // Create Vendor with Currency and Payment Terms.
+      VendorWithCurrency(Vendor,PaymentTerms.Code);
+      Amount := LibraryRandom.RandDec(100,2);
+      AmountLCY := LibraryERM.ConvertCurrency(Amount,Vendor."Currency Code",'',WORKDATE);
+      AmountToApply := Amount * (1 - (GetPaymentTermsDiscountPercentage(PaymentTerms) / 100));
+
+      CreateGeneralJournalBatch(GenJournalBatch);
+      // Apply refund to Credit Memo With random values.
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Account Type"::Vendor,Vendor."No.",Amount);
+      UpdateGeneralJournalLine(GenJournalLine);
+      DocumentNo := GenJournalLine."Document No.";
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        GenJournalLine."Document Type"::Refund,GenJournalLine."Account Type"::Vendor,Vendor."No.",-AmountToApply);
+      UpdateGeneralJournalLine(GenJournalLine);
+
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // 2. Exercise: Apply and post vendor entry.
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,VendorLedgerEntry."Document Type"::Refund,GenJournalLine."Document No.");
+      VendorLedgerEntry.CALCFIELDS("Remaining Amount");
+      LibraryERM.SetApplyVendorEntry(VendorLedgerEntry,VendorLedgerEntry."Remaining Amount");
+      LibraryERM.FindVendorLedgerEntry(
+        VendorLedgerEntry2,VendorLedgerEntry2."Document Type"::"Credit Memo",DocumentNo);
+      LibraryERM.SetAppliestoIdVendor(VendorLedgerEntry2);
+      LibraryERM.PostVendLedgerApplication(VendorLedgerEntry);
+
+      // 3. Verify: Verify Vendor Ledger Entry for Amount and Amount LCY.
+      VerifyVendorLedgerEntry(Vendor."No.",DocumentNo,Amount,AmountLCY);
+      VerifyVendorLedgerEntry(Vendor."No.",GenJournalLine."Document No.",-Amount,-AmountLCY);
+    END;
+
+    LOCAL PROCEDURE CustomerWithCurrency@75(VAR Customer@1000 : Record 18;PaymentTermsCode@1001 : Code[10]);
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Payment Terms Code",PaymentTermsCode);
+      Customer.VALIDATE("Currency Code",CurrencyWithExchangeRate);
+      Customer.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VendorWithCurrency@15(VAR Vendor@1002 : Record 23;PaymentTermsCode@1001 : Code[10]);
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("Payment Terms Code",PaymentTermsCode);
+      Vendor.VALIDATE("Currency Code",CurrencyWithExchangeRate);
+      Vendor.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateCurrency@93() : Code[10];
+    VAR
+      GLAccount@1000 : Record 15;
+      Currency@1001 : Record 4;
+    BEGIN
+      LibraryERM.FindGLAccount(GLAccount);
+      LibraryERM.CreateCurrency(Currency);
+      Currency.VALIDATE("Residual Gains Account",GLAccount."No.");
+      Currency.VALIDATE("Residual Losses Account",Currency."Residual Gains Account");
+      Currency.VALIDATE("Realized G/L Gains Account",GLAccount."No.");
+      Currency.VALIDATE("Realized G/L Losses Account",Currency."Realized G/L Gains Account");
+      Currency.MODIFY(TRUE);
+      EXIT(Currency.Code);
+    END;
+
+    LOCAL PROCEDURE CurrencyWithExchangeRate@4() : Code[10];
+    VAR
+      CurrencyExchangeRate@1002 : Record 330;
+    BEGIN
+      // Create new exchange rates with random values.
+      LibraryERM.CreateExchRate(CurrencyExchangeRate,CreateCurrency,WORKDATE);
+      CurrencyExchangeRate.VALIDATE("Exchange Rate Amount",100 * LibraryRandom.RandDec(10,2));
+      CurrencyExchangeRate.VALIDATE("Adjustment Exch. Rate Amount",CurrencyExchangeRate."Exchange Rate Amount");
+      CurrencyExchangeRate.VALIDATE("Relational Exch. Rate Amount",2 * CurrencyExchangeRate."Exchange Rate Amount");
+      CurrencyExchangeRate.VALIDATE("Relational Adjmt Exch Rate Amt",CurrencyExchangeRate."Relational Exch. Rate Amount");
+      CurrencyExchangeRate.MODIFY(TRUE);
+      EXIT(CurrencyExchangeRate."Currency Code");
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalBatch@5(VAR GenJournalBatch@1000 : Record 232);
+    VAR
+      GenJournalTemplate@1001 : Record 80;
+    BEGIN
+      GenJournalTemplate.SETRANGE(Type,GenJournalTemplate.Type::General);
+      GenJournalTemplate.SETRANGE(Recurring,FALSE);
+      LibraryERM.FindGenJournalTemplate(GenJournalTemplate);
+
+      // Create General Journal Batch.
+      LibraryERM.CreateGenJournalBatch(GenJournalBatch,GenJournalTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE CreatePaymentTerms@74(VAR PaymentTerms@1000 : Record 3);
+    BEGIN
+      LibraryERM.CreatePaymentTermsDiscount(PaymentTerms,TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateGeneralJournalLine@6(VAR GenJournalLine@1000 : Record 81);
+    VAR
+      GLAccount@1001 : Record 15;
+    BEGIN
+      LibraryERM.CreateGLAccount(GLAccount);
+      // Validating Document No as Journal Batch Name and Line No because value is not important.
+      GenJournalLine.VALIDATE("Document No.",GenJournalLine."Journal Batch Name" + FORMAT(GenJournalLine."Line No."));
+      GenJournalLine.VALIDATE("External Document No.",GenJournalLine."Document No.");
+      GenJournalLine.VALIDATE("Bal. Account Type",GenJournalLine."Bal. Account Type"::"G/L Account");
+      GenJournalLine.VALIDATE("Bal. Account No.",GLAccount."No.");
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyCustomerLedgerEntry@8(CustomerNo@1000 : Code[20];DocumentNo@1001 : Code[20];Amount@1003 : Decimal;AmountLCY@1004 : Decimal);
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+      GeneralLedgerSetup@1005 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CustLedgerEntry.SETRANGE("Customer No.",CustomerNo);
+      CustLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CustLedgerEntry.FINDFIRST;
+      CustLedgerEntry.CALCFIELDS(Amount,"Amount (LCY)");
+      Assert.AreNearlyEqual(
+        Amount,CustLedgerEntry.Amount,GeneralLedgerSetup."Amount Rounding Precision",
+        STRSUBSTNO(
+          AmountError,CustLedgerEntry.FIELDCAPTION(Amount),AmountLCY,CustLedgerEntry.TABLECAPTION,
+          CustLedgerEntry.FIELDCAPTION("Entry No."),CustLedgerEntry."Entry No."));
+      Assert.AreNearlyEqual(
+        AmountLCY,CustLedgerEntry."Amount (LCY)",GeneralLedgerSetup."Amount Rounding Precision",
+        STRSUBSTNO(
+          AmountError,CustLedgerEntry.FIELDCAPTION("Amount (LCY)"),AmountLCY,CustLedgerEntry.TABLECAPTION,
+          CustLedgerEntry.FIELDCAPTION("Entry No."),CustLedgerEntry."Entry No."));
+    END;
+
+    LOCAL PROCEDURE VerifyVendorLedgerEntry@29(VendorNo@1000 : Code[20];DocumentNo@1001 : Code[20];Amount@1003 : Decimal;AmountLCY@1004 : Decimal);
+    VAR
+      VendorLedgerEntry@1002 : Record 25;
+      GeneralLedgerSetup@1005 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      VendorLedgerEntry.SETRANGE("Vendor No.",VendorNo);
+      VendorLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      VendorLedgerEntry.FINDFIRST;
+      VendorLedgerEntry.CALCFIELDS(Amount,"Amount (LCY)");
+      Assert.AreNearlyEqual(
+        Amount,VendorLedgerEntry.Amount,GeneralLedgerSetup."Amount Rounding Precision",
+        STRSUBSTNO(
+          AmountError,VendorLedgerEntry.FIELDCAPTION(Amount),AmountLCY,VendorLedgerEntry.TABLECAPTION,
+          VendorLedgerEntry.FIELDCAPTION("Entry No."),VendorLedgerEntry."Entry No."));
+      Assert.AreNearlyEqual(
+        AmountLCY,VendorLedgerEntry."Amount (LCY)",GeneralLedgerSetup."Amount Rounding Precision",
+        STRSUBSTNO(
+          AmountError,VendorLedgerEntry.FIELDCAPTION("Amount (LCY)"),AmountLCY,VendorLedgerEntry.TABLECAPTION,
+          VendorLedgerEntry.FIELDCAPTION("Entry No."),VendorLedgerEntry."Entry No."));
+    END;
+
+    LOCAL PROCEDURE GetPaymentTermsDiscountPercentage@3(PaymentTerms@1000 : Record 3) : Decimal;
+    BEGIN
+      EXIT(LibraryERM.GetPaymentTermsDiscountPct(PaymentTerms));
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Payment Discount] [FCY]
+      Test invoice in foreign currency that allows payment discount.
+      1. Test invoice in foreign currency for customer that allow payment discount.
+      2. Test invoice in foreign currency for vendor that allow payment discount.
+
+        TFS_TS_ID = 245213
+        Covers Test cases:
+        ------------------------------------------------------
+        Test Function Name                      TFS ID
+        ------------------------------------------------------
+        DiscountWithCurrencyOfCustomer          126598
+        DiscountWithCurrencyOfVendor            126599
+    }
+    END.
+  }
+}
+

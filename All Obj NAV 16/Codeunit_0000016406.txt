@@ -1,0 +1,652 @@
+OBJECT Codeunit 16406 Service Transfer Post
+{
+  OBJECT-PROPERTIES
+  {
+    Date=29-06-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00.48822;
+  }
+  PROPERTIES
+  {
+    TableNo=16437;
+    OnRun=BEGIN
+            ServiceTransferHeader.COPY(Rec);
+            Code;
+            Rec := ServiceTransferHeader ;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ServiceTransferHeader@1500000 : Record 16437;
+      ShipReceiveQst@1500001 : TextConst 'ENU=&Ship,&Receive;ENN=&Ship,&Receive';
+      SameLocErr@1500003 : TextConst '@@@="%1 = Transfer Order;%2 = From Location;%3 = To Location";ENU=Service Transfer order %1 cannot be posted because %2 and %3 are the same.;ENN=Service Transfer order %1 cannot be posted because %2 and %3 are the same.';
+      ServiceTransferLine@1500002 : Record 16438;
+      TempGSTPostingBuffer@1500011 : ARRAY [2] OF TEMPORARY Record 16420;
+      TempTransferBuffer@1500005 : ARRAY [2] OF TEMPORARY Record 13715;
+      GenJnlLine@1500013 : Record 81;
+      DimensionManagement@1500004 : Codeunit 408;
+      ServTransDimErr@1500007 : TextConst '@@@="%1 = Order No ;%2 = Error";ENU=The combination of dimensions used in Service Transfer order %1 is blocked. %2.;ENN=The combination of dimensions used in Service Transfer order %1 is blocked. %2.';
+      ServTransDimCombErr@1500006 : TextConst '@@@="%1 = Order No ;%2 = Line No ;%3 = Error";ENU=The combination of dimensions used in Service Transfer order %1, line no. %2 is blocked. %3.;ENN=The combination of dimensions used in Service Transfer order %1, line no. %2 is blocked. %3.';
+      PostMsg@1500009 : TextConst '@@@=#2###;ENU=Posting transfer lines     #2######;ENN=Posting transfer lines     #2######';
+      ServTransMsg@1500008 : TextConst '@@@=Service Transfer Order %1.;ENU=Service Transfer Order %1.;ENN=Service Transfer Order %1.';
+      GenJnlPostLine@1500016 : Codeunit 12;
+      GSTManagement@1500020 : Codeunit 16401;
+      NoSeriesManagement@1500023 : Codeunit 396;
+      SourceCode@1500010 : Code[10];
+      NoSeriesErr@1500012 : TextConst '@@@="%1 = Field Name,%2 = Table Name,%3 = Table Name ";ENU=%1 must not be empty in %2 or %3.;ENN=%1 must not be empty in %2 or %3.';
+      ServiceTranTxt@1500014 : TextConst '@@@="%1 = Transfer Doc ";ENU=Service Transfer - %1;ENN=Service Transfer - %1';
+      PostedServiceTransferShptDocNo@1500015 : Code[20];
+      PostedServiceTransferRcptDocNo@1500022 : Code[20];
+      TransferAmount@1500017 : Decimal;
+      GSTAmount@1500018 : Decimal;
+      ControlAccount@1500019 : Boolean;
+      DocTransactionType@1500024 : 'Purchase,Sales,Transfer,Service,Service Transfer';
+      ServTransDelMsg@1500025 : TextConst '@@@="%1 = Service Transfer Order No";ENU=Service Transfer Order %1 has been deleted.;ENN=Service Transfer Order %1 has been deleted.';
+      DocTransferType@1500021 : 'ServiceTransferShpmnt,ServiceTransferReciept';
+
+    LOCAL PROCEDURE Code@1500001();
+    VAR
+      ServiceTransferLine@1500004 : Record 16438;
+      DefaultNumber@1500003 : Integer;
+      Selection@1500000 : ' ,Shipment,Receipt';
+    BEGIN
+      WITH ServiceTransferHeader DO BEGIN
+        ServiceTransferLine.SETRANGE("Document No.","No.");
+        IF ServiceTransferLine.FINDSET THEN
+          REPEAT
+            IF NOT ServiceTransferLine.Shipped AND (DefaultNumber = 0)
+            THEN
+              DefaultNumber := 1;
+            IF ServiceTransferLine.Shipped AND (DefaultNumber = 0)
+            THEN
+              DefaultNumber := 2;
+          UNTIL (ServiceTransferLine.NEXT = 0) OR (DefaultNumber > 0);
+
+        IF DefaultNumber = 0 THEN
+          DefaultNumber := 1;
+        Selection := STRMENU(ShipReceiveQst,DefaultNumber);
+        CASE Selection OF
+          0:
+            EXIT;
+          1:
+            ServiceTransferPostShipment(ServiceTransferHeader);
+          2:
+            ServiceTransferPostReceipt(ServiceTransferHeader);
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE ServiceTransferPostShipment@1500002(ServiceTransferHeader@1500000 : Record 16437);
+    VAR
+      ServiceTransferLine@1500003 : Record 16438;
+      SourceCodeSetup@1500001 : Record 242;
+      Window@1500002 : Dialog;
+    BEGIN
+      WITH ServiceTransferHeader DO BEGIN
+        GSTManagement.CheckGSTAccountingPeriod("Shipment Date");
+        CheckServiceTransfer(ServiceTransferHeader,TRUE);
+        CheckDim;
+        TempGSTPostingBuffer[1].DELETEALL;
+        TempTransferBuffer[1].DELETEALL;
+        ServiceTransferLine.CalculateGST(ServiceTransferHeader);
+        Window.OPEN(
+          '#1#################################\\' +
+          PostMsg);
+        Window.UPDATE(1,STRSUBSTNO(ServTransMsg,"No."));
+        SourceCodeSetup.GET;
+        SourceCode := SourceCodeSetup."Service Transfer Shipment";
+        // Insert Service Transfer Shipment Header
+        PostedServiceTransferShptDocNo := InsertServiceTransShptHeader(ServiceTransferHeader);
+        InsertServiceTransShptLine;
+        IF TempTransferBuffer[1].FIND('+') THEN
+          REPEAT
+            PostTransLineToGenJnlLine(ServiceTransferHeader,TRUE);
+          UNTIL TempTransferBuffer[1].NEXT(-1) = 0;
+        IF TempGSTPostingBuffer[1].FIND('+') THEN
+          REPEAT
+            PostTransLineToGenJnlLineGST(ServiceTransferHeader,TRUE);
+          UNTIL TempGSTPostingBuffer[1].NEXT(-1) = 0;
+        ControlAccount := TRUE;
+        PostTransLineToGenJnlLine(ServiceTransferHeader,TRUE);
+        "External Doc No." := PostedServiceTransferShptDocNo;
+        Status := Status::Shipped;
+        MODIFY;
+        ServiceTransferLine.SETRANGE("Document No.","No.");
+        ServiceTransferLine.SETFILTER("Transfer From G/L Account No.",'<>%1','');
+        IF ServiceTransferLine.FINDSET THEN
+          REPEAT
+            GSTManagement.InsertDetailedGSTLedgEntryServiceTransfer(
+              ServiceTransferLine,ServiceTransferHeader,
+              PostedServiceTransferShptDocNo,GenJnlLine."Document Type",
+              GenJnlPostLine.GetNextTransactionNo,DocTransferType::ServiceTransferShpmnt);
+            ServiceTransferLine.Shipped := TRUE;
+            ServiceTransferLine.MODIFY;
+          UNTIL ServiceTransferLine.NEXT = 0;
+        TempGSTPostingBuffer[1].DELETEALL;
+        Window.CLOSE;
+      END;
+    END;
+
+    LOCAL PROCEDURE ServiceTransferPostReceipt@1500018(ServiceTransferHeader@1500000 : Record 16437);
+    VAR
+      ServiceTransferLine@1500003 : Record 16438;
+      SourceCodeSetup@1500001 : Record 242;
+      Window@1500002 : Dialog;
+    BEGIN
+      WITH ServiceTransferHeader DO BEGIN
+        GSTManagement.CheckGSTAccountingPeriod("Receipt Date");
+        CheckServiceTransfer(ServiceTransferHeader,FALSE);
+        CheckDim;
+        TempGSTPostingBuffer[1].DELETEALL;
+        TempTransferBuffer[1].DELETEALL;
+        Window.OPEN(
+          '#1#################################\\' +
+          PostMsg);
+        Window.UPDATE(1,STRSUBSTNO(ServTransMsg,"No."));
+        SourceCodeSetup.GET;
+        SourceCode := SourceCodeSetup."Service Transfer Receipt";
+        // Insert Service Transfer Shipment Header
+        PostedServiceTransferRcptDocNo := InsertServiceTransRcptHeader(ServiceTransferHeader);
+        InsertServiceTransRcptLine;
+        IF TempTransferBuffer[1].FIND('+') THEN
+          REPEAT
+            PostTransLineToGenJnlLine(ServiceTransferHeader,FALSE);
+          UNTIL TempTransferBuffer[1].NEXT(-1) = 0;
+        IF TempGSTPostingBuffer[1].FIND('+') THEN
+          REPEAT
+            PostTransLineToGenJnlLineGST(ServiceTransferHeader,FALSE);
+          UNTIL TempGSTPostingBuffer[1].NEXT(-1) = 0;
+        ControlAccount := TRUE;
+        PostTransLineToGenJnlLine(ServiceTransferHeader,FALSE);
+        ServiceTransferLine.SETRANGE("Document No.","No.");
+        ServiceTransferLine.SETFILTER("Transfer From G/L Account No.",'<>%1','');
+        IF ServiceTransferLine.FINDSET THEN
+          REPEAT
+            GSTManagement.InsertDetailedGSTLedgEntryServiceTransfer(
+              ServiceTransferLine,ServiceTransferHeader,
+              PostedServiceTransferRcptDocNo,GenJnlLine."Document Type",
+              GenJnlPostLine.GetNextTransactionNo,DocTransferType::ServiceTransferReciept);
+          UNTIL ServiceTransferLine.NEXT = 0;
+        TempGSTPostingBuffer[1].DELETEALL;
+        DeleteOneServiceTransferOrder;
+        Window.CLOSE;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckServiceTransfer@1500000(ServiceTransferHeader@1500000 : Record 16437;Ship@1500002 : Boolean);
+    VAR
+      ServiceTransferLine@1500001 : Record 16438;
+    BEGIN
+      WITH ServiceTransferHeader DO BEGIN
+        TESTFIELD("Transfer-from Code");
+        TESTFIELD("Transfer-to Code");
+        IF Ship THEN BEGIN
+          TESTFIELD(Status,Status::Open);
+          TESTFIELD("Ship Control Account");
+        END ELSE BEGIN
+          TESTFIELD(Status,Status::Shipped);
+          TESTFIELD("Receive Control Account");
+          TESTFIELD("Receipt Date");
+        END;
+        IF "Transfer-from Code" = "Transfer-to Code" THEN
+          ERROR(SameLocErr,"No.",FIELDCAPTION("Transfer-from Code"),FIELDCAPTION("Transfer-to Code"));
+        TESTFIELD("Transfer-from State");
+        TESTFIELD("Transfer-to State");
+        TESTFIELD("Shipment Date");
+        ServiceTransferLine.SETRANGE("Document No.","No.");
+        IF ServiceTransferLine.FINDSET THEN
+          REPEAT
+            IF Ship THEN BEGIN
+              ServiceTransferLine.TESTFIELD("Transfer From G/L Account No.");
+              ServiceTransferLine.TESTFIELD(Shipped,FALSE);
+            END ELSE BEGIN
+              ServiceTransferLine.TESTFIELD("Transfer To G/L Account No.");
+              ServiceTransferLine.TESTFIELD(Shipped,TRUE);
+            END;
+            IF NOT ServiceTransferLine.Exempted THEN
+              ServiceTransferLine.TESTFIELD("Total GST Amount");
+            ServiceTransferLine.TESTFIELD("GST Base Amount");
+            ServiceTransferLine.TESTFIELD("Transfer Price");
+            ServiceTransferLine.TESTFIELD("GST Group Code");
+            ServiceTransferLine.TESTFIELD("SAC Code");
+          UNTIL ServiceTransferLine.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckDim@1500006();
+    BEGIN
+      ServiceTransferLine."Line No." := 0;
+      CheckDimComb(ServiceTransferHeader,ServiceTransferLine);
+
+      ServiceTransferLine.SETRANGE("Document No.",ServiceTransferHeader."No.");
+      IF ServiceTransferLine.FINDFIRST THEN
+        CheckDimComb(ServiceTransferHeader,ServiceTransferLine);
+    END;
+
+    LOCAL PROCEDURE CheckDimComb@1500005(ServiceTransferHeader@1500000 : Record 16437;ServiceTransferLine@1500001 : Record 16438);
+    BEGIN
+      IF ServiceTransferLine."Line No." = 0 THEN
+        IF NOT DimensionManagement.CheckDimIDComb(ServiceTransferHeader."Dimension Set ID") THEN
+          ERROR(
+            ServTransDimErr,
+            ServiceTransferHeader."No.",DimensionManagement.GetDimCombErr);
+      IF ServiceTransferLine."Line No." <> 0 THEN
+        IF NOT DimensionManagement.CheckDimIDComb(ServiceTransferLine."Dimension Set ID") THEN
+          ERROR(
+            ServTransDimCombErr,
+            ServiceTransferHeader."No.",ServiceTransferLine."Line No.",DimensionManagement.GetDimCombErr);
+    END;
+
+    LOCAL PROCEDURE GetPostingNoSeriesShpt@1500004(LocationCode@1500000 : Code[10]) : Code[10];
+    VAR
+      Location@1500001 : Record 14;
+      InventorySetup@1500002 : Record 313;
+    BEGIN
+      IF Location.GET(LocationCode) AND (Location."Posted Serv. Trans. Shpt. Nos." <> '') THEN
+        EXIT(Location."Posted Serv. Trans. Shpt. Nos.");
+      InventorySetup.GET;
+      IF InventorySetup."Posted Serv. Trans. Shpt. Nos." = '' THEN
+        ERROR(NoSeriesErr,InventorySetup.FIELDCAPTION("Posted Transfer Shpt. Nos."),
+          Location.TABLECAPTION,InventorySetup.TABLECAPTION);
+      EXIT(InventorySetup."Posted Serv. Trans. Shpt. Nos.");
+    END;
+
+    LOCAL PROCEDURE InsertServiceTransShptHeader@1500008(ServiceTransferHeader@1500000 : Record 16437) : Code[20];
+    VAR
+      ServiceTransferShptHeader@1500002 : Record 16439;
+    BEGIN
+      WITH ServiceTransferHeader DO BEGIN
+        ServiceTransferShptHeader.LOCKTABLE;
+        ServiceTransferShptHeader.INIT;
+        ServiceTransferShptHeader."Service Transfer Order No." := "No.";
+        ServiceTransferShptHeader."Transfer-from Code" := "Transfer-from Code";
+        ServiceTransferShptHeader."Transfer-from Name" := "Transfer-from Name";
+        ServiceTransferShptHeader."Transfer-from Name 2" := "Transfer-from Name 2";
+        ServiceTransferShptHeader."Transfer-from Address" := "Transfer-from Address";
+        ServiceTransferShptHeader."Transfer-from Address 2" := "Transfer-from Address 2";
+        ServiceTransferShptHeader."Transfer-from Post Code" := "Transfer-from Post Code";
+        ServiceTransferShptHeader."Transfer-from City" := "Transfer-from City";
+        ServiceTransferShptHeader."Transfer-from State" := "Transfer-from State";
+        ServiceTransferShptHeader."Transfer-to Code" := "Transfer-to Code";
+        ServiceTransferShptHeader."Transfer-to Name" := "Transfer-to Name";
+        ServiceTransferShptHeader."Transfer-to Name 2" := "Transfer-to Name 2";
+        ServiceTransferShptHeader."Transfer-to Address" := "Transfer-to Address";
+        ServiceTransferShptHeader."Transfer-to Address 2" := "Transfer-to Address 2";
+        ServiceTransferShptHeader."Transfer-to Post Code" := "Transfer-to Post Code";
+        ServiceTransferShptHeader."Transfer-to City" := "Transfer-to City";
+        ServiceTransferShptHeader."Transfer-to State" := "Transfer-to State";
+        ServiceTransferShptHeader."Shipment Date" := "Shipment Date";
+        ServiceTransferShptHeader."Receipt Date" := "Receipt Date";
+        ServiceTransferShptHeader.Status := Status::Shipped;
+        ServiceTransferShptHeader."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        ServiceTransferShptHeader."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+        ServiceTransferShptHeader."Ship Control Account" := "Ship Control Account";
+        ServiceTransferShptHeader."Receive Control Account" := "Receive Control Account";
+        ServiceTransferShptHeader."Dimension Set ID" := "Dimension Set ID";
+        ServiceTransferShptHeader."Assigned User ID" := "Assigned User ID";
+        ServiceTransferShptHeader."No. Series" := GetPostingNoSeriesShpt("Transfer-from Code");
+        ServiceTransferShptHeader."No." := NoSeriesManagement.GetNextNo(
+            ServiceTransferShptHeader."No. Series","Shipment Date",TRUE);
+        ServiceTransferShptHeader.INSERT;
+        EXIT(ServiceTransferShptHeader."No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertServiceTransShptLine@1500010();
+    VAR
+      ServiceTransferShptLine@1500002 : Record 16440;
+      ServiceTransferLine@1500003 : Record 16438;
+    BEGIN
+      WITH ServiceTransferLine DO BEGIN
+        SETRANGE("Document No.",ServiceTransferHeader."No.");
+        IF FINDSET THEN
+          REPEAT
+            ServiceTransferShptLine.LOCKTABLE;
+            ServiceTransferShptLine.INIT;
+            ServiceTransferShptLine."Document No." := PostedServiceTransferShptDocNo;
+            ServiceTransferShptLine."Line No." := "Line No.";
+            ServiceTransferShptLine."Transfer From G/L Account No." := "Transfer From G/L Account No.";
+            ServiceTransferShptLine."Transfer To G/L Account No." := "Transfer To G/L Account No.";
+            ServiceTransferShptLine."Transfer Price" := "Transfer Price";
+            ServiceTransferShptLine."Ship Control A/C No." := "Ship Control A/C No.";
+            ServiceTransferShptLine."Receive Control A/C No." := "Receive Control A/C No.";
+            ServiceTransferShptLine.Shipped := TRUE;
+            ServiceTransferShptLine."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+            ServiceTransferShptLine."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+            ServiceTransferShptLine."GST Group Code" := "GST Group Code";
+            ServiceTransferShptLine."SAC Code" := "SAC Code";
+            ServiceTransferShptLine."GST Base Amount" := "GST Base Amount";
+            ServiceTransferShptLine."GST %" := "GST %";
+            ServiceTransferShptLine."Total GST Amount" := "Total GST Amount";
+            ServiceTransferShptLine."GST Rounding Type" := "GST Rounding Type";
+            ServiceTransferShptLine."GST Rounding Precision" := "GST Rounding Precision";
+            ServiceTransferShptLine.Exempted := Exempted;
+            ServiceTransferShptLine."Dimension Set ID" := "Dimension Set ID";
+            ServiceTransferShptLine."From G/L Account Description" := "From G/L Account Description";
+            ServiceTransferShptLine."To G/L Account Description" := "To G/L Account Description";
+            ServiceTransferShptLine.INSERT;
+            IF NOT Shipped THEN BEGIN
+              FillTransferBuffer(ServiceTransferLine,TRUE);
+              FillGSTPostingBuffer(ServiceTransferLine,TRUE);
+            END;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertServiceTransRcptHeader@1500024(ServiceTransferHeader@1500000 : Record 16437) : Code[20];
+    VAR
+      ServiceTransferRcptHeader@1500002 : Record 16441;
+    BEGIN
+      WITH ServiceTransferHeader DO BEGIN
+        ServiceTransferRcptHeader.LOCKTABLE;
+        ServiceTransferRcptHeader.INIT;
+        ServiceTransferRcptHeader."Service Transfer Order No." := "No.";
+        ServiceTransferRcptHeader."Transfer-from Code" := "Transfer-from Code";
+        ServiceTransferRcptHeader."Transfer-from Name" := "Transfer-from Name";
+        ServiceTransferRcptHeader."Transfer-from Name 2" := "Transfer-from Name 2";
+        ServiceTransferRcptHeader."Transfer-from Address" := "Transfer-from Address";
+        ServiceTransferRcptHeader."Transfer-from Address 2" := "Transfer-from Address 2";
+        ServiceTransferRcptHeader."Transfer-from Post Code" := "Transfer-from Post Code";
+        ServiceTransferRcptHeader."Transfer-from City" := "Transfer-from City";
+        ServiceTransferRcptHeader."Transfer-from State" := "Transfer-from State";
+        ServiceTransferRcptHeader."Transfer-to Code" := "Transfer-to Code";
+        ServiceTransferRcptHeader."Transfer-to Name" := "Transfer-to Name";
+        ServiceTransferRcptHeader."Transfer-to Name 2" := "Transfer-to Name 2";
+        ServiceTransferRcptHeader."Transfer-to Address" := "Transfer-to Address";
+        ServiceTransferRcptHeader."Transfer-to Address 2" := "Transfer-to Address 2";
+        ServiceTransferRcptHeader."Transfer-to Post Code" := "Transfer-to Post Code";
+        ServiceTransferRcptHeader."Transfer-to City" := "Transfer-to City";
+        ServiceTransferRcptHeader."Transfer-to State" := "Transfer-to State";
+        ServiceTransferRcptHeader."Shipment Date" := "Shipment Date";
+        ServiceTransferRcptHeader."Receipt Date" := "Receipt Date";
+        ServiceTransferRcptHeader.Status := Status::Shipped;
+        ServiceTransferRcptHeader."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        ServiceTransferRcptHeader."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+        ServiceTransferRcptHeader."Ship Control Account" := "Ship Control Account";
+        ServiceTransferRcptHeader."Receive Control Account" := "Receive Control Account";
+        ServiceTransferRcptHeader."Dimension Set ID" := "Dimension Set ID";
+        ServiceTransferRcptHeader."Assigned User ID" := "Assigned User ID";
+        ServiceTransferRcptHeader."External Doc No." := "External Doc No.";
+        ServiceTransferRcptHeader."No. Series" := GetPostingNoSeriesRcpt("Transfer-to Code");
+        ServiceTransferRcptHeader."No." := NoSeriesManagement.GetNextNo(
+            ServiceTransferRcptHeader."No. Series","Receipt Date",TRUE);
+        ServiceTransferRcptHeader.INSERT;
+        EXIT(ServiceTransferRcptHeader."No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertServiceTransRcptLine@1500023();
+    VAR
+      ServiceTransferRcptLine@1500002 : Record 16442;
+      ServiceTransferLine@1500003 : Record 16438;
+    BEGIN
+      WITH ServiceTransferLine DO BEGIN
+        SETRANGE("Document No.",ServiceTransferHeader."No.");
+        IF FINDSET THEN
+          REPEAT
+            ServiceTransferRcptLine.LOCKTABLE;
+            ServiceTransferRcptLine.INIT;
+            ServiceTransferRcptLine."Document No." := PostedServiceTransferRcptDocNo;
+            ServiceTransferRcptLine."Line No." := "Line No.";
+            ServiceTransferRcptLine."Transfer From G/L Account No." := "Transfer From G/L Account No.";
+            ServiceTransferRcptLine."Transfer To G/L Account No." := "Transfer To G/L Account No.";
+            ServiceTransferRcptLine."Transfer Price" := "Transfer Price";
+            ServiceTransferRcptLine."Ship Control A/C No." := "Ship Control A/C No.";
+            ServiceTransferRcptLine."Receive Control A/C No." := "Receive Control A/C No.";
+            ServiceTransferRcptLine.Shipped := TRUE;
+            ServiceTransferRcptLine."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+            ServiceTransferRcptLine."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+            ServiceTransferRcptLine."GST Group Code" := "GST Group Code";
+            ServiceTransferRcptLine."SAC Code" := "SAC Code";
+            ServiceTransferRcptLine."GST Base Amount" := "GST Base Amount";
+            ServiceTransferRcptLine."GST %" := "GST %";
+            ServiceTransferRcptLine."Total GST Amount" := "Total GST Amount";
+            ServiceTransferRcptLine."GST Rounding Type" := "GST Rounding Type";
+            ServiceTransferRcptLine."GST Rounding Precision" := "GST Rounding Precision";
+            ServiceTransferRcptLine.Exempted := Exempted;
+            ServiceTransferRcptLine."Dimension Set ID" := "Dimension Set ID";
+            ServiceTransferRcptLine."From G/L Account Description" := "From G/L Account Description";
+            ServiceTransferRcptLine."To G/L Account Description" := "To G/L Account Description";
+            ServiceTransferRcptLine.INSERT;
+            IF Shipped THEN BEGIN
+              FillTransferBuffer(ServiceTransferLine,FALSE);
+              FillGSTPostingBuffer(ServiceTransferLine,FALSE);
+            END;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE FillGSTPostingBuffer@1500013(ServiceTransferLine@1500110 : Record 16438;Ship@1500003 : Boolean);
+    VAR
+      DetailedGSTEntryBuffer@1500006 : Record 16412;
+      GLAccount@1500004 : Record 15;
+      GSTStateCode@1500000 : Code[10];
+    BEGIN
+      WITH ServiceTransferLine DO BEGIN
+        ServiceTransferHeader.TESTFIELD("Transfer-from State");
+        ServiceTransferHeader.TESTFIELD("Transfer-to State");
+        IF Ship THEN
+          GSTStateCode := ServiceTransferHeader."Transfer-from State"
+        ELSE
+          GSTStateCode := ServiceTransferHeader."Transfer-to State";
+        DetailedGSTEntryBuffer.RESET;
+        DetailedGSTEntryBuffer.SETCURRENTKEY("Transaction Type","Document Type","Document No.","Line No.");
+        DetailedGSTEntryBuffer.SETRANGE("Transaction Type",DetailedGSTEntryBuffer."Transaction Type"::"Service Transfer");
+        DetailedGSTEntryBuffer.SETRANGE("Document Type",0);
+        DetailedGSTEntryBuffer.SETRANGE("Document No.","Document No.");
+        DetailedGSTEntryBuffer.SETRANGE("Line No.","Line No.");
+        DetailedGSTEntryBuffer.SETFILTER("GST Base Amount",'<>%1',0);
+        IF DetailedGSTEntryBuffer.FINDSET THEN
+          REPEAT
+            TempGSTPostingBuffer[1].Type := TempGSTPostingBuffer[1].Type::"G/L Account";
+            TempGSTPostingBuffer[1]."Global Dimension 1 Code" := "Shortcut Dimension 1 Code";
+            TempGSTPostingBuffer[1]."Global Dimension 2 Code" := "Shortcut Dimension 2 Code";
+            TempGSTPostingBuffer[1]."Dimension Set ID" := "Dimension Set ID";
+            TempGSTPostingBuffer[1]."GST Group Code" := "GST Group Code";
+            IF Ship THEN BEGIN
+              TempGSTPostingBuffer[1]."GST Base Amount" :=
+                GSTManagement.RoundGSTPrecision(DetailedGSTEntryBuffer."GST Base Amount");
+              TempGSTPostingBuffer[1]."GST Amount" :=
+                GSTManagement.RoundGSTPrecision(DetailedGSTEntryBuffer."GST Amount");
+              GLAccount.GET("Transfer From G/L Account No.");
+              TempGSTPostingBuffer[1]."Gen. Prod. Posting Group" := GLAccount."Gen. Prod. Posting Group";
+              TempGSTPostingBuffer[1]."Account No." :=
+                GSTManagement.GetGSTPayableAccountNo(GSTStateCode,DetailedGSTEntryBuffer."GST Component Code");
+            END ELSE BEGIN
+              TempGSTPostingBuffer[1]."GST Base Amount" := -
+                GSTManagement.RoundGSTPrecision(DetailedGSTEntryBuffer."GST Base Amount");
+              TempGSTPostingBuffer[1]."GST Amount" := -
+                GSTManagement.RoundGSTPrecision(DetailedGSTEntryBuffer."GST Amount");
+              GLAccount.GET("Transfer To G/L Account No.");
+              TempGSTPostingBuffer[1]."Gen. Prod. Posting Group" := GLAccount."Gen. Prod. Posting Group";
+              TempGSTPostingBuffer[1]."Account No." :=
+                GSTManagement.GetGSTReceivableAccountNo(GSTStateCode,DetailedGSTEntryBuffer."GST Component Code");
+            END;
+            TempGSTPostingBuffer[1]."GST %" := DetailedGSTEntryBuffer."GST %" ;
+            TempGSTPostingBuffer[1]."GST Component Code" := DetailedGSTEntryBuffer."GST Component Code";
+            GSTAmount += TempGSTPostingBuffer[1]."GST Amount";
+            UpdateGSTPostingBuffer;
+          UNTIL DetailedGSTEntryBuffer.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateGSTPostingBuffer@1500012();
+    BEGIN
+      DimensionManagement.UpdateGlobalDimFromDimSetID(TempGSTPostingBuffer[1]."Dimension Set ID",
+        TempGSTPostingBuffer[1]."Global Dimension 1 Code",TempGSTPostingBuffer[1]."Global Dimension 2 Code");
+      TempGSTPostingBuffer[2] := TempGSTPostingBuffer[1];
+      IF TempGSTPostingBuffer[2].FIND THEN BEGIN
+        TempGSTPostingBuffer[2]."GST Base Amount" += TempGSTPostingBuffer[1]."GST Base Amount";
+        TempGSTPostingBuffer[2]."GST Amount" += TempGSTPostingBuffer[1]."GST Amount";
+        TempGSTPostingBuffer[2].MODIFY;
+      END ELSE
+        TempGSTPostingBuffer[1].INSERT;
+    END;
+
+    LOCAL PROCEDURE FillTransferBuffer@1500009(ServiceTransferLine@1500001 : Record 16438;Ship@1500000 : Boolean);
+    VAR
+      GLAccount@1500002 : Record 15;
+    BEGIN
+      WITH ServiceTransferLine DO BEGIN
+        TempTransferBuffer[1]."System-Created Entry" := TRUE;
+        IF Ship THEN BEGIN
+          TempTransferBuffer[1]."G/L Account" := "Transfer From G/L Account No.";
+          TempTransferBuffer[1].Amount := -"Transfer Price";
+          GLAccount.GET("Transfer From G/L Account No.");
+          TempGSTPostingBuffer[1]."Gen. Prod. Posting Group" := GLAccount."Gen. Prod. Posting Group";
+        END ELSE BEGIN
+          TempTransferBuffer[1]."G/L Account" := "Transfer To G/L Account No.";
+          TempTransferBuffer[1].Amount := "Transfer Price";
+          GLAccount.GET("Transfer To G/L Account No.");
+          TempGSTPostingBuffer[1]."Gen. Prod. Posting Group" := GLAccount."Gen. Prod. Posting Group";
+        END;
+        TempTransferBuffer[1]."Global Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        TempTransferBuffer[1]."Global Dimension 2 Code" := "Shortcut Dimension 2 Code";
+        TempTransferBuffer[1]."Dimension Set ID" := "Dimension Set ID";
+        TransferAmount += TempTransferBuffer[1].Amount;
+        UpdTransferBuffer;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdTransferBuffer@1500007();
+    BEGIN
+      DimensionManagement.UpdateGlobalDimFromDimSetID(TempTransferBuffer[1]."Dimension Set ID",
+        TempTransferBuffer[1]."Global Dimension 1 Code",TempTransferBuffer[1]."Global Dimension 2 Code");
+      TempTransferBuffer[2] := TempTransferBuffer[1];
+      IF TempTransferBuffer[2].FIND THEN BEGIN
+        TempTransferBuffer[2].Amount := TempTransferBuffer[2].Amount + TempTransferBuffer[1].Amount;
+        TempTransferBuffer[2].MODIFY;
+      END ELSE
+        TempTransferBuffer[1].INSERT;
+    END;
+
+    LOCAL PROCEDURE PostTransLineToGenJnlLineGST@1500016(ServiceTransferHeader@1500000 : Record 16437;Ship@1500001 : Boolean);
+    BEGIN
+      WITH GenJnlLine DO BEGIN
+        INIT;
+        Description := STRSUBSTNO(ServiceTranTxt,ServiceTransferHeader."No.");
+        "Document Type" := "Document Type"::Invoice;
+        IF TempGSTPostingBuffer[1]."GST Amount" <> 0 THEN BEGIN
+          VALIDATE(Amount,ROUND(TempGSTPostingBuffer[1]."GST Amount"));
+          "Account No." := TempGSTPostingBuffer[1]."Account No.";
+        END;
+        "VAT Posting" := "VAT Posting"::"Manual VAT Entry";
+        "System-Created Entry" := TempTransferBuffer[1]."System-Created Entry";
+        "Gen. Bus. Posting Group" := TempGSTPostingBuffer[1]."Gen. Bus. Posting Group";
+        "Gen. Prod. Posting Group" := TempGSTPostingBuffer[1]."Gen. Prod. Posting Group";
+        "Shortcut Dimension 1 Code" := TempGSTPostingBuffer[1]."Global Dimension 1 Code";
+        "Shortcut Dimension 2 Code" := TempGSTPostingBuffer[1]."Global Dimension 2 Code";
+        "Dimension Set ID" := TempGSTPostingBuffer[1]."Dimension Set ID";
+        "Source Code" := SourceCode;
+        "Account Type" := "Account Type"::"G/L Account";
+        IF Ship THEN BEGIN
+          "Document No." := PostedServiceTransferShptDocNo;
+          "Location Code" := ServiceTransferHeader."Transfer-from Code";
+          "Gen. Posting Type" := "Gen. Posting Type"::Sale;
+          "Posting Date" := ServiceTransferHeader."Shipment Date";
+          GSTManagement.InsertGSTLedgerEntryServiceTransfer(
+            TempGSTPostingBuffer[1],ServiceTransferHeader,
+            GenJnlPostLine.GetNextTransactionNo,"Document Type","Document No.",
+            "Source Code",DocTransferType::ServiceTransferShpmnt);
+        END ELSE BEGIN
+          "Location Code" := ServiceTransferHeader."Transfer-to Code";
+          "Gen. Posting Type" := "Gen. Posting Type"::Purchase;
+          "Document No." := PostedServiceTransferRcptDocNo;
+          "Posting Date" := ServiceTransferHeader."Receipt Date";
+          GSTManagement.InsertGSTLedgerEntryServiceTransfer(
+            TempGSTPostingBuffer[1],ServiceTransferHeader,
+            GenJnlPostLine.GetNextTransactionNo,"Document Type","Document No.",
+            "Source Code",DocTransferType::ServiceTransferReciept);
+        END;
+        GenJnlPostLine.RunWithCheck(GenJnlLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE PostTransLineToGenJnlLine@1500020(ServiceTransferHeader@1500000 : Record 16437;Ship@1500001 : Boolean);
+    BEGIN
+      WITH GenJnlLine DO BEGIN
+        INIT;
+        IF Ship THEN BEGIN
+          "Document No." := PostedServiceTransferShptDocNo;
+          "Posting Date" := ServiceTransferHeader."Shipment Date";
+          "Gen. Posting Type" := "Gen. Posting Type"::Sale
+        END ELSE BEGIN
+          "Document No." := PostedServiceTransferRcptDocNo;
+          "Posting Date" := ServiceTransferHeader."Receipt Date";
+          "Gen. Posting Type" := "Gen. Posting Type"::Purchase
+        END;
+        "Document Date" := "Posting Date";
+        "Document Type" := "Document Type"::Invoice;
+        "System-Created Entry" := TempTransferBuffer[1]."System-Created Entry";
+        IF ControlAccount THEN BEGIN
+          IF Ship THEN
+            "Account No." := ServiceTransferHeader."Ship Control Account"
+          ELSE
+            "Account No." := ServiceTransferHeader."Receive Control Account";
+          Amount := -(GSTAmount + TransferAmount);
+          "Shortcut Dimension 1 Code" := ServiceTransferHeader."Shortcut Dimension 1 Code";
+          "Shortcut Dimension 2 Code" := ServiceTransferHeader."Shortcut Dimension 2 Code";
+          "Dimension Set ID" := ServiceTransferHeader."Dimension Set ID";
+        END ELSE BEGIN
+          "Account No." := TempTransferBuffer[1]."G/L Account";
+          Amount := TempTransferBuffer[1].Amount;
+          "Shortcut Dimension 1 Code" := TempTransferBuffer[1]."Global Dimension 1 Code";
+          "Shortcut Dimension 2 Code" := TempTransferBuffer[1]."Global Dimension 2 Code";
+          "Dimension Set ID" := TempTransferBuffer[1]."Dimension Set ID";
+          "Gen. Bus. Posting Group" := TempTransferBuffer[1]."Gen. Bus. Posting Group";
+          "Gen. Prod. Posting Group" := TempTransferBuffer[1]."Gen. Prod. Posting Group";
+        END;
+        "VAT Posting" := "VAT Posting"::"Manual VAT Entry";
+        "VAT Base Amount" := Amount;
+        "Source Code" := SourceCode;
+        Description := STRSUBSTNO(ServiceTranTxt,ServiceTransferHeader."No.");
+        IF Amount <> 0 THEN
+          GenJnlPostLine.RUN(GenJnlLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetPostingNoSeriesRcpt@1500003(LocationCode@1500000 : Code[10]) : Code[10];
+    VAR
+      Location@1500001 : Record 14;
+      InventorySetup@1500002 : Record 313;
+    BEGIN
+      IF Location.GET(LocationCode) AND (Location."Posted Serv. Trans. Rcpt. Nos." <> '') THEN
+        EXIT(Location."Posted Serv. Trans. Rcpt. Nos.");
+      InventorySetup.GET;
+      IF InventorySetup."Posted Serv. Trans. Rcpt. Nos." = '' THEN
+        ERROR(NoSeriesErr,InventorySetup.FIELDCAPTION("Posted Transfer Rcpt. Nos."),
+          Location.TABLECAPTION,InventorySetup.TABLECAPTION);
+      EXIT(InventorySetup."Posted Serv. Trans. Rcpt. Nos.");
+    END;
+
+    LOCAL PROCEDURE DeleteOneServiceTransferOrder@1500028();
+    VAR
+      ServiceTransferLine2@1500000 : Record 16438;
+      DoNotDelete@1500001 : Boolean;
+      No@1500002 : Code[20];
+    BEGIN
+      No := ServiceTransferHeader."No.";
+      ServiceTransferLine2.SETRANGE("Document No.",ServiceTransferHeader."No.");
+      ServiceTransferLine2.SETFILTER("Transfer From G/L Account No.",'<>%1','');
+      ServiceTransferLine2.SETFILTER("Transfer To G/L Account No.",'<>%1','');
+      IF ServiceTransferLine2.FINDSET THEN
+        REPEAT
+          IF NOT ServiceTransferLine2.Shipped THEN
+            DoNotDelete := TRUE;
+        UNTIL ServiceTransferLine2.NEXT = 0;
+      IF NOT DoNotDelete THEN BEGIN
+        IF ServiceTransferLine2.FINDSET THEN
+          ServiceTransferLine2.DELETEALL;
+        ServiceTransferHeader.DELETE;
+        GSTManagement.DeleteGSTBuffer(DocTransactionType::"Service Transfer",0,ServiceTransferHeader."No.",0);
+        MESSAGE(ServTransDelMsg,No);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

@@ -1,0 +1,1938 @@
+OBJECT Codeunit 137261 SCM Inventory Item Tracking II
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 32=rimd;
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1007 : Codeunit 130000;
+      LibraryERM@1011 : Codeunit 131300;
+      LibraryInventory@1013 : Codeunit 132201;
+      LibraryItemTracking@1025 : Codeunit 130502;
+      LibraryPurchase@1002 : Codeunit 130512;
+      LibrarySales@1018 : Codeunit 130509;
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryVariableStorage@1014 : Codeunit 131004;
+      LibraryWarehouse@1005 : Codeunit 132204;
+      LibraryPlanning@1020 : Codeunit 132203;
+      LibraryRandom@1001 : Codeunit 130440;
+      isInitialized@1000 : Boolean;
+      AvailabilityWarning@1017 : TextConst 'ENU=There are availability warnings on one or more lines.';
+      DeleteItemTrackingCodeError@1010 : TextConst '@@@=%1:FieldCaption1,%2:Value1;ENU=You cannot delete %1 %2 because it is used on one or more items.';
+      MultipleExpirDateError@1021 : TextConst 'ENU=There are multiple expiration dates registered for lot %1.';
+      NegativeSelectedQuantityError@1009 : TextConst 'ENU=The value must be greater than or equal to 0. Value: -%1.';
+      SelectedQuantityError@1008 : TextConst 'ENU=You cannot select more than';
+      SerialLotConfirmMessage@1006 : TextConst 'ENU=Do you want to reserve specific serial or lot numbers?';
+      PickCreated@1015 : TextConst 'ENU=Number of Invt. Pick activities created: 1 out of a total of 1.';
+      PostPartialInvoiceError@1003 : TextConst 'ENU=The quantity to invoice does not match the quantity defined in item tracking.';
+      ReservEntryError@1016 : TextConst 'ENU=There is no Reservation Entry within the filter.';
+      AssignSerialNoStatus@1022 : TextConst 'ENU=Assign Serial No must be TRUE.';
+      ExistingSalesLnITError@1023 : TextConst 'ENU=Item tracking is defined for item %1 in the Sales Line.';
+      WrongSerialNoErr@1024 : TextConst 'ENU=Serial No is wrong.';
+      TrackingOption@1026 : 'AssignSerialNo,AssignLotNo,VerifyLotNo,EditValue,SelectEntries,UpdateQtyToInvoice,AssignLotNo2,AssignQty,ReSelectEntries,AssignMoreThanPurchasedQty,SetNewLotNo,EditSNValue,SetNewSN';
+      TheLotNoInfoDoesNotExistErr@1028 : TextConst 'ENU=The Lot No. Information does not exist. Identification fields and values:';
+      TheSerialNoInfoDoesNotExistErr@1027 : TextConst 'ENU=The Serial No. Information does not exist. Identification fields and values:';
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler)]
+    PROCEDURE ErrorForPartialInvoiceWithIT@23();
+    VAR
+      Item@1002 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      // Verify Error while Posting partial Invoice from Purchase Order with Item Tracking.
+
+      // Setup: Create Purchase Order with Item with Serial Specific Item Tracking and Post Purchase Order Receipt.
+      Initialize;
+      CreateTrackedItem(Item,'',LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(FALSE,TRUE));
+      CreatePurchaseOrder(PurchaseLine,Item."No.",LibraryRandom.RandInt(20));  // Take random for Quantity.
+      AssignSerialNoAndReceivePurchaseOrder(PurchaseHeader,PurchaseLine);
+
+      // Exercise: Post Partial Invoice from Purchase Order.
+      ASSERTERROR LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+
+      // Verify: Verify error message while posting partial Invoice from Purchase Order.
+      Assert.ExpectedError(PostPartialInvoiceError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler)]
+    PROCEDURE ErrorForDeleteItemTrackingCode@42();
+    VAR
+      Item@1005 : Record 27;
+      ItemJournalLine@1000 : Record 83;
+      ItemTrackingCode@1004 : Record 6502;
+    BEGIN
+      // Verify Error while Deleting Item Tracking Code after creating inventory with Item Tracking.
+
+      // Setup: Create Item Journal Line with Serial Specific Item Tracking and post.
+      Initialize;
+      CreateTrackedItem(Item,'',LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(FALSE,TRUE));
+      CreateItemJournalLine(ItemJournalLine,Item."No.",'','',LibraryRandom.RandInt(10));  // Take random for Quantity and used blank for Location and Bin Code.
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignSerialNo);  // Enqueue value for ItemTrackingLinesPageHandler.
+      ItemJournalLine.OpenItemTrackingLines(FALSE);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+      ItemTrackingCode.GET(Item."Item Tracking Code");
+
+      // Exercise: Delete Item Tracking Code.
+      ASSERTERROR ItemTrackingCode.DELETE(TRUE);
+
+      // Verify: Verify error message while Deleting Item Tracking Code.
+      Assert.ExpectedError(STRSUBSTNO(DeleteItemTrackingCodeError,Item.FIELDCAPTION("Item Tracking Code"),ItemTrackingCode.Code));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ConfirmHandler)]
+    PROCEDURE LotNoOnPurchaseOrderFromCarryOutActMsg@41();
+    VAR
+      Item@1000 : Record 27;
+      SalesLine@1002 : Record 37;
+      Vendor@1003 : Record 23;
+      LotNo@1004 : Variant;
+    BEGIN
+      // Verify Lot No. in Purchase Order created from Sales Order through Carry Out Action Msg.
+
+      // Setup: Create Item, Location, Vendor and Sales Order with Item Tracking.
+      Initialize;
+      CreateSetupforSalesOrder(SalesLine,TRUE,FALSE);
+      Item.GET(SalesLine."No.");
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignLotNo);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(AvailabilityWarning);  // Enqueue value for ConfirmHandler.
+      SalesLine.OpenItemTrackingLines;
+      LibraryVariableStorage.Dequeue(LotNo);
+
+      // Exercise: Generate Purchase Order through Carry Out Action Msg.
+      CalcRegenPlanAndCarryOutActionMsg(Item,SalesLine."Location Code",Vendor."No.");
+
+      // Verify: Verify Lot No. in Reservation Entry for generated Purchase Order.
+      VerifyPurchaseOrderItemTracking(SalesLine."Location Code",Item."No.",LotNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ConfirmHandler)]
+    PROCEDURE DeleteSerialNoOnPlanningWorksheet@47();
+    VAR
+      Item@1000 : Record 27;
+      SalesLine@1006 : Record 37;
+    BEGIN
+      // Verify Reservation Entry for Deleted Item Tracking on Planning Worksheet.
+
+      // Setup: Create Item, Location, Vendor and Sales Order with Item Tracking.
+      Initialize;
+      CreateSetupforSalesOrder(SalesLine,FALSE,TRUE);
+      Item.GET(SalesLine."No.");
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignSerialNo);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(AvailabilityWarning);  // Enqueue value for ConfirmHandler.
+      SalesLine.OpenItemTrackingLines;
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<CY>',WORKDATE));  // Dates based on WORKDATE.
+
+      // Exercise: Delete Item Tracking Lines from Planning Worksheet.
+      DeleteItemTrackingLines(SalesLine);
+
+      // Verify: Verify Deleted Item Tracking in Reservation Entry from Planning Worksheet.
+      VerifyDeletedItemTracking(SalesLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE SalesLineErrorWithNegativeSelectedQty@6();
+    VAR
+      Quantity@1005 : Decimal;
+    BEGIN
+      // Verify error while negative values is taken in the Selected Quantity field on Item Tracking Summary page.
+
+      // Setup: Create Item, create and post Purchase Order, create Sales Order.
+      Initialize;
+      Quantity := LibraryRandom.RandInt(20);  // Take random for Quantity.
+      SelectITEntriesOnSalesLine(Quantity,-1,STRSUBSTNO(NegativeSelectedQuantityError,Quantity));  // -1 for sign factor.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE SelectedQtyErrorOnSalesLine@25();
+    BEGIN
+      // Verify error for Selected Quantity field on Item Tracking Summary page after creating Sales Order.
+
+      // Setup: Create Item, create and post Purchase Order, create Sales Order.
+      Initialize;
+      SelectITEntriesOnSalesLine(10 + LibraryRandom.RandInt(10),1,STRSUBSTNO(SelectedQuantityError));  // Take random Quantity greater than 1 and 1 for sign factor.
+    END;
+
+    LOCAL PROCEDURE SelectITEntriesOnSalesLine@50(Quantity@1003 : Integer;SignFactor@1005 : Integer;ExpectedError@1006 : Text[100]);
+    VAR
+      SalesLine@1007 : Record 37;
+    BEGIN
+      // Create Item, create and post Purchase Order, create Sales Order.
+      SetupSalesAndPurchEntryWithIT(SalesLine,Quantity);
+      LibraryVariableStorage.Enqueue(SignFactor * SalesLine.Quantity);
+
+      // Exercise: Assign Item Tracking on Sales Line.
+      ASSERTERROR SalesLine.OpenItemTrackingLines;
+
+      // Verify: Verify error for Select Quantity on Sales Line.
+      Assert.ExpectedError(ExpectedError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler,ItemTrackingListPageHandler,ReservationPageHandler,ConfirmHandler)]
+    PROCEDURE SelectedQtyErrorOnSalesLineWithReserv@15();
+    VAR
+      SalesLine@1005 : Record 37;
+      SummaryOption@1008 : 'SetQuantity,VerifyQuantity';
+    BEGIN
+      // Verify error for Selected Quantity field on Item Tracking Summary page after creating Sales Order with Reservation.
+
+      // Setup: Create Item, create and post Purchase Order, create Sales Order.
+      Initialize;
+      SetupSalesAndPurchEntryWithIT(SalesLine,LibraryRandom.RandInt(10));  // Take random Quantity.
+      LibraryVariableStorage.Enqueue(1);  // Enqueue 1 for Quantity as Item Tracking code is Serial Specific for ItemTrackingSummaryPageHandler.
+
+      // Exercise: Assign Item Tracking and Reservation on Sales Line.
+      ASSERTERROR AssignTrackingAndReserveOnSalesLine(SalesLine,SummaryOption::SetQuantity,SalesLine.Quantity);
+
+      // Verify: Verify error for Select Quantity on Sales Line.
+      Assert.ExpectedError(SelectedQuantityError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler,ItemTrackingListPageHandler,ReservationPageHandler,ConfirmHandler)]
+    PROCEDURE SelectedQtyOnSalesLineWithReserv@10();
+    VAR
+      SalesLine@1005 : Record 37;
+      SummaryOption@1008 : 'SetQuantity,VerifyQuantity';
+    BEGIN
+      // Verify Selected Quantity on Item Tracking Summary page after creating Sales Order with Reservation.
+
+      // Setup: Create Item, create and post Purchase Order, create Sales Order.
+      Initialize;
+      SetupSalesAndPurchEntryWithIT(SalesLine,LibraryRandom.RandInt(10));  // Take random Quantity.
+      LibraryVariableStorage.Enqueue(1);  // Enqueue 1 for Quantity as Item Tracking code is Serial Specific for ItemTrackingSummaryPageHandler.
+
+      // Exercise: Item Tracking and Reservation on Sales Line.
+      AssignTrackingAndReserveOnSalesLine(SalesLine,SummaryOption::VerifyQuantity,0);
+
+      // Verify: Verify Selected Quantity on Item Tracking Summary page.Verification done in ItemTrackingSummaryPageHandler.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ExpirDateOnItemTrackingSummaryPage@9();
+    VAR
+      SalesLine@1000 : Record 37;
+      ItemLedgerEntry@1002 : Record 32;
+      SummaryOption@1005 : 'SetQuantity,VerifyQuantity,VerifyExpirationDate';
+    BEGIN
+      // Verify Expiration Date on Item Tracking Summary page after creating Sales Order.
+
+      // Setup: Create Item, create and post Purchase Order, create Sales Order.
+      Initialize;
+      SetupSalesAndPurchEntryWithIT(SalesLine,LibraryRandom.RandInt(10));  // Take random Quantity.
+
+      // Enuque values for ItemTrackingLinesPageHandler and ItemTrackingSummaryPageHandler.Taking 1 for Quantity as Item Tracking code is Serial Specific.
+      LibraryVariableStorage.Enqueue(1);
+      LibraryVariableStorage.Enqueue(TrackingOption::SelectEntries);
+      LibraryVariableStorage.Enqueue(SummaryOption::VerifyExpirationDate);
+      LibraryVariableStorage.Enqueue(1);
+      FindItemLedgerEntry(ItemLedgerEntry,SalesLine."No.");
+      LibraryVariableStorage.Enqueue(ItemLedgerEntry."Expiration Date");
+
+      // Exercise: Assign Item Tracking on Sales Line.
+      SalesLine.OpenItemTrackingLines;
+
+      // Verify: Verify Expiration Date on Item Tracking Summary page.Verification done in ItemTrackingSummaryPageHandler.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE PostSalesOrderWithExpirDateAndIT@53();
+    VAR
+      GeneralPostingSetup@1001 : Record 252;
+      GLAccount@1002 : Record 15;
+      SalesLine@1000 : Record 37;
+      SalesInvoiceHeader@1008 : Record 112;
+      DocumentNo@1007 : Code[20];
+    BEGIN
+      // Verify Sales Order is posted successfully created with Item Tracking and Expiration Date.
+
+      // Setup: Create Item, create and post Purchase Order, create Sales Order with Expiration Date and Item Tracking.
+      Initialize;
+      SetupSalesAndPurchEntryWithIT(SalesLine,LibraryRandom.RandInt(10));  // Take random Quantity.
+      GeneralPostingSetup.GET(SalesLine."Gen. Bus. Posting Group",SalesLine."Gen. Prod. Posting Group");
+      LibraryERM.FindGLAccount(GLAccount);
+      UpdateGeneralLedgerSetup(SalesLine."Gen. Bus. Posting Group",SalesLine."Gen. Prod. Posting Group",GLAccount."No.");
+      LibraryVariableStorage.Enqueue(1);
+      SalesLine.OpenItemTrackingLines;
+
+      // Exercise: Post Sales Order.
+      DocumentNo := PostSalesDocument(SalesLine."Document Type",SalesLine."Document No.",TRUE);
+
+      // Verify: Verify Sales Order has been posted successfully.
+      SalesInvoiceHeader.GET(DocumentNo);
+
+      // Tear Down.
+      UpdateGeneralLedgerSetup(
+        SalesLine."Gen. Bus. Posting Group",SalesLine."Gen. Prod. Posting Group",GeneralPostingSetup."Sales Account");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler,MessageHandler)]
+    PROCEDURE CreateInvPickOnSalesOrderWithIT@19();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      SalesLine@1005 : Record 37;
+    BEGIN
+      // Verify Message while creating Inventory Pick on Sales Order with Item Tracking.
+
+      // Setup: Create and post Purchase Order, create Sales Order with Item Tracking.
+      Initialize;
+      PostPurchaseOrderWithLocation(PurchaseLine);
+      CreateSalesOrderWithIT(SalesLine,PurchaseLine."No.",PurchaseLine."Location Code",PurchaseLine.Quantity,1);  // Taking 1 for Quantity as Item Tracking code is Serial Specific.
+
+      // Exercise: Create Inventory Pick on Sales Order.
+      CreateInventoryPickOnSalesLine(SalesLine);
+
+      // Verify message that Pick has been created. Verification done in MessageHandler.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler,MessageHandler)]
+    PROCEDURE ReservEntryErrorAfterPostInvPickOnSalesOrder@3();
+    VAR
+      GLAccount@1021 : Record 15;
+      PurchaseLine@1002 : Record 39;
+      SalesLine@1005 : Record 37;
+      ItemLedgerEntry@1003 : Record 32;
+      WarehouseActivityHeader@1001 : Record 5766;
+      No@1004 : Code[20];
+    BEGIN
+      // Verify Reservation Entry error if an Inventory Pick on Sales Order is created and posted.
+
+      // Setup: Create and post Purchase Order, create and post Inventory Pick on Sales Order.
+      Initialize;
+      PostPurchaseOrderWithLocation(PurchaseLine);
+      FindItemLedgerEntry(ItemLedgerEntry,PurchaseLine."No.");
+      CreateSalesOrderWithIT(SalesLine,PurchaseLine."No.",PurchaseLine."Location Code",PurchaseLine.Quantity / 2,1);  // Taking partial Quantity and 1 for Quantity as Item Tracking code is Serial Specific.
+      LibraryERM.FindGLAccount(GLAccount);
+      UpdateGeneralLedgerSetup(SalesLine."Gen. Bus. Posting Group",SalesLine."Gen. Prod. Posting Group",GLAccount."No.");
+      No := CreateInventoryPickOnSalesLine(SalesLine);
+      WarehouseActivityHeader.GET(WarehouseActivityHeader.Type::"Invt. Pick",No);
+      LibraryWarehouse.PostInventoryActivity(WarehouseActivityHeader,TRUE);
+
+      // Exercise.
+      ASSERTERROR FindReservationEntryForSerialNo(SalesLine."No.",PurchaseLine."Location Code",ItemLedgerEntry."Serial No.");
+
+      // Verify.
+      Assert.ExpectedError(ReservEntryError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE SelectedQtyErrorAfterPostInvPickOnSalesOrder@85();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      SalesLine@1009 : Record 37;
+    BEGIN
+      // Verify error for Selected Quantity field on Item Tracking Summary page after an Inventory Pick on Sales Order is created and posted.
+
+      // Setup:
+      Initialize;
+      PostWhseRcptAndRegisterPutAway(PurchaseLine);
+      CreateWhseShptAndRegisterPick(PurchaseLine);
+
+      // Exercise: Item Tracking and Reservation on Sales Line.
+      ASSERTERROR CreateSalesOrderWithIT(SalesLine,PurchaseLine."No.",PurchaseLine."Location Code",PurchaseLine.Quantity / 2,1);  // Taking partial Quantity and 1 for Quantity as Item Tracking code is Serial Specific.
+
+      // Verify: Verify error for Select Quantity on Sales Line.
+      Assert.ExpectedError(SelectedQuantityError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ExpirDateOnILEAfterRegisterPutAway@20();
+    VAR
+      Item@1001 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      SalesLine@1009 : Record 37;
+      ExpirationDate@1015 : Date;
+    BEGIN
+      // Verify Expiration Date on Item Ledger Entry When Put Away is Registered.
+
+      // Setup: Create Purchase Order, post Warehouse Receipt, register Put Away.
+      Initialize;
+      PostWhseRcptAndRegisterPutAway(PurchaseLine);
+      Item.GET(PurchaseLine."No.");
+      ExpirationDate := CALCDATE(Item."Expiration Calculation",WORKDATE);
+
+      // Exercise: Create Sales Order with Item Tracking.
+      CreateSalesOrderWithIT(SalesLine,PurchaseLine."No.",PurchaseLine."Location Code",PurchaseLine.Quantity / 2,1);  // Taking partial Quantity and 1 for Quantity as Item Tracking code is Serial Specific.
+
+      // Verify: Verify Expiration Date on Item Ledger Entry.
+      VerifyExpirationDateOnItemLedgerEntry(SalesLine."No.",ExpirationDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ExpirDateOnILEAfterRegisterPick@43();
+    VAR
+      Item@1003 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      SalesLine@1001 : Record 37;
+      ExpirationDate@1000 : Date;
+    BEGIN
+      // Verify Expiration Date on Item Ledger Entry When Pick is Registered.
+
+      // Setup: Create Purchase Order, post Warehouse Receipt, Register Put Away, create Warehouse Shipment and register Pick.
+      Initialize;
+      PostWhseRcptAndRegisterPutAway(PurchaseLine);
+      CreateWhseShptAndRegisterPick(PurchaseLine);
+      Item.GET(PurchaseLine."No.");
+      ExpirationDate := CALCDATE(Item."Expiration Calculation",WORKDATE);
+
+      // Exercise: Create Sales Order with Item Tracking.
+      CreateSalesOrderWithIT(SalesLine,PurchaseLine."No.",PurchaseLine."Location Code",PurchaseLine.Quantity / 2,0);  // Taking partial Quantity and 0 for Quantity as Item Tracking code is Serial Specific.
+
+      // Verify: Verify Expiration Date on Item Ledger Entry.
+      VerifyExpirationDateOnItemLedgerEntry(SalesLine."No.",ExpirationDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ConfirmHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE SelectedQtyErrorWithAssignITManually@32();
+    VAR
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      Location@1006 : Record 14;
+      SalesLine@1005 : Record 37;
+    BEGIN
+      // Verify error for Selected Quantity field on Item Tracking Summary page after assigning Item Tracking manually.
+
+      // Setup: Create and post Purchase Order.
+      Initialize;
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      CreatePurchaseOrderWithLocation(PurchaseLine,Location.Code,'');
+      AssignSerialNoOnPurchaseOrder(PurchaseHeader,PurchaseLine);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // Create Sales Order and Assign Item Tracking.
+      CreateSalesDocument(SalesLine,SalesLine."Document Type"::Order,PurchaseLine."No.",Location.Code,PurchaseLine.Quantity / 2);  // Take partial Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignSerialNo);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(AvailabilityWarning);
+      SalesLine.OpenItemTrackingLines;
+
+      // Exercise: Create another Sales Order and assign Item Tracking.
+      ASSERTERROR CreateSalesOrderWithIT(SalesLine,PurchaseLine."No.",PurchaseLine."Location Code",PurchaseLine.Quantity / 2,0);  // Taking partial Quantity and 0 for Quantity as Item Tracking code is Serial Specific.
+
+      // Verify: Verify error for Selected Quantity field on Item Tracking Summary page.
+      Assert.ExpectedError(SelectedQuantityError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE PostItemReclassJournalWithLotNo@52();
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      // Verify Posting of Item Reclass. Journal with Lot Tracked Item.
+
+      // Setup: Create and post Item Journal with Item Tracking, create Reclassification Journal with Item Tracking.
+      Initialize;
+      CreateAndPostItemJournalLineWithIT(ItemJournalLine);
+      CreateItemReclassificationJournal(
+        ItemJournalLine,ItemJournalLine."Item No.",ItemJournalLine."Location Code",ItemJournalLine."Bin Code",
+        ItemJournalLine.Quantity);
+
+      // Exercise: Post Item Reclass. Journal.
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+
+      // Verify: Verify Location on Warehouse entries.
+      VerifyWarehouseEntry(ItemJournalLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreateHandlerForSetQuantity)]
+    PROCEDURE PostPartialPurchOrderWithSerialNo@46();
+    VAR
+      Item@1002 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      PurchInvLine@1007 : Record 123;
+      Quantity@1005 : Decimal;
+      DocumentNo@1006 : Code[20];
+    BEGIN
+      // Verify Purchase Order is posted partially with Serial Tracked Item.
+
+      // Setup: Create Item, create Purchase Order and Receive partially.
+      Initialize;
+      CreateTrackedItem(Item,'',LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(FALSE,TRUE));
+      CreatePurchaseOrder(PurchaseLine,Item."No.",2 * LibraryRandom.RandInt(100));  // Take random Quantity.
+      UpdatePurchaseLineAndAssignIT(
+        PurchaseLine,PurchaseLine.FIELDNO("Qty. to Receive"),PurchaseLine.Quantity / 2,TrackingOption::AssignSerialNo,
+        PurchaseLine.Quantity / 2);
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);  // Post Purchase Order as Receive partially.
+
+      // Update Qty to Invoice on Purchase Line.
+      Quantity := LibraryRandom.RandInt(PurchaseLine."Quantity Received" - 1);  // Take random Quantity less than Quantity Received.
+      PurchaseLine.GET(PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.");
+      UpdatePurchaseLineAndAssignIT(
+        PurchaseLine,PurchaseLine.FIELDNO("Qty. to Invoice"),PurchaseLine."Quantity Received" - Quantity,
+        TrackingOption::UpdateQtyToInvoice,Quantity);
+
+      // Exercise: Post Purchase Order as Invoice partially.
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Post Purchase Order as Invoice.
+
+      // Verify: Verify Quantity on Posted Purchase Invoice Line.
+      PurchInvLine.SETRANGE("Document No.",DocumentNo);
+      PurchInvLine.SETRANGE("Buy-from Vendor No.",PurchaseLine."Buy-from Vendor No.");
+      PurchInvLine.FINDFIRST;
+      PurchInvLine.TESTFIELD(Quantity,PurchaseLine."Qty. to Invoice");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler)]
+    PROCEDURE ExpirDateOnPurchaseOrderWithLotNo@55();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseLine@1001 : Record 39;
+      LotNo@1004 : Variant;
+      ExpirationDate@1005 : Date;
+    BEGIN
+      // Verify Expiration Date for Item Tracking if it has already been assigned to Lot No.
+
+      // Setup: Create and post Purchase Order.
+      Initialize;
+      CreateAndPostPurchaseOrderWithIT(PurchaseLine,CreateAndUpdateItem(FALSE,TRUE),TrackingOption::AssignLotNo);
+      LibraryVariableStorage.Dequeue(LotNo);
+      Item.GET(PurchaseLine."No.");
+      ExpirationDate := CALCDATE(Item."Expiration Calculation",WORKDATE);
+
+      // Create another Purchase Order.
+      CreatePurchaseOrder(PurchaseLine,PurchaseLine."No.",PurchaseLine.Quantity);  // Take random Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::EditValue);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(LotNo);
+
+      // Exercise: Assign Item Tracking on Purchase Line.
+      PurchaseLine.OpenItemTrackingLines;
+
+      // Verify: Verify Expiration Date on Reservation Entry.
+      VerifyExpirationDateForItemTracking(PurchaseLine."No.",ExpirationDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler)]
+    PROCEDURE UpdatedExpirDateOnPurchOrder@67();
+    VAR
+      PurchaseLine@1000 : Record 39;
+      LotNo@1001 : Variant;
+      ExpirationDate@1002 : Date;
+    BEGIN
+      // Verify Expiration date is updated  for Item Tracking if it is updated in Item Ledger Entry.
+
+      // Setup: Create and post Purchase Order and update Expiration Date on Item Ledger Entry.
+      Initialize;
+      CreateAndPostPurchaseOrderWithIT(PurchaseLine,CreateAndUpdateItem(FALSE,TRUE),TrackingOption::AssignLotNo);
+      LibraryVariableStorage.Dequeue(LotNo);
+      ExpirationDate := UpdateExpirDateOnILE(PurchaseLine."No.");
+
+      // Exercise: Create Purchase Order and assign Item Tracking.
+      CreatePurchaseOrderWithIT(PurchaseLine,PurchaseLine."No.",LotNo);
+
+      // Verify: Verify Expiration Date on Reservation Entry.
+      VerifyExpirationDateForItemTracking(PurchaseLine."No.",ExpirationDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler)]
+    PROCEDURE MultipleExpirDateOnPurchOrder@62();
+    VAR
+      PurchaseLine@1001 : Record 39;
+      Item@1000 : Record 27;
+      LotNo@1004 : Variant;
+      ExpirationDate@1002 : Date;
+    BEGIN
+      // Verify Expiration Date is not updated on Purchase Line if multiple Expiration dates for the same lot No. exist in Item Ledger Entry.
+
+      // Setup: Create and post Purchase Order having same Lot No. and update Expiration Date on Item Ledger Entry.
+      Initialize;
+      LotNo := SetupForMultipleExpirDateOnILE(PurchaseLine);
+      Item.GET(PurchaseLine."No.");
+      ExpirationDate := CALCDATE(Item."Expiration Calculation",WORKDATE);
+
+      // Exercise: Create Purchase Order.
+      CreatePurchaseOrderWithIT(PurchaseLine,PurchaseLine."No.",LotNo);
+
+      // Verify: Verify Expiration Date on Reservation Entry.
+      VerifyExpirationDateForItemTracking(PurchaseLine."No.",ExpirationDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler)]
+    PROCEDURE MultipleExpirDateErrorForSameLotNo@66();
+    VAR
+      PurchaseLine@1001 : Record 39;
+      LotNo@1004 : Variant;
+    BEGIN
+      // Verify error while posting Purchase Order if multiple Expiration dates for the same lot No. exist in Item Ledger Entry.
+
+      // Setup: Create and post Purchase Order having same Lot No. and update Expiration Date on Item Ledger Entry.
+      Initialize;
+      LotNo := SetupForMultipleExpirDateOnILE(PurchaseLine);
+      CreatePurchaseOrderWithIT(PurchaseLine,PurchaseLine."No.",LotNo);
+
+      // Exercise.
+      ASSERTERROR PostPurchaseOrder(PurchaseLine);
+
+      // Verify: Verify error while posting Purchase Order
+      Assert.ExpectedError(STRSUBSTNO(MultipleExpirDateError,LotNo));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE RecalculateQtyOnItemTrackingLinesPage@57();
+    VAR
+      Item@1001 : Record 27;
+      PurchaseLine@1000 : Record 39;
+      SalesLine@1003 : Record 37;
+      SummaryOption@1007 : 'SetQuantity,VerifyQuantity,VerifyExpirationDate,AssignQty,SelectEntries,ReSelectEntries';
+    BEGIN
+      // Recalculate Quantity on Item Tracking Lines Page.
+
+      // Setup: Create and Post Purchase order with Lot No.
+      Initialize;
+      CreateTrackedItem(
+        Item,LibraryUtility.GetGlobalNoSeriesCode,LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(TRUE,FALSE));
+      CreateAndPostPurchaseOrderWithIT(PurchaseLine,Item."No.",TrackingOption::AssignLotNo2);
+      CreateSalesDocument(
+        SalesLine,SalesLine."Document Type"::Order,Item."No.",'',(PurchaseLine.Quantity - LibraryRandom.RandInt(10)));  // Random Sales Quantity less than Purchase Quantity for test case.
+      EnqueueQuantityForReselectEntries(
+        TrackingOption::ReSelectEntries,SummaryOption::SelectEntries,SummaryOption::ReSelectEntries,
+        PurchaseLine.Quantity - SalesLine.Quantity,0,SalesLine.Quantity);
+
+      // Exercise: Open Item Tracking Lines Page.
+      SalesLine.OpenItemTrackingLines;
+
+      // Verify: Verify Enqueue Quantity values on Item Tracking Summary Page Handler.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE RecalculateQtyOnITLinesPageWithMoreQtythanPurchase@86();
+    VAR
+      Item@1006 : Record 27;
+      PurchaseLine@1005 : Record 39;
+      SalesLine@1004 : Record 37;
+      QuantityBase@1007 : Decimal;
+      SummaryOption@1009 : 'SetQuantity,VerifyQuantity,VerifyExpirationDate,AssignQty,SelectEntries,ReSelectEntries';
+    BEGIN
+      // Recalculate Quantity on Sales Order Item Tracking Lines Page With More Quantity than Purchase Quantity.
+
+      // Setup: Create and Post Purchase order with Lot No,Create Sales order,Assign Lot.
+      Initialize;
+      CreateTrackedItem(
+        Item,LibraryUtility.GetGlobalNoSeriesCode,LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(TRUE,FALSE));
+      CreateAndPostPurchaseOrderWithIT(PurchaseLine,Item."No.",TrackingOption::AssignLotNo2);
+      CreateSalesDocument(SalesLine,SalesLine."Document Type"::Order,Item."No.",'',(PurchaseLine.Quantity - 1));  // Sales Quantity less than Purchase Quantity for test case.
+      QuantityBase := LibraryRandom.RandInt(10) + PurchaseLine.Quantity;  // Take Random Quantity Greater than Purchase Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignMoreThanPurchasedQty);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(SummaryOption::SelectEntries);  // Enqueue value for ItemTrackingSummaryPageHandler.
+      LibraryVariableStorage.Enqueue(QuantityBase);  // Enqueue Quantity Base for ItemTrackingLinesPageHandler.
+
+      // Enqueue value for ItemTrackingSummaryPageHandler.
+      LibraryVariableStorage.Enqueue(SummaryOption::ReSelectEntries);
+      LibraryVariableStorage.Enqueue(PurchaseLine.Quantity - QuantityBase);
+      LibraryVariableStorage.Enqueue(0);
+      LibraryVariableStorage.Enqueue(QuantityBase);
+
+      // Exercise: Open Item Tracking Lines Page.
+      SalesLine.OpenItemTrackingLines;
+
+      // Verify: Verify Enqueue Quantity values on Item Tracking Summary Page Handler.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE RecalculateQtyOnPartiallyAssignedITLinesPage@92();
+    VAR
+      Item@1012 : Record 27;
+      PurchaseLine@1009 : Record 39;
+      SalesLine@1008 : Record 37;
+      QuantityBase@1000 : Variant;
+      QtyBase@1001 : Decimal;
+      SummaryOption@1005 : 'SetQuantity,VerifyQuantity,VerifyExpirationDate,AssignQty,SelectEntries,ReSelectEntries';
+    BEGIN
+      // Recalculate Quantity on Partially Assigned Item Tracking Lines Page.
+
+      // Setup: Create and Post Purchase order,Create Sales Order Assign Lot.
+      Initialize;
+      CreateTrackedItem(
+        Item,LibraryUtility.GetGlobalNoSeriesCode,LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(TRUE,FALSE));
+      CreateAndPostPurchaseOrderWithIT(PurchaseLine,Item."No.",TrackingOption::AssignLotNo2);
+      CreateSalesDocument(
+        SalesLine,SalesLine."Document Type"::Order,Item."No.",'',(PurchaseLine.Quantity - LibraryRandom.RandInt(10)));  // Take Random Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignQty);  // Enqueue value for ItemTrackingLinesPageHandler.
+      SalesLine.OpenItemTrackingLines;
+      LibraryVariableStorage.Dequeue(QuantityBase);
+      QtyBase := QuantityBase;
+      EnqueueQuantityForReselectEntries(
+        TrackingOption::ReSelectEntries,SummaryOption::SelectEntries,SummaryOption::ReSelectEntries,
+        PurchaseLine.Quantity - SalesLine.Quantity,QtyBase,SalesLine.Quantity - QtyBase);
+      // Enqueue value for ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler.
+
+      // Exercise: Open Item Tracking Lines Page.
+      SalesLine.OpenItemTrackingLines;
+
+      // Verify: Verify Enqueue Quantity values on Item Tracking Summary Page Handler.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler,ConfirmHandler)]
+    PROCEDURE AssignItemTrackingNoToSupplyOrderWithDemand@96();
+    VAR
+      Item@1001 : Record 27;
+      Location@1002 : Record 14;
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1005 : Record 39;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Assign Item Tracking Number to Purchase Order With Demand.
+
+      // Setup: Create Sales order and Assign Serial Number, Create Purchase Order and Assign Serial No.
+      Initialize;
+      CreateTrackedItem(
+        Item,LibraryUtility.GetGlobalNoSeriesCode,LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(FALSE,TRUE));
+      LibraryWarehouse.CreateLocation(Location);
+      CreateSalesDocument(SalesLine,SalesLine."Document Type"::Order,Item."No.",Location.Code,LibraryRandom.RandInt(10));  // Take random for Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignSerialNo);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(AvailabilityWarning);  // Enqueue value for ConfirmHandler.
+      SalesLine.OpenItemTrackingLines;
+      CreatePurchaseOrder(PurchaseLine,Item."No.",LibraryRandom.RandInt(10));  // Take Random Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignSerialNo);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(AvailabilityWarning);  // Enqueue value for ConfirmHandler.
+      PurchaseLine.OpenItemTrackingLines;
+      PurchaseHeader.GET(PurchaseLine."Document Type"::Order,PurchaseLine."Document No.");
+
+      // Exercise: Post Purchase Order.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // Verify: Verify Purchase Receipt.
+      VerifyPurchRcpt(PurchaseHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler)]
+    PROCEDURE AssignItemTrackingNoToSupplyOrderWithoutDemand@101();
+    VAR
+      Item@1005 : Record 27;
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      // Assign Item Tracking Number to Purchase Order without Demand.
+
+      // Setup: Create Purchase order.
+      Initialize;
+      CreateTrackedItem(
+        Item,LibraryUtility.GetGlobalNoSeriesCode,LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(FALSE,TRUE));
+      CreatePurchaseOrder(PurchaseLine,Item."No.",LibraryRandom.RandIntInRange(10,20));  // Take Random Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignLotNo2);  // Enqueue value for ItemTrackingLinesPageHandler.
+
+      // Exercise: Open Item Tracking Lines Page.
+      PurchaseLine.OpenItemTrackingLines;
+
+      // Verify: Item Tracking Page run without Availability Warning Error.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler)]
+    PROCEDURE AssignSerialNoToSalesRetOrd@72();
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      // Verify Generated Assign Serial No on on Item Tracking Lines Page for Sales Return Order.
+
+      // Setup: Create Sales Return Order, assign Serial No with Item Tracking.
+      Initialize;
+      CreateSalesRetOrdWithIT(SalesLine);
+
+      // Exercise: Assign Serial Numbers to Item tracking Lines.
+      SalesLine.OpenItemTrackingLines;
+
+      // Verify: Verify Serial No Lines generated on the ItemTrackingLinesPageHandler.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreatePageHandler)]
+    PROCEDURE DeleteSalesCrMemoLnWithITLnError@79();
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      // Verify Error while deleting Sales Credit Memo Line with Item tracking lines generated with Get Return Receipt Lines.
+
+      // Setup: Create Sales Return Order, assign Serial No with Item Tracking, create Credit Memo with Get Return Receipt Lines.
+      Initialize;
+      CreateSalesRetOrdWithIT(SalesLine);
+      SalesLine.OpenItemTrackingLines;
+      PostSalesDocument(SalesLine."Document Type",SalesLine."Document No.",FALSE);
+      CreateSalesCreditMemo(SalesHeader,SalesLine."No.",SalesLine."Sell-to Customer No.");
+      FindSalesLine(SalesLine,SalesHeader."Document Type",SalesHeader."No.");
+
+      // Exercise: Delete Credit Memo Line.
+      ASSERTERROR SalesLine.DELETEALL(TRUE);
+
+      // Verify: Verify Error on deleting Sales Credit Memo Line.
+      Assert.ExpectedError(STRSUBSTNO(ExistingSalesLnITError,SalesLine."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,EnterQuantityToCreateHandlerForSetQuantityAssignLot)]
+    PROCEDURE NoSNWhseTrackingPurchOrder@83();
+    VAR
+      WarehouseReceiptLine@1005 : Record 7317;
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      Item@1001 : Record 27;
+      PurchQuantity@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Item Tracking] [Warehouse] [Purchase]
+      // [SCENARIO] Check that warehouse entries contain empty Serial No, if warehouse tracking only enabled for Lot.
+
+      // [GIVEN] Item with Lot Warehouse Tracking, Serial Purchase Inbound Tracking, but no Serial Warehouse Tracking.
+      Initialize;
+      CreateWhseLotSpecificTrackedItem(Item);
+      PurchQuantity := LibraryRandom.RandIntInRange(1,10);
+
+      // [GIVEN] Create Purchase Order, Location with receive/ship required.
+      CreatePurchOrderWithLocation(PurchaseLine,CreateLocationWithReceiveShipRequired,Item."No.",PurchQuantity);
+
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+
+      // [GIVEN] Create Warehouse Receipt from Purchase order, assign Serial and Lot Nos.
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      WITH WarehouseReceiptLine DO BEGIN
+        SETRANGE("Source Document","Source Document"::"Purchase Order");
+        SETRANGE("Source No.",PurchaseHeader."No.");
+        FINDFIRST;
+        LibraryVariableStorage.Enqueue(TrackingOption::AssignSerialNo); // Enqueue for ItemTrackingPageHandler.
+        LibraryVariableStorage.Enqueue(PurchQuantity); // Enqueue for EnterQuantityToCreateHandlerForSetQuantityAssignLot.
+        OpenItemTrackingLines;
+      END;
+
+      // [WHEN] Post Warehouse Receipt.
+      PostWarehouseReceipt(WarehouseReceiptLine."Source Document"::"Purchase Order",PurchaseHeader."No.");
+
+      // [THEN] Warehouse Entries have empty "Serial No."
+      VerifyWarehouseEntriesSN(Item."No.",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler)]
+    PROCEDURE PostItemReclassJournalWithInboundLotInfo@69();
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalLine@1002 : Record 83;
+      LotNo@1000 : Code[20];
+      NewLotNo@1001 : Code[20];
+    BEGIN
+      // [FEATURE] [Item Tracking] [Lot No. Info]
+      // [SCENARIO 380704] It should not be allowed to post item reclassification journal with a lot that does not have lot information if inbound lot info must exists in tracking code.
+      Initialize;
+
+      // [GIVEN] Assign item tracking code that must have inbound lot info to item "I".
+      CreateItemInboundLotInfoMustExist(Item);
+
+      // [GIVEN] Stock inventory with lot no. = "L1".
+      LotNo := CreateItemWarehouseInventoryWithLotInfo(ItemJournalLine,Item."No.");
+
+      // [GIVEN] Create item reclassification journal line. Set New "Lot No." = "L2". Lot "L2" does not have lot information.
+      NewLotNo := LibraryUtility.GenerateGUID + LibraryUtility.GenerateGUID;
+      CreateItemReclassificationJournalLineWithTrackingAttribute(
+        ItemJournalLine,ItemJournalLine."Item No.",ItemJournalLine."Location Code",
+        ItemJournalLine.Quantity,TrackingOption::SetNewLotNo,LotNo,NewLotNo);
+
+      // [WHEN] Post Item Reclassification Journal
+      ASSERTERROR LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+
+      // [THEN] Error 'The Lot No. Information does not exist.' occurs.
+      Assert.ExpectedError(TheLotNoInfoDoesNotExistErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler)]
+    PROCEDURE PostItemReclassJournalWithInboundSNInfo@147();
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalLine@1002 : Record 83;
+      SN@1000 : Code[20];
+      NewSN@1001 : Code[20];
+    BEGIN
+      // [FEATURE] [Item Tracking] [Serial No. Info]
+      // [SCENARIO 380704] It should not be allowed to post item reclassification journal with a serial no. that does not have serial no. information if inbound serial no. info must exists in tracking code.
+      Initialize;
+
+      // [GIVEN] Assign item tracking code that must have inbound serial no. info to item "I".
+      CreateItemInboundSNInfoMustExist(Item);
+
+      // [GIVEN] Stock inventory with serial no. = "S1".
+      SN := CreateItemWarehouseInventoryWithSNInfo(ItemJournalLine,Item."No.");
+
+      // [GIVEN] Create item reclassification journal line. Set New "Serial No." = "S2". Serial No. "S2" does not have serial no. information.
+      NewSN := LibraryUtility.GenerateGUID + LibraryUtility.GenerateGUID;
+      CreateItemReclassificationJournalLineWithTrackingAttribute(
+        ItemJournalLine,ItemJournalLine."Item No.",ItemJournalLine."Location Code",
+        ItemJournalLine.Quantity,TrackingOption::SetNewSN,SN,NewSN);
+
+      // [WHEN] Post Item Reclassification Journal
+      ASSERTERROR LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+
+      // [THEN] Error 'The Serial No. Information does not exist.' occurs.
+      Assert.ExpectedError(TheSerialNoInfoDoesNotExistErr);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      InventorySetup@1000 : Record 313;
+      LibraryERMCountryData@1002 : Codeunit 131305;
+    BEGIN
+      // Clear Global variables.
+      LibraryVariableStorage.Clear;
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryInventory.NoSeriesSetup(InventorySetup);
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE AssignSerialNoOnPurchaseOrder@56(VAR PurchaseHeader@1000 : Record 38;PurchaseLine@1002 : Record 39);
+    BEGIN
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignSerialNo);  // Enqueue value for ItemTrackingLinesPageHandler.
+      PurchaseLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE AssignSerialNoAndReceivePurchaseOrder@65(VAR PurchaseHeader@1000 : Record 38;PurchaseLine@1002 : Record 39);
+    BEGIN
+      AssignSerialNoOnPurchaseOrder(PurchaseHeader,PurchaseLine);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);  // Post Purchase Receipt.
+      UpdatePurchaseLine(PurchaseLine);  // Update Quatity-to Invoice with partial Quantity.
+    END;
+
+    LOCAL PROCEDURE AssignTrackingAndReserveOnSalesLine@34(SalesLine@1002 : Record 37;SummaryOption@1000 : Option;Quantity@1001 : Decimal);
+    BEGIN
+      SalesLine.OpenItemTrackingLines;
+      LibraryVariableStorage.Enqueue(SerialLotConfirmMessage);  // Enqueue value for ConfirmHandler.
+      SalesLine.ShowReservation;
+      LibraryVariableStorage.Enqueue(TrackingOption::SelectEntries);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(SummaryOption);  // Enqueue value for ItemTrackingSummaryPageHandler.
+      LibraryVariableStorage.Enqueue(Quantity);
+      SalesLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE CalcRegenPlanAndCarryOutActionMsg@44(Item@1000 : Record 27;LocationCode@1001 : Code[10];VendorNo@1003 : Code[20]);
+    VAR
+      RequisitionLine@1002 : Record 246;
+    BEGIN
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<CY>',WORKDATE));  // Dates based on WORKDATE.
+      FindAndUpdateRequisitionLine(RequisitionLine,Item."No.",LocationCode,VendorNo);
+      LibraryPlanning.CarryOutActionMsgPlanWksh(RequisitionLine);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateItem@76(SerialSpecific@1002 : Boolean;LotSpecific@1003 : Boolean) : Code[20];
+    VAR
+      Item@1000 : Record 27;
+      ExpirationDate@1001 : DateFormula;
+    BEGIN
+      CreateTrackedItem(
+        Item,LibraryUtility.GetGlobalNoSeriesCode,LibraryUtility.GetGlobalNoSeriesCode,
+        CreateItemTrackingCode(LotSpecific,SerialSpecific));
+      EVALUATE(ExpirationDate,'<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>');
+      Item.VALIDATE("Expiration Calculation",ExpirationDate);
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLineWithIT@70(VAR ItemJournalLine@1000 : Record 83);
+    VAR
+      Item@1003 : Record 27;
+      Bin@1002 : Record 7354;
+      LotNo@1004 : Variant;
+    BEGIN
+      CreateTrackedItem(Item,LibraryUtility.GetGlobalNoSeriesCode,'',CreateItemTrackingCode(TRUE,FALSE));
+      CreateLocationWithBin(Bin);
+      CreateItemJournalLine(ItemJournalLine,Item."No.",Bin."Location Code",Bin.Code,LibraryRandom.RandInt(10));  // Take random Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignLotNo);  // Enqueue value for ItemTrackingLinesPageHandler.
+      ItemJournalLine.OpenItemTrackingLines(FALSE);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+      LibraryVariableStorage.Dequeue(LotNo);
+    END;
+
+    LOCAL PROCEDURE CreateItemWarehouseInventoryWithLotInfo@91(VAR ItemJournalLine@1000 : Record 83;ItemNo@1001 : Code[20]) LotNo : Code[20];
+    BEGIN
+      LotNo := CreateLotNoInformation(ItemNo);
+      CreateItemWarehouseInventoryWithTrackingAttribute(ItemJournalLine,ItemNo,TrackingOption::EditValue,LotNo);
+    END;
+
+    LOCAL PROCEDURE CreateItemWarehouseInventoryWithSNInfo@148(VAR ItemJournalLine@1000 : Record 83;ItemNo@1001 : Code[20]) SN : Code[20];
+    BEGIN
+      SN := CreateSNInformation(ItemNo);
+      CreateItemWarehouseInventoryWithTrackingAttribute(ItemJournalLine,ItemNo,TrackingOption::EditSNValue,SN);
+    END;
+
+    LOCAL PROCEDURE CreateItemWarehouseInventoryWithTrackingAttribute@135(VAR ItemJournalLine@1000 : Record 83;ItemNo@1001 : Code[20];TrackingOptionPar@1004 : Option;AttributeValue@1003 : Code[20]);
+    VAR
+      Location@1002 : Record 14;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      CreateItemJournalLine(ItemJournalLine,ItemNo,Location.Code,'',LibraryRandom.RandInt(10));  // Take random Quantity.
+      SetItemJournalLineTrackingAttribute(ItemJournalLine,TrackingOptionPar,AttributeValue);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrderWithIT@61(VAR PurchaseLine@1000 : Record 39;ItemNo@1001 : Code[20];TrackOption@1002 : Option);
+    BEGIN
+      CreatePurchaseOrder(PurchaseLine,ItemNo,LibraryRandom.RandInt(10) + 20);  // Quantity shoulb be always more thant 20 required for Test.
+      LibraryVariableStorage.Enqueue(TrackOption);  // Enqueue value for ItemTrackingLinesPageHandler.
+      PurchaseLine.OpenItemTrackingLines;
+      PostPurchaseOrder(PurchaseLine);
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@38() : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateSalesCreditMemo@102(VAR SalesHeader@1000 : Record 36;No@1003 : Code[20];SellToCustomerNo@1004 : Code[20]);
+    VAR
+      ReturnReceiptLine@1002 : Record 6661;
+      SalesGetReturnReceipts@1001 : Codeunit 6638;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Credit Memo",SellToCustomerNo);
+      SalesGetReturnReceipts.SetSalesHeader(SalesHeader);
+      ReturnReceiptLine.SETRANGE("Sell-to Customer No.",SalesHeader."Sell-to Customer No.");
+      ReturnReceiptLine.SETRANGE("No.",No);
+      ReturnReceiptLine.FINDFIRST;
+      SalesGetReturnReceipts.CreateInvLines(ReturnReceiptLine);
+    END;
+
+    LOCAL PROCEDURE CreateInventoryPickOnSalesLine@11(VAR SalesLine@1000 : Record 37) : Code[20];
+    VAR
+      SalesHeader@1003 : Record 36;
+      WarehouseActivityLine@1001 : Record 5767;
+      WarehouseActivityHeader@1002 : Record 5766;
+    BEGIN
+      SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+      LibraryVariableStorage.Enqueue(PickCreated);
+      LibraryWarehouse.CreateInvtPutPickMovement(SalesHeader."Document Type",SalesHeader."No.",FALSE,TRUE,FALSE);
+      FindWarehouseActivityLine(
+        WarehouseActivityLine,SalesHeader."No.",WarehouseActivityLine."Activity Type"::"Invt. Pick",SalesLine."Location Code",
+        WarehouseActivityLine."Action Type"::Take);
+      WarehouseActivityHeader.SETRANGE("No.",WarehouseActivityLine."No.");
+      WarehouseActivityLine.VALIDATE("Qty. to Handle",WarehouseActivityLine.Quantity);
+      WarehouseActivityLine.MODIFY(TRUE);
+      WarehouseActivityHeader.FINDFIRST;
+      EXIT(WarehouseActivityHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemReclassificationJournal@80(VAR ItemJournalLine@1000 : Record 83;ItemNo@1003 : Code[20];LocationCode@1001 : Code[10];BinCode@1002 : Code[20];Quantity@1007 : Decimal);
+    VAR
+      ItemJournalBatch@1004 : Record 233;
+      SummaryOption@1005 : 'SetQuantity,VerifyQuantity';
+    BEGIN
+      SelectAndClearItemJournalBatch(ItemJournalBatch,ItemJournalBatch."Template Type"::Transfer);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,ItemJournalLine."Entry Type"::Transfer,ItemNo,
+        Quantity);
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.VALIDATE("Bin Code",BinCode);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryVariableStorage.Enqueue(TrackingOption::SelectEntries);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(SummaryOption::SetQuantity);
+      LibraryVariableStorage.Enqueue(ItemJournalLine.Quantity);
+      ItemJournalLine.OpenItemTrackingLines(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemReclassificationJournalLine@110(VAR ItemJournalLine@1000 : Record 83;ItemNo@1003 : Code[20];LocationCode@1001 : Code[10];Quantity@1007 : Decimal);
+    VAR
+      ItemJournalBatch@1004 : Record 233;
+    BEGIN
+      SelectAndClearItemJournalBatch(ItemJournalBatch,ItemJournalBatch."Template Type"::Transfer);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,ItemJournalLine."Entry Type"::Transfer,
+        ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemReclassificationJournalLineWithTrackingAttribute@124(VAR ItemJournalLine@1000 : Record 83;ItemNo@1003 : Code[20];LocationCode@1001 : Code[10];Quantity@1007 : Decimal;TrackingOptionPar@1005 : Option;OldAttributeValue@1004 : Code[20];NewAttributeValue@1002 : Code[20]);
+    BEGIN
+      CreateItemReclassificationJournalLine(ItemJournalLine,ItemNo,LocationCode,Quantity);
+      SetItemJournalLineNewTrackingAttribute(ItemJournalLine,TrackingOptionPar,OldAttributeValue,NewAttributeValue);
+    END;
+
+    LOCAL PROCEDURE SetItemJournalLineNewTrackingAttribute@98(VAR ItemJournalLine@1000 : Record 83;TrackingOptionPar@1001 : Option;OldAttributeValue@1002 : Code[20];NewAttributeValue@1003 : Code[20]);
+    BEGIN
+      LibraryVariableStorage.Enqueue(TrackingOptionPar);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(OldAttributeValue);
+      LibraryVariableStorage.Enqueue(NewAttributeValue);
+      ItemJournalLine.OpenItemTrackingLines(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetItemJournalLineTrackingAttribute@129(VAR ItemJournalLine@1000 : Record 83;TrackingOptionPar@1001 : Option;AttributeValue@1002 : Code[20]);
+    BEGIN
+      LibraryVariableStorage.Enqueue(TrackingOptionPar);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(AttributeValue);
+      ItemJournalLine.OpenItemTrackingLines(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateTrackedItem@5(VAR Item@1000 : Record 27;LotNos@1003 : Code[10];SerialNos@1004 : Code[10];ItemTrackingCode@1001 : Code[10]);
+    BEGIN
+      LibraryInventory.CreateTrackedItem(Item,LotNos,SerialNos,ItemTrackingCode);
+      Item.VALIDATE("Reordering Policy",Item."Reordering Policy"::Order);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalLine@7(VAR ItemJournalLine@1003 : Record 83;ItemNo@1002 : Code[20];LocationCode@1000 : Code[10];BinCode@1004 : Code[20];Quantity@1005 : Decimal);
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+    BEGIN
+      SelectAndClearItemJournalBatch(ItemJournalBatch,ItemJournalBatch."Template Type"::Item);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.VALIDATE("Bin Code",BinCode);
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingCode@17(LOTSpecific@1003 : Boolean;SNSpecific@1004 : Boolean) : Code[10];
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,SNSpecific,LOTSpecific);
+      EXIT(ItemTrackingCode.Code);
+    END;
+
+    LOCAL PROCEDURE CreateItemInboundLotInfoMustExist@144(VAR Item@1001 : Record 27);
+    BEGIN
+      CreateTrackedItem(
+        Item,'',LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCodeInboundInfoMustExist(TRUE,FALSE,TRUE,FALSE));
+    END;
+
+    LOCAL PROCEDURE CreateItemInboundSNInfoMustExist@145(VAR Item@1001 : Record 27);
+    BEGIN
+      CreateTrackedItem(
+        Item,'',LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCodeInboundInfoMustExist(FALSE,TRUE,FALSE,TRUE));
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingCodeInboundInfoMustExist@84(LotSpecific@1003 : Boolean;SNSpecific@1004 : Boolean;InboundLotNoInfoMustExist@1002 : Boolean;InboundSNInfoMustExist@1001 : Boolean) : Code[10];
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+    BEGIN
+      LibraryInventory.CreateItemTrackingCode(ItemTrackingCode);
+      WITH ItemTrackingCode DO BEGIN
+        VALIDATE("Lot Specific Tracking",LotSpecific);
+        VALIDATE("SN Specific Tracking",SNSpecific);
+        VALIDATE("Lot Info. Inbound Must Exist",InboundLotNoInfoMustExist);
+        VALIDATE("SN Info. Inbound Must Exist",InboundSNInfoMustExist);
+        MODIFY(TRUE);
+        EXIT(Code);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateLotNoInformation@103(ItemNo@1001 : Code[20]) : Code[20];
+    VAR
+      LotNoInformation@1000 : Record 6505;
+    BEGIN
+      LibraryInventory.CreateLotNoInformation(
+        LotNoInformation,ItemNo,'',
+        LibraryUtility.GenerateRandomCode(LotNoInformation.FIELDNO("Lot No."),DATABASE::"Lot No. Information"));
+      EXIT(LotNoInformation."Lot No.");
+    END;
+
+    LOCAL PROCEDURE CreateSNInformation@149(ItemNo@1001 : Code[20]) : Code[20];
+    VAR
+      SerialNoInformation@1000 : Record 6504;
+    BEGIN
+      LibraryInventory.CreateSerialNoInformation(
+        SerialNoInformation,ItemNo,'',
+        LibraryUtility.GenerateRandomCode(SerialNoInformation.FIELDNO("Serial No."),DATABASE::"Serial No. Information"));
+      EXIT(SerialNoInformation."Serial No.");
+    END;
+
+    LOCAL PROCEDURE CreateLocationWithBin@12(VAR Bin@1000 : Record 7354);
+    VAR
+      Location@1001 : Record 14;
+      WarehouseEmployee@1002 : Record 7301;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Location.VALIDATE("Bin Mandatory",TRUE);
+      Location.VALIDATE("Require Pick",TRUE);
+      Location.MODIFY(TRUE);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,FALSE);
+      LibraryWarehouse.CreateBin(
+        Bin,Location.Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(Bin.FIELDNO(Code),DATABASE::Bin),1,
+          LibraryUtility.GetFieldLength(DATABASE::Bin,Bin.FIELDNO(Code))),'','');
+    END;
+
+    LOCAL PROCEDURE CreateLocationWithReceiveShipRequired@89() : Code[10];
+    VAR
+      Location@1001 : Record 14;
+      Bin@1000 : Record 7354;
+      WarehouseEmployee@1002 : Record 7301;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      WITH Location DO BEGIN
+        VALIDATE("Bin Mandatory",TRUE);
+        VALIDATE("Require Receive",TRUE);
+        VALIDATE("Require Shipment",TRUE);
+        LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Code,FALSE);
+        LibraryWarehouse.CreateBin(
+          Bin,Code,COPYSTR(
+            LibraryUtility.GenerateRandomCode(Bin.FIELDNO(Code),DATABASE::Bin),1,
+            LibraryUtility.GetFieldLength(DATABASE::Bin,Bin.FIELDNO(Code))),'','');
+        VALIDATE("Receipt Bin Code",Bin.Code);
+        LibraryWarehouse.CreateBin(
+          Bin,Code,COPYSTR(
+            LibraryUtility.GenerateRandomCode(Bin.FIELDNO(Code),DATABASE::Bin),1,
+            LibraryUtility.GetFieldLength(DATABASE::Bin,Bin.FIELDNO(Code))),'','');
+        VALIDATE("Shipment Bin Code",Bin.Code);
+        MODIFY(TRUE);
+        EXIT(Code);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateWhseLotSpecificTrackedItem@94(VAR Item@1000 : Record 27);
+    VAR
+      ItemTrackingCode@1001 : Record 6502;
+    BEGIN
+      WITH ItemTrackingCode DO BEGIN
+        GET(CreateItemTrackingCode(TRUE,FALSE));
+        VALIDATE("Lot Warehouse Tracking",TRUE);
+        VALIDATE("SN Purchase Inbound Tracking",TRUE);
+        MODIFY(TRUE);
+        CreateTrackedItem(Item,LibraryUtility.GetGlobalNoSeriesCode,LibraryUtility.GetGlobalNoSeriesCode,Code);
+      END;
+      EVALUATE(Item."Expiration Calculation",'<1Y>');
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderWithLocation@26(VAR PurchaseLine@1000 : Record 39;LocationCode@1001 : Code[10];BinCode@1002 : Code[20]);
+    BEGIN
+      CreatePurchaseOrder(PurchaseLine,CreateAndUpdateItem(TRUE,FALSE),2 * LibraryRandom.RandInt(10));  // Take random Quantity.
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.VALIDATE("Bin Code",BinCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderWithIT@95(VAR PurchaseLine@1000 : Record 39;ItemNo@1001 : Code[20];LotNo@1002 : Code[20]);
+    BEGIN
+      CreatePurchaseOrder(PurchaseLine,ItemNo,PurchaseLine.Quantity);  // Take random Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::EditValue);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(LotNo);
+      PurchaseLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE CreateSalesRetOrdWithIT@87(VAR SalesLine@1001 : Record 37);
+    VAR
+      Item@1000 : Record 27;
+      Location@1002 : Record 14;
+    BEGIN
+      CreateTrackedItem(Item,'',LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(FALSE,TRUE));  // Blank value for Lot No.
+      CreateSalesDocument(
+        SalesLine,SalesLine."Document Type"::"Return Order",Item."No.",
+        LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location),
+        LibraryRandom.RandInt(10));  // Random value for Quantity.
+      LibraryVariableStorage.Enqueue(TrackingOption::AssignSerialNo);  // Enqueue value for ItemTrackingLinesPageHandler.
+    END;
+
+    LOCAL PROCEDURE CreateWhseShptAndRegisterPick@74(PurchaseLine@1000 : Record 39);
+    VAR
+      SalesLine@1003 : Record 37;
+      WarehouseActivityHeader@1002 : Record 5766;
+      WarehouseShipmentHeader@1001 : Record 7320;
+    BEGIN
+      CreateSalesOrderWithIT(SalesLine,PurchaseLine."No.",PurchaseLine."Location Code",PurchaseLine.Quantity / 2,1);  // Taking 1 for Quantity as Item Tracking code is Serial Specific.
+      CreateWarehouseShipment(SalesLine."Document No.");
+      WarehouseShipmentHeader.SETRANGE("Location Code",PurchaseLine."Location Code");
+      WarehouseShipmentHeader.FINDFIRST;
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(SalesLine."Document No.",WarehouseActivityHeader.Type::Pick,PurchaseLine."Location Code");
+    END;
+
+    LOCAL PROCEDURE CreateSetupforSalesOrder@49(VAR SalesLine@1002 : Record 37;LOTSpecific@1005 : Boolean;SNSpecific@1004 : Boolean);
+    VAR
+      Location@1000 : Record 14;
+      Item@1007 : Record 27;
+    BEGIN
+      CreateTrackedItem(
+        Item,LibraryUtility.GetGlobalNoSeriesCode,LibraryUtility.GetGlobalNoSeriesCode,CreateItemTrackingCode(LOTSpecific,SNSpecific));
+      LibraryWarehouse.CreateLocation(Location);
+      CreateSalesDocument(SalesLine,SalesLine."Document Type"::Order,Item."No.",Location.Code,LibraryRandom.RandInt(10));  // Take random for Quantity.
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocument@37(VAR SalesLine@1001 : Record 37;DocumentType@1000 : Option;No@1004 : Code[20];LocationCode@1007 : Code[10];Quantity@1002 : Decimal);
+    VAR
+      SalesHeader@1006 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,CreateCustomer);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,No,Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithIT@27(VAR SalesLine@1003 : Record 37;No@1002 : Code[20];LocationCode@1001 : Code[10];Quantity@1000 : Decimal;SetQuantity@1006 : Decimal);
+    VAR
+      SummaryOption@1004 : 'SetQuantity,VerifyQuantity,VerifyExpirationDate';
+    BEGIN
+      CreateSalesDocument(SalesLine,SalesLine."Document Type"::Order,No,LocationCode,Quantity);
+      LibraryVariableStorage.Enqueue(TrackingOption::SelectEntries);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(SummaryOption::SetQuantity);  // Enqueue value for ItemTrackingSummaryPageHandler.
+      LibraryVariableStorage.Enqueue(SetQuantity);
+      SalesLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@33(VAR PurchaseLine@1001 : Record 39;ItemNo@1000 : Code[20];Quantity@1004 : Decimal);
+    VAR
+      GLAccount@1021 : Record 15;
+      PurchaseHeader@1003 : Record 38;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      LibraryERM.FindGLAccount(GLAccount);
+      UpdateGeneralLedgerSetup(PurchaseLine."Gen. Bus. Posting Group",PurchaseLine."Gen. Prod. Posting Group",GLAccount."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchOrderWithLocation@118(VAR PurchaseLine@1001 : Record 39;LocationCode@1006 : Code[10];ItemNo@1000 : Code[20];Quantity@1004 : Decimal);
+    VAR
+      PurchaseHeader@1003 : Record 38;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      PurchaseHeader.VALIDATE("Location Code",LocationCode);
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseShipment@48(DocumentNo@1002 : Code[20]);
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      SalesHeader.GET(SalesHeader."Document Type"::Order,DocumentNo);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE DeleteItemTrackingLines@30(SalesLine@1004 : Record 37);
+    VAR
+      RequisitionLine@1002 : Record 246;
+    BEGIN
+      FindRequisitionLine(RequisitionLine,SalesLine."No.",SalesLine."Location Code");
+      LibraryVariableStorage.Enqueue(TrackingOption::EditValue); // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(''); // Enqueue value for ItemTrackingLinesPageHandler.
+      RequisitionLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE EnqueueQuantityForReselectEntries@68(TrackingOptionPar@1000 : Option;SummaryOption@1001 : Option;SummaryOption2@1002 : Option;TotalAvailableQuantity@1003 : Decimal;TotalRequestedQuantity@1004 : Decimal;CurrentPendingQuantity@1005 : Decimal);
+    BEGIN
+      // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(TrackingOptionPar);
+      LibraryVariableStorage.Enqueue(SummaryOption);
+      LibraryVariableStorage.Enqueue(SummaryOption2);
+      LibraryVariableStorage.Enqueue(TotalAvailableQuantity);
+      LibraryVariableStorage.Enqueue(TotalRequestedQuantity);
+      LibraryVariableStorage.Enqueue(CurrentPendingQuantity);
+    END;
+
+    LOCAL PROCEDURE FindItemLedgerEntry@31(VAR ItemLedgerEntry@1000 : Record 32;ItemNo@1001 : Code[20]);
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindAndUpdateRequisitionLine@60(VAR RequisitionLine@1000 : Record 246;No@1001 : Code[20];LocationCode@1002 : Code[10];VendorNo@1003 : Code[20]);
+    BEGIN
+      FindRequisitionLine(RequisitionLine,No,LocationCode);
+      RequisitionLine.VALIDATE("Accept Action Message",TRUE);
+      RequisitionLine.VALIDATE("Vendor No.",VendorNo);
+      RequisitionLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE FindReservationEntry@2(VAR ReservationEntry@1002 : Record 337;LocationCode@1000 : Code[10];ItemNo@1001 : Code[20]);
+    BEGIN
+      ReservationEntry.SETRANGE("Location Code",LocationCode);
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindReservationEntryForSerialNo@75(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10];SerialNo@1002 : Code[20]);
+    VAR
+      ReservationEntry@1003 : Record 337;
+    BEGIN
+      FindReservationEntry(ReservationEntry,LocationCode,ItemNo);
+      ReservationEntry.SETRANGE("Serial No.",SerialNo);
+      ReservationEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindRequisitionLine@45(VAR RequisitionLine@1000 : Record 246;No@1001 : Code[20];LocationCode@1002 : Code[10]);
+    BEGIN
+      RequisitionLine.SETRANGE(Type,RequisitionLine.Type::Item);
+      RequisitionLine.SETRANGE("No.",No);
+      RequisitionLine.SETRANGE("Location Code",LocationCode);
+      RequisitionLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindSalesLine@108(VAR SalesLine@1000 : Record 37;DocumentType@1001 : Option;DocumentNo@1002 : Code[20]);
+    BEGIN
+      SalesLine.SETRANGE("Document Type",DocumentType);
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseActivityLine@40(VAR WarehouseActivityLine@1000 : Record 5767;SourceNo@1002 : Code[20];ActivityType@1003 : Option;LocationCode@1005 : Code[10];ActionType@1001 : Option);
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Source No.",SourceNo);
+      WarehouseActivityLine.SETRANGE("Location Code",LocationCode);
+      WarehouseActivityLine.SETRANGE("Activity Type",ActivityType);
+      WarehouseActivityLine.SETRANGE("Action Type",ActionType);
+      WarehouseActivityLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseReceiptNo@59(SourceDocument@1002 : Option;SourceNo@1003 : Code[20]) : Code[20];
+    VAR
+      WarehouseReceiptLine@1004 : Record 7317;
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("Source Document",SourceDocument);
+      WarehouseReceiptLine.SETRANGE("Source No.",SourceNo);
+      WarehouseReceiptLine.FINDFIRST;
+      EXIT(WarehouseReceiptLine."No.");
+    END;
+
+    LOCAL PROCEDURE SetupSalesAndPurchEntryWithIT@18(VAR SalesLine@1001 : Record 37;Quantity@1007 : Integer);
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      SummaryOption@1000 : 'SetQuantity,VerifyQuantity,VerifyExpirationDate';
+    BEGIN
+      // Create Item, update Expiration calculation on Item, create and post Purchase Order, create Sales Order.
+      CreatePurchaseOrder(PurchaseLine,CreateAndUpdateItem(TRUE,FALSE),Quantity);
+      AssignSerialNoAndReceivePurchaseOrder(PurchaseHeader,PurchaseLine);
+      CreateSalesDocument(SalesLine,SalesLine."Document Type"::Order,PurchaseLine."No.",'',Quantity);
+      LibraryVariableStorage.Enqueue(TrackingOption::SelectEntries);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(SummaryOption::SetQuantity);  // Enqueue value for ItemTrackingSummaryPageHandler.
+    END;
+
+    LOCAL PROCEDURE PostPurchaseOrderWithLocation@54(VAR PurchaseLine@1000 : Record 39);
+    VAR
+      Bin@1001 : Record 7354;
+      PurchaseHeader@1003 : Record 38;
+    BEGIN
+      CreateLocationWithBin(Bin);
+      CreatePurchaseOrderWithLocation(PurchaseLine,Bin."Location Code",Bin.Code);
+      AssignSerialNoAndReceivePurchaseOrder(PurchaseHeader,PurchaseLine);
+    END;
+
+    LOCAL PROCEDURE PostPurchaseOrder@105(PurchaseLine@1000 : Record 39);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+    BEGIN
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE PostSalesDocument@81(DocumentType@1001 : Option;DocumentNo@1000 : Code[20];Invoice@1003 : Boolean) : Code[20];
+    VAR
+      SalesHeader@1004 : Record 36;
+    BEGIN
+      SalesHeader.GET(DocumentType,DocumentNo);
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,Invoice));
+    END;
+
+    LOCAL PROCEDURE PostWhseRcptAndRegisterPutAway@28(VAR PurchaseLine@1007 : Record 39);
+    VAR
+      Location@1006 : Record 14;
+      WarehouseEmployee@1005 : Record 7301;
+      PurchaseHeader@1004 : Record 38;
+      WarehouseReceiptLine@1003 : Record 7317;
+      WarehouseActivityHeader@1001 : Record 5766;
+    BEGIN
+      LibraryWarehouse.CreateFullWMSLocation(Location,1);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,FALSE);
+
+      // Create Purchase Order with Item Tracking.
+      CreatePurchaseOrderWithLocation(PurchaseLine,Location.Code,'');
+      AssignSerialNoOnPurchaseOrder(PurchaseHeader,PurchaseLine);
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+
+      // Create Warehouse Receipt from Purchase Order and Register.
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      PostWarehouseReceipt(WarehouseReceiptLine."Source Document"::"Purchase Order",PurchaseHeader."No.");
+      RegisterWarehouseActivity(PurchaseLine."Document No.",WarehouseActivityHeader.Type::"Put-away",PurchaseLine."Location Code");
+    END;
+
+    LOCAL PROCEDURE PostWarehouseReceipt@14(SourceDocument@1000 : Option;SourceNo@1001 : Code[20]);
+    VAR
+      WarehouseReceiptHeader@1002 : Record 7316;
+    BEGIN
+      WarehouseReceiptHeader.GET(FindWarehouseReceiptNo(SourceDocument,SourceNo));
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+    END;
+
+    LOCAL PROCEDURE RegisterWarehouseActivity@51(SourceNo@1002 : Code[20];ActivityType@1000 : Option;LocationCode@1001 : Code[10]);
+    VAR
+      WarehouseActivityHeader@1003 : Record 5766;
+      WarehouseActivityLine@1004 : Record 5767;
+    BEGIN
+      FindWarehouseActivityLine(WarehouseActivityLine,SourceNo,ActivityType,LocationCode,WarehouseActivityLine."Action Type"::Place);
+      WarehouseActivityHeader.SETRANGE("No.",WarehouseActivityLine."No.");
+      WarehouseActivityHeader.FINDFIRST;
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+    END;
+
+    LOCAL PROCEDURE SelectAndClearItemJournalBatch@21(VAR ItemJournalBatch@1001 : Record 233;TemplateType@1002 : Option);
+    VAR
+      ItemJournalTemplate@1000 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,TemplateType);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,TemplateType,ItemJournalTemplate.Name);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE SetupForMultipleExpirDateOnILE@82(VAR PurchaseLine@1000 : Record 39) : Code[20];
+    VAR
+      Item@1005 : Record 27;
+      LotNo@1002 : Variant;
+    BEGIN
+      // Create and post Purchase Order having same Lot No. and update Expiration Date on Item Ledger Entry.
+      CreateAndPostPurchaseOrderWithIT(PurchaseLine,CreateAndUpdateItem(FALSE,TRUE),TrackingOption::AssignLotNo);
+      LibraryVariableStorage.Dequeue(LotNo);
+      Item.GET(PurchaseLine."No.");
+      CreatePurchaseOrderWithIT(PurchaseLine,PurchaseLine."No.",LotNo);
+      PostPurchaseOrder(PurchaseLine);
+      UpdateExpirDateOnILE(PurchaseLine."No.");
+      EXIT(LotNo);
+    END;
+
+    LOCAL PROCEDURE UpdateExpirDateOnILE@90(ItemNo@1000 : Code[20]) : Date;
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+      Item@1002 : Record 27;
+      ExpirationDate@1003 : Date;
+    BEGIN
+      Item.GET(ItemNo);
+      ExpirationDate := CALCDATE(Item."Expiration Calculation",WORKDATE);
+      FindItemLedgerEntry(ItemLedgerEntry,ItemNo);
+      ItemLedgerEntry.VALIDATE("Expiration Date",CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',ExpirationDate));
+      ItemLedgerEntry.MODIFY(TRUE);
+      EXIT(ItemLedgerEntry."Expiration Date");
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseLine@58(VAR PurchaseLine@1000 : Record 39);
+    BEGIN
+      PurchaseLine.GET(PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.");
+      PurchaseLine.VALIDATE("Qty. to Invoice",PurchaseLine.Quantity / 2);  // Take partial Quantity.
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseLineAndAssignIT@36(VAR PurchaseLine@1000 : Record 39;FieldNo@1001 : Integer;Value@1002 : Variant;TrackingOptionPar@1005 : Option;Quantity@1006 : Decimal);
+    VAR
+      RecRef@1003 : RecordRef;
+      FieldRef@1004 : FieldRef;
+    BEGIN
+      // Update Purchase Line based on Field and its corresponding value.
+      RecRef.GETTABLE(PurchaseLine);
+      FieldRef := RecRef.FIELD(FieldNo);
+      FieldRef.VALIDATE(Value);
+      RecRef.SETTABLE(PurchaseLine);
+      PurchaseLine.MODIFY(TRUE);
+      LibraryVariableStorage.Enqueue(TrackingOptionPar);  // Enqueue value for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(Quantity);
+      PurchaseLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE UpdateGeneralLedgerSetup@13(GenBusPostingGroup@1000 : Code[10];GenProdPostingGroup@1022 : Code[10];AccountNo@1001 : Code[20]);
+    VAR
+      GeneralPostingSetup@1002 : Record 252;
+    BEGIN
+      GeneralPostingSetup.GET(GenBusPostingGroup,GenProdPostingGroup);
+      GeneralPostingSetup.VALIDATE("Sales Account",AccountNo);
+      GeneralPostingSetup.VALIDATE("Purch. Account",AccountNo);
+      GeneralPostingSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyExpirationDateOnItemLedgerEntry@24(ItemNo@1001 : Code[20];ExpirationDate@1002 : Date);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      FindItemLedgerEntry(ItemLedgerEntry,ItemNo);
+      ItemLedgerEntry.TESTFIELD("Expiration Date",ExpirationDate);
+    END;
+
+    LOCAL PROCEDURE VerifyExpirationDateForItemTracking@64(ItemNo@1001 : Code[20];ExpirationDate@1002 : Date);
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.FINDFIRST;
+      ReservationEntry.TESTFIELD("Expiration Date",ExpirationDate);
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseEntry@35(ItemJournalLine@1001 : Record 83);
+    VAR
+      WarehouseEntry@1000 : Record 7312;
+    BEGIN
+      WarehouseEntry.SETRANGE("Item No.",ItemJournalLine."Item No.");
+      WarehouseEntry.SETRANGE("Entry Type",WarehouseEntry."Entry Type"::Movement);
+      WarehouseEntry.FINDFIRST;
+      WarehouseEntry.TESTFIELD("Location Code",ItemJournalLine."Location Code");
+    END;
+
+    LOCAL PROCEDURE VerifyPurchRcpt@120(OrderNo@1001 : Code[20]);
+    VAR
+      PurchRcptHeader@1000 : Record 120;
+    BEGIN
+      PurchRcptHeader.SETRANGE("Order No.",OrderNo);
+      PurchRcptHeader.FINDFIRST;
+      PurchRcptHeader.TESTFIELD("Order No.",OrderNo);
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseOrderItemTracking@114(LocationCode@1001 : Code[10];ItemNo@1002 : Code[20];LotNo@1003 : Code[20]);
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      ReservationEntry.SETRANGE(Positive,TRUE);
+      FindReservationEntry(ReservationEntry,LocationCode,ItemNo);
+      ReservationEntry.TESTFIELD("Lot No.",LotNo);
+    END;
+
+    LOCAL PROCEDURE VerifyDeletedItemTracking@1(SalesLine@1003 : Record 37);
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      FindReservationEntry(ReservationEntry,SalesLine."Location Code",SalesLine."No.");
+      ReservationEntry.TESTFIELD("Item Tracking",ReservationEntry."Item Tracking"::None);
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseEntriesSN@155(ItemNo@1000 : Code[20];ExpectedSerialNo@1002 : Code[20]);
+    VAR
+      WarehouseEntry@1001 : Record 7312;
+    BEGIN
+      WITH WarehouseEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        FINDSET;
+        REPEAT
+          Assert.AreEqual(ExpectedSerialNo,"Serial No.",WrongSerialNoErr);
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@63(ConfirmMessage@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    VAR
+      ExpectedMessage@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ExpectedMessage);  // Dequeue variable.
+      Assert.IsTrue(STRPOS(ConfirmMessage,ExpectedMessage) > 0,ConfirmMessage);
+      Reply := TRUE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE EnterQuantityToCreatePageHandler@29(VAR EnterQuantityToCreate@1000 : TestPage 6513);
+    BEGIN
+      EnterQuantityToCreate.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE EnterQuantityToCreateHandlerForSetQuantity@77(VAR EnterQuantityToCreate@1000 : TestPage 6513);
+    VAR
+      Quantity@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(Quantity);
+      EnterQuantityToCreate.QtyToCreate.SETVALUE(Quantity);
+      EnterQuantityToCreate.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE EnterQuantityToCreateHandlerForSetQuantityAssignLot@141(VAR EnterQuantityToCreate@1000 : TestPage 6513);
+    VAR
+      Quantity@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(Quantity);
+      EnterQuantityToCreate.QtyToCreate.SETVALUE(Quantity);
+      EnterQuantityToCreate.CreateNewLotNo.SETVALUE(TRUE);
+      EnterQuantityToCreate.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingLinesPageHandler@39(VAR ItemTrackingLines@1000 : TestPage 6510);
+    VAR
+      LotNo@1001 : Variant;
+      NewLotNo@1010 : Variant;
+      SN@1012 : Variant;
+      NewSN@1011 : Variant;
+      Count@1002 : Variant;
+      QuantityBase@1009 : Variant;
+      SummaryOption@1008 : 'SetQuantity,VerifyQuantity,VerifyExpirationDate,AssignQty,SelectEntries,ReSelectEntries';
+      TrackingOptionLoc@1006 : Option;
+      Count2@1003 : Integer;
+      i@1007 : Integer;
+    BEGIN
+      TrackingOptionLoc := LibraryVariableStorage.DequeueInteger;  // Dequeue TrackingOption.
+      CASE TrackingOptionLoc OF
+        TrackingOption::AssignSerialNo:
+          BEGIN
+            ItemTrackingLines."Assign Serial No.".INVOKE;
+            Assert.IsTrue(ItemTrackingLines.FIRST,AssignSerialNoStatus);
+          END;
+        TrackingOption::AssignLotNo:
+          BEGIN
+            ItemTrackingLines."Assign Lot No.".INVOKE;
+            LibraryVariableStorage.Enqueue(ItemTrackingLines."Lot No.".VALUE);
+          END;
+        TrackingOption::EditValue:
+          BEGIN
+            LibraryVariableStorage.Dequeue(LotNo);
+            ItemTrackingLines."Lot No.".SETVALUE(LotNo);
+            ItemTrackingLines."Quantity (Base)".SETVALUE(ItemTrackingLines.Quantity3.ASINTEGER);
+          END;
+        TrackingOption::SelectEntries:
+          ItemTrackingLines."Select Entries".INVOKE;
+        TrackingOption::UpdateQtyToInvoice:
+          BEGIN
+            LibraryVariableStorage.Dequeue(Count);
+            Count2 := Count;
+            FOR i := 1 TO Count2 DO
+              ItemTrackingLines."Qty. to Invoice (Base)".SETVALUE(0);
+          END;
+        TrackingOption::AssignLotNo2:
+          ItemTrackingLines."Assign Lot No.".INVOKE;
+        TrackingOption::ReSelectEntries:
+          BEGIN
+            ItemTrackingLines."Lot No.".ASSISTEDIT;
+            ItemTrackingLines."Lot No.".ASSISTEDIT;
+          END;
+        TrackingOption::AssignQty:
+          BEGIN
+            LibraryVariableStorage.Enqueue(SummaryOption::AssignQty);  // Enqueue value for ItemTrackingSummaryPageHandler.
+            ItemTrackingLines."Lot No.".ASSISTEDIT;
+            ItemTrackingLines."Quantity (Base)".SETVALUE(LibraryRandom.RandInt(10));  // Take random for QuantityBase.
+            LibraryVariableStorage.Enqueue(ItemTrackingLines."Quantity (Base)".ASDECIMAL);   // Enqueue Assigned Qantity.
+          END;
+        TrackingOption::AssignMoreThanPurchasedQty:
+          BEGIN
+            ItemTrackingLines."Lot No.".ASSISTEDIT;
+            LibraryVariableStorage.Dequeue(QuantityBase);
+            ItemTrackingLines."Quantity (Base)".SETVALUE(QuantityBase);
+            ItemTrackingLines."Lot No.".ASSISTEDIT;
+          END;
+        TrackingOption::SetNewLotNo:
+          BEGIN
+            LibraryVariableStorage.Dequeue(LotNo);
+            LibraryVariableStorage.Dequeue(NewLotNo);
+            ItemTrackingLines."Lot No.".SETVALUE(LotNo);
+            ItemTrackingLines."New Lot No.".SETVALUE(NewLotNo);
+            ItemTrackingLines."Quantity (Base)".SETVALUE(ItemTrackingLines.Quantity3.ASINTEGER);
+          END;
+        TrackingOption::EditSNValue:
+          BEGIN
+            LibraryVariableStorage.Dequeue(SN);
+            ItemTrackingLines."Serial No.".SETVALUE(SN);
+            ItemTrackingLines."Quantity (Base)".SETVALUE(ItemTrackingLines.Quantity3.ASINTEGER);
+          END;
+        TrackingOption::SetNewSN:
+          BEGIN
+            LibraryVariableStorage.Dequeue(SN);
+            LibraryVariableStorage.Dequeue(NewSN);
+            ItemTrackingLines."Serial No.".SETVALUE(SN);
+            ItemTrackingLines."New Serial No.".SETVALUE(NewSN);
+            ItemTrackingLines."Quantity (Base)".SETVALUE(ItemTrackingLines.Quantity3.ASINTEGER);
+          END;
+      END;
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingSummaryPageHandler@8(VAR ItemTrackingSummary@1000 : TestPage 6500);
+    VAR
+      CurrentPendingQuantity@1008 : Variant;
+      Quantity@1001 : Variant;
+      OptionValue@1004 : Variant;
+      TotalAvailableQuantity@1006 : Variant;
+      TotalRequestedQuantity@1007 : Variant;
+      ExpirationDate@1005 : Variant;
+      OptionString@1003 : 'SetQuantity,VerifyQuantity,VerifyExpirationDate,AssignQty,SelectEntries,ReSelectEntries';
+      SummaryOption@1002 : Option;
+    BEGIN
+      LibraryVariableStorage.Dequeue(OptionValue);  // Dequeue variable.
+      SummaryOption := OptionValue;  // To convert Variant into Option.
+      CASE SummaryOption OF
+        OptionString::SetQuantity:
+          BEGIN
+            LibraryVariableStorage.Dequeue(Quantity);
+            ItemTrackingSummary.FIRST;
+            ItemTrackingSummary."Selected Quantity".SETVALUE(Quantity);
+          END;
+        OptionString::VerifyQuantity:
+          BEGIN
+            LibraryVariableStorage.Dequeue(Quantity);
+            ItemTrackingSummary."Selected Quantity".ASSERTEQUALS(Quantity);
+          END;
+        OptionString::VerifyExpirationDate:
+          BEGIN
+            LibraryVariableStorage.Dequeue(ExpirationDate);
+            ItemTrackingSummary."Expiration Date".ASSERTEQUALS(ExpirationDate);
+          END;
+        OptionString::ReSelectEntries:
+          BEGIN
+            LibraryVariableStorage.Dequeue(TotalAvailableQuantity);  // Dequeue variable.
+            LibraryVariableStorage.Dequeue(TotalRequestedQuantity);  // Dequeue variable.
+            LibraryVariableStorage.Dequeue(CurrentPendingQuantity);  // Dequeue variable.
+            ItemTrackingSummary."Total Available Quantity".ASSERTEQUALS(TotalAvailableQuantity);
+            ItemTrackingSummary."Total Requested Quantity".ASSERTEQUALS(TotalRequestedQuantity);
+            ItemTrackingSummary."Current Pending Quantity".ASSERTEQUALS(CurrentPendingQuantity);
+          END;
+      END;
+      ItemTrackingSummary.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingListPageHandler@71(VAR ItemTrackingList@1000 : TestPage 6507);
+    BEGIN
+      ItemTrackingList.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@100(Message@1000 : Text[1024]);
+    VAR
+      ExpectedMessage@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ExpectedMessage);  // Dequeue variable.
+      Assert.IsTrue(STRPOS(Message,ExpectedMessage) > 0,Message);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationPageHandler@16(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      Reservation."Reserve from Current Line".INVOKE;
+      Reservation.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Item Tracking] [SCM]
+      Test for Item Tracking:
+       1. Verify Error while Posting partial Invoice from Purchase Order with Item Tracking.
+       2. Verify Error while Deleting Item Tracking Code after creating inventory with Item Tracking.
+       3. Verify Lot No. in Purchase Order created from Sales Order through Carry Out Action Msg.
+       4. Verify Reservation Entry for Deleted Item Tracking on Planning Worksheet.
+       5. Verify error while negative values is taken in the Selected Quantity field on Item Tracking Summary page.
+       6. Verify error for Selected Quantity field on Item Tracking Summary page after creating Sales Order.
+       7. Verify error for Selected Quantity field on Item Tracking Summary page after creating Sales Order with Reservation.
+       8. Verify Selected Quantity on Item Tracking Summary page after creating Sales Order with Reservation.
+       9. Verify Expiration Date on Item Tracking Summary page after creating Sales Order.
+      10. Verify Sales Order is posted successfully created with Item Tracking and Expiration Date.
+      11. Verify Message while creating Inventory Pick on Sales Order with Item Tracking.
+      12. Verify Reservation Entry error if an Inventory Pick on Sales Order is created and posted.
+      13. Verify error for Selected Quantity field on Item Tracking Summary page after an Inventory Pick on Sales Order is created and posted.
+      14. Verify Expiration Date on Item Ledger Entry When Put Away is Registered.
+      15. Verify Expiration Date on Item Ledger Entry When Pick is Registered.
+      16. Verify error for Selected Quantity field on Item Tracking Summary page after assigning Item Tracking manually.
+      17. Verify posting of Item Reclass. Journal with Lot tracked Item.
+      18. Verify Purchase Order is posted partially with Serial Tracked Item.
+      19. Verify Expiration Date for Item Tracking if it has already been assigned to Lot No.
+      20. Verify Expiration date is updated  for Item Tracking if it is updated in Item Ledger Entry.
+      21. Verify Expiration Date is not updated on Purchase Line if multiple Expiration dates for the same lot No. exist in Item Ledger Entry.
+      22. Verify error while posting Purchase Order if multiple Expiration dates for the same lot No. exist in Item Ledger Entry.
+      23. Recalculate Quantity on Item Tracking Lines Page.
+      24. Recalculate Quantity on Item Tracking Lines Page With More Quantity than Purchase Quantity.
+      25. Recalculate Quantity on Partially Assigned Item Tracking Lines Page.
+      26. Assign Item Tracking No To Purchase Order With Sales Order.
+      27. Assign Item Tracking No To Purchase Order Without Sales Order.
+      28. Verify generated Assign Serial No Lines on Item Tracking Lines Page for Sales Return Order.
+      29. Verify Error while deleting Sales Credit Memo Line with Item tracking lines generated with Get Return Receipt Lines.
+      30. Check that warehouse entries contain empty Serial No, if warehouse tracking only enabled for Lot.
+
+      Covers Test cases: for WI -  304162
+      -----------------------------------------------------------------------------------------
+      Test Function Name                                                                 TFS ID
+      -----------------------------------------------------------------------------------------
+      ErrorForPartialInvoiceWithIT                                                       135450
+      ErrorForDeleteItemTrackingCode                                                     127863
+      LotNoOnPurchaseOrderFromCarryOutActMsg                                             127655
+      DeleteSerialNoOnPlanningWorksheet                                                  135597
+
+      Covers Test cases: for WI -  304162
+      -----------------------------------------------------------------------------------------
+      Test Function Name                                                                 TFS ID
+      -----------------------------------------------------------------------------------------
+      SalesLineErrorWithNegativeSelectedQty, SelectedQtyErrorOnSalesLine                 129246
+      SelectedQtyErrorOnSalesLineWithReserv, SelectedQtyOnSalesLineWithReserv            129245
+      ExpirDateOnItemTrackingSummaryPage, PostSalesOrderWithExpirDateAndIT               129247
+
+      Covers Test cases: for WI -  304930
+      ---------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                 TFS ID
+      ---------------------------------------------------------------------------------------------------------
+      CreateInvPickOnSalesOrderWithIT, ReservEntryErrorAfterPostInvPickOnSalesOrder
+      SelectedQtyErrorAfterPostInvPickOnSalesOrder, ExpirDateOnILEAfterRegisterPutAway
+      ExpirDateOnILEAfterRegisterPick                                                                     129248
+      SelectedQtyErrorWithAssignITManually                                                                128249
+
+      Covers Test cases: for WI -  304875
+      ---------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                 TFS ID
+      ---------------------------------------------------------------------------------------------------------
+      PostItemReclassJournalWithLotNo                                                            127587, 137514
+      PostPartialPurchOrderWithSerialNo                                                          127664, 135600
+      ExpirDateOnPurchaseOrderWithLotNo                                                                  129217
+      UpdatedExpirDateOnPurchOrder, MultipleExpirDateOnPurchOrder, MultipleExpirDateErrorForSameLotNo    129216
+
+      Covers Test cases: for WI -  303191
+      ---------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                 TFS ID
+      ---------------------------------------------------------------------------------------------------------
+      RecalculateQtyOnItemTrackingLinesPage, RecalculateQtyOnITLinesPageWithMoreQtythanPurchase
+      RecalculateQtyOnPartiallyAssignedITLinesPage                                                       129243
+      AssignItemTrackingNoToSupplyOrderWithDemand, AssignItemTrackingNoToSupplyOrderWithoutDemand        129244
+
+      Covers Test cases: for WI -  315338
+      ---------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                 TFS ID
+      ---------------------------------------------------------------------------------------------------------
+      AssignSerialNoToSalesRetOrd, DeleteSalesCrMemoLnWithITLnError                                      128209
+
+      Covers Test cases: for WI -  362739
+      ---------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                 TFS ID
+      ---------------------------------------------------------------------------------------------------------
+      NoSNWhseTrackingPurchOrder                                                                         362739
+    }
+    END.
+  }
+}
+

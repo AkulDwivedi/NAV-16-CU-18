@@ -1,0 +1,400 @@
+OBJECT Codeunit 134555 ERM CF Accounts
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryRandom@1001 : Codeunit 130440;
+      Assert@1005 : Codeunit 130000;
+      LibraryCashFlow@1002 : Codeunit 131331;
+      CFHelper@1004 : Codeunit 131332;
+      SourceType@1006 : ' ,Receivables,Payables,Liquid Funds,Cash Flow Manual Expense,Cash Flow Manual Revenue,Sales Order,Purchase Order,Fixed Assets Budget,Fixed Assets Disposal,Service Orders,G/L Budget';
+      isInitialized@1000 : Boolean;
+      ROLLBACK@1003 : TextConst 'ENU=Rollback.';
+      isInitializedCountryData@1500002 : Boolean;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE CFAccountIndent@4();
+    VAR
+      CashFlowAccount@1000 : Record 841;
+      TempCashFlowAccount@1001 : TEMPORARY Record 841;
+      AccountNo@1002 : Code[20];
+    BEGIN
+      Initialize;
+      // Clear existing cash flow account to make room for our test
+      CashFlowAccount.DELETEALL;
+
+      // Create new setup starting from account 0000, expected setup:
+      // |0001
+      // |  0002
+      // |  0003
+      // |    0004
+      // |  0005
+      // |0006
+      AccountNo := '0000';
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::"Begin-Total");
+      StoreAccount(TempCashFlowAccount,CashFlowAccount."No.",0);
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::Entry);
+      StoreAccount(TempCashFlowAccount,CashFlowAccount."No.",1);
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::"Begin-Total");
+      StoreAccount(TempCashFlowAccount,CashFlowAccount."No.",1);
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::Entry);
+      StoreAccount(TempCashFlowAccount,CashFlowAccount."No.",2);
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::"End-Total");
+      StoreAccount(TempCashFlowAccount,CashFlowAccount."No.",1);
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::"End-Total");
+      StoreAccount(TempCashFlowAccount,CashFlowAccount."No.",0);
+
+      // Exercise
+      CODEUNIT.RUN(CODEUNIT::"Cash Flow Account - Indent");
+
+      // Validate correct indentation
+      VerifyIndentation(TempCashFlowAccount);
+
+      // Roll back account setup
+      ASSERTERROR ERROR(ROLLBACK);
+    END;
+
+    [Test]
+    PROCEDURE CFAccountSelectionFilter@31();
+    VAR
+      CashFlowAccount@1000 : Record 841;
+      SelectionFilterManagement@1001 : Codeunit 46;
+      AccountNo@1002 : Code[20];
+      ExpectedFilter@1003 : Code[80];
+    BEGIN
+      Initialize;
+      // Clear existing cash flow account to make room for our test
+      CashFlowAccount.DELETEALL;
+
+      // Create new setup starting from account 0000, expected setup:
+      // |0001
+      // |0002 (*)
+      // |0003
+      // |0004 (*)
+      // |0005 (*)
+      // |0006
+      // (*) indicates account is marked
+      // This setup should produce a filter: 0002|0004..0005
+      AccountNo := '0000';
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::"Begin-Total");
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::Entry);
+      CashFlowAccount.MARK(TRUE);
+
+      ExpectedFilter := SelectionFilterManagement.AddQuotes(CashFlowAccount."No.") + '|';
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::Entry);
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::Entry);
+      CashFlowAccount.MARK(TRUE);
+      ExpectedFilter += SelectionFilterManagement.AddQuotes(CashFlowAccount."No.") + '..';
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::Entry);
+      CashFlowAccount.MARK(TRUE);
+      ExpectedFilter += SelectionFilterManagement.AddQuotes(CashFlowAccount."No.");
+
+      CreateCashFlowAccount(CashFlowAccount,AccountNo,CashFlowAccount."Account Type"::"End-Total");
+
+      // Validate correct filter generated from markings
+      CashFlowAccount.MARKEDONLY(TRUE);
+      Assert.AreEqual(
+        ExpectedFilter,SelectionFilterManagement.GetSelectionFilterForCashFlowAccount(CashFlowAccount),
+        'Incorrect account filter generated');
+
+      // Roll back account setup
+      ASSERTERROR ERROR(ROLLBACK);
+    END;
+
+    [Test]
+    PROCEDURE FAInvestAccount@46();
+    VAR
+      CashFlowSetup@1000 : Record 843;
+      FASetup@1001 : Record 5603;
+      FixedAsset@1002 : Record 5600;
+      FAPostingDateFormula@1003 : DateFormula;
+      ConsiderSource@1004 : ARRAY [11] OF Boolean;
+    BEGIN
+      Initialize;
+      EVALUATE(FAPostingDateFormula,'<1M>');
+      FASetup.GET;
+      CFHelper.CreateFixedAssetForInvestment(
+        FixedAsset,FASetup."Default Depr. Book",FAPostingDateFormula,
+        LibraryRandom.RandDec(1000,2));
+
+      ConsiderSource[SourceType::"Fixed Assets Budget"] := TRUE;
+      CashFlowAccountPosting(CashFlowSetup.FIELDNO("FA Budget CF Account No."),ConsiderSource);
+    END;
+
+    [Test]
+    PROCEDURE FASaleAccount@47();
+    VAR
+      CashFlowSetup@1000 : Record 843;
+      FASetup@1002 : Record 5603;
+      FixedAsset@1001 : Record 5600;
+      DeprecStartDateFormula@1003 : DateFormula;
+      DeprecEndDateFormula@1004 : DateFormula;
+      ExpectedDisposalDateFormula@1005 : DateFormula;
+      ConsiderSource@1006 : ARRAY [11] OF Boolean;
+    BEGIN
+      Initialize;
+      EVALUATE(DeprecStartDateFormula,'<-2Y>');
+      EVALUATE(DeprecEndDateFormula,'<1M-D5>');
+      EVALUATE(ExpectedDisposalDateFormula,'<1M+1W-WD1>');
+      FASetup.GET;
+      CFHelper.CreateFixedAssetForDisposal(FixedAsset,FASetup."Default Depr. Book",DeprecStartDateFormula,DeprecEndDateFormula,
+        ExpectedDisposalDateFormula,LibraryRandom.RandDec(1000,2));
+
+      ConsiderSource[SourceType::"Fixed Assets Disposal"] := TRUE;
+      CashFlowAccountPosting(CashFlowSetup.FIELDNO("FA Disposal CF Account No."),ConsiderSource);
+    END;
+
+    [Test]
+    PROCEDURE PayablesAccount@40();
+    VAR
+      CashFlowSetup@1000 : Record 843;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+      VendorLedgerEntries@1500000 : Record 25;
+    BEGIN
+      ConsiderSource[SourceType::Payables] := TRUE;
+      IF VendorLedgerEntries.COUNT = 0 THEN
+        CreateAndPostPayEntries;
+      CashFlowAccountPosting(CashFlowSetup.FIELDNO("Payables CF Account No."),ConsiderSource);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseAccount@42();
+    VAR
+      CashFlowSetup@1000 : Record 843;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+      PurchLine@1500000 : Record 39;
+    BEGIN
+      ConsiderSource[SourceType::"Purchase Order"] := TRUE;
+      IF PurchLine.COUNT = 0 THEN
+        CreatePurchaseDocument;
+      CashFlowAccountPosting(CashFlowSetup.FIELDNO("Purch. Order CF Account No."),ConsiderSource);
+    END;
+
+    [Test]
+    PROCEDURE ReceivablesAccount@1();
+    VAR
+      CashFlowSetup@1000 : Record 843;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+      CustomerLedgerEntry@1500000 : Record 21;
+    BEGIN
+      ConsiderSource[SourceType::Receivables] := TRUE;
+      IF CustomerLedgerEntry.COUNT = 0 THEN
+        CreateAndPostRecEntries;
+      CashFlowAccountPosting(CashFlowSetup.FIELDNO("Receivables CF Account No."),ConsiderSource);
+    END;
+
+    [Test]
+    PROCEDURE SalesAccount@41();
+    VAR
+      CashFlowSetup@1000 : Record 843;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      ConsiderSource[SourceType::"Sales Order"] := TRUE;
+      CashFlowAccountPosting(CashFlowSetup.FIELDNO("Sales Order CF Account No."),ConsiderSource);
+    END;
+
+    [Test]
+    PROCEDURE ServiceAccount@43();
+    VAR
+      CashFlowSetup@1000 : Record 843;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      ConsiderSource[SourceType::"Service Orders"] := TRUE;
+      CashFlowAccountPosting(CashFlowSetup.FIELDNO("Service CF Account No."),ConsiderSource);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CashFlowAccountPosting@18(FieldNo@1000 : Integer;ConsiderSource@1005 : ARRAY [11] OF Boolean);
+    VAR
+      CashFlowAccount@1004 : Record 841;
+      CashFlowForecast@1003 : Record 840;
+      RecRef@1001 : RecordRef;
+      FieldRef@1012 : FieldRef;
+    BEGIN
+      // Setup: Generically modify CF Setup
+      Initialize;
+      LibraryCashFlow.CreateCashFlowAccount(CashFlowAccount,CashFlowAccount."Account Type"::Entry);
+      RecRef.OPEN(DATABASE::"Cash Flow Setup");
+      RecRef.FINDFIRST;
+      FieldRef := RecRef.FIELD(FieldNo);
+      FieldRef.VALIDATE(CashFlowAccount."No.");
+      RecRef.MODIFY(TRUE);
+
+      LibraryCashFlow.CreateCashFlowCard(CashFlowForecast);
+      LibraryCashFlow.ClearJournal;
+
+      // Exercise
+      LibraryCashFlow.FillJournal(ConsiderSource,CashFlowForecast."No.",FALSE);
+      LibraryCashFlow.PostJournal;
+
+      // Verify
+      VerifyLedgerEntryAccount(CashFlowForecast,CashFlowAccount);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateCashFlowAccount@19(VAR CashFlowAccount@1000 : Record 841;VAR AccountNo@1002 : Code[20];AccountType@1001 : Option);
+    BEGIN
+      AccountNo := INCSTR(AccountNo);
+      CashFlowAccount.INIT;
+      CashFlowAccount.VALIDATE("No.",AccountNo);
+      CashFlowAccount.VALIDATE("Account Type",AccountType);
+      CashFlowAccount.VALIDATE(Name,CashFlowAccount."No.");
+      CashFlowAccount.INSERT(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE StoreAccount@5(VAR TempCashFlowAccount@1000 : TEMPORARY Record 841;No@1001 : Code[20];ExpectedIndentation@1002 : Integer);
+    BEGIN
+      TempCashFlowAccount.INIT;
+      TempCashFlowAccount."No." := No;
+      TempCashFlowAccount.Indentation := ExpectedIndentation;
+      TempCashFlowAccount.INSERT;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyIndentation@17(VAR CashFlowAccount@1000 : Record 841);
+    VAR
+      CashFlowAccount2@1001 : Record 841;
+    BEGIN
+      CashFlowAccount.FINDSET;
+      REPEAT
+        CashFlowAccount2.GET(CashFlowAccount."No.");
+        CashFlowAccount2.TESTFIELD(Indentation,CashFlowAccount.Indentation);
+      UNTIL CashFlowAccount.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyLedgerEntryAccount@7(CashFlowForecast@1000 : Record 840;CashFlowAccount@1001 : Record 841);
+    VAR
+      CashFlowForecastEntry@1002 : Record 847;
+    BEGIN
+      CashFlowForecastEntry.SETRANGE("Cash Flow Forecast No.",CashFlowForecast."No.");
+      CashFlowForecastEntry.FINDSET;
+
+      REPEAT
+        CashFlowForecastEntry.TESTFIELD("Cash Flow Account No.",CashFlowAccount."No.");
+      UNTIL CashFlowForecastEntry.NEXT = 0;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@12(Msg@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPayEntries@1500009();
+    VAR
+      LibraryERM@1500004 : Codeunit 131300;
+      LibraryPurchase@1500003 : Codeunit 130512;
+      Vendor@1003 : Record 23;
+      GenJournalBatch@1500002 : Record 232;
+      GenJournalLine@1500001 : Record 81;
+    BEGIN
+      // Create General Line and Post it.
+      InitializeCountryData;
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,1,GenJournalLine."Account Type"::Vendor,
+        Vendor."No.",100);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE InitializeCountryData@1500012();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      IF isInitializedCountryData THEN
+        EXIT;
+      LibraryERMCountryData.UpdateGenJournalTemplate;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      isInitializedCountryData := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostRecEntries@1500001();
+    VAR
+      LibraryERM@1500004 : Codeunit 131300;
+      LibrarySales@1500003 : Codeunit 130509;
+      Customer@1003 : Record 18;
+      GenJournalBatch@1500002 : Record 232;
+      GenJournalLine@1500001 : Record 81;
+    BEGIN
+      // Create General Line and Post it.
+      InitializeCountryData;
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,1,GenJournalLine."Account Type"::Customer,
+        Customer."No.",-100);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    PROCEDURE CreatePurchaseDocument@1500000();
+    VAR
+      LibraryERM@1500002 : Codeunit 131300;
+      LibraryInventory@1500005 : Codeunit 132201;
+      LibraryPurchase@1500001 : Codeunit 130512;
+      Vendor@1500000 : Record 23;
+      PurchaseHeader@1500003 : Record 38;
+      PurchaseLine@1500004 : Record 39;
+      Item@1500006 : Record 27;
+    BEGIN
+      InitializeCountryData;
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,PurchaseHeader."Buy-from Vendor No.");
+      LibraryInventory.CreateItem(Item);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",1);
+      PurchaseLine.VALIDATE("Direct Unit Cost",100);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Cash Flow] [Cash Flow Account]
+    }
+    END.
+  }
+}
+

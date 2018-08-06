@@ -1,0 +1,2986 @@
+OBJECT Codeunit 131300 Library - ERM
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 21=rimd,
+                TableData 25=rimd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GeneralLedgerSetup@1004 : Record 98;
+      LibraryUtility@1000 : Codeunit 131000;
+      LibraryERMUnapply@1003 : Codeunit 131301;
+      LibraryRandom@1001 : Codeunit 130440;
+      NoRecordsInFilterError@1002 : TextConst 'ENU=There are no %1 within the filters specified.';
+      LibraryJournals@1052 : Codeunit 131306;
+      LibraryFixedAsset@1500000 : Codeunit 131330;
+
+    PROCEDURE ApplicationAmountRounding@3(ApplicationAmount@1003 : Decimal;CurrencyCode@1002 : Code[10]) : Decimal;
+    VAR
+      Currency@1001 : Record 4;
+    BEGIN
+      // Round Application Entry Amount.
+      Currency.InitRoundingPrecision;
+      IF CurrencyCode <> '' THEN
+        Currency.GET(CurrencyCode);
+
+      // Case of Appln. Rounding Precision is equals to zero, use Amount Rounding Precision.
+      IF Currency."Appln. Rounding Precision" = 0 THEN
+        Currency."Appln. Rounding Precision" := Currency."Amount Rounding Precision";
+
+      EXIT(ROUND(ApplicationAmount,Currency."Appln. Rounding Precision",Currency.InvoiceRoundingDirection));
+    END;
+
+    PROCEDURE ApplyCustomerLedgerEntries@245(ApplyingToDocType@1000 : Option;AppliedDocType@1001 : Option;ApplyingToDocNo@1002 : Code[20];AppliedDocNo@1003 : Code[20]);
+    VAR
+      ApplyingCustLedgerEntry@1004 : Record 21;
+      CustLedgerEntry@1005 : Record 21;
+    BEGIN
+      FindCustomerLedgerEntry(ApplyingCustLedgerEntry,ApplyingToDocType,ApplyingToDocNo);
+      ApplyingCustLedgerEntry.CALCFIELDS("Remaining Amount");
+      SetApplyCustomerEntry(ApplyingCustLedgerEntry,ApplyingCustLedgerEntry."Remaining Amount");
+      CustLedgerEntry.SETRANGE(Open,TRUE);
+      FindCustomerLedgerEntry(CustLedgerEntry,AppliedDocType,AppliedDocNo);
+      WITH CustLedgerEntry DO BEGIN
+        CALCFIELDS("Remaining Amount");
+        VALIDATE("Amount to Apply","Remaining Amount");
+        MODIFY(TRUE);
+      END;
+      SetAppliestoIdCustomer(CustLedgerEntry);
+      PostCustLedgerApplication(ApplyingCustLedgerEntry);
+    END;
+
+    PROCEDURE ApplyVendorLedgerEntries@258(ApplyingToDocType@1003 : Option;AppliedDocType@1002 : Option;ApplyingToDocNo@1001 : Code[20];AppliedDocNo@1000 : Code[20]);
+    VAR
+      ApplyingVendorLedgerEntry@1004 : Record 25;
+      VendorLedgerEntry@1005 : Record 25;
+    BEGIN
+      FindVendorLedgerEntry(ApplyingVendorLedgerEntry,ApplyingToDocType,ApplyingToDocNo);
+      ApplyingVendorLedgerEntry.CALCFIELDS("Remaining Amount");
+      SetApplyVendorEntry(ApplyingVendorLedgerEntry,ApplyingVendorLedgerEntry."Remaining Amount");
+      VendorLedgerEntry.SETRANGE(Open,TRUE);
+      FindVendorLedgerEntry(VendorLedgerEntry,AppliedDocType,AppliedDocNo);
+      WITH VendorLedgerEntry DO BEGIN
+        CALCFIELDS("Remaining Amount");
+        VALIDATE("Amount to Apply");
+        MODIFY(TRUE);
+      END;
+      SetAppliestoIdVendor(VendorLedgerEntry);
+      PostVendLedgerApplication(ApplyingVendorLedgerEntry);
+    END;
+
+    PROCEDURE AdjustGenJournalBalance@215(VAR GenJournalLine@1000 : Record 81);
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"Adjust Gen. Journal Balance",GenJournalLine);
+    END;
+
+    PROCEDURE ClearAdjustPmtDiscInVATSetup@261();
+    VAR
+      VATPostingSetup@1000 : Record 325;
+    BEGIN
+      VATPostingSetup.SETRANGE("Adjust for Payment Discount",TRUE);
+      IF VATPostingSetup.FINDSET THEN
+        REPEAT
+          VATPostingSetup.VALIDATE("Adjust for Payment Discount",FALSE);
+          VATPostingSetup.MODIFY(TRUE);
+        UNTIL VATPostingSetup.NEXT = 0;
+    END;
+
+    PROCEDURE CheckPreview@175(PaymentJournal@1000 : TestPage 256) : Text;
+    VAR
+      CheckPreview@1001 : TestPage 404;
+    BEGIN
+      CheckPreview.TRAP;
+      PaymentJournal.PreviewCheck.INVOKE;
+      EXIT(CheckPreview.AmountText.VALUE);
+    END;
+
+    PROCEDURE ClearIntrastatJnlLines@113(IntrastatJnlBatch@1000 : Record 262);
+    VAR
+      IntrastatJnlLine@1001 : Record 263;
+    BEGIN
+      IntrastatJnlLine.SETRANGE("Journal Template Name",IntrastatJnlBatch."Journal Template Name");
+      IntrastatJnlLine.SETRANGE("Journal Batch Name",IntrastatJnlBatch.Name);
+      IntrastatJnlLine.DELETEALL(TRUE);
+    END;
+
+    PROCEDURE ClearGenJournalLines@87(GenJournalBatch@1000 : Record 232);
+    VAR
+      GenJournalLine@1001 : Record 81;
+    BEGIN
+      GenJournalLine.SETRANGE("Journal Template Name",GenJournalBatch."Journal Template Name");
+      GenJournalLine.SETRANGE("Journal Batch Name",GenJournalBatch.Name);
+      GenJournalLine.DELETEALL(TRUE);
+    END;
+
+    PROCEDURE ConvertCurrency@13(Amount@1003 : Decimal;FromCur@1002 : Code[10];ToCur@1001 : Code[10];ConversionDate@1000 : Date) NewAmount : Decimal;
+    VAR
+      CurrencyExchangeRate@1005 : Record 330;
+      CurrencyExchangeRate2@1004 : Record 330;
+    BEGIN
+      // Converts an Amount from one currency to another.
+      // A blank currency code means LCY.
+      NewAmount := Amount;
+
+      // Convert to LCY.
+      IF FromCur <> '' THEN BEGIN
+        FindExchRate(CurrencyExchangeRate,FromCur,ConversionDate);
+        NewAmount := NewAmount * CurrencyExchangeRate."Relational Exch. Rate Amount" / CurrencyExchangeRate."Exchange Rate Amount";
+      END;
+
+      // Convert into new currency.
+      IF ToCur <> '' THEN BEGIN
+        FindExchRate(CurrencyExchangeRate2,ToCur,ConversionDate);
+        NewAmount := NewAmount * CurrencyExchangeRate2."Exchange Rate Amount" / CurrencyExchangeRate2."Relational Exch. Rate Amount";
+      END;
+    END;
+
+    PROCEDURE CreateAnalysisColumn@122(VAR AnalysisColumn@1001 : Record 7118;AnalysisArea@1003 : Option;AnalysisColumnTemplate@1002 : Code[10]);
+    VAR
+      RecRef@1000 : RecordRef;
+    BEGIN
+      AnalysisColumn.INIT;
+      AnalysisColumn.VALIDATE("Analysis Area",AnalysisArea);
+      AnalysisColumn.VALIDATE("Analysis Column Template",AnalysisColumnTemplate);
+      RecRef.GETTABLE(AnalysisColumn);
+      AnalysisColumn.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,AnalysisColumn.FIELDNO("Line No.")));
+      AnalysisColumn.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateAnalysisView@80(VAR AnalysisView@1000 : Record 363);
+    BEGIN
+      AnalysisView.INIT;
+      AnalysisView.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(AnalysisView.FIELDNO(Code),DATABASE::"Analysis View"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Analysis View",AnalysisView.FIELDNO(Code))));
+
+      // Validating Name as Code because value is not important.
+      AnalysisView.VALIDATE(Name,AnalysisView.Code);
+      AnalysisView.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateAccScheduleName@32(VAR AccScheduleName@1000 : Record 84);
+    BEGIN
+      AccScheduleName.INIT;
+      AccScheduleName.VALIDATE(
+        Name,
+        COPYSTR(LibraryUtility.GenerateRandomCode(AccScheduleName.FIELDNO(Name),DATABASE::"Acc. Schedule Name"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Acc. Schedule Name",AccScheduleName.FIELDNO(Name))));
+      AccScheduleName.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateAccScheduleLine@39(VAR AccScheduleLine@1001 : Record 85;ScheduleName@1000 : Code[10]);
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      AccScheduleLine.INIT;
+      AccScheduleLine.VALIDATE("Schedule Name",ScheduleName);
+      RecRef.GETTABLE(AccScheduleLine);
+      AccScheduleLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,AccScheduleLine.FIELDNO("Line No.")));
+      AccScheduleLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateAccountMapping@140(VAR TextToAccMapping@1000 : Record 1251;MappingText@1001 : Text[250]);
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      WITH TextToAccMapping DO BEGIN
+        INIT;
+        RecRef.GETTABLE(TextToAccMapping);
+        VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,FIELDNO("Line No.")));
+        VALIDATE("Mapping Text",MappingText);
+        INSERT(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateAccountMappingCustomer@146(VAR TextToAccMapping@1000 : Record 1251;MappingText@1001 : Text[250];SourceNo@1004 : Code[20]);
+    BEGIN
+      WITH TextToAccMapping DO BEGIN
+        CreateAccountMapping(TextToAccMapping,MappingText);
+        VALIDATE("Bal. Source Type","Bal. Source Type"::Customer);
+        VALIDATE("Bal. Source No.",SourceNo);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateAccountMappingGLAccount@148(VAR TextToAccMapping@1000 : Record 1251;MappingText@1001 : Text[250];CreditNo@1004 : Code[20];DebitNo@1003 : Code[20]);
+    BEGIN
+      WITH TextToAccMapping DO BEGIN
+        CreateAccountMapping(TextToAccMapping,MappingText);
+        VALIDATE("Bal. Source Type","Bal. Source Type"::"G/L Account");
+        VALIDATE("Debit Acc. No.",DebitNo);
+        VALIDATE("Credit Acc. No.",CreditNo);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateAccountMappingVendor@147(VAR TextToAccMapping@1000 : Record 1251;MappingText@1001 : Text[250];SourceNo@1004 : Code[20]);
+    BEGIN
+      WITH TextToAccMapping DO BEGIN
+        CreateAccountMapping(TextToAccMapping,MappingText);
+        VALIDATE("Bal. Source Type","Bal. Source Type"::Vendor);
+        VALIDATE("Bal. Source No.",SourceNo);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateBankAccount@1(VAR BankAccount@1000 : Record 270);
+    VAR
+      BankAccountPostingGroup@1001 : Record 277;
+    BEGIN
+      FindBankAccountPostingGroup(BankAccountPostingGroup);
+      BankAccount.INIT;
+      BankAccount.VALIDATE("No.",LibraryUtility.GenerateRandomCode(BankAccount.FIELDNO("No."),DATABASE::"Bank Account"));
+      BankAccount.VALIDATE(Name,BankAccount."No.");  // Validating No. as Name because value is not important.
+      BankAccount.INSERT(TRUE);
+      BankAccount.VALIDATE("Bank Acc. Posting Group",BankAccountPostingGroup.Code);
+      BankAccount.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateBankAccountNo@250() : Code[20];
+    VAR
+      BankAccount@1000 : Record 270;
+    BEGIN
+      CreateBankAccount(BankAccount);
+      EXIT(BankAccount."No.");
+    END;
+
+    PROCEDURE CreateBankAccReconciliation@44(VAR BankAccReconciliation@1000 : Record 273;BankAccountNo@1001 : Code[20];StatementType@1002 : Option);
+    BEGIN
+      BankAccReconciliation.INIT;
+      BankAccReconciliation.VALIDATE("Statement Type",StatementType);
+      BankAccReconciliation.VALIDATE("Bank Account No.",BankAccountNo);
+      BankAccReconciliation.INSERT(TRUE);
+      BankAccReconciliation.TESTFIELD("Statement No.");
+    END;
+
+    PROCEDURE CreateBankAccReconciliationLn@76(VAR BankAccReconciliationLine@1000 : Record 274;BankAccReconciliation@1003 : Record 273);
+    VAR
+      RecRef@1001 : RecordRef;
+    BEGIN
+      BankAccReconciliationLine.INIT;
+      BankAccReconciliationLine.VALIDATE("Bank Account No.",BankAccReconciliation."Bank Account No.");
+      BankAccReconciliationLine.VALIDATE("Statement No.",BankAccReconciliation."Statement No.");
+      BankAccReconciliationLine.VALIDATE("Statement Type",BankAccReconciliation."Statement Type");
+      RecRef.GETTABLE(BankAccReconciliationLine);
+      BankAccReconciliationLine.VALIDATE(
+        "Statement Line No.",LibraryUtility.GetNewLineNo(RecRef,BankAccReconciliationLine.FIELDNO("Statement Line No.")));
+      BankAccReconciliationLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateBankAccountPostingGroup@152(VAR BankAccountPostingGroup@1001 : Record 277);
+    BEGIN
+      BankAccountPostingGroup.INIT;
+      BankAccountPostingGroup.VALIDATE(
+        Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(BankAccountPostingGroup.FIELDNO(Code),DATABASE::"Bank Account Posting Group"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Bank Account Posting Group",BankAccountPostingGroup.FIELDNO(Code))));
+      BankAccountPostingGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateBusinessUnit@178(VAR BusinessUnit@1000 : Record 220);
+    BEGIN
+      BusinessUnit.INIT;
+      BusinessUnit.VALIDATE(Code,LibraryUtility.GenerateRandomCode(BusinessUnit.FIELDNO(Code),DATABASE::"Business Unit"));
+      BusinessUnit.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateChangeLogField@125(VAR ChangeLogSetupField@1001 : Record 404;TableNo@1000 : Integer;FieldNo@1002 : Integer);
+    BEGIN
+      ChangeLogSetupField.INIT;
+      ChangeLogSetupField.VALIDATE("Table No.",TableNo);
+      ChangeLogSetupField.VALIDATE("Field No.",FieldNo);
+      ChangeLogSetupField.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateChangeLogTable@105(VAR ChangeLogSetupTable@1001 : Record 403;TableNo@1000 : Integer);
+    BEGIN
+      ChangeLogSetupTable.INIT;
+      ChangeLogSetupTable.VALIDATE("Table No.",TableNo);
+      ChangeLogSetupTable.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateColumnLayout@38(VAR ColumnLayout@1001 : Record 334;ColumnLayoutName@1000 : Code[10]);
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      ColumnLayout.INIT;
+      ColumnLayout.VALIDATE("Column Layout Name",ColumnLayoutName);
+      RecRef.GETTABLE(ColumnLayout);
+      ColumnLayout.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,ColumnLayout.FIELDNO("Line No.")));
+      ColumnLayout.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateColumnLayoutName@36(VAR ColumnLayoutName@1000 : Record 333);
+    BEGIN
+      ColumnLayoutName.INIT;
+      ColumnLayoutName.VALIDATE(
+        Name,
+        COPYSTR(LibraryUtility.GenerateRandomCode(ColumnLayoutName.FIELDNO(Name),DATABASE::"Column Layout Name"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Column Layout Name",ColumnLayoutName.FIELDNO(Name))));
+      ColumnLayoutName.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCountryRegion@82(VAR CountryRegion@1000 : Record 9);
+    BEGIN
+      CountryRegion.INIT;
+      CountryRegion.VALIDATE(
+        Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(CountryRegion.FIELDNO(Code),DATABASE::"Country/Region"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Country/Region",CountryRegion.FIELDNO(Code))));
+      CountryRegion.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateTerritory@206(VAR Territory@1000 : Record 286);
+    BEGIN
+      Territory.INIT;
+      Territory.VALIDATE(
+        Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(Territory.FIELDNO(Code),DATABASE::Territory),
+          1,LibraryUtility.GetFieldLength(DATABASE::Territory,Territory.FIELDNO(Code))));
+      Territory.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCurrency@8(VAR Currency@1000 : Record 4);
+    BEGIN
+      Currency.INIT;
+      Currency.VALIDATE(Code,LibraryUtility.GenerateRandomCode(Currency.FIELDNO(Code),DATABASE::Currency));
+      Currency.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCurrencyWithRandomExchRates@159() : Code[10];
+    VAR
+      CurrencyCode@1000 : Code[10];
+    BEGIN
+      CurrencyCode := CreateCurrencyWithGLAccountSetup;
+      CreateRandomExchangeRate(CurrencyCode);
+      EXIT(CurrencyCode);
+    END;
+
+    PROCEDURE CreateCurrencyWithRounding@142() : Code[10];
+    VAR
+      Currency@1001 : Record 4;
+      Decimals@1000 : Integer;
+    BEGIN
+      Decimals := LibraryRandom.RandInt(5);
+      WITH Currency DO BEGIN
+        GET(
+          CreateCurrencyWithExchangeRate(
+            WORKDATE,LibraryRandom.RandDec(100,Decimals),LibraryRandom.RandDec(100,Decimals)));
+        VALIDATE("Amount Rounding Precision",LibraryRandom.RandPrecision);
+        MODIFY(TRUE);
+        EXIT(Code);
+      END;
+    END;
+
+    PROCEDURE CreateCurrencyWithExchangeRate@156(StartingDate@1004 : Date;ExchangeRateAmount@1003 : Decimal;AdjustmentExchangeRateAmount@1001 : Decimal) CurrencyCode : Code[10];
+    BEGIN
+      CurrencyCode := CreateCurrencyWithGLAccountSetup;
+      CreateExchangeRate(CurrencyCode,StartingDate,ExchangeRateAmount,AdjustmentExchangeRateAmount);
+      EXIT(CurrencyCode);
+    END;
+
+    PROCEDURE CreateCurrencyWithGLAccountSetup@155() : Code[10];
+    VAR
+      Currency@1001 : Record 4;
+    BEGIN
+      CreateCurrency(Currency);
+      WITH Currency DO BEGIN
+        VALIDATE("Residual Gains Account",CreateGLAccountNo);
+        VALIDATE("Residual Losses Account","Residual Gains Account");
+        VALIDATE("Realized G/L Gains Account",CreateGLAccountNo);
+        VALIDATE("Realized G/L Losses Account","Realized G/L Gains Account");
+        VALIDATE("Realized Gains Acc.",CreateGLAccountNo);
+        VALIDATE("Realized Losses Acc.","Realized Gains Acc.");
+        VALIDATE("Unrealized Gains Acc.",CreateGLAccountNo);
+        VALIDATE("Unrealized Losses Acc.","Unrealized Gains Acc.");
+        MODIFY(TRUE);
+        EXIT(Code);
+      END;
+    END;
+
+    PROCEDURE CreateCurrencyForReminderLevel@64(VAR CurrencyForReminderLevel@1002 : Record 329;ReminderTermsCode@1000 : Code[10];CurrencyCode@1001 : Code[10]);
+    VAR
+      RecRef@1003 : RecordRef;
+    BEGIN
+      CurrencyForReminderLevel.INIT;
+      CurrencyForReminderLevel.VALIDATE("Reminder Terms Code",ReminderTermsCode);
+      RecRef.GETTABLE(CurrencyForReminderLevel);
+      CurrencyForReminderLevel.VALIDATE("No.",LibraryUtility.GetNewLineNo(RecRef,CurrencyForReminderLevel.FIELDNO("No.")));
+      CurrencyForReminderLevel.VALIDATE("Currency Code",CurrencyCode);
+      CurrencyForReminderLevel.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCustomerDiscountGroup@124(VAR CustomerDiscountGroup@1000 : Record 340);
+    BEGIN
+      CustomerDiscountGroup.INIT;
+      CustomerDiscountGroup.VALIDATE(Code,LibraryUtility.GenerateRandomCode(CustomerDiscountGroup.FIELDNO(Code),DATABASE::"Customer Discount Group"));
+      CustomerDiscountGroup.VALIDATE(Description,CustomerDiscountGroup.Code);  // Validating Code as Description because value is not important.
+      CustomerDiscountGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateItemDiscountGroup@205(VAR ItemDiscountGroup@1001 : Record 341);
+    BEGIN
+      ItemDiscountGroup.INIT;
+      ItemDiscountGroup.VALIDATE(
+        Code,LibraryUtility.GenerateRandomCode(ItemDiscountGroup.FIELDNO(Code),DATABASE::"Item Discount Group"));
+      ItemDiscountGroup.VALIDATE(Description,ItemDiscountGroup.Code);  // Validating Code as Description because value is not important.
+      ItemDiscountGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateDeferralTemplate@203(VAR DeferralTemplate@1000 : Record 1700;CalcMethod@1001 : Option;StartDate@1002 : Option;NumOfPeriods@1003 : Integer);
+    BEGIN
+      DeferralTemplate.INIT;
+      DeferralTemplate."Deferral Code" :=
+        LibraryUtility.GenerateRandomCode(DeferralTemplate.FIELDNO("Deferral Code"),DATABASE::"Deferral Template");
+      DeferralTemplate."Deferral Account" := CreateGLAccountNo;
+      DeferralTemplate."Calc. Method" := CalcMethod;
+      DeferralTemplate."Start Date" := StartDate;
+      DeferralTemplate."No. of Periods" := NumOfPeriods;
+      DeferralTemplate."Period Description" := DeferralTemplate."Deferral Code";
+      DeferralTemplate.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateDeferralTemplateCode@204(CalcMethod@1001 : Option;StartDate@1002 : Option;NumOfPeriods@1003 : Integer) : Code[10];
+    VAR
+      DeferralTemplate@1000 : Record 1700;
+    BEGIN
+      CreateDeferralTemplate(DeferralTemplate,CalcMethod,StartDate,NumOfPeriods);
+      EXIT(DeferralTemplate."Deferral Code");
+    END;
+
+    PROCEDURE CreateDeductorCategory@1500002(VAR DeductorCategory@1500002 : Record 16498);
+    BEGIN
+      DeductorCategory.INIT;
+      DeductorCategory.VALIDATE(Code,COPYSTR(LibraryUtility.GenerateRandomCode(DeductorCategory.FIELDNO(Code),DATABASE::"Deductor Category"),1,LibraryUtility.GetFieldLength(DATABASE::"Deductor Category",DeductorCategory.FIELDNO(Code))));
+      DeductorCategory.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateFinanceChargeMemoHeader@72(VAR FinanceChargeMemoHeader@1000 : Record 302;CustomerNo@1001 : Code[20]);
+    BEGIN
+      FinanceChargeMemoHeader.INIT;
+      FinanceChargeMemoHeader.INSERT(TRUE);
+      FinanceChargeMemoHeader.VALIDATE("Customer No.",CustomerNo);
+      FindVATSetupForCust(CustomerNo);
+      FinanceChargeMemoHeader.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateFinanceChargeMemoLine@71(VAR FinanceChargeMemoLine@1002 : Record 303;FinanceChargeMemoHeaderNo@1000 : Code[20];Type@1001 : Option);
+    VAR
+      RecRef@1003 : RecordRef;
+    BEGIN
+      FinanceChargeMemoLine.INIT;
+      FinanceChargeMemoLine.VALIDATE("Finance Charge Memo No.",FinanceChargeMemoHeaderNo);
+      RecRef.GETTABLE(FinanceChargeMemoLine);
+      FinanceChargeMemoLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,FinanceChargeMemoLine.FIELDNO("Line No.")));
+      FinanceChargeMemoLine.INSERT(TRUE);
+      FinanceChargeMemoLine.VALIDATE(Type,Type);
+      FinanceChargeMemoLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateFinanceChargeTerms@77(VAR FinanceChargeTerms@1000 : Record 5);
+    BEGIN
+      FinanceChargeTerms.INIT;
+      FinanceChargeTerms.VALIDATE(
+        Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(FinanceChargeTerms.FIELDNO(Code),DATABASE::"Finance Charge Terms"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Finance Charge Terms",FinanceChargeTerms.FIELDNO(Code))));
+      FinanceChargeTerms.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateFinanceChargeText@73(VAR FinanceChargeText@1004 : Record 301;FinChargeTermsCode@1003 : Code[10];Position@1002 : Option;Text@1000 : Text[100]);
+    VAR
+      RecRef@1001 : RecordRef;
+    BEGIN
+      FinanceChargeText.INIT;
+      FinanceChargeText.VALIDATE("Fin. Charge Terms Code",FinChargeTermsCode);
+      FinanceChargeText.VALIDATE(Position,Position);
+      RecRef.GETTABLE(FinanceChargeText);
+      FinanceChargeText.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,FinanceChargeText.FIELDNO("Line No.")));
+      FinanceChargeText.INSERT(TRUE);
+      FinanceChargeText.VALIDATE(Text,Text);
+      FinanceChargeText.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateExchRate@16(VAR CurrencyExchangeRate@1002 : Record 330;CurrencyCode@1001 : Code[10];StartingDate@1000 : Date);
+    BEGIN
+      CurrencyExchangeRate.INIT;
+      CurrencyExchangeRate.VALIDATE("Currency Code",CurrencyCode);
+      CurrencyExchangeRate.VALIDATE("Starting Date",StartingDate);
+      CurrencyExchangeRate.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateExchangeRate@154(CurrencyCode@1001 : Code[10];StartingDate@1005 : Date;ExchangeRateAmount@1003 : Decimal;AdjustmentExchangeRateAmount@1004 : Decimal);
+    VAR
+      CurrencyExchangeRate@1000 : Record 330;
+    BEGIN
+      WITH CurrencyExchangeRate DO BEGIN
+        INIT;
+        VALIDATE("Currency Code",CurrencyCode);
+        VALIDATE("Starting Date",StartingDate);
+        INSERT(TRUE);
+
+        VALIDATE("Exchange Rate Amount",ExchangeRateAmount);
+        VALIDATE("Adjustment Exch. Rate Amount",AdjustmentExchangeRateAmount);
+        VALIDATE("Relational Exch. Rate Amount",1);
+        VALIDATE("Relational Adjmt Exch Rate Amt",1);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateExciseBusPostingGroup@1500001() : Code[10];
+    VAR
+      ExciseBusPostingGroup@1500000 : Record 13709;
+    BEGIN
+      WITH ExciseBusPostingGroup DO BEGIN
+        INIT;
+        VALIDATE(
+          Code,
+          COPYSTR(
+            LibraryUtility.GenerateRandomCode(FIELDNO(Code),DATABASE::"Excise Bus. Posting Group"),
+            1,
+            LibraryUtility.GetFieldLength(DATABASE::"Excise Bus. Posting Group",FIELDNO(Code))));
+        VALIDATE(Description,Code);
+        INSERT(TRUE);
+        EXIT(Code);
+      END;
+    END;
+
+    PROCEDURE CreateExciseProdPostingGroup@1500007() : Code[10];
+    VAR
+      ExciseProdPostingGroup@1500000 : Record 13710;
+    BEGIN
+      WITH ExciseProdPostingGroup DO BEGIN
+        INIT;
+        VALIDATE(
+          Code,
+          COPYSTR(
+            LibraryUtility.GenerateRandomCode(FIELDNO(Code),DATABASE::"Excise Prod. Posting Group"),
+            1,
+            LibraryUtility.GetFieldLength(DATABASE::"Excise Prod. Posting Group",FIELDNO(Code))));
+        VALIDATE(Description,Code);
+        VALIDATE("Chapter No.",LibraryUtility.GenerateGUID);
+        VALIDATE("Heading No",LibraryUtility.GenerateGUID);
+        INSERT(TRUE);
+        EXIT(Code);
+      END;
+    END;
+
+    PROCEDURE CreateExcisePostingSetup@1500000(VAR ExcisePostngSetup@1002 : Record 13711;BEDCalculationType@1500000 : Option;BEDPercent@1500001 : Decimal;NewSSI@1500002 : Boolean);
+    BEGIN
+      WITH ExcisePostngSetup DO BEGIN
+        INIT;
+        VALIDATE("Excise Bus. Posting Group",CreateExciseBusPostingGroup);
+        VALIDATE("Excise Prod. Posting Group",CreateExciseProdPostingGroup);
+        VALIDATE("BED Calculation Type",BEDCalculationType);
+        VALIDATE("BED %",BEDPercent);
+        VALIDATE(SSI,NewSSI);
+        INSERT(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateGenBusPostingGroup@43(VAR GenBusinessPostingGroup@1001 : Record 250);
+    BEGIN
+      GenBusinessPostingGroup.INIT;
+      GenBusinessPostingGroup.VALIDATE(
+        Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(GenBusinessPostingGroup.FIELDNO(Code),DATABASE::"Gen. Business Posting Group"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Gen. Business Posting Group",GenBusinessPostingGroup.FIELDNO(Code))));
+
+      // Validating Code as Name because value is not important.
+      GenBusinessPostingGroup.VALIDATE(Description,GenBusinessPostingGroup.Code);
+      GenBusinessPostingGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateGeneralPostingSetup@47(VAR GeneralPostingSetup@1003 : Record 252;GenBusPostingGroup@1001 : Code[10];GenProdPostingGroup@1002 : Code[10]);
+    BEGIN
+      GeneralPostingSetup.INIT;
+      GeneralPostingSetup.VALIDATE("Gen. Bus. Posting Group",GenBusPostingGroup);
+      GeneralPostingSetup.VALIDATE("Gen. Prod. Posting Group",GenProdPostingGroup);
+      GeneralPostingSetup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateGeneralPostingSetupInvt@163(VAR GeneralPostingSetup@1000 : Record 252);
+    VAR
+      GenBusinessPostingGroup@1001 : Record 250;
+      GenProductPostingGroup@1002 : Record 251;
+    BEGIN
+      CreateGenBusPostingGroup(GenBusinessPostingGroup);
+      CreateGenProdPostingGroup(GenProductPostingGroup);
+      CreateGeneralPostingSetup(GeneralPostingSetup,GenBusinessPostingGroup.Code,GenProductPostingGroup.Code);
+      GeneralPostingSetup.VALIDATE("Sales Account",CreateGLAccountNo);
+      GeneralPostingSetup.VALIDATE("Purch. Account",CreateGLAccountNo);
+      GeneralPostingSetup.VALIDATE("COGS Account",CreateGLAccountNo);
+      GeneralPostingSetup.VALIDATE("Inventory Adjmt. Account",CreateGLAccountNo);
+      GeneralPostingSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateGenProdPostingGroup@42(VAR GenProductPostingGroup@1000 : Record 251);
+    VAR
+      LibraryUtility@1001 : Codeunit 131000;
+    BEGIN
+      GenProductPostingGroup.INIT;
+      GenProductPostingGroup.VALIDATE(
+        Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(GenProductPostingGroup.FIELDNO(Code),DATABASE::"Gen. Product Posting Group"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Gen. Product Posting Group",GenProductPostingGroup.FIELDNO(Code))));
+
+      // Validating Code as Name because value is not important.
+      GenProductPostingGroup.VALIDATE(Description,GenProductPostingGroup.Code);
+      GenProductPostingGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateInsurance@46(VAR Insurance@1000 : Record 5628);
+    BEGIN
+      Insurance.INIT;
+      Insurance.INSERT(TRUE);
+      Insurance.VALIDATE(Description,Insurance."No.");  // Validating No as Description because value is not important.
+      Insurance.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateRandomExchangeRate@25(CurrencyCode@1001 : Code[10]);
+    VAR
+      CurrencyExchangeRate@1000 : Record 330;
+    BEGIN
+      CurrencyExchangeRate.INIT;
+      CurrencyExchangeRate.VALIDATE("Currency Code",CurrencyCode);
+      CurrencyExchangeRate.VALIDATE("Starting Date",FindEarliestDateForExhRate);
+      CurrencyExchangeRate.INSERT(TRUE);
+
+      // Using RANDOM Exchange Rate Amount and Adjustment Exchange Rate, between 100 and 400 (Standard Value).
+      CurrencyExchangeRate.VALIDATE("Exchange Rate Amount",100 * LibraryRandom.RandInt(4));
+      CurrencyExchangeRate.VALIDATE("Adjustment Exch. Rate Amount",CurrencyExchangeRate."Exchange Rate Amount");
+
+      // Relational Exch. Rate Amount and Relational Adjmt Exch Rate Amt always greater than Exchange Rate Amount.
+      CurrencyExchangeRate.VALIDATE("Relational Exch. Rate Amount",2 * CurrencyExchangeRate."Exchange Rate Amount");
+      CurrencyExchangeRate.VALIDATE("Relational Adjmt Exch Rate Amt",CurrencyExchangeRate."Relational Exch. Rate Amount");
+      CurrencyExchangeRate.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateGeneralJnlLine@15(VAR GenJournalLine@1006 : Record 81;JournalTemplateName@1005 : Code[10];JournalBatchName@1004 : Code[10];DocumentType@1003 : Option;AccountType@1002 : Option;AccountNo@1001 : Code[20];Amount@1000 : Decimal);
+    VAR
+      GenJournalBatch@1007 : Record 232;
+    BEGIN
+      GenJournalBatch.GET(JournalTemplateName,JournalBatchName);
+      CreateGeneralJnlLineWithBalAcc(GenJournalLine,JournalTemplateName,JournalBatchName,DocumentType,AccountType,AccountNo,
+        GenJournalBatch."Bal. Account Type",GenJournalBatch."Bal. Account No.",Amount);
+    END;
+
+    PROCEDURE CreateGeneralJnlLineWithBalAcc@134(VAR GenJournalLine@1006 : Record 81;JournalTemplateName@1005 : Code[10];JournalBatchName@1004 : Code[10];DocumentType@1003 : Option;AccountType@1002 : Option;AccountNo@1001 : Code[20];BalAccountType@1008 : Option;BalAccountNo@1007 : Code[20];Amount@1000 : Decimal);
+    BEGIN
+      LibraryJournals.CreateGenJournalLine(GenJournalLine,JournalTemplateName,JournalBatchName,DocumentType,AccountType,AccountNo,
+        BalAccountType,BalAccountNo,Amount);
+
+      // Update Cheque No. and Cheque Date when Account Type is Bank Account to avoid failures, value is not important for test.
+      IF  AccountType = GenJournalLine."Account Type"::"Bank Account" THEN BEGIN
+        GenJournalLine.VALIDATE("Cheque No.",GenJournalLine."Document No.");
+        GenJournalLine.VALIDATE("Cheque Date",WORKDATE);
+        GenJournalLine.MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateGeneralJnlLine2@136(VAR GenJournalLine@1006 : Record 81;JournalTemplateName@1005 : Code[10];JournalBatchName@1004 : Code[10];DocumentType@1003 : Option;AccountType@1002 : Option;AccountNo@1001 : Code[20];Amount@1000 : Decimal);
+    VAR
+      GenJournalBatch@1007 : Record 232;
+    BEGIN
+      // This function should replace the identical one above, but it requires a lot of changes to existing tests so I'm keeping both for now and will refactor when time permits
+      GenJournalBatch.GET(JournalTemplateName,JournalBatchName);
+      CreateGeneralJnlLine2WithBalAcc(GenJournalLine,JournalTemplateName,JournalBatchName,DocumentType,AccountType,AccountNo,
+        GenJournalBatch."Bal. Account Type",GenJournalBatch."Bal. Account No.",Amount);
+    END;
+
+    PROCEDURE CreateGeneralJnlLine2WithBalAcc@135(VAR GenJournalLine@1006 : Record 81;JournalTemplateName@1005 : Code[10];JournalBatchName@1004 : Code[10];DocumentType@1003 : Option;AccountType@1002 : Option;AccountNo@1001 : Code[20];BalAccountType@1008 : Option;BalAccountNo@1007 : Code[20];Amount@1000 : Decimal);
+    BEGIN
+      // This function should replace the identical one above, but it requires a lot of changes to existing tests so I'm keeping both for now and will refactor when time permits
+      LibraryJournals.CreateGenJournalLine2(GenJournalLine,JournalTemplateName,JournalBatchName,DocumentType,AccountType,AccountNo,
+        BalAccountType,BalAccountNo,Amount);
+
+      // Update Cheque No. and Cheque Date when Account Type is Bank Account to avoid failures, value is not important for test.
+      IF  AccountType = GenJournalLine."Account Type"::"Bank Account" THEN BEGIN
+        GenJournalLine.VALIDATE("Cheque No.",GenJournalLine."Document No.");
+        GenJournalLine.VALIDATE("Cheque Date",WORKDATE);
+        GenJournalLine.MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateFAJournalLine@49(VAR FAJournalLine@1006 : Record 5621;JournalTemplateName@1005 : Code[10];JournalBatchName@1004 : Code[10];DocumentType@1003 : Option;FAPostingType@1002 : Option;FANo@1001 : Code[20];Amount@1000 : Decimal);
+    VAR
+      FAJournalBatch@1011 : Record 5620;
+      NoSeries@1010 : Record 308;
+      NoSeriesMgt@1009 : Codeunit 396;
+      RecRef@1007 : RecordRef;
+    BEGIN
+      // Find a balanced template/batch pair.
+      FAJournalBatch.GET(JournalTemplateName,JournalBatchName);
+
+      // Create a General Journal Entry.
+      FAJournalLine.INIT;
+      FAJournalLine.VALIDATE("Journal Template Name",JournalTemplateName);
+      FAJournalLine.VALIDATE("Journal Batch Name",JournalBatchName);
+      RecRef.GETTABLE(FAJournalLine);
+      FAJournalLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,FAJournalLine.FIELDNO("Line No.")));
+      FAJournalLine.INSERT(TRUE);
+      FAJournalLine.VALIDATE("Posting Date",WORKDATE);  // Defaults to work date.
+      FAJournalLine.VALIDATE("Document Type",DocumentType);
+      FAJournalLine.VALIDATE("FA No.",FANo);
+      FAJournalLine.VALIDATE("FA Posting Type",FAPostingType);
+      FAJournalLine.VALIDATE("FA Posting Date",WORKDATE);
+      FAJournalLine.VALIDATE(Amount,Amount);
+      IF NoSeries.GET(FAJournalBatch."No. Series") THEN
+        FAJournalLine.VALIDATE(
+          "Document No.",NoSeriesMgt.GetNextNo(FAJournalBatch."No. Series",WORKDATE,FALSE));  // Unused but required field for posting.
+      FAJournalLine.VALIDATE("External Document No.",FAJournalLine."Document No.");  // Unused but required for vendor posting.
+      FAJournalLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateGLAccount@14(VAR GLAccount@1000 : Record 15);
+    BEGIN
+      GLAccount.INIT;
+      // Prefix a number to fix errors for local build.
+      GLAccount.VALIDATE(
+        "No.",
+        PADSTR(
+          '1' + LibraryUtility.GenerateRandomCode(GLAccount.FIELDNO("No."),DATABASE::"G/L Account"),MAXSTRLEN(GLAccount."No."),'0'));
+      GLAccount.VALIDATE(Name,GLAccount."No.");  // Enter No. as Name because value is not important.
+      GLAccount.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateGLAccountNo@149() : Code[20];
+    VAR
+      GLAccount@1000 : Record 15;
+    BEGIN
+      CreateGLAccount(GLAccount);
+      EXIT(GLAccount."No.");
+    END;
+
+    PROCEDURE CreateGLAccountNoWithDirectPosting@151() : Code[20];
+    VAR
+      GLAccount@1000 : Record 15;
+    BEGIN
+      CreateGLAccount(GLAccount);
+      GLAccount.VALIDATE("Direct Posting",TRUE);
+      GLAccount.MODIFY;
+      EXIT(GLAccount."No.");
+    END;
+
+    PROCEDURE CreateGLAccountWithSalesSetup@157() : Code[20];
+    VAR
+      GLAccount@1000 : Record 15;
+      VATPostingSetup@1001 : Record 325;
+    BEGIN
+      FindVATPostingSetup(VATPostingSetup,VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+      EXIT(CreateGLAccountWithVATPostingSetup(VATPostingSetup,GLAccount."Gen. Posting Type"::Sale));
+    END;
+
+    PROCEDURE CreateGLAccountWithPurchSetup@150() : Code[20];
+    VAR
+      GLAccount@1000 : Record 15;
+      VATPostingSetup@1001 : Record 325;
+    BEGIN
+      FindVATPostingSetup(VATPostingSetup,VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+      EXIT(CreateGLAccountWithVATPostingSetup(VATPostingSetup,GLAccount."Gen. Posting Type"::Purchase));
+    END;
+
+    PROCEDURE CreateGLAccountWithVATPostingSetup@143(VAR VATPostingSetup@1001 : Record 325;GenPostingType@1003 : Option) : Code[20];
+    VAR
+      GLAccount@1000 : Record 15;
+      GeneralPostingSetup@1002 : Record 252;
+    BEGIN
+      FindGeneralPostingSetup(GeneralPostingSetup);
+      CreateGLAccount(GLAccount);
+      WITH GLAccount DO BEGIN
+        VALIDATE("Account Type","Account Type"::Posting);
+        VALIDATE("Gen. Posting Type",GenPostingType);
+        VALIDATE("Gen. Bus. Posting Group",GeneralPostingSetup."Gen. Bus. Posting Group");
+        VALIDATE("Gen. Prod. Posting Group",GeneralPostingSetup."Gen. Prod. Posting Group");
+        VALIDATE("VAT Bus. Posting Group",VATPostingSetup."VAT Bus. Posting Group");
+        VALIDATE("VAT Prod. Posting Group",VATPostingSetup."VAT Prod. Posting Group");
+        MODIFY(TRUE);
+        EXIT("No.");
+      END;
+    END;
+
+    PROCEDURE CreateGLBudgetEntry@91(VAR GLBudgetEntry2@1000 : Record 96;BudgetDate@1001 : Date;GLAccountNo@1002 : Code[20];BudgetName@1003 : Code[10]);
+    VAR
+      GLBudgetEntry@1004 : Record 96;
+    BEGIN
+      IF GLBudgetEntry.FINDLAST THEN;
+      GLBudgetEntry2.INIT;
+      GLBudgetEntry2.VALIDATE("Entry No.",GLBudgetEntry."Entry No." + 1);
+      GLBudgetEntry2.VALIDATE("Budget Name",BudgetName);
+      GLBudgetEntry2.VALIDATE("G/L Account No.",GLAccountNo);
+      GLBudgetEntry2.VALIDATE(Date,BudgetDate);
+      GLBudgetEntry2.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateGLBudgetName@79(VAR GLBudgetName@1000 : Record 95);
+    BEGIN
+      GLBudgetName.INIT;
+      GLBudgetName.VALIDATE(Name,LibraryUtility.GenerateRandomCode(GLBudgetName.FIELDNO(Name),DATABASE::"G/L Budget Name"));
+      GLBudgetName.VALIDATE(Description,GLBudgetName.Name);
+      GLBudgetName.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateGenJnlAllocation@63(VAR GenJnlAllocation@1000 : Record 221;JournalTemplateName@1001 : Code[10];JournalBatchName@1002 : Code[10];LineNo@1003 : Integer);
+    VAR
+      RecRef@1004 : RecordRef;
+    BEGIN
+      GenJnlAllocation.INIT;
+      GenJnlAllocation.VALIDATE("Journal Template Name",JournalTemplateName);
+      GenJnlAllocation.VALIDATE("Journal Batch Name",JournalBatchName);
+      GenJnlAllocation.VALIDATE("Journal Line No.",LineNo);
+      RecRef.GETTABLE(GenJnlAllocation);
+      GenJnlAllocation.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,GenJnlAllocation.FIELDNO("Line No.")));
+      GenJnlAllocation.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateGenJournalBatch@75(VAR GenJournalBatch@1000 : Record 232;JournalTemplateName@1001 : Code[10]);
+    BEGIN
+      // creates a new Gen. Journal Batch named with the next available number (if it does not yet exist), OR
+      // returns the Gen. Journal batch named with the next available number
+      // calling ConvertNumericToText to avoid auto-removal of the batch during posting by COD13
+      GenJournalBatch.INIT;
+      GenJournalBatch.VALIDATE("Journal Template Name",JournalTemplateName);
+      GenJournalBatch.VALIDATE(
+        Name,
+        LibraryUtility.ConvertNumericToText(
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(GenJournalBatch.FIELDNO(Name),DATABASE::"Gen. Journal Batch"),
+          1,
+            LibraryUtility.GetFieldLength(DATABASE::"Gen. Journal Batch",GenJournalBatch.FIELDNO(Name)))));
+      GenJournalBatch.VALIDATE(Description,GenJournalBatch.Name);  // Validating Name as Description because value is not important.
+      IF GenJournalBatch.INSERT(TRUE) THEN ;
+    END;
+
+    PROCEDURE CreateGenJournalTemplate@68(VAR GenJournalTemplate@1000 : Record 80);
+    BEGIN
+      GenJournalTemplate.INIT;
+      GenJournalTemplate.VALIDATE(
+        Name,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(GenJournalTemplate.FIELDNO(Name),DATABASE::"Gen. Journal Template"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Gen. Journal Template",GenJournalTemplate.FIELDNO(Name))));
+      GenJournalTemplate.VALIDATE(Description,GenJournalTemplate.Name);
+      // Validating Name as Description because value is not important.
+      GenJournalTemplate.INSERT(TRUE);
+
+      IF NOT GenJournalTemplate."Force Doc. Balance" THEN BEGIN
+        GenJournalTemplate.VALIDATE("Force Doc. Balance",TRUE);  // This field is FALSE by default in ES. Setting this to TRUE to match ES with W1.
+        GenJournalTemplate.MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateICGLAccount@111(VAR ICGLAccount@1000 : Record 410);
+    BEGIN
+      ICGLAccount.INIT;
+      ICGLAccount.VALIDATE(
+        "No.",
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(ICGLAccount.FIELDNO("No."),DATABASE::"IC G/L Account"),1,
+          LibraryUtility.GetFieldLength(DATABASE::"IC G/L Account",ICGLAccount.FIELDNO("No."))));
+      ICGLAccount.VALIDATE(Name,ICGLAccount."No.");  // Validating No. as Name because value is not important.
+      ICGLAccount.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateICPartner@108(VAR ICPartner@1000 : Record 413);
+    BEGIN
+      ICPartner.INIT;
+      ICPartner.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(ICPartner.FIELDNO(Code),DATABASE::"IC Partner"),1,
+          LibraryUtility.GetFieldLength(DATABASE::"IC Partner",ICPartner.FIELDNO(Code))));
+      ICPartner.VALIDATE(Name,ICPartner.Code);  // Validating Name as Code because value is not important.
+      ICPartner.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateIncomeTaxAccountingPeriod@1500003(VAR IncomeTaxAccountingPeriod@1000 : Record 13724);
+    VAR
+      No@1500000 : Integer;
+    BEGIN
+      IF IncomeTaxAccountingPeriod.FINDLAST THEN
+        No := IncomeTaxAccountingPeriod."No." + LibraryRandom.RandInt(2)
+      ELSE
+        No := LibraryRandom.RandInt(2);
+      IncomeTaxAccountingPeriod.INIT;
+      IncomeTaxAccountingPeriod.VALIDATE("No.",No);
+      IncomeTaxAccountingPeriod.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateIncomeTaxPeriod@1500004(VAR IncomeTaxPeriodSetUp@1500000 : Record 16501;IncomeTaxAccountingPeriodNo@1500001 : Integer;Quarter@1500002 : ' ,Q1,Q2,Q3,Q4');
+    BEGIN
+      IncomeTaxPeriodSetUp.INIT;
+      IncomeTaxPeriodSetUp.VALIDATE("No.",IncomeTaxAccountingPeriodNo);
+      IncomeTaxPeriodSetUp.VALIDATE(Quarter,Quarter);
+      IncomeTaxPeriodSetUp.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateIntrastatJnlBatch@97(VAR IntrastatJnlBatch@1000 : Record 262;JournalTemplateName@1001 : Code[10]);
+    BEGIN
+      IntrastatJnlBatch.INIT;
+      IntrastatJnlBatch.VALIDATE("Journal Template Name",JournalTemplateName);
+      IntrastatJnlBatch.VALIDATE(
+        Name,LibraryUtility.GenerateRandomCode(IntrastatJnlBatch.FIELDNO(Name),DATABASE::"Intrastat Jnl. Batch"));
+      IntrastatJnlBatch.VALIDATE(Description,IntrastatJnlBatch.Name);
+      IntrastatJnlBatch.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateIntrastatJnlLine@96(VAR IntrastatJnlLine@1002 : Record 263;JournalTemplateName@1001 : Code[10];JournalBatchName@1000 : Code[10]);
+    VAR
+      RecRef@1003 : RecordRef;
+    BEGIN
+      IntrastatJnlLine.INIT;
+      IntrastatJnlLine.VALIDATE("Journal Template Name",JournalTemplateName);
+      IntrastatJnlLine.VALIDATE("Journal Batch Name",JournalBatchName);
+      RecRef.GETTABLE(IntrastatJnlLine);
+      IntrastatJnlLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,IntrastatJnlLine.FIELDNO("Line No.")));
+      IntrastatJnlLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateIntrastatJnlTemplate@98(VAR IntrastatJnlTemplate@1000 : Record 261);
+    BEGIN
+      IntrastatJnlTemplate.INIT;
+      IntrastatJnlTemplate.VALIDATE(
+        Name,LibraryUtility.GenerateRandomCode(IntrastatJnlTemplate.FIELDNO(Name),DATABASE::"Intrastat Jnl. Template"));
+      IntrastatJnlTemplate.VALIDATE(Description,IntrastatJnlTemplate.Name);
+      IntrastatJnlTemplate.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateIntrastatJnlTemplateAndBatch@187(VAR IntrastatJnlBatch@1000 : Record 262;JournalDate@1002 : Date);
+    VAR
+      IntrastatJnlTemplate@1001 : Record 261;
+      LibraryFiscalYear@1003 : Codeunit 131302;
+    BEGIN
+      CreateIntrastatJnlTemplate(IntrastatJnlTemplate);
+      CreateIntrastatJnlBatch(IntrastatJnlBatch,IntrastatJnlTemplate.Name);
+      IntrastatJnlBatch.VALIDATE(
+        "Statistics Period",FORMAT(JournalDate,0,LibraryFiscalYear.GetStatisticsPeriod));
+      IntrastatJnlBatch.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateInvDiscForCustomer@17(VAR CustInvoiceDisc@1000 : Record 19;Code@1001 : Code[20];CurrencyCode@1003 : Code[10];MinimumAmount@1004 : Decimal);
+    BEGIN
+      CustInvoiceDisc.INIT;
+      CustInvoiceDisc.VALIDATE(Code,Code);
+      CustInvoiceDisc.VALIDATE("Currency Code",CurrencyCode);
+      CustInvoiceDisc.VALIDATE("Minimum Amount",MinimumAmount);
+      CustInvoiceDisc.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateInvDiscForVendor@9(VAR VendorInvoiceDisc@1000 : Record 24;Code@1001 : Code[20];CurrencyCode@1003 : Code[10];MinimumAmount@1004 : Decimal);
+    BEGIN
+      VendorInvoiceDisc.INIT;
+      VendorInvoiceDisc.VALIDATE(Code,Code);
+      VendorInvoiceDisc.VALIDATE("Currency Code",CurrencyCode);
+      VendorInvoiceDisc.VALIDATE("Minimum Amount",MinimumAmount);
+      VendorInvoiceDisc.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateItemAnalysisView@88(VAR ItemAnalysisView@1001 : Record 7152;AnalysisArea@1000 : Option);
+    BEGIN
+      ItemAnalysisView.INIT;
+      ItemAnalysisView.VALIDATE("Analysis Area",AnalysisArea);
+      ItemAnalysisView.VALIDATE(Code,LibraryUtility.GenerateRandomCode(ItemAnalysisView.FIELDNO(Code),DATABASE::"Item Analysis View"));
+      // Validating Name as Code because value is not important.
+      ItemAnalysisView.VALIDATE(Name,ItemAnalysisView.Code);
+      ItemAnalysisView.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateLineDiscForCustomer@23(VAR SalesLineDiscount@1001 : Record 7004;Type@1000 : Option;Code@1002 : Code[20];SalesType@1003 : Option;SalesCode@1004 : Code[20];StartingDate@1005 : Date;CurrencyCode@1006 : Code[10];VariantCode@1007 : Code[10];UnitOfMeasureCode@1008 : Code[10];MinimumQuantity@1009 : Decimal);
+    BEGIN
+      SalesLineDiscount.INIT;
+      SalesLineDiscount.VALIDATE(Type,Type);
+      SalesLineDiscount.VALIDATE(Code,Code);
+      SalesLineDiscount.VALIDATE("Sales Type",SalesType);
+      SalesLineDiscount.VALIDATE("Sales Code",SalesCode);
+      SalesLineDiscount.VALIDATE("Starting Date",StartingDate);
+      SalesLineDiscount.VALIDATE("Currency Code",CurrencyCode);
+      IF Type = SalesLineDiscount.Type::Item THEN BEGIN
+        SalesLineDiscount.VALIDATE("Variant Code",VariantCode);
+        SalesLineDiscount.VALIDATE("Unit of Measure Code",UnitOfMeasureCode);
+      END;
+      SalesLineDiscount.VALIDATE("Minimum Quantity",MinimumQuantity);
+      SalesLineDiscount.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateLineDiscForVendor@29(VAR PurchaseLineDiscount@1000 : Record 7014;ItemNo@1001 : Code[20];VendorNo@1002 : Code[20];StartingDate@1003 : Date;CurrencyCode@1004 : Code[10];VariantCode@1005 : Code[10];UnitofMeasureCode@1006 : Code[10];MinimumQuantity@1007 : Decimal);
+    BEGIN
+      PurchaseLineDiscount.INIT;
+      PurchaseLineDiscount.VALIDATE("Item No.",ItemNo);
+      PurchaseLineDiscount.VALIDATE("Vendor No.",VendorNo);
+      PurchaseLineDiscount.VALIDATE("Starting Date",StartingDate);
+      PurchaseLineDiscount.VALIDATE("Currency Code",CurrencyCode);
+      PurchaseLineDiscount.VALIDATE("Variant Code",VariantCode);
+      PurchaseLineDiscount.VALIDATE("Unit of Measure Code",UnitofMeasureCode);
+      PurchaseLineDiscount.VALIDATE("Minimum Quantity",MinimumQuantity);
+      PurchaseLineDiscount.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateNoSeriesCode@18() : Code[10];
+    VAR
+      NoSeries@1002 : Record 308;
+      NoSeriesLine@1001 : Record 309;
+    BEGIN
+      // Create Number Series and Number Series Line and return the No. Series Code.
+      LibraryUtility.CreateNoSeries(NoSeries,TRUE,TRUE,FALSE);
+      LibraryUtility.CreateNoSeriesLine(NoSeriesLine,NoSeries.Code,'','');
+      EXIT(NoSeries.Code);
+    END;
+
+    PROCEDURE CreatePaymentMethod@127(VAR PaymentMethod@1000 : Record 289);
+    BEGIN
+      PaymentMethod.INIT;
+      PaymentMethod.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(PaymentMethod.FIELDNO(Code),DATABASE::"Payment Method"),1,
+          LibraryUtility.GetFieldLength(DATABASE::"Payment Method",PaymentMethod.FIELDNO(Code))));
+      PaymentMethod.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreatePaymentTerms@41(VAR PaymentTerms@1000 : Record 3);
+    BEGIN
+      PaymentTerms.INIT;
+      PaymentTerms.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(PaymentTerms.FIELDNO(Code),DATABASE::"Payment Terms"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Payment Terms",PaymentTerms.FIELDNO(Code))));
+      PaymentTerms.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreatePaymentTermsDiscount@1043(VAR PaymentTerms@1001 : Record 3;CalcPmtDiscOnCrMemos@1002 : Boolean);
+    BEGIN
+      CreatePaymentTerms(PaymentTerms);
+      PaymentTerms.VALIDATE("Calc. Pmt. Disc. on Cr. Memos",CalcPmtDiscOnCrMemos);
+      EVALUATE(PaymentTerms."Due Date Calculation",'<' + FORMAT(LibraryRandom.RandInt(5)) + 'M>');
+      EVALUATE(PaymentTerms."Discount Date Calculation",'<' + FORMAT(LibraryRandom.RandInt(10)) + 'D>');
+      PaymentTerms.VALIDATE("Due Date Calculation",PaymentTerms."Due Date Calculation");
+      PaymentTerms.VALIDATE("Discount Date Calculation",PaymentTerms."Discount Date Calculation");
+      PaymentTerms.VALIDATE("Discount %",LibraryRandom.RandInt(10));
+      PaymentTerms.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreatePostCode@186(VAR PostCode@1000 : Record 225);
+    VAR
+      CountryRegion@1001 : Record 9;
+    BEGIN
+      PostCode.INIT;
+      PostCode.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(PostCode.FIELDNO(Code),DATABASE::"Post Code"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Post Code",PostCode.FIELDNO(Code))));
+      PostCode.VALIDATE(
+        City,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(PostCode.FIELDNO(City),DATABASE::"Post Code"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Post Code",PostCode.FIELDNO(City))));
+      CountryRegion.NEXT(LibraryRandom.RandInt(CountryRegion.COUNT));
+      PostCode.VALIDATE("Country/Region Code",CountryRegion.Code);
+      PostCode.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePrepaymentVATPostingSetup@192(VAR VATPostingSetup@1000 : Record 325;VATCalcType@1001 : Option;GenPostingType@1002 : ',Purchase,Sale';SetupGLAccount@1006 : Record 15;VATAccountNo@1005 : Code[20]);
+    VAR
+      VATBusinessPostingGroup@1003 : Record 323;
+      VATProductPostingGroup@1004 : Record 324;
+    BEGIN
+      WITH VATPostingSetup DO BEGIN
+        IF (SetupGLAccount."VAT Bus. Posting Group" <> '') AND (SetupGLAccount."VAT Prod. Posting Group" <> '') THEN
+          IF GET(SetupGLAccount."VAT Bus. Posting Group",SetupGLAccount."VAT Prod. Posting Group") THEN
+            EXIT;
+
+        INIT;
+        IF SetupGLAccount."VAT Bus. Posting Group" <> '' THEN
+          "VAT Bus. Posting Group" := SetupGLAccount."VAT Bus. Posting Group"
+        ELSE BEGIN
+          CreateVATBusinessPostingGroup(VATBusinessPostingGroup);
+          "VAT Bus. Posting Group" := VATBusinessPostingGroup.Code;
+        END;
+        CreateVATProductPostingGroup(VATProductPostingGroup);
+        "VAT Prod. Posting Group" := VATProductPostingGroup.Code;
+        "VAT Identifier" := "VAT Prod. Posting Group";
+        "VAT Calculation Type" := VATCalcType;
+        IF "VAT Calculation Type" <> "VAT Calculation Type"::"Full VAT" THEN BEGIN
+          // "VAT %" := LibraryRandom.RandIntInRange(5,25);
+          "VAT %" := 0;
+
+          VATAccountNo := CreateGLAccountNo;
+        END;
+        IF GenPostingType = GenPostingType::Purchase THEN
+          "Purchase VAT Account" := VATAccountNo
+        ELSE
+          "Sales VAT Account" := VATAccountNo;
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePrepaymentGenPostingSetup@191(VAR GenPostingSetup@1000 : Record 252;VAR PrepmtGLAccount@1002 : Record 15;GenPostingType@1001 : ' ,Purchase,Sale';SetupGLAccount@1006 : Record 15);
+    VAR
+      GenBusPostingGroup@1005 : Record 250;
+      GenProdPostingGroup@1004 : Record 251;
+    BEGIN
+      WITH GenPostingSetup DO BEGIN
+        IF (SetupGLAccount."Gen. Bus. Posting Group" <> '') AND (SetupGLAccount."Gen. Prod. Posting Group" <> '') THEN
+          IF GET(SetupGLAccount."Gen. Bus. Posting Group",SetupGLAccount."Gen. Prod. Posting Group") THEN
+            EXIT;
+
+        INIT;
+        IF SetupGLAccount."Gen. Bus. Posting Group" <> '' THEN
+          "Gen. Bus. Posting Group" := SetupGLAccount."Gen. Bus. Posting Group"
+        ELSE BEGIN
+          CreateGenBusPostingGroup(GenBusPostingGroup);
+          "Gen. Bus. Posting Group" := GenBusPostingGroup.Code;
+        END;
+        CreateGenProdPostingGroup(GenProdPostingGroup);
+        "Gen. Prod. Posting Group" := GenProdPostingGroup.Code;
+        CreateGLAccount(PrepmtGLAccount);
+        CASE GenPostingType OF
+          GenPostingType::Purchase:
+            BEGIN
+              "Direct Cost Applied Account" := CreateGLAccountNo;
+              "Purch. Account" := CreateGLAccountNo;
+              "Purch. Prepayments Account" := PrepmtGLAccount."No.";
+              "Purch. Line Disc. Account" := CreateGLAccountNo;
+            END;
+          GenPostingType::Sale:
+            BEGIN
+              "COGS Account" := CreateGLAccountNo;
+              "Sales Account" := CreateGLAccountNo;
+              "Sales Prepayments Account" := PrepmtGLAccount."No.";
+              "Sales Line Disc. Account" := CreateGLAccountNo;
+            END;
+        END;
+        INSERT;
+      END;
+    END;
+
+    PROCEDURE CreatePrepaymentVATSetup@190(VAR LineGLAccount@1009 : Record 15;VAR PrepmtGLAccount@1005 : Record 15;GenPostingType@1006 : ' ,Purchase,Sale';VATCalcType@1001 : 'Normal VAT,Reverse Charge VAT,Full VAT,Sales Tax';PrepmtVATCalcType@1002 : Option);
+    VAR
+      GenPostingSetup@1003 : Record 252;
+      PassedGLAccount@1004 : Record 15;
+    BEGIN
+      PassedGLAccount := LineGLAccount;
+      CreatePrepaymentGenPostingSetup(GenPostingSetup,PrepmtGLAccount,GenPostingType,PassedGLAccount);
+      SetPostingGroupsOnPrepmtGLAccount(PrepmtGLAccount,GenPostingSetup,GenPostingType,PrepmtVATCalcType,PassedGLAccount);
+
+      CreateGLAccount(LineGLAccount);
+      IF (PrepmtVATCalcType = VATCalcType) AND (VATCalcType <> VATCalcType::"Full VAT") THEN
+        SetPostingGroupsOnPrepmtGLAccount(LineGLAccount,GenPostingSetup,GenPostingType,VATCalcType,PrepmtGLAccount)
+      ELSE BEGIN
+        PassedGLAccount."Gen. Bus. Posting Group" := PrepmtGLAccount."Gen. Bus. Posting Group";
+        PassedGLAccount."VAT Bus. Posting Group" := PrepmtGLAccount."VAT Bus. Posting Group";
+        SetPostingGroupsOnPrepmtGLAccount(LineGLAccount,GenPostingSetup,GenPostingType,VATCalcType,PassedGLAccount);
+      END;
+    END;
+
+    PROCEDURE CreateReasonCode@85(VAR ReasonCode@1000 : Record 231);
+    BEGIN
+      ReasonCode.INIT;
+      ReasonCode.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(ReasonCode.FIELDNO(Code),DATABASE::"Reason Code"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Reason Code",ReasonCode.FIELDNO(Code))));
+      ReasonCode.VALIDATE(Description,ReasonCode.Code);  // Validating Description as Code because value is not important.
+      ReasonCode.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateReminderHeader@12(VAR ReminderHeader@1000 : Record 295);
+    BEGIN
+      ReminderHeader.INIT;
+      ReminderHeader.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateReminderLevel@10(VAR ReminderLevel@1001 : Record 293;ReminderTermsCode@1000 : Code[10]);
+    BEGIN
+      ReminderLevel.INIT;
+      ReminderLevel.VALIDATE("Reminder Terms Code",ReminderTermsCode);
+      ReminderLevel.NewRecord;
+      ReminderLevel.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateReminderLine@69(VAR ReminderLine@1002 : Record 296;ReminderNo@1000 : Code[20];Type@1001 : Option);
+    VAR
+      RecRef@1003 : RecordRef;
+    BEGIN
+      ReminderLine.INIT;
+      ReminderLine.VALIDATE("Reminder No.",ReminderNo);
+      RecRef.GETTABLE(ReminderLine);
+      ReminderLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,ReminderLine.FIELDNO("Line No.")));
+      ReminderLine.INSERT(TRUE);
+      ReminderLine.VALIDATE(Type,Type);
+      ReminderLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateReminderTerms@4(VAR ReminderTerms@1000 : Record 292);
+    BEGIN
+      ReminderTerms.INIT;
+      ReminderTerms.VALIDATE(Code,LibraryUtility.GenerateRandomCode(ReminderTerms.FIELDNO(Code),DATABASE::"Reminder Terms"));
+      ReminderTerms.VALIDATE(Description,ReminderTerms.Code);
+      ReminderTerms.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateReminderText@110(VAR ReminderText@1000 : Record 294;ReminderTermsCode@1002 : Code[10];ReminderLevel@1003 : Integer;Position@1004 : Option;Text@1001 : Text[100]);
+    VAR
+      RecRef@1005 : RecordRef;
+    BEGIN
+      ReminderText.INIT;
+      ReminderText.VALIDATE("Reminder Terms Code",ReminderTermsCode);
+      ReminderText.VALIDATE("Reminder Level",ReminderLevel);
+      ReminderText.VALIDATE(Position,Position);
+      RecRef.GETTABLE(ReminderText);
+      ReminderText.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,ReminderText.FIELDNO("Line No.")));
+      ReminderText.INSERT(TRUE);
+      ReminderText.VALIDATE(Text,Text);
+      ReminderText.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateRecurringTemplateName@60(VAR GenJournalTemplate@1000 : Record 80);
+    BEGIN
+      GenJournalTemplate.INIT;
+      GenJournalTemplate.VALIDATE(
+        Name,
+        COPYSTR(LibraryUtility.GenerateRandomCode(GenJournalTemplate.FIELDNO(Name),DATABASE::"Gen. Journal Template"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Gen. Journal Template",GenJournalTemplate.FIELDNO(Name))));
+      GenJournalTemplate.INSERT(TRUE);
+      GenJournalTemplate.VALIDATE("Posting No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      GenJournalTemplate.VALIDATE(Recurring,TRUE);
+      GenJournalTemplate.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateRecurringBatchName@61(VAR GenJournalBatch@1000 : Record 232;JournalTemplateName@1002 : Code[10]);
+    VAR
+      GenJournalTemplate@1001 : Record 80;
+    BEGIN
+      // Create New General Journal Batch with a random Name of String length less than 10.
+      GenJournalTemplate.GET(JournalTemplateName);
+      GenJournalBatch.INIT;
+      GenJournalBatch.VALIDATE("Journal Template Name",GenJournalTemplate.Name);
+      GenJournalBatch.VALIDATE(
+        Name,
+        COPYSTR(LibraryUtility.GenerateRandomCode(GenJournalBatch.FIELDNO(Name),DATABASE::"Gen. Journal Batch"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Gen. Journal Batch",GenJournalBatch.FIELDNO(Name))));
+      GenJournalBatch.INSERT(TRUE);
+      GenJournalBatch.VALIDATE("Posting No. Series",GenJournalTemplate."Posting No. Series");
+      GenJournalBatch.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateReturnReasonCode@126(VAR ReturnReason@1001 : Record 6635);
+    BEGIN
+      ReturnReason.INIT;
+      ReturnReason.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(ReturnReason.FIELDNO(Code),DATABASE::"Return Reason"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Return Reason",ReturnReason.FIELDNO(Code))));
+      ReturnReason.VALIDATE(Description,ReturnReason.Code);  // Validating Description as Code because value is not important.
+      ReturnReason.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateSourceCode@58(VAR SourceCode@1001 : Record 230);
+    BEGIN
+      SourceCode.INIT;
+      SourceCode.VALIDATE(
+        Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(SourceCode.FIELDNO(Code),DATABASE::"Source Code"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Source Code",SourceCode.FIELDNO(Code))));
+      SourceCode.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateRelatedVATPostingSetup@189(GLAccount@1000 : Record 15) : Code[10];
+    VAR
+      VATPostingSetup@1001 : Record 325;
+      VATProductPostingGroup@1002 : Record 324;
+    BEGIN
+      VATPostingSetup.GET(GLAccount."VAT Bus. Posting Group",GLAccount."VAT Prod. Posting Group");
+      CreateVATProductPostingGroup(VATProductPostingGroup);
+      VATPostingSetup."VAT Prod. Posting Group" := VATProductPostingGroup.Code;
+      VATPostingSetup."Sales VAT Account" := CreateGLAccountNo;
+      VATPostingSetup."Purchase VAT Account" := CreateGLAccountNo;
+      VATPostingSetup.INSERT;
+      EXIT(VATPostingSetup."VAT Prod. Posting Group");
+    END;
+
+    PROCEDURE CreateState@1500025(VAR State@1500000 : Record 13762);
+    BEGIN
+      State.INIT;
+      State.VALIDATE(Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(State.FIELDNO(Code),DATABASE::State),
+          1,LibraryUtility.GetFieldLength(DATABASE::State,State.FIELDNO(Code))));
+      State.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateStructureDetails@1500005(VAR StructureDetails@1500000 : Record 13793;Code@1500001 : Code[10];CalculationOrder@1500002 : Integer;Type@1500003 : 'Charges,Sales Tax,Excise,Other Taxes,Service Tax';TaxChargeGroup@1500004 : Code[10];TaxChargeCode@1500005 : Code[10]);
+    BEGIN
+      StructureDetails.INIT;
+      StructureDetails.VALIDATE(Code,Code);
+      StructureDetails.VALIDATE("Calculation Order",CalculationOrder);
+      StructureDetails.VALIDATE(Type,Type);
+      StructureDetails.VALIDATE("Tax/Charge Group",TaxChargeGroup);
+      StructureDetails.VALIDATE("Tax/Charge Code",TaxChargeCode);
+      StructureDetails.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateStructureHeader@1500006(VAR StructureHeader@1000 : Record 13792);
+    BEGIN
+      StructureHeader.INIT;
+      StructureHeader.VALIDATE(Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(StructureHeader.FIELDNO(Code),DATABASE::"Structure Header"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Structure Header",StructureHeader.FIELDNO(Code))));
+      StructureHeader.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateFixedAsset@348(VAR FixedAsset@1000 : Record 5600);
+    BEGIN
+      LibraryFixedAsset.CreateFixedAsset(FixedAsset);
+    END;
+
+    PROCEDURE CreateFADepreciationBook@353(VAR FADepreciationBook@1000 : Record 5612;FANo@1001 : Code[20];DepreciationBookCode@1003 : Code[10]);
+    BEGIN
+      FADepreciationBook.INIT;
+      FADepreciationBook.VALIDATE("FA No.",FANo);
+      FADepreciationBook.VALIDATE("Depreciation Book Code",DepreciationBookCode);
+      FADepreciationBook.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATBusinessPostingGroup@109(VAR VATBusinessPostingGroup@1000 : Record 323);
+    BEGIN
+      VATBusinessPostingGroup.INIT;
+      VATBusinessPostingGroup.VALIDATE(
+        Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(VATBusinessPostingGroup.FIELDNO(Code),DATABASE::"VAT Business Posting Group"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"VAT Business Posting Group",VATBusinessPostingGroup.FIELDNO(Code))));
+
+      // Validating Code as Name because value is not important.
+      VATBusinessPostingGroup.VALIDATE(Description,VATBusinessPostingGroup.Code);
+      VATBusinessPostingGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateRandomVATIdentifierAndGetCode@133() : Text;
+    VAR
+      VATPostingSetup@1001 : Record 325;
+    BEGIN
+      EXIT(LibraryUtility.GenerateRandomCode(VATPostingSetup.FIELDNO("VAT Identifier"),DATABASE::"VAT Posting Setup"));
+    END;
+
+    PROCEDURE CreateVATPostingSetup@106(VAR VATPostingSetup@1003 : Record 325;VATBusPostingGroup@1001 : Code[10];VATProdPostingGroup@1002 : Code[10]);
+    BEGIN
+      VATPostingSetup.INIT;
+      VATPostingSetup.VALIDATE("VAT Bus. Posting Group",VATBusPostingGroup);
+      VATPostingSetup.VALIDATE("VAT Prod. Posting Group",VATProdPostingGroup);
+      VATPostingSetup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATPostingSetupWithAccounts@172(VAR VATPostingSetup@1003 : Record 325;VATCalculationType@1002 : Option;VATRate@1004 : Decimal);
+    VAR
+      VATBusinessPostingGroup@1000 : Record 323;
+      VATProductPostingGroup@1001 : Record 324;
+    BEGIN
+      VATPostingSetup.INIT;
+      CreateVATBusinessPostingGroup(VATBusinessPostingGroup);
+      CreateVATProductPostingGroup(VATProductPostingGroup);
+      VATPostingSetup.VALIDATE("VAT Bus. Posting Group",VATBusinessPostingGroup.Code);
+      VATPostingSetup.VALIDATE("VAT Prod. Posting Group",VATProductPostingGroup.Code);
+      VATPostingSetup.VALIDATE("VAT Calculation Type",VATCalculationType);
+      // VATPostingSetup.VALIDATE("VAT %",VATRate);
+      VATPostingSetup.VALIDATE("VAT %",0);
+      VATPostingSetup.VALIDATE("VAT Identifier",
+        LibraryUtility.GenerateRandomCode(VATPostingSetup.FIELDNO("VAT Identifier"),DATABASE::"VAT Posting Setup"));
+      VATPostingSetup.VALIDATE("Sales VAT Account",CreateGLAccountNo);
+      VATPostingSetup.VALIDATE("Purchase VAT Account",CreateGLAccountNo);
+      VATPostingSetup.VALIDATE("Tax Category",'S');
+      VATPostingSetup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATProductPostingGroup@107(VAR VATProductPostingGroup@1000 : Record 324);
+    VAR
+      LibraryUtility@1001 : Codeunit 131000;
+    BEGIN
+      VATProductPostingGroup.INIT;
+      VATProductPostingGroup.VALIDATE(
+        Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(VATProductPostingGroup.FIELDNO(Code),DATABASE::"VAT Product Posting Group"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"VAT Product Posting Group",VATProductPostingGroup.FIELDNO(Code))));
+
+      // Validating Code as Name because value is not important.
+      VATProductPostingGroup.VALIDATE(Description,VATProductPostingGroup.Code);
+      VATProductPostingGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATRegistrationNoFormat@81(VAR VATRegistrationNoFormat@1000 : Record 381;CountryRegionCode@1001 : Code[10]);
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      VATRegistrationNoFormat.INIT;
+      VATRegistrationNoFormat.VALIDATE("Country/Region Code",CountryRegionCode);
+      RecRef.GETTABLE(VATRegistrationNoFormat);
+      VATRegistrationNoFormat.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,VATRegistrationNoFormat.FIELDNO("Line No.")));
+      VATRegistrationNoFormat.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATClause@222(VAR VATClause@1000 : Record 560);
+    BEGIN
+      VATClause.INIT;
+      VATClause.VALIDATE(Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(VATClause.FIELDNO(Code),DATABASE::"VAT Clause"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"VAT Clause",VATClause.FIELDNO(Code))));
+      VATClause.VALIDATE(Description,LibraryUtility.GenerateGUID);
+      VATClause.INSERT(TRUE);
+    END;
+
+    PROCEDURE GenerateVATRegistrationNo@131(CountryRegionCode@1004 : Code[10]) VATRegNo : Text[20];
+    VAR
+      VATRegistrationNoFormat@1000 : Record 381;
+      FormatType@1002 : Text[1];
+      i@1003 : Integer;
+      RandomCharacter@1005 : Char;
+    BEGIN
+      // Generate VAT Registration No. as per VAT Registration No. format.
+      VATRegistrationNoFormat.SETRANGE("Country/Region Code",CountryRegionCode);
+      IF VATRegistrationNoFormat.FINDFIRST THEN
+        FOR i := 1 TO STRLEN(VATRegistrationNoFormat.Format) DO BEGIN
+          FormatType := COPYSTR(VATRegistrationNoFormat.Format,i,1);
+          CASE FormatType OF
+            'A'..'Z','0'..'9','.','-':
+              VATRegNo := INSSTR(VATRegNo,FormatType,i);
+            '#':
+              VATRegNo := INSSTR(VATRegNo,FORMAT(LibraryRandom.RandInt(9)),i);
+            '@':
+              BEGIN
+                RandomCharacter := LibraryRandom.RandInt(25) + 65;  // For the generation of random character.
+                VATRegNo := INSSTR(VATRegNo,FORMAT(RandomCharacter),i);  // Used as constant as VAT Registration validation is not important.
+              END
+            ELSE
+              VATRegNo := INSSTR(VATRegNo,FORMAT(LibraryRandom.RandInt(9)),i);
+        END;
+        END
+      ELSE
+        VATRegNo :=
+          COPYSTR(LibraryUtility.GenerateRandomCode(VATRegistrationNoFormat.FIELDNO(Format),DATABASE::"VAT Registration No. Format"),
+            1,LibraryUtility.GetFieldLength(DATABASE::"VAT Registration No. Format",VATRegistrationNoFormat.FIELDNO(Format)));
+    END;
+
+    PROCEDURE CreateStandardGeneralJournal@90(VAR StandardGeneralJournal@1000 : Record 750;JournalTemplateName@1001 : Code[10]);
+    BEGIN
+      StandardGeneralJournal.INIT;
+      StandardGeneralJournal.VALIDATE("Journal Template Name",JournalTemplateName);
+      StandardGeneralJournal.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(StandardGeneralJournal.FIELDNO(Code),DATABASE::"Standard General Journal"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Standard General Journal",StandardGeneralJournal.FIELDNO(Code))));
+
+      // Validating Code as Description because value is not important.
+      StandardGeneralJournal.VALIDATE(Description,StandardGeneralJournal.Code);
+      StandardGeneralJournal.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateStandardItemJournal@93(VAR StandardItemJournal@1000 : Record 752;JournalTemplateName@1001 : Code[10]);
+    BEGIN
+      StandardItemJournal.INIT;
+      StandardItemJournal.VALIDATE("Journal Template Name",JournalTemplateName);
+      StandardItemJournal.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(StandardItemJournal.FIELDNO(Code),DATABASE::"Standard Item Journal"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Standard Item Journal",StandardItemJournal.FIELDNO(Code))));
+
+      // Validating Code as Description because value is not important.
+      StandardItemJournal.VALIDATE(Description,StandardItemJournal.Code);
+      StandardItemJournal.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATStatementLine@119(VAR VATStatementLine@1000 : Record 256;StatementTemplateName@1001 : Code[10];StatementName@1002 : Code[10]);
+    VAR
+      RecRef@1003 : RecordRef;
+    BEGIN
+      VATStatementLine.INIT;
+      VATStatementLine.VALIDATE("Statement Template Name",StatementTemplateName);
+      VATStatementLine.VALIDATE("Statement Name",StatementName);
+      RecRef.GETTABLE(VATStatementLine);
+      VATStatementLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,VATStatementLine.FIELDNO("Line No.")));
+      VATStatementLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATStatementName@120(VAR VATStatementName@1000 : Record 257;StatementTemplateName@1001 : Code[10]);
+    BEGIN
+      VATStatementName.INIT;
+      VATStatementName.VALIDATE("Statement Template Name",StatementTemplateName);
+      VATStatementName.VALIDATE(
+        Name,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(VATStatementName.FIELDNO(Name),DATABASE::"VAT Statement Name"),1,
+          LibraryUtility.GetFieldLength(DATABASE::"VAT Statement Name",VATStatementName.FIELDNO(Name))));
+      VATStatementName.VALIDATE(Description,VATStatementName.Name);  // Validating Name as Description because value is not important.
+      VATStatementName.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATStatementTemplate@118(VAR VATStatementTemplate@1000 : Record 255);
+    BEGIN
+      VATStatementTemplate.INIT;
+      VATStatementTemplate.VALIDATE(
+        Name,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(VATStatementTemplate.FIELDNO(Name),DATABASE::"VAT Statement Template"),1,
+          LibraryUtility.GetFieldLength(DATABASE::"VAT Statement Template",VATStatementTemplate.FIELDNO(Name))));
+      VATStatementTemplate.VALIDATE(Description,VATStatementTemplate.Name);  // Validating Name as Description because value is not important.
+      VATStatementTemplate.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATStatementNameWithTemplate@219(VAR VATStatementName@1000 : Record 257);
+    VAR
+      VATStatementTemplate@1001 : Record 255;
+    BEGIN
+      CreateVATStatementTemplate(VATStatementTemplate);
+      CreateVATStatementName(VATStatementName,VATStatementTemplate.Name);
+    END;
+
+    PROCEDURE CreateTaxArea@116(VAR TaxArea@1002 : Record 318);
+    BEGIN
+      TaxArea.INIT;
+      TaxArea.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(TaxArea.FIELDNO(Code),DATABASE::"Tax Area"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Tax Area",TaxArea.FIELDNO(Code))));
+      TaxArea.VALIDATE(Description,TaxArea.Code);  // Validating Code as Description because value is not important.
+      TaxArea.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateTaxAreaLine@117(VAR TaxAreaLine@1000 : Record 319;TaxAreaCode@1001 : Code[20];TaxJurisdictionCode@1002 : Code[10]);
+    BEGIN
+      TaxAreaLine.INIT;
+      TaxAreaLine.VALIDATE("Tax Area",TaxAreaCode);
+      TaxAreaLine.VALIDATE("Tax Jurisdiction Code",TaxJurisdictionCode);
+      TaxAreaLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateTaxGroup@112(VAR TaxGroup@1000 : Record 321);
+    BEGIN
+      TaxGroup.INIT;
+      TaxGroup.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(TaxGroup.FIELDNO(Code),DATABASE::"Tax Group"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Tax Group",TaxGroup.FIELDNO(Code))));
+      TaxGroup.VALIDATE(Description,TaxGroup.Code);  // Validating Code as Description because value is not important.
+      TaxGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateTaxJurisdiction@114(VAR TaxJurisdiction@1000 : Record 320);
+    BEGIN
+      TaxJurisdiction.INIT;
+      TaxJurisdiction.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(TaxJurisdiction.FIELDNO(Code),DATABASE::"Tax Jurisdiction"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Tax Jurisdiction",TaxJurisdiction.FIELDNO(Code))));
+      TaxJurisdiction.VALIDATE(Description,TaxJurisdiction.Code);  // Validating Code as Description because value is not important.
+      TaxJurisdiction.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateTaxDetail@115(VAR TaxDetail@1002 : Record 322;TaxJurisdictionCode@1003 : Code[10];TaxGroupCode@1004 : Code[10];TaxType@1000 : Option;EffectiveDate@1001 : Date);
+    BEGIN
+      TaxDetail.INIT;
+      TaxDetail.VALIDATE("Tax Jurisdiction Code",TaxJurisdictionCode);
+      TaxDetail.VALIDATE("Tax Group Code",TaxGroupCode);
+      TaxDetail.VALIDATE("Tax Type",TaxType);
+      TaxDetail.VALIDATE("Effective Date",EffectiveDate);
+      TaxDetail.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateTDSNatureDeduction@1500008(VAR TDSNatureDeduction@1500000 : Record 13726);
+    BEGIN
+      TDSNatureDeduction.INIT;
+      TDSNatureDeduction.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(TDSNatureDeduction.FIELDNO(Code),DATABASE::"TDS Nature of Deduction"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"TDS Nature of Deduction",TDSNatureDeduction.FIELDNO(Code))));
+      TDSNatureDeduction.VALIDATE(Description,TDSNatureDeduction.Code); // Validating Code as Description because value is not important.
+      TDSNatureDeduction.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateTINNo@1500026(VAR TINNos@1500000 : Record 13701);
+    BEGIN
+      TINNos.INIT;
+      TINNos.VALIDATE(Code,
+        COPYSTR(LibraryUtility.GenerateRandomCode(TINNos.FIELDNO(Code),DATABASE::"T.I.N. Nos.") + LibraryUtility.GenerateRandomCode(TINNos.FIELDNO(Code),DATABASE::"T.I.N. Nos."),1,
+          LibraryUtility.GetFieldLength(DATABASE::"T.I.N. Nos.",TINNos.FIELDNO(Code))));
+      TINNos.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateAssesseeCode@1500009(VAR AssesseeCode@1500000 : Record 13727);
+    BEGIN
+      AssesseeCode.INIT;
+      AssesseeCode.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(AssesseeCode.FIELDNO(Code),DATABASE::"Assessee Code"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Assessee Code",AssesseeCode.FIELDNO(Code))));
+      AssesseeCode.VALIDATE(Description,AssesseeCode.Code); // Validating Code as Description because value is not important.
+      AssesseeCode.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateTDSSetup@1500010(VAR TDSSetup@1500000 : Record 13728;TDSNatureDeduction@1500001 : Code[10];AssesseeCode@1500002 : Code[10];EffectiveDate@1500003 : Date;ConcessionalCode@1500004 : Code[10]);
+    BEGIN
+      TDSSetup.INIT;
+      TDSSetup.VALIDATE("TDS Nature of Deduction",TDSNatureDeduction);
+      TDSSetup.VALIDATE("Assessee Code",AssesseeCode);
+      TDSSetup.VALIDATE("Effective Date",EffectiveDate);
+      TDSSetup.VALIDATE("Concessional Code",ConcessionalCode);
+      TDSSetup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateNODNOCHeader@1500011(VAR NODNOCHeader@1500000 : Record 13786;Type@1500001 : Option;No@1500002 : Code[20]);
+    BEGIN
+      NODNOCHeader.INIT;
+      NODNOCHeader.VALIDATE(Type,Type);
+      NODNOCHeader.VALIDATE("No.",No);
+      NODNOCHeader.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateNODNOCLines@1500012(VAR NODNOCLines@1500000 : Record 13785;NODNOCHeader@1500001 : Record 13786;NODNOC@1500002 : Code[10]);
+    BEGIN
+      NODNOCLines.INIT;
+      NODNOCLines.VALIDATE(Type,NODNOCHeader.Type);
+      NODNOCLines.VALIDATE("No.",NODNOCHeader."No.");
+      NODNOCLines.VALIDATE("NOD/NOC",NODNOC);
+      NODNOCLines.INSERT(TRUE);
+    END;
+
+    PROCEDURE FindRecurringTemplateName@62(VAR GenJournalTemplate@1000 : Record 80);
+    BEGIN
+      GenJournalTemplate.SETRANGE(Type,GenJournalTemplate.Type::General);
+      GenJournalTemplate.SETRANGE(Recurring,TRUE);
+      IF NOT GenJournalTemplate.FINDFIRST THEN
+        CreateRecurringTemplateName(GenJournalTemplate);
+    END;
+
+    PROCEDURE FindBankAccount@57(VAR BankAccount@1000 : Record 270);
+    BEGIN
+      BankAccount.SETFILTER("Bank Acc. Posting Group",'<>%1','');
+      BankAccount.SETRANGE("Currency Code",'');
+      BankAccount.SETRANGE(Blocked,FALSE);
+      IF NOT BankAccount.FINDFIRST THEN
+        CreateBankAccount(BankAccount);
+    END;
+
+    PROCEDURE FindBankAccountPostingGroup@95(VAR BankAccountPostingGroup@1000 : Record 277);
+    BEGIN
+      IF NOT BankAccountPostingGroup.FINDFIRST THEN
+        CreateBankAccountPostingGroup(BankAccountPostingGroup);
+    END;
+
+    PROCEDURE FindCountryRegion@137(VAR CountryRegion@1000 : Record 9);
+    BEGIN
+      IF NOT CountryRegion.FINDFIRST THEN
+        CreateCountryRegion(CountryRegion);
+    END;
+
+    PROCEDURE FindCurrency@56(VAR Currency@1000 : Record 4);
+    BEGIN
+      IF NOT Currency.FINDFIRST THEN
+        CreateCurrency(Currency);
+    END;
+
+    PROCEDURE FindCustomerLedgerEntry@20(VAR CustLedgerEntry@1002 : Record 21;DocumentType@1001 : Option;DocumentNo@1000 : Code[20]);
+    BEGIN
+      // Finds the matching Customer Ledger Entry from a General Journal Line.
+      WITH CustLedgerEntry DO BEGIN
+        SETRANGE("Document Type",DocumentType);
+        SETRANGE("Document No.",DocumentNo);
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE MinDate@202(Date1@1000 : Date;Date2@1001 : Date) : Date;
+    BEGIN
+      IF Date1 < Date2 THEN
+        EXIT(Date1);
+      EXIT(Date2);
+    END;
+
+    PROCEDURE FindEarliestDateForExhRate@201() Date : Date;
+    VAR
+      GLEntry@1000 : Record 17;
+    BEGIN
+      Date := MinDate(WORKDATE,TODAY);
+      GLEntry.SETCURRENTKEY("Posting Date");
+      IF GLEntry.FINDFIRST THEN
+        Date := MinDate(Date,NORMALDATE(GLEntry."Posting Date"));
+      EXIT(Date);
+    END;
+
+    PROCEDURE FindExchRate@22(VAR CurrencyExchangeRate@1002 : Record 330;Currency@1001 : Code[10];ConversionDate@1000 : Date);
+    BEGIN
+      // Returns the Exchange Rate for a specified Currency at a specified Date. If multiple Exchange Rates exists it picks the latest.
+      CurrencyExchangeRate.SETRANGE("Currency Code",Currency);
+      CurrencyExchangeRate.SETRANGE("Starting Date",0D,ConversionDate);
+      CurrencyExchangeRate.FINDLAST;
+    END;
+
+    PROCEDURE FindExcisePostingSetup@1500015(VAR ExcisePostingSetup@1500000 : Record 13711);
+    BEGIN
+      ExcisePostingSetup.SETFILTER("Excise Bus. Posting Group",'<>%1','');
+      ExcisePostingSetup.SETFILTER("Excise Prod. Posting Group",'<>%1','');
+      ExcisePostingSetup.FINDFIRST;
+    END;
+
+    PROCEDURE FindGLAccount@59(VAR GLAccount@1000 : Record 15) : Code[20];
+    BEGIN
+      // Filter G/L Account so that errors are not generated due to mandatory fields.
+      SetGLAccountDirectPostingFilter(GLAccount);
+      SetGLAccountNotBlankGroupsFilter(GLAccount);
+      GLAccount.FINDFIRST;
+      EXIT(GLAccount."No.");
+    END;
+
+    PROCEDURE FindGLAccountDataSet@141(VAR GLAccount@1000 : Record 15);
+    BEGIN
+      SetGLAccountDirectPostingFilter(GLAccount);
+      SetGLAccountNotBlankGroupsFilter(GLAccount);
+      GLAccount.FINDSET;
+    END;
+
+    PROCEDURE FindDirectPostingGLAccount@139(VAR GLAccount@1000 : Record 15) : Code[20];
+    BEGIN
+      SetGLAccountDirectPostingFilter(GLAccount);
+      GLAccount.FINDFIRST;
+      EXIT(GLAccount."No.");
+    END;
+
+    PROCEDURE FindGenBusinessPostingGroup@65(VAR GenBusinessPostingGroup@1000 : Record 250);
+    BEGIN
+      IF NOT GenBusinessPostingGroup.FINDFIRST THEN
+        CreateGenBusPostingGroup(GenBusinessPostingGroup);
+    END;
+
+    PROCEDURE FindGenJournalBatch@78(VAR GenJournalBatch@1000 : Record 232;JournalTemplateName@1001 : Code[10]);
+    BEGIN
+      GenJournalBatch.SETRANGE("Journal Template Name",JournalTemplateName);
+      IF NOT GenJournalBatch.FINDFIRST THEN
+        CreateGenJournalBatch(GenJournalBatch,JournalTemplateName);
+    END;
+
+    PROCEDURE FindGenJournalTemplate@66(VAR GenJournalTemplate@1000 : Record 80);
+    BEGIN
+      GenJournalTemplate.SETRANGE(Recurring,FALSE);
+      GenJournalTemplate.SETRANGE("Sub Type",GenJournalTemplate."Sub Type"::" ");
+      IF NOT GenJournalTemplate.FINDFIRST THEN BEGIN
+        CreateGenJournalTemplate(GenJournalTemplate);
+        IF GenJournalTemplate.GETRANGEMIN(Type) = GenJournalTemplate.GETRANGEMAX(Type) THEN BEGIN
+          GenJournalTemplate.VALIDATE(Type,GenJournalTemplate.GETRANGEMIN(Type));
+          GenJournalTemplate.MODIFY(TRUE);
+        END;
+      END;
+    END;
+
+    PROCEDURE FindGenProductPostingGroup@70(VAR GenProductPostingGroup@1000 : Record 251);
+    BEGIN
+      IF NOT GenProductPostingGroup.FINDFIRST THEN
+        CreateGenProdPostingGroup(GenProductPostingGroup);
+    END;
+
+    PROCEDURE FindGeneralPostingSetup@99(VAR GeneralPostingSetup@1000 : Record 252) : Boolean;
+    BEGIN
+      GeneralPostingSetup.SETFILTER("Gen. Bus. Posting Group",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Gen. Prod. Posting Group",'<>%1','');
+      GeneralPostingSetup.FINDFIRST;
+      EXIT(TRUE);
+    END;
+
+    PROCEDURE FindGeneralPostingSetupInvtBase@161(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      GeneralPostingSetup.SETFILTER("Gen. Bus. Posting Group",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Gen. Prod. Posting Group",'<>%1','');
+      GeneralPostingSetup.SETFILTER("COGS Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Sales Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Purch. Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Inventory Adjmt. Account",'<>%1','');
+      IF NOT GeneralPostingSetup.FINDFIRST THEN BEGIN
+        GeneralPostingSetup.SETRANGE("Purch. Account");
+        GeneralPostingSetup.SETRANGE("Inventory Adjmt. Account");
+        IF GeneralPostingSetup.FINDFIRST THEN BEGIN
+          GeneralPostingSetup.SETFILTER("Purch. Account",CreateGLAccountNo);
+          GeneralPostingSetup.SETFILTER("Inventory Adjmt. Account",CreateGLAccountNo);
+          GeneralPostingSetup.MODIFY(TRUE);
+        END ELSE
+          CreateGeneralPostingSetupInvt(GeneralPostingSetup);
+      END;
+    END;
+
+    PROCEDURE FindGeneralPostingSetupInvtFull@173(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      GeneralPostingSetup.SETFILTER("Gen. Bus. Posting Group",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Gen. Prod. Posting Group",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Sales Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Purch. Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("COGS Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("COGS Account (Interim)",'<>''''');
+      GeneralPostingSetup.SETFILTER("Inventory Adjmt. Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Sales Credit Memo Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Purch. Credit Memo Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Direct Cost Applied Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Overhead Applied Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Purchase Variance Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Sales Prepayments Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Purch. Prepayments Account",'<>%1','');
+      IF NOT GeneralPostingSetup.FINDFIRST THEN BEGIN
+        GeneralPostingSetup.SETRANGE("Sales Prepayments Account");
+        GeneralPostingSetup.SETRANGE("Purch. Prepayments Account");
+        IF GeneralPostingSetup.FINDFIRST THEN BEGIN
+          SetGeneralPostingSetupPrepAccounts(GeneralPostingSetup);
+          GeneralPostingSetup.MODIFY(TRUE);
+        END ELSE BEGIN
+          GeneralPostingSetup.SETRANGE("COGS Account (Interim)");
+          GeneralPostingSetup.SETRANGE("Direct Cost Applied Account");
+          GeneralPostingSetup.SETRANGE("Overhead Applied Account");
+          GeneralPostingSetup.SETRANGE("Purchase Variance Account");
+          IF GeneralPostingSetup.FINDFIRST THEN BEGIN
+            SetGeneralPostingSetupInvtAccounts(GeneralPostingSetup);
+            SetGeneralPostingSetupMfgAccounts(GeneralPostingSetup);
+            SetGeneralPostingSetupPrepAccounts(GeneralPostingSetup);
+            GeneralPostingSetup.MODIFY(TRUE);
+          END ELSE BEGIN
+            GeneralPostingSetup.SETRANGE("Purch. Account");
+            GeneralPostingSetup.SETRANGE("Purch. Credit Memo Account");
+            IF GeneralPostingSetup.FINDFIRST THEN BEGIN
+              SetGeneralPostingSetupInvtAccounts(GeneralPostingSetup);
+              SetGeneralPostingSetupMfgAccounts(GeneralPostingSetup);
+              SetGeneralPostingSetupPrepAccounts(GeneralPostingSetup);
+              SetGeneralPostingSetupPurchAccounts(GeneralPostingSetup);
+              GeneralPostingSetup.MODIFY(TRUE);
+            END ELSE
+              FindGeneralPostingSetupInvtBase(GeneralPostingSetup);
+          END;
+        END;
+      END;
+    END;
+
+    PROCEDURE FindGeneralPostingSetupInvtToGL@197(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      GeneralPostingSetup.SETRANGE("Gen. Bus. Posting Group",'');
+      GeneralPostingSetup.SETFILTER("Gen. Prod. Posting Group",'<>%1','');
+      GeneralPostingSetup.SETFILTER("COGS Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("COGS Account (Interim)",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Inventory Adjmt. Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Direct Cost Applied Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Overhead Applied Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Purchase Variance Account",'<>%1','');
+      GeneralPostingSetup.SETFILTER("Invt. Accrual Acc. (Interim)",'<>%1','');
+      IF NOT GeneralPostingSetup.FINDFIRST THEN BEGIN
+        GeneralPostingSetup.SETRANGE("COGS Account (Interim)");
+        GeneralPostingSetup.SETRANGE("Direct Cost Applied Account");
+        GeneralPostingSetup.SETRANGE("Overhead Applied Account");
+        GeneralPostingSetup.SETRANGE("Purchase Variance Account");
+        GeneralPostingSetup.SETRANGE("Invt. Accrual Acc. (Interim)");
+        IF GeneralPostingSetup.FINDFIRST THEN BEGIN
+          SetGeneralPostingSetupInvtAccounts(GeneralPostingSetup);
+          SetGeneralPostingSetupMfgAccounts(GeneralPostingSetup);
+          GeneralPostingSetup.MODIFY(TRUE);
+        END ELSE
+          FindGeneralPostingSetupInvtBase(GeneralPostingSetup);
+      END;
+    END;
+
+    PROCEDURE FindGenPostingSetupWithDefVAT@174(VAR GeneralPostingSetup@1000 : Record 252);
+    VAR
+      VATPostingSetup@1001 : Record 325;
+      GenBusPostingGroup@1002 : Record 250;
+      GenProdPostingGroup@1003 : Record 251;
+    BEGIN
+      FindGeneralPostingSetupInvtFull(GeneralPostingSetup);
+      FindVATPostingSetupInvt(VATPostingSetup);
+      GenBusPostingGroup.GET(GeneralPostingSetup."Gen. Bus. Posting Group");
+      GenBusPostingGroup.VALIDATE("Def. VAT Bus. Posting Group",VATPostingSetup."VAT Bus. Posting Group");
+      GenBusPostingGroup.MODIFY;
+      GenProdPostingGroup.GET(GeneralPostingSetup."Gen. Prod. Posting Group");
+      GenProdPostingGroup.VALIDATE("Def. VAT Prod. Posting Group",VATPostingSetup."VAT Prod. Posting Group");
+      GenProdPostingGroup.MODIFY;
+    END;
+
+    PROCEDURE FindPaymentMethod@83(VAR PaymentMethod@1000 : Record 289);
+    BEGIN
+      PaymentMethod.SETRANGE("Bal. Account No.",'');
+      IF NOT PaymentMethod.FINDFIRST THEN
+        CreatePaymentMethod(PaymentMethod);
+    END;
+
+    PROCEDURE FindPaymentTerms@84(VAR PaymentTerms@1000 : Record 3);
+    BEGIN
+      IF NOT PaymentTerms.FINDFIRST THEN
+        CreatePaymentTerms(PaymentTerms);
+    END;
+
+    PROCEDURE FindPaymentTermsCode@48() : Code[10];
+    VAR
+      PaymentTerms@1000 : Record 3;
+      DateFormular_0D@1160 : DateFormula;
+    BEGIN
+      EVALUATE(DateFormular_0D,'<0D>');
+
+      IF PaymentTerms.FIELDACTIVE("Due Date Calculation") THEN // Field is disabled on IT build
+        PaymentTerms.SETRANGE("Due Date Calculation",DateFormular_0D);
+      IF NOT PaymentTerms.FINDFIRST THEN
+        CreatePaymentTerms(PaymentTerms);
+      EXIT(PaymentTerms.Code);
+    END;
+
+    PROCEDURE FindPostCode@89(VAR PostCode@1000 : Record 225);
+    BEGIN
+      IF NOT PostCode.FINDFIRST THEN
+        CreatePostCode(PostCode);
+    END;
+
+    PROCEDURE FindGeneralJournalSourceCode@86() : Code[10];
+    VAR
+      GenJournalTemplate@1000 : Record 80;
+    BEGIN
+      // Find general journal source code
+      WITH GenJournalTemplate DO BEGIN
+        SETRANGE(Type,Type::General);
+        SETRANGE(Recurring,FALSE);
+        SETRANGE("Sub Type","Sub Type"::" ");
+        FINDFIRST;
+        EXIT("Source Code");
+      END;
+    END;
+
+    PROCEDURE FindVATBusinessPostingGroup@67(VAR VATBusinessPostingGroup@1000 : Record 323);
+    BEGIN
+      IF NOT VATBusinessPostingGroup.FINDFIRST THEN
+        CreateVATBusinessPostingGroup(VATBusinessPostingGroup);
+    END;
+
+    PROCEDURE FindVATProductPostingGroup@74(VAR VATProductPostingGroup@1000 : Record 324);
+    BEGIN
+      IF NOT VATProductPostingGroup.FINDFIRST THEN
+        CreateVATProductPostingGroup(VATProductPostingGroup);
+    END;
+
+    PROCEDURE FindVATPostingSetup@19(VAR VATPostingSetup@1000 : Record 325;VATCalculationType@1001 : Option);
+    BEGIN
+      VATPostingSetup.SETFILTER("VAT Bus. Posting Group",'<>%1','');
+      VATPostingSetup.SETFILTER("VAT Prod. Posting Group",'<>%1','');
+      VATPostingSetup.SETRANGE("VAT Calculation Type",VATCalculationType);
+      // VATPostingSetup.SETFILTER("VAT %",'>%1',0);
+      IF NOT VATPostingSetup.FINDFIRST THEN
+        CreateVATPostingSetupWithAccounts(VATPostingSetup,VATCalculationType,LibraryRandom.RandDecInDecimalRange(10,25,0));
+    END;
+
+    PROCEDURE FindVATPostingSetupInvt@171(VAR VATPostingSetup@1001 : Record 325);
+    BEGIN
+      VATPostingSetup.SETFILTER("VAT Prod. Posting Group",'<>%1','');
+      // VATPostingSetup.SETFILTER("VAT %",'<>%1',0);
+      VATPostingSetup.SETRANGE("VAT Calculation Type",VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+      VATPostingSetup.SETFILTER("Sales VAT Account",'<>%1','');
+      VATPostingSetup.SETFILTER("Purchase VAT Account",'<>%1','');
+      IF NOT VATPostingSetup.FINDFIRST THEN
+        CreateVATPostingSetupWithAccounts(VATPostingSetup,
+          VATPostingSetup."VAT Calculation Type"::"Normal VAT",LibraryRandom.RandDecInDecimalRange(10,25,0));
+    END;
+
+    PROCEDURE FindZeroVATPostingSetup@158(VAR VATPostingSetup@1001 : Record 325;VATCalculationType@1000 : Option);
+    BEGIN
+      VATPostingSetup.SETFILTER("VAT Bus. Posting Group",'<>%1','');
+      VATPostingSetup.SETFILTER("VAT Prod. Posting Group",'<>%1','');
+      VATPostingSetup.SETRANGE("VAT Calculation Type",VATCalculationType);
+      VATPostingSetup.SETRANGE("VAT %",0);
+      IF NOT VATPostingSetup.FINDFIRST THEN
+        CreateVATPostingSetupWithAccounts(VATPostingSetup,VATCalculationType,0);
+    END;
+
+    PROCEDURE FindUnrealVATPostingSetup@162(VAR VATPostingSetup@1000 : Record 325;UnrealizedVATType@1002 : Option);
+    BEGIN
+      VATPostingSetup.SETFILTER("VAT Bus. Posting Group",'<>%1','');
+      VATPostingSetup.SETFILTER("VAT Prod. Posting Group",'<>%1','');
+      VATPostingSetup.SETRANGE("VAT Calculation Type",VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+      VATPostingSetup.SETRANGE("Unrealized VAT Type",UnrealizedVATType);
+      // VATPostingSetup.SETFILTER("VAT %",'>%1',0);
+      IF NOT VATPostingSetup.FINDFIRST THEN BEGIN
+        VATPostingSetup.SETRANGE("Unrealized VAT Type");
+      VATPostingSetup.FINDFIRST;
+        VATPostingSetup."Unrealized VAT Type" := UnrealizedVATType;
+        IF VATPostingSetup."Sales VAT Unreal. Account" = '' THEN
+          VATPostingSetup.VALIDATE("Sales VAT Unreal. Account",CreateGLAccountNo);
+        IF VATPostingSetup."Purch. VAT Unreal. Account" = '' THEN
+          VATPostingSetup.VALIDATE("Purch. VAT Unreal. Account",CreateGLAccountNo);
+        VATPostingSetup.MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE FindVendorLedgerEntry@24(VAR VendorLedgerEntry@1002 : Record 25;DocumentType@1001 : Option;DocumentNo@1000 : Code[20]);
+    BEGIN
+      // Finds the matching Vendor Ledger Entry from a General Journal Line.
+      WITH VendorLedgerEntry DO BEGIN
+        SETRANGE("Document Type",DocumentType);
+        SETRANGE("Document No.",DocumentNo);
+        FINDFIRST;
+      END;
+    END;
+
+    PROCEDURE FindDeferralLine@214(VAR DeferralLine@1000 : Record 1702;DeferralDocType@1004 : Option;GenJnlBatchName@1005 : Code[10];GenJnlTemplateName@1006 : Code[10];DocType@1003 : Integer;DocNo@1002 : Code[20];LineNo@1001 : Integer);
+    BEGIN
+      WITH DeferralLine DO BEGIN
+        SETRANGE("Deferral Doc. Type",DeferralDocType);
+        SETRANGE("Gen. Jnl. Batch Name",GenJnlBatchName);
+        SETRANGE("Gen. Jnl. Template Name",GenJnlTemplateName);
+        SETRANGE("Document Type",DocType);
+        SETRANGE("Document No.",DocNo);
+        SETRANGE("Line No.",LineNo);
+        FINDFIRST;
+      END;
+    END;
+
+    PROCEDURE GetAddReportingCurrency@179() : Code[10];
+    BEGIN
+      GeneralLedgerSetup.GET;
+      EXIT(GeneralLedgerSetup."Additional Reporting Currency");
+    END;
+
+    PROCEDURE GetAllowPostingFrom@196() : Date;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      EXIT(GeneralLedgerSetup."Allow Posting From");
+    END;
+
+    PROCEDURE GetAllowPostingTo@198() : Date;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      EXIT(GeneralLedgerSetup."Allow Posting To");
+    END;
+
+    PROCEDURE GetAmountRoundingPrecision@104() : Decimal;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      EXIT(GeneralLedgerSetup."Amount Rounding Precision");
+    END;
+
+    PROCEDURE GetCurrencyAmountRoundingPrecision@241(CurrencyCode@1000 : Code[10]) : Decimal;
+    VAR
+      Currency@1001 : Record 4;
+    BEGIN
+      Currency.Initialize(CurrencyCode);
+      EXIT(Currency."Amount Rounding Precision");
+    END;
+
+    PROCEDURE GetCurrencyCode@195(Code@1000 : Code[10]) : Code[10];
+    BEGIN
+      GeneralLedgerSetup.GET;
+      EXIT(GeneralLedgerSetup.GetCurrencyCode(Code));
+    END;
+
+    PROCEDURE GetDiscountPaymentTerm@26(VAR PaymentTerms@1000 : Record 3);
+    BEGIN
+      PaymentTerms.SETFILTER("Due Date Calculation",'<>''''');
+      PaymentTerms.SETFILTER("Discount Date Calculation",'<>''''');
+      PaymentTerms.SETFILTER("Discount %",'>%1',0);
+      IF NOT PaymentTerms.FINDFIRST THEN
+        CreatePaymentTermsDiscount(PaymentTerms,FALSE);
+    END;
+
+    PROCEDURE GetGlobalDimensionCode@92(DimNo@1000 : Integer) : Code[20];
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CASE DimNo OF
+        1:
+          EXIT(GeneralLedgerSetup."Global Dimension 1 Code");
+        2:
+          EXIT(GeneralLedgerSetup."Global Dimension 2 Code");
+      END;
+    END;
+
+    PROCEDURE GetInvoiceRoundingPrecisionLCY@101() : Decimal;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      EXIT(GeneralLedgerSetup."Inv. Rounding Precision (LCY)");
+    END;
+
+    PROCEDURE GetLCYCode@182() : Code[10];
+    BEGIN
+      GeneralLedgerSetup.GET;
+      EXIT(GeneralLedgerSetup."LCY Code");
+    END;
+
+    PROCEDURE GetPaymentTermsDiscountPct@200(PaymentTerms@1000 : Record 3) : Decimal;
+    BEGIN
+      EXIT(PaymentTerms."Discount %");
+    END;
+
+    PROCEDURE GetShortcutDimensionCode@183(DimNo@1000 : Integer) : Code[20];
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CASE DimNo OF
+        1:
+          EXIT(GeneralLedgerSetup."Shortcut Dimension 1 Code");
+        2:
+          EXIT(GeneralLedgerSetup."Shortcut Dimension 2 Code");
+        3:
+          EXIT(GeneralLedgerSetup."Shortcut Dimension 3 Code");
+        4:
+          EXIT(GeneralLedgerSetup."Shortcut Dimension 4 Code");
+        5:
+          EXIT(GeneralLedgerSetup."Shortcut Dimension 5 Code");
+        6:
+          EXIT(GeneralLedgerSetup."Shortcut Dimension 6 Code");
+        7:
+          EXIT(GeneralLedgerSetup."Shortcut Dimension 7 Code");
+        8:
+          EXIT(GeneralLedgerSetup."Shortcut Dimension 8 Code");
+      END;
+    END;
+
+    PROCEDURE GetUnitAmountRoundingPrecision@194() : Decimal;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      EXIT(GeneralLedgerSetup."Unit-Amount Rounding Precision");
+    END;
+
+    PROCEDURE InvoiceAmountRounding@2(InvoiceAmont@1000 : Decimal;CurrencyCode@1002 : Code[10]) : Decimal;
+    VAR
+      Currency@1001 : Record 4;
+    BEGIN
+      // Round Invoice Amount.
+      Currency.InitRoundingPrecision;
+      IF CurrencyCode <> '' THEN
+        Currency.GET(CurrencyCode);
+      EXIT(ROUND(InvoiceAmont,Currency."Invoice Rounding Precision",Currency.InvoiceRoundingDirection));
+    END;
+
+    PROCEDURE IssueFinanceChargeMemo@130(FinanceChargeMemoHeader@1059 : Record 302);
+    VAR
+      IssueFinanceChargeMemos@1002 : Report 193;
+    BEGIN
+      FinanceChargeMemoHeader.SETRANGE("No.",FinanceChargeMemoHeader."No.");
+      CLEAR(IssueFinanceChargeMemos);
+      IssueFinanceChargeMemos.SETTABLEVIEW(FinanceChargeMemoHeader);
+      IssueFinanceChargeMemos.USEREQUESTPAGE(FALSE);
+      IssueFinanceChargeMemos.RUN;
+    END;
+
+    PROCEDURE PostCustLedgerApplication@28(CustLedgerEntry@1000 : Record 21);
+    BEGIN
+      // Post Application Entries.
+      CODEUNIT.RUN(CODEUNIT::"CustEntry-Apply Posted Entries",CustLedgerEntry);
+    END;
+
+    PROCEDURE PostGeneralJnlLine@30(GenJournalLine@1000 : Record 81);
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"Gen. Jnl.-Post Batch",GenJournalLine);
+    END;
+
+    PROCEDURE PostFAJournalLine@50(FAJournalLine@1000 : Record 5621);
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"FA Jnl.-Post Batch",FAJournalLine);
+    END;
+
+    PROCEDURE PostVendLedgerApplication@33(VendorLedgerEntry@1000 : Record 25);
+    BEGIN
+      // Post Application Entries.
+      CODEUNIT.RUN(CODEUNIT::"VendEntry-Apply Posted Entries",VendorLedgerEntry);
+    END;
+
+    PROCEDURE PostBankAccReconciliation@45(BankAccReconciliation@1000 : Record 273);
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"Bank Acc. Reconciliation Post",BankAccReconciliation);
+    END;
+
+    PROCEDURE ReverseTransaction@265(TransactionNo@1001 : Integer);
+    VAR
+      ReversalEntry@1000 : Record 179;
+    BEGIN
+      ReversalEntry.SetHideDialog(TRUE);
+      ReversalEntry.ReverseTransaction(TransactionNo);
+    END;
+
+    PROCEDURE RunAddnlReportingCurrency@103(CurrencyCode@1002 : Code[10];DocumentNo@1001 : Code[20];NewRetainedEarningsGLAccNo@1003 : Code[20]);
+    VAR
+      AdjustAddReportingCurrency@1000 : Report 86;
+    BEGIN
+      // Run Additional Currency Reporting Report for ACY.
+      AdjustAddReportingCurrency.SetAddCurr(CurrencyCode);
+      AdjustAddReportingCurrency.InitializeRequest(DocumentNo,NewRetainedEarningsGLAccNo);
+      AdjustAddReportingCurrency.USEREQUESTPAGE(FALSE);
+      AdjustAddReportingCurrency.RUN;
+    END;
+
+    PROCEDURE RunAdjustExchangeRatesSimple@129(CurrencyCode@1000 : Code[10];EndDate@1003 : Date;PostingDate@1004 : Date);
+    BEGIN
+      RunAdjustExchangeRates(
+        CurrencyCode,0D,EndDate,'Test',PostingDate,LibraryUtility.GenerateGUID,FALSE);
+    END;
+
+    PROCEDURE RunAdjustExchangeRates@132(CurrencyCode@1000 : Code[10];StartDate@1008 : Date;EndDate@1003 : Date;PostingDescription@1007 : Text[50];PostingDate@1004 : Date;PostingDocNo@1005 : Code[20];AdjGLAcc@1006 : Boolean);
+    VAR
+      Currency@1002 : Record 4;
+      AdjustExchangeRates@1001 : Report 595;
+    BEGIN
+      Currency.SETRANGE(Code,CurrencyCode);
+      AdjustExchangeRates.SETTABLEVIEW(Currency);
+      AdjustExchangeRates.InitializeRequest2(StartDate,EndDate,PostingDescription,PostingDate,PostingDocNo,TRUE,AdjGLAcc);
+      AdjustExchangeRates.USEREQUESTPAGE(FALSE);
+      AdjustExchangeRates.RUN;
+    END;
+
+    PROCEDURE SelectGenJnlBatch@35(VAR GenJournalBatch@1000 : Record 232);
+    BEGIN
+      LibraryJournals.SelectGenJournalBatch(GenJournalBatch,SelectGenJnlTemplate);
+    END;
+
+    PROCEDURE SelectGenJnlTemplate@37() : Code[10];
+    VAR
+      GenJournalTemplate@1001 : Record 80;
+    BEGIN
+      EXIT(LibraryJournals.SelectGenJournalTemplate(GenJournalTemplate.Type::General,PAGE::"General Journal"));
+    END;
+
+    PROCEDURE SelectFAJournalBatch@54(VAR FAJournalBatch@1000 : Record 5620);
+    BEGIN
+      // Select FA Journal Batch Name for FA Journal Line.
+      FAJournalBatch.SETRANGE("Journal Template Name",SelectFAJournalTemplate);
+      IF FAJournalBatch.FINDFIRST THEN
+        EXIT;
+      // Create New FA Journal Batch.
+      FAJournalBatch.INIT;
+      FAJournalBatch.VALIDATE("Journal Template Name",SelectFAJournalTemplate);
+      FAJournalBatch.VALIDATE(Name,
+        COPYSTR(LibraryUtility.GenerateRandomCode(FAJournalBatch.FIELDNO(Name),DATABASE::"FA Journal Batch"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"FA Journal Batch",FAJournalBatch.FIELDNO(Name))));
+      FAJournalBatch.INSERT(TRUE);
+      FAJournalBatch.VALIDATE("No. Series",CreateNoSeriesCode);
+      FAJournalBatch.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SelectFAJournalTemplate@52() : Code[10];
+    VAR
+      FAJournalTemplate@1001 : Record 5619;
+    BEGIN
+      // Select FA Journal Template Name for FA Journal Line.
+      FAJournalTemplate.SETRANGE(Recurring,FALSE);
+      IF NOT FAJournalTemplate.FINDFIRST THEN BEGIN
+        FAJournalTemplate.INIT;
+        FAJournalTemplate.VALIDATE(
+          Name,COPYSTR(LibraryUtility.GenerateRandomCode(FAJournalTemplate.FIELDNO(Name),DATABASE::"FA Journal Template"),
+            1,LibraryUtility.GetFieldLength(DATABASE::"FA Journal Template",FAJournalTemplate.FIELDNO(Name))));
+        FAJournalTemplate.VALIDATE(Recurring,FALSE);
+        FAJournalTemplate.INSERT(TRUE);
+      END;
+      EXIT(FAJournalTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE PopGLAccount@123(VAR GLAccount@1000 : Record 15) AccountNo : Code[20];
+    BEGIN
+      IF GLAccount.MARK THEN
+        ERROR(NoRecordsInFilterError,GLAccount.TABLECAPTION);
+      AccountNo := GLAccount."No.";
+      GLAccount.MARK(TRUE); // To make sure account is not used twice.
+      GLAccount.NEXT;
+    END;
+
+    PROCEDURE SetCurrencyGainLossAccounts@121(VAR Currency@1000 : Record 4);
+    VAR
+      GLAccount@1001 : Record 15;
+    BEGIN
+      // Find a correct account for realized adjustment
+      GLAccount.SETRANGE("Income/Balance",GLAccount."Income/Balance"::"Income Statement");
+      GLAccount.SETRANGE("Account Type",GLAccount."Account Type"::Posting);
+      GLAccount.SETRANGE("Gen. Posting Type",GLAccount."Gen. Posting Type"::" ");
+      GLAccount.SETRANGE(Blocked,FALSE);
+      GLAccount.FINDSET;
+      GLAccount.NEXT(0); // Needed to trick preCAL
+
+      Currency.VALIDATE("Realized Losses Acc.",PopGLAccount(GLAccount));
+      Currency.VALIDATE("Realized Gains Acc.",PopGLAccount(GLAccount));
+      Currency.VALIDATE("Unrealized Losses Acc.",PopGLAccount(GLAccount));
+      Currency.VALIDATE("Unrealized Gains Acc.",PopGLAccount(GLAccount));
+      Currency.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetAddReportingCurrency@51(AdditionalReportingCurrency@1000 : Code[10]);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup."Additional Reporting Currency" := AdditionalReportingCurrency;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetAllowPostingFromTo@180(FromDate@1000 : Date;ToDate@1001 : Date);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup."Allow Posting From" := FromDate;
+      GeneralLedgerSetup."Allow Posting To" := ToDate;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetAllowPostingTo@184(ToDate@1001 : Date);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup."Allow Posting To" := ToDate;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetAmountRoundingPrecision@181(AmountRoundingPrecision@1000 : Decimal);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup."Amount Rounding Precision" := AmountRoundingPrecision;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetApplnRoundingPrecision@177(ApplnRoundingPrecision@1000 : Decimal);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.VALIDATE("Appln. Rounding Precision",ApplnRoundingPrecision);
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetBillToSellToVATCalc@176(BillToSellToVATCalc@1000 : Option);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.VALIDATE("Bill-to/Sell-to VAT Calc.",BillToSellToVATCalc);
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetGlobalDimensionCode@94(DimNo@1000 : Integer;DimCode@1001 : Code[20]);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CASE DimNo OF
+        1:
+          GeneralLedgerSetup.VALIDATE("Global Dimension 1 Code",DimCode);
+        2:
+          GeneralLedgerSetup.VALIDATE("Global Dimension 2 Code",DimCode);
+      END;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetAppliestoIdCustomer@40(VAR CustLedgerEntry@1001 : Record 21);
+    BEGIN
+      // Set Applies-to ID.
+      CustLedgerEntry.LOCKTABLE;
+      CustLedgerEntry.FINDFIRST;
+      REPEAT
+        CustLedgerEntry.TESTFIELD(Open,TRUE);
+        CustLedgerEntry.VALIDATE("Applies-to ID",USERID);
+        IF CustLedgerEntry."Amount to Apply" = 0 THEN BEGIN
+          CustLedgerEntry.CALCFIELDS("Remaining Amount");
+          CustLedgerEntry.VALIDATE("Amount to Apply",CustLedgerEntry."Remaining Amount");
+        END;
+        CustLedgerEntry.MODIFY(TRUE);
+      UNTIL CustLedgerEntry.NEXT = 0;
+    END;
+
+    PROCEDURE SetAppliestoIdVendor@5(VAR VendorLedgerEntry@1003 : Record 25);
+    BEGIN
+      // Set Applies-to ID.
+      VendorLedgerEntry.LOCKTABLE;
+      VendorLedgerEntry.FINDFIRST;
+      REPEAT
+        VendorLedgerEntry.TESTFIELD(Open,TRUE);
+        VendorLedgerEntry.VALIDATE("Applies-to ID",USERID);
+        VendorLedgerEntry.VALIDATE("Applying Entry",TRUE);
+        IF VendorLedgerEntry."Amount to Apply" = 0 THEN BEGIN
+          VendorLedgerEntry.CALCFIELDS("Remaining Amount");
+          VendorLedgerEntry.VALIDATE("Amount to Apply",VendorLedgerEntry."Remaining Amount");
+        END;
+        VendorLedgerEntry.MODIFY(TRUE);
+      UNTIL VendorLedgerEntry.NEXT = 0;
+    END;
+
+    PROCEDURE SetApplyCustomerEntry@11(VAR CustLedgerEntry@1000 : Record 21;AmountToApply@1002 : Decimal);
+    VAR
+      CustLedgerEntry2@1001 : Record 21;
+    BEGIN
+      // Clear any existing applying entries.
+      CustLedgerEntry2.SETRANGE("Applying Entry",TRUE);
+      CustLedgerEntry2.SETFILTER("Entry No.",'<>%1',CustLedgerEntry."Entry No.");
+      IF CustLedgerEntry2.FINDSET THEN
+        REPEAT
+          CustLedgerEntry2.VALIDATE("Applying Entry",FALSE);
+          CustLedgerEntry2.MODIFY(TRUE);
+        UNTIL CustLedgerEntry2.NEXT = 0;
+
+      // Clear Applies-to IDs
+      CustLedgerEntry2.RESET;
+      CustLedgerEntry2.SETFILTER("Applies-to ID",'<>%1','');
+      IF CustLedgerEntry2.FINDSET THEN
+        REPEAT
+          CustLedgerEntry2.VALIDATE("Applies-to ID",'');
+          CustLedgerEntry2.MODIFY(TRUE);
+        UNTIL CustLedgerEntry2.NEXT = 0;
+
+      // Apply Payment Entry on Posted Invoice.
+      WITH CustLedgerEntry DO BEGIN
+        VALIDATE("Applying Entry",TRUE);
+        VALIDATE("Applies-to ID",USERID);
+        VALIDATE("Amount to Apply",AmountToApply);
+        MODIFY(TRUE);
+      END;
+      CODEUNIT.RUN(CODEUNIT::"Cust. Entry-Edit",CustLedgerEntry);
+      COMMIT;
+    END;
+
+    PROCEDURE SetApplyVendorEntry@6(VAR VendorLedgerEntry@1000 : Record 25;AmountToApply@1002 : Decimal);
+    VAR
+      VendorLedgerEntry2@1001 : Record 25;
+    BEGIN
+      // Clear any existing applying entries.
+      VendorLedgerEntry2.SETRANGE("Applying Entry",TRUE);
+      VendorLedgerEntry2.SETFILTER("Entry No.",'<>%1',VendorLedgerEntry."Entry No.");
+      IF VendorLedgerEntry2.FINDSET THEN
+        REPEAT
+          VendorLedgerEntry2.VALIDATE("Applying Entry",FALSE);
+          VendorLedgerEntry2.MODIFY(TRUE);
+        UNTIL VendorLedgerEntry2.NEXT = 0;
+
+      // Clear Applies-to IDs.
+      VendorLedgerEntry2.RESET;
+      VendorLedgerEntry2.SETFILTER("Applies-to ID",'<>%1','');
+      IF VendorLedgerEntry2.FINDSET THEN
+        REPEAT
+          VendorLedgerEntry2.VALIDATE("Applies-to ID",'');
+          VendorLedgerEntry2.MODIFY(TRUE);
+        UNTIL VendorLedgerEntry2.NEXT = 0;
+
+      // Apply Payment Entry on Posted Invoice.
+      WITH VendorLedgerEntry DO BEGIN
+        VALIDATE("Applying Entry",TRUE);
+        VALIDATE("Applies-to ID",USERID);
+        VALIDATE("Amount to Apply",AmountToApply);
+        MODIFY(TRUE);
+      END;
+      CODEUNIT.RUN(CODEUNIT::"Vend. Entry-Edit",VendorLedgerEntry);
+    END;
+
+    PROCEDURE SetGLAccountDirectPostingFilter@138(VAR GLAccount@1000 : Record 15);
+    BEGIN
+      GLAccount.SETRANGE(Blocked,FALSE);
+      GLAccount.SETRANGE("Account Type",GLAccount."Account Type"::Posting);
+      GLAccount.SETRANGE("Direct Posting",TRUE);
+    END;
+
+    PROCEDURE SetGLAccountNotBlankGroupsFilter@144(VAR GLAccount@1000 : Record 15);
+    BEGIN
+      GLAccount.SETFILTER("Gen. Posting Type",'<>%1',GLAccount."Gen. Posting Type"::" ");
+      GLAccount.SETFILTER("Gen. Bus. Posting Group",'<>%1','');
+      GLAccount.SETFILTER("Gen. Prod. Posting Group",'<>%1','');
+      GLAccount.SETFILTER("VAT Prod. Posting Group",'<>%1','');
+      GLAccount.SETFILTER("Service Tax Group Code",'=%1','');
+    END;
+
+    PROCEDURE SetGeneralPostingSetupInvtAccounts@170(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      WITH GeneralPostingSetup DO BEGIN
+        IF "COGS Account" = '' THEN
+          VALIDATE("COGS Account",CreateGLAccountNo);
+        IF "COGS Account (Interim)" = '' THEN
+          VALIDATE("COGS Account (Interim)",CreateGLAccountNo);
+        IF "Inventory Adjmt. Account" = '' THEN
+          VALIDATE("Inventory Adjmt. Account",CreateGLAccountNo);
+        IF "Invt. Accrual Acc. (Interim)" = '' THEN
+          VALIDATE("Invt. Accrual Acc. (Interim)",CreateGLAccountNo);
+      END;
+    END;
+
+    PROCEDURE SetGeneralPostingSetupMfgAccounts@165(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      WITH GeneralPostingSetup DO BEGIN
+        IF "Direct Cost Applied Account" = '' THEN
+          VALIDATE("Direct Cost Applied Account",CreateGLAccountNo);
+        IF "Overhead Applied Account" = '' THEN
+          VALIDATE("Overhead Applied Account",CreateGLAccountNo);
+        IF "Purchase Variance Account" = '' THEN
+          VALIDATE("Purchase Variance Account",CreateGLAccountNo);
+      END;
+    END;
+
+    PROCEDURE SetGeneralPostingSetupPrepAccounts@164(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      WITH GeneralPostingSetup DO BEGIN
+        IF "Sales Prepayments Account" = '' THEN
+          VALIDATE("Sales Prepayments Account",CreateGLAccountNo);
+        IF "Purch. Prepayments Account" = '' THEN
+          VALIDATE("Purch. Prepayments Account",CreateGLAccountNo);
+      END;
+    END;
+
+    PROCEDURE SetGeneralPostingSetupPurchAccounts@169(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      WITH GeneralPostingSetup DO BEGIN
+        IF "Purch. Account" = '' THEN
+          VALIDATE("Purch. Account",CreateGLAccountNo);
+        IF "Purch. Line Disc. Account" = '' THEN
+          VALIDATE("Purch. Line Disc. Account",CreateGLAccountNo);
+        IF "Purch. Inv. Disc. Account" = '' THEN
+          VALIDATE("Purch. Inv. Disc. Account",CreateGLAccountNo);
+        IF "Purch. Credit Memo Account" = '' THEN
+          VALIDATE("Purch. Credit Memo Account",CreateGLAccountNo);
+      END;
+    END;
+
+    PROCEDURE SetGeneralPostingSetupPurchPmtDiscAccounts@168(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      WITH GeneralPostingSetup DO BEGIN
+        IF "Purch. Pmt. Disc. Debit Acc." = '' THEN
+          VALIDATE("Purch. Pmt. Disc. Debit Acc.",CreateGLAccountNo);
+        IF "Purch. Pmt. Disc. Credit Acc." = '' THEN
+          VALIDATE("Purch. Pmt. Disc. Credit Acc.",CreateGLAccountNo);
+        IF "Purch. Pmt. Tol. Debit Acc." = '' THEN
+          VALIDATE("Purch. Pmt. Tol. Debit Acc.",CreateGLAccountNo);
+        IF "Purch. Pmt. Tol. Credit Acc." = '' THEN
+          VALIDATE("Purch. Pmt. Tol. Credit Acc.",CreateGLAccountNo);
+      END;
+    END;
+
+    PROCEDURE SetGeneralPostingSetupSalesAccounts@166(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      WITH GeneralPostingSetup DO BEGIN
+        IF "Sales Account" = '' THEN
+          VALIDATE("Sales Account",CreateGLAccountNo);
+        IF "Sales Line Disc. Account" = '' THEN
+          VALIDATE("Sales Line Disc. Account",CreateGLAccountNo);
+        IF "Sales Inv. Disc. Account" = '' THEN
+          VALIDATE("Sales Inv. Disc. Account",CreateGLAccountNo);
+        IF "Sales Credit Memo Account" = '' THEN
+          VALIDATE("Sales Credit Memo Account",CreateGLAccountNo);
+      END;
+    END;
+
+    PROCEDURE SetGeneralPostingSetupSalesPmtDiscAccounts@167(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      WITH GeneralPostingSetup DO BEGIN
+        IF "Sales Pmt. Disc. Debit Acc." = '' THEN
+          VALIDATE("Sales Pmt. Disc. Debit Acc.",CreateGLAccountNo);
+        IF "Sales Pmt. Disc. Credit Acc." = '' THEN
+          VALIDATE("Sales Pmt. Disc. Credit Acc.",CreateGLAccountNo);
+        IF "Sales Pmt. Tol. Debit Acc." = '' THEN
+          VALIDATE("Sales Pmt. Tol. Debit Acc.",CreateGLAccountNo);
+        IF "Sales Pmt. Tol. Credit Acc." = '' THEN
+          VALIDATE("Sales Pmt. Tol. Credit Acc.",CreateGLAccountNo);
+      END;
+    END;
+
+    LOCAL PROCEDURE SetPostingGroupsOnPrepmtGLAccount@188(VAR GLAccount@1002 : Record 15;GenPostingSetup@1003 : Record 252;GenPostingType@1001 : ' ,Purchase,Sale';VATCalcType@1000 : Option;SetupGLAccount@1005 : Record 15);
+    VAR
+      VATPostingSetup@1004 : Record 325;
+    BEGIN
+      WITH GLAccount DO BEGIN
+        "Gen. Posting Type" := GenPostingType;
+        "Gen. Bus. Posting Group" := GenPostingSetup."Gen. Bus. Posting Group";
+        "Gen. Prod. Posting Group" := GenPostingSetup."Gen. Prod. Posting Group";
+        CreatePrepaymentVATPostingSetup(VATPostingSetup,VATCalcType,GenPostingType,SetupGLAccount,"No.");
+        "VAT Bus. Posting Group" := VATPostingSetup."VAT Bus. Posting Group";
+        "VAT Prod. Posting Group" := VATPostingSetup."VAT Prod. Posting Group";
+
+        "Income/Balance" := "Income/Balance"::"Balance Sheet";
+        "Direct Posting" := TRUE;
+        MODIFY;
+      END;
+    END;
+
+    PROCEDURE SetInvRoundingPrecisionLCY@55(InvRoundingPrecisionLCY@1000 : Decimal);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.VALIDATE("Inv. Rounding Precision (LCY)",InvRoundingPrecisionLCY);
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetMaxVATDifferenceAllowed@53(MaxVATDifferenceAllowed@1000 : Decimal);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.VALIDATE("Max. VAT Difference Allowed",MaxVATDifferenceAllowed);
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetLCYCode@185(LCYCode@1000 : Code[10]);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.VALIDATE("LCY Code",LCYCode);
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetShortcutDimensionCode@199(DimNo@1000 : Integer;DimCode@1001 : Code[20]);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CASE DimNo OF
+        1:
+          GeneralLedgerSetup.VALIDATE("Shortcut Dimension 1 Code",DimCode);
+        2:
+          GeneralLedgerSetup.VALIDATE("Shortcut Dimension 2 Code",DimCode);
+        3:
+          GeneralLedgerSetup.VALIDATE("Shortcut Dimension 3 Code",DimCode);
+        4:
+          GeneralLedgerSetup.VALIDATE("Shortcut Dimension 4 Code",DimCode);
+        5:
+          GeneralLedgerSetup.VALIDATE("Shortcut Dimension 5 Code",DimCode);
+        6:
+          GeneralLedgerSetup.VALIDATE("Shortcut Dimension 6 Code",DimCode);
+        7:
+          GeneralLedgerSetup.VALIDATE("Shortcut Dimension 7 Code",DimCode);
+        8:
+          GeneralLedgerSetup.VALIDATE("Shortcut Dimension 8 Code",DimCode);
+      END;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetUnrealizedVAT@34(UnrealizedVAT@1001 : Boolean);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup.VALIDATE("Unrealized VAT",UnrealizedVAT);
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetUseLegacyGLEntryLocking@193(UseLegacyGLEntryLocking@1000 : Boolean);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup."Use Legacy G/L Entry Locking" := UseLegacyGLEntryLocking;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetVATRoundingType@31(Direction@1000 : Text[1]);
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CASE Direction OF
+        '<':
+          GeneralLedgerSetup."VAT Rounding Type" := GeneralLedgerSetup."VAT Rounding Type"::Down;
+        '>':
+          GeneralLedgerSetup."VAT Rounding Type" := GeneralLedgerSetup."VAT Rounding Type"::Up;
+        '=':
+          GeneralLedgerSetup."VAT Rounding Type" := GeneralLedgerSetup."VAT Rounding Type"::Nearest;
+      END;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetWorkDate@145();
+    VAR
+      GLEntry@1000 : Record 17;
+      OK@1001 : Boolean;
+    BEGIN
+      // Set workdate to date of last transaction or today
+      GLEntry.SETCURRENTKEY("G/L Account No.","Posting Date");
+      OK := TRUE;
+      REPEAT
+        GLEntry.SETFILTER("G/L Account No.",'>%1',GLEntry."G/L Account No.");
+        GLEntry.SETFILTER("Posting Date",'>%1',GLEntry."Posting Date");
+        IF GLEntry.FINDFIRST THEN BEGIN
+          GLEntry.SETRANGE("G/L Account No.",GLEntry."G/L Account No.");
+          GLEntry.SETRANGE("Posting Date");
+          GLEntry.FINDLAST;
+        END ELSE
+          OK := FALSE
+      UNTIL NOT OK;
+
+      IF GLEntry."Posting Date" = 0D THEN
+        WORKDATE := TODAY
+      ELSE
+        WORKDATE := NORMALDATE(GLEntry."Posting Date");
+    END;
+
+    PROCEDURE SetupReportSelection@211(ReportUsage@1001 : Option;ReportId@1002 : Integer);
+    VAR
+      ReportSelections@1000 : Record 77;
+    BEGIN
+      ReportSelections.SETRANGE(Usage,ReportUsage);
+      ReportSelections.DELETEALL;
+      ReportSelections.INIT;
+      ReportSelections.VALIDATE(Usage,ReportUsage);
+      ReportSelections.VALIDATE(Sequence,'1');
+      ReportSelections.VALIDATE("Report ID",ReportId);
+      ReportSelections.INSERT(TRUE);
+    END;
+
+    PROCEDURE SuggestBankAccountReconciliation@331(VAR BankAccReconciliation@1000 : Record 273;BankAccount@1001 : Record 270;StatementType@1003 : Option;IncludeChecks@1004 : Boolean);
+    VAR
+      SuggestBankAccReconLines@1002 : Report 1496;
+    BEGIN
+      CreateBankAccReconciliation(BankAccReconciliation,BankAccount."No.",StatementType);
+
+      SuggestBankAccReconLines.SetStmt(BankAccReconciliation);
+      SuggestBankAccReconLines.SETTABLEVIEW(BankAccount);
+      SuggestBankAccReconLines.InitializeRequest(WORKDATE,WORKDATE,IncludeChecks);
+      SuggestBankAccReconLines.USEREQUESTPAGE(FALSE);
+
+      SuggestBankAccReconLines.RUN;
+    END;
+
+    PROCEDURE UnapplyCustomerLedgerEntry@27(CustLedgerEntry@1000 : Record 21);
+    BEGIN
+      LibraryERMUnapply.UnapplyCustomerLedgerEntry(CustLedgerEntry);
+    END;
+
+    PROCEDURE UnapplyVendorLedgerEntry@21(VendorLedgerEntry@1001 : Record 25);
+    BEGIN
+      LibraryERMUnapply.UnapplyVendorLedgerEntry(VendorLedgerEntry);
+    END;
+
+    PROCEDURE UpdateAnalysisView@128(VAR AnalysisView@1000 : Record 363);
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"Update Analysis View",AnalysisView)
+    END;
+
+    PROCEDURE UpdateGenPostingSetupPrepmtAccounts@160(VAR GeneralPostingSetup@1000 : Record 252);
+    BEGIN
+      GeneralPostingSetup.VALIDATE("Sales Prepayments Account",CreateGLAccountWithSalesSetup);
+      GeneralPostingSetup.VALIDATE("Purch. Prepayments Account",CreateGLAccountWithPurchSetup);
+      GeneralPostingSetup.MODIFY;
+    END;
+
+    PROCEDURE UpdateGLAccountWithPostingSetup@246(VAR GLAccount@1000 : Record 15;GenPostingType@1004 : Option;GeneralPostingSetup@1001 : Record 252;VATPostingSetup@1003 : Record 325);
+    BEGIN
+      WITH GLAccount DO BEGIN
+        VALIDATE("Gen. Posting Type",GenPostingType);
+        VALIDATE("Gen. Bus. Posting Group",GeneralPostingSetup."Gen. Bus. Posting Group");
+        VALIDATE("Gen. Prod. Posting Group",GeneralPostingSetup."Gen. Prod. Posting Group");
+        VALIDATE("VAT Bus. Posting Group",VATPostingSetup."VAT Bus. Posting Group");
+        VALIDATE("VAT Prod. Posting Group",VATPostingSetup."VAT Prod. Posting Group");
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE UpdateVATPostingSetup@153(VAR VATPostingSetup@1000 : Record 325;VATPercent@1001 : Integer);
+    BEGIN
+      FindVATPostingSetup(VATPostingSetup,VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+      // VATPostingSetup."VAT %" := VATPercent;
+      VATPostingSetup."VAT %" := 0;
+      VATPostingSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE VATAmountRounding@7(VATAmount@1001 : Decimal;CurrencyCode@1000 : Code[10]) : Decimal;
+    VAR
+      Currency@1003 : Record 4;
+    BEGIN
+      // Round VAT Entry Amount.
+      Currency.InitRoundingPrecision;
+      IF CurrencyCode <> '' THEN
+        Currency.GET(CurrencyCode);
+
+      EXIT(ROUND(VATAmount,Currency."Amount Rounding Precision",Currency.VATRoundingDirection));
+    END;
+
+    PROCEDURE VerifyVendApplnWithZeroTransNo@102(DocumentNo@1002 : Code[20];DocumentType@1001 : Option;AmountLCY@1000 : Decimal);
+    VAR
+      DtldVendLedgEntry@1003 : Record 380;
+    BEGIN
+      DtldVendLedgEntry.SETRANGE("Document Type",DocumentType);
+      DtldVendLedgEntry.SETRANGE("Document No.",DocumentNo);
+      DtldVendLedgEntry.SETRANGE("Entry Type",DtldVendLedgEntry."Entry Type"::Application);
+      DtldVendLedgEntry.FINDLAST;
+      DtldVendLedgEntry.TESTFIELD("Transaction No.",0);
+      DtldVendLedgEntry.TESTFIELD("Application No.");
+      DtldVendLedgEntry.TESTFIELD("Amount (LCY)",AmountLCY);
+    END;
+
+    PROCEDURE VerifyCustApplnWithZeroTransNo@100(DocumentNo@1002 : Code[20];DocumentType@1001 : Option;AmountLCY@1000 : Decimal);
+    VAR
+      DtldCustLedgEntry@1003 : Record 379;
+    BEGIN
+      DtldCustLedgEntry.SETRANGE("Document Type",DocumentType);
+      DtldCustLedgEntry.SETRANGE("Document No.",DocumentNo);
+      DtldCustLedgEntry.SETRANGE("Entry Type",DtldCustLedgEntry."Entry Type"::Application);
+      DtldCustLedgEntry.FINDLAST;
+      DtldCustLedgEntry.TESTFIELD("Transaction No.",0);
+      DtldCustLedgEntry.TESTFIELD("Application No.");
+      DtldCustLedgEntry.TESTFIELD("Amount (LCY)",AmountLCY);
+    END;
+
+    PROCEDURE CreateGenPostSetup@1500014(GenBusPostGrp@1500000 : Code[10];GenProdPostGrp@1500004 : Code[10]);
+    VAR
+      GeneralPostingSetup@1500001 : Record 252;
+      SetGeneralPostingSetup@1500003 : Record 252;
+    BEGIN
+      SetGeneralPostingSetup.RESET;
+      SetGeneralPostingSetup.SETRANGE("Gen. Bus. Posting Group",GenBusPostGrp);
+      SetGeneralPostingSetup.SETRANGE("Gen. Prod. Posting Group",GenProdPostGrp);
+      IF NOT SetGeneralPostingSetup.FINDFIRST THEN BEGIN
+        GeneralPostingSetup.SETFILTER("Gen. Bus. Posting Group",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Gen. Prod. Posting Group",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Sales Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Purch. Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("COGS Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("COGS Account (Interim)",'<>''''');
+        GeneralPostingSetup.SETFILTER("Inventory Adjmt. Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Sales Credit Memo Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Purch. Credit Memo Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Direct Cost Applied Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Overhead Applied Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Purchase Variance Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Sales Prepayments Account",'<>%1','');
+        GeneralPostingSetup.SETFILTER("Purch. Prepayments Account",'<>%1','');
+        IF GeneralPostingSetup.FINDFIRST THEN BEGIN
+          SetGeneralPostingSetup := GeneralPostingSetup;
+          SetGeneralPostingSetup."Gen. Bus. Posting Group" := GenBusPostGrp;
+          SetGeneralPostingSetup."Gen. Prod. Posting Group" := GenProdPostGrp;
+          SetGeneralPostingSetup.INSERT(TRUE);
+        END;
+      END;
+    END;
+
+    PROCEDURE CreateVATPostingSetups@1500013(VATBusPostCode@1500000 : Code[10];VATGenPostCode@1500007 : Code[10]);
+    VAR
+      VATPostingSetup@1500002 : Record 325;
+      SetVATPostingSetup@1500006 : Record 325;
+    BEGIN
+      SetVATPostingSetup.RESET;
+      SetVATPostingSetup.SETCURRENTKEY("VAT Bus. Posting Group","VAT Prod. Posting Group");
+      SetVATPostingSetup.SETRANGE("VAT Bus. Posting Group",VATBusPostCode);
+      SetVATPostingSetup.SETRANGE("VAT Prod. Posting Group",VATGenPostCode);
+      IF NOT SetVATPostingSetup.FINDFIRST THEN BEGIN
+        VATPostingSetup.SETFILTER("VAT Prod. Posting Group",'<>%1','');
+        // VATPostingSetup.SETFILTER("VAT %",'<>%1',0);
+        VATPostingSetup.SETRANGE("VAT Calculation Type",VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+        VATPostingSetup.SETFILTER("Sales VAT Account",'<>%1','');
+        VATPostingSetup.SETFILTER("Purchase VAT Account",'<>%1','');
+        IF VATPostingSetup.FINDFIRST THEN BEGIN
+          SetVATPostingSetup := VATPostingSetup;
+          SetVATPostingSetup."Unrealized VAT Type" := SetVATPostingSetup."Unrealized VAT Type"::" ";
+          SetVATPostingSetup."VAT Bus. Posting Group" := VATBusPostCode;
+          SetVATPostingSetup."VAT Prod. Posting Group" := VATGenPostCode;
+          SetVATPostingSetup.INSERT(TRUE);
+        END;
+      END;
+    END;
+
+    PROCEDURE FindVATSetupForCust@1500016(CustCode@1500000 : Code[20]);
+    VAR
+      Cust@1500004 : Record 18;
+      CustPostGroup@1500003 : Record 92;
+    BEGIN
+      IF NOT Cust.GET(CustCode) THEN
+        EXIT;
+      IF CustPostGroup.GET(Cust."Customer Posting Group") THEN BEGIN
+        CreateVATSetupForGL(Cust."VAT Bus. Posting Group",CustPostGroup."Additional Fee Account");
+        CreateVATSetupForGL(Cust."VAT Bus. Posting Group",CustPostGroup."Interest Account");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateVATSetupForGL@1500017(CustVATBusGrp@1500003 : Code[10];GLAccNo@1500000 : Code[20]);
+    VAR
+      GLAcc@1500002 : Record 15;
+      GenPostGrp@1500001 : Record 251;
+    BEGIN
+      IF GLAcc.GET(GLAccNo) THEN BEGIN
+        CreateVATPostingSetups(CustVATBusGrp,GLAcc."VAT Prod. Posting Group");
+        GenPostGrp.RESET;
+        IF GenPostGrp.GET(GLAcc."Gen. Prod. Posting Group") THEN
+          CreateVATPostingSetups(CustVATBusGrp,GenPostGrp."Def. VAT Prod. Posting Group");
+      END;
+    END;
+
+    PROCEDURE CreateVATBusinessPostingGroups@1500019(VATBusinessPostingGroups@1000 : Code[10]);
+    VAR
+      VATBusinessPostingGroup@1500000 : Record 323;
+    BEGIN
+      VATBusinessPostingGroup.INIT;
+      VATBusinessPostingGroup.VALIDATE(Code,VATBusinessPostingGroups);
+      // Validating Code as Name because value is not important.
+      VATBusinessPostingGroup.VALIDATE(Description,VATBusinessPostingGroup.Code);
+      VATBusinessPostingGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateVATProductPostingGroups@1500018(VATProductPostingGroups@1000 : Code[10]);
+    VAR
+      VATProductPostingGroup@1001 : Record 324;
+    BEGIN
+      VATProductPostingGroup.INIT;
+      VATProductPostingGroup.VALIDATE(Code,VATProductPostingGroups);
+      // Validating Code as Name because value is not important.
+      VATProductPostingGroup.VALIDATE(Description,VATProductPostingGroup.Code);
+      VATProductPostingGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateBankAccAndLCCrLimit@1500020() : Code[20];
+    VAR
+      BankAccount@1500000 : Record 270;
+      BankLCLimitDetails@1500001 : Record 16304;
+    BEGIN
+      CreateBankAccount(BankAccount);
+      WITH BankLCLimitDetails DO BEGIN
+        INIT;
+        VALIDATE("Bank No.",BankAccount."No.");
+        VALIDATE("From Date",WORKDATE);
+        VALIDATE("To Date",CALCDATE('<1Y>',WORKDATE));
+        VALIDATE(Amount,LibraryRandom.RandDec(1000000,1));
+        INSERT(TRUE);
+      END;
+      EXIT(BankLCLimitDetails."Bank No.");
+    END;
+
+    PROCEDURE CreateTaxComponent@1500043(VAR TaxComponent@1500000 : Record 16479) : Code[10];
+    BEGIN
+      WITH TaxComponent DO BEGIN
+        INIT;
+        VALIDATE(Code,LibraryUtility.GenerateRandomCode(FIELDNO(Code),DATABASE::"Tax Component"));
+        VALIDATE(Description,LibraryUtility.GenerateRandomText(10));
+        INSERT(TRUE);
+        EXIT(Code);
+      END;
+    END;
+
+    PROCEDURE CreateTaxAreaAndTaxAreaLine@1500041(VAR TaxArea@1500001 : Record 318;TaxJurisdiction@1500000 : Code[10];CalcFormula@1500003 : Text[80];CalculationOrder@1500004 : Integer;InclTaxBase@1500002 : Boolean);
+    VAR
+      TaxAreaLine@1500005 : Record 319;
+    BEGIN
+      WITH TaxArea DO BEGIN
+        INIT;
+        VALIDATE(Code,LibraryUtility.GenerateRandomCode(FIELDNO(Code),DATABASE::"Tax Area"));
+        INSERT(TRUE);
+      END;
+      WITH TaxAreaLine DO BEGIN
+        INIT;
+        VALIDATE("Tax Area",TaxArea.Code);
+        VALIDATE("Tax Jurisdiction Code",TaxJurisdiction);
+        VALIDATE("Calculation Order",CalculationOrder);
+        VALIDATE(Formula,CalcFormula);
+        VALIDATE("Include Tax Base",InclTaxBase);
+        INSERT(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateTaxDetails@1500038(VAR TaxGroup@1500003 : Record 321;TaxJurisdiction@1500000 : Code[10];CapitalGoods@1500001 : Boolean;CreditableGoods@1500002 : Boolean);
+    VAR
+      DummyTaxDetail@1500005 : Record 322;
+    BEGIN
+      CreateTaxGroup(TaxGroup);
+      WITH DummyTaxDetail DO BEGIN
+        VALIDATE("Tax Jurisdiction Code",TaxJurisdiction);
+        VALIDATE("Tax Group Code",TaxGroup.Code);
+        VALIDATE("Tax Below Maximum",LibraryRandom.RandDec(10,2));
+        VALIDATE("Capital Goods",CapitalGoods);
+        VALIDATE("Creditable Goods",CreditableGoods);
+        INSERT(TRUE);
+      END;
+    END;
+
+    BEGIN
+    {
+      All utility functions related to ERM.
+    }
+    END.
+  }
+}
+

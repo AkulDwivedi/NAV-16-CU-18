@@ -1,0 +1,652 @@
+OBJECT Codeunit 132200 Library - Costing
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempPathTxt@1000 : TextConst '@@@="%1 = Temporary Path, %2 = Document No.";ENU=%1%2.html';
+      Assert@1001 : Codeunit 130000;
+      IncorrectCostTxt@1005 : TextConst 'ENU=Incorrect Cost Amount in Entry No. %1.';
+      IncorrectRoundingTxt@1004 : TextConst 'ENU=Rounding mismatch of %1 for Inbound Entry No. %2.';
+      OutputConsumpMismatchTxt@1003 : TextConst 'ENU=Output Cost in Prod. Order %1, line %2 does not match Consumption.';
+      OutputVarianceMismatchTxt@1002 : TextConst 'ENU=Output Cost including Variance in Prod. Order %1, line %2 does not match total Standard Cost of Produced Item.';
+      LibraryERM@1006 : Codeunit 131300;
+
+    PROCEDURE AdjustCostItemEntries@41(ItemNoFilter@1002 : Text[250];ItemCategoryFilter@1003 : Text[250]);
+    VAR
+      AdjustCostItemEntries@1000 : Report 795;
+    BEGIN
+      COMMIT;
+      AdjustCostItemEntries.InitializeRequest(ItemNoFilter,ItemCategoryFilter);
+      AdjustCostItemEntries.USEREQUESTPAGE(FALSE);
+      AdjustCostItemEntries.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE CalculateApplUnitCost@49(ItemLedgerEntryNo@1000 : Integer;PostingDate@1002 : Date;FirstOutboundValuePostingDate@1007 : Date;FirstOutboundValueEntryNo@1006 : Integer) : Decimal;
+    VAR
+      ValueEntry@1001 : Record 5802;
+      CostWithoutRevaluation@1003 : Decimal;
+      ILEQuantity@1005 : Decimal;
+      RevaluationUnitCost@1004 : Decimal;
+    BEGIN
+      ValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntryNo);
+      ValueEntry.SETRANGE("Valuation Date",0D,PostingDate);
+      IF ValueEntry.FINDSET THEN
+        REPEAT
+          IF ValueEntry."Entry Type" = ValueEntry."Entry Type"::Revaluation THEN BEGIN
+            IF (FirstOutboundValueEntryNo > ValueEntry."Entry No.") OR (FirstOutboundValuePostingDate > ValueEntry."Posting Date") THEN
+              RevaluationUnitCost +=
+                (ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)") / ValueEntry."Valued Quantity";
+          END ELSE BEGIN
+            CostWithoutRevaluation += ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)";
+            ILEQuantity += ValueEntry."Item Ledger Entry Quantity";
+          END;
+        UNTIL ValueEntry.NEXT = 0;
+      EXIT(CostWithoutRevaluation / ILEQuantity + RevaluationUnitCost);
+    END;
+
+    LOCAL PROCEDURE CalculateCostAmount@3(VAR ItemApplicationEntry@1000 : Record 339;VAR TempItemJournalBuffer@1008 : TEMPORARY Record 5803;OutbndComplInvoiced@1009 : Boolean) : Decimal;
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+      RefCostAmount@1002 : Decimal;
+      RefInbILECostAmount@1005 : Decimal;
+      ValuationDate@1004 : Date;
+      FirstValuePostingDate@1007 : Date;
+      FirstValueEntryNo@1006 : Integer;
+    BEGIN
+      IF ItemApplicationEntry.FINDSET THEN BEGIN
+        ValuationDate := FindLastValuationDate(ItemApplicationEntry."Outbound Item Entry No.");
+        FindFirstValueEntry(ItemApplicationEntry."Outbound Item Entry No.",FirstValueEntryNo,FirstValuePostingDate);
+        REPEAT
+          // Get the inbound Item Ledger Entry located at the other end of the application.
+          IF ItemLedgerEntry.GET(ItemApplicationEntry."Inbound Item Entry No.") THEN BEGIN
+            // Add cost according to how much of the inbound ILE quantity was applied to the outbound ILE.
+            RefInbILECostAmount :=
+              RoundAmount(
+                CalculateApplUnitCost(ItemLedgerEntry."Entry No.",ValuationDate,FirstValuePostingDate,FirstValueEntryNo) *
+                ItemApplicationEntry.Quantity);
+            RefCostAmount += RefInbILECostAmount;
+            IF OutbndComplInvoiced THEN
+              UpdateBufferforRoundingCheck(
+                TempItemJournalBuffer,ItemLedgerEntry."Entry No.",ItemApplicationEntry.Quantity,RefInbILECostAmount);
+          END;
+        UNTIL ItemApplicationEntry.NEXT = 0;
+      END;
+
+      EXIT(RefCostAmount);
+    END;
+
+    PROCEDURE CalculateInventoryValue@164(VAR ItemJournalLine@1009 : Record 83;VAR Item@1008 : Record 27;NewPostingDate@1007 : Date;NewDocNo@1006 : Code[20];NewCalculatePer@1005 : Option;NewByLocation@1004 : Boolean;NewByVariant@1003 : Boolean;NewUpdStdCost@1002 : Boolean;NewCalcBase@1001 : Option;NewShowDialog@1000 : Boolean);
+    VAR
+      CalculateInventoryValue@1010 : Report 5899;
+    BEGIN
+      CalculateInventoryValue.InitializeRequest(
+        NewPostingDate,NewDocNo,TRUE,NewCalculatePer,NewByLocation,NewByVariant,NewUpdStdCost,NewCalcBase,NewShowDialog);
+      COMMIT;
+      CalculateInventoryValue.USEREQUESTPAGE(FALSE);
+      CalculateInventoryValue.SetItemJnlLine(ItemJournalLine);
+      CalculateInventoryValue.SETTABLEVIEW(Item);
+      CalculateInventoryValue.RUNMODAL;
+    END;
+
+    PROCEDURE CopyStandardCostWorksheet@85(FromStandardCostWorksheetName@1000 : Code[10];ToStandardCostWorksheetName@1001 : Code[10]);
+    VAR
+      CopyStandardCostWorksheet@1002 : Report 5853;
+    BEGIN
+      CLEAR(CopyStandardCostWorksheet);
+      CopyStandardCostWorksheet.Initialize(FromStandardCostWorksheetName,ToStandardCostWorksheetName,TRUE);
+      CopyStandardCostWorksheet.USEREQUESTPAGE(FALSE);
+      CopyStandardCostWorksheet.RUN
+    END;
+
+    PROCEDURE CheckAdjustment@34(Item@1000 : Record 27);
+    VAR
+      TempItemJournalBuffer@1001 : TEMPORARY Record 5803;
+    BEGIN
+      PrepareBufferforRoundingCheck(Item,TempItemJournalBuffer);
+      IF Item."Costing Method" = Item."Costing Method"::Average THEN
+        CheckAverageCosting(Item,TempItemJournalBuffer)
+      ELSE
+        CheckNonAverageCosting(Item,TempItemJournalBuffer);
+
+      VerifyInboundEntriesRounding(TempItemJournalBuffer);
+    END;
+
+    LOCAL PROCEDURE CheckAverageCosting@69(Item@1000 : Record 27;VAR TempItemJournalBuffer@1017 : TEMPORARY Record 5803);
+    VAR
+      AvgCostAdjmtEntryPoint@1004 : Record 5804;
+      ValueEntry@1005 : Record 5802;
+      OutboundItemLedgerEntry@1006 : Record 32;
+      FixedAppItemLedgerEntry@1007 : Record 32;
+      OutboundValueEntry@1008 : Record 5802;
+      FixedAppValueEntry@1002 : Record 5802;
+      TempValueEntry@1015 : TEMPORARY Record 5802;
+      CurrPeriodInboundCost@1009 : Decimal;
+      CurrPeriodInboundQty@1010 : Decimal;
+      PrevPeriodCost@1011 : Decimal;
+      PrevPeriodQty@1012 : Decimal;
+      RefCostAmount@1013 : Decimal;
+      OutboundCostAmount@1014 : Decimal;
+      RevaluationUnitCost@1001 : Decimal;
+      RefCostAmountwoReval@1018 : Decimal;
+      PeriodStartDate@1016 : Date;
+    BEGIN
+      AvgCostAdjmtEntryPoint.SETRANGE("Item No.",Item."No.");
+      AvgCostAdjmtEntryPoint.FINDSET;
+      ValueEntry.SETCURRENTKEY("Item No.","Valuation Date","Location Code","Variant Code");
+      ValueEntry.SETRANGE("Item No.",Item."No.");
+      REPEAT
+        // Add cost and quantity of all inbound non-revaluation entries for the period
+        ValueEntry.SETRANGE("Valuation Date",PeriodStartDate,AvgCostAdjmtEntryPoint."Valuation Date");
+        ValueEntry.SETFILTER("Valued Quantity",'>%1',0);
+        ValueEntry.SETFILTER("Entry Type",'<>%1',ValueEntry."Entry Type"::Revaluation);
+        ValueEntry.CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)","Item Ledger Entry Quantity");
+        CurrPeriodInboundCost := ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)";
+        CurrPeriodInboundQty := ValueEntry."Item Ledger Entry Quantity";
+
+        // Reduce cost and quantity of inbound entries in the period, which are fixed applied
+        IF ValueEntry.FINDSET THEN
+          REPEAT
+            // Only loop through the quantity entries and add up the cost without revaluation
+            IF ValueEntry."Item Ledger Entry Quantity" <> 0 THEN BEGIN
+              FixedAppItemLedgerEntry.SETRANGE("Item No.",Item."No.");
+              FixedAppItemLedgerEntry.SETRANGE("Applies-to Entry",ValueEntry."Item Ledger Entry No.");
+              IF FixedAppItemLedgerEntry.FINDFIRST THEN BEGIN
+                FixedAppItemLedgerEntry.CALCSUMS(Quantity);
+                FixedAppValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+                FixedAppValueEntry.SETRANGE("Item Ledger Entry No.",ValueEntry."Item Ledger Entry No.");
+                FixedAppValueEntry.SETFILTER("Entry Type",'<>%1',FixedAppValueEntry."Entry Type"::Revaluation);
+                FixedAppValueEntry.SETRANGE("Valuation Date",PeriodStartDate,AvgCostAdjmtEntryPoint."Valuation Date");
+                FixedAppValueEntry.SETFILTER("Valued Quantity",'>%1',0);
+                FixedAppValueEntry.CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)","Item Ledger Entry Quantity");
+                CurrPeriodInboundCost +=
+                  ROUND((FixedAppValueEntry."Cost Amount (Expected)" + FixedAppValueEntry."Cost Amount (Actual)") /
+                    FixedAppValueEntry."Item Ledger Entry Quantity" * FixedAppItemLedgerEntry.Quantity,
+                    LibraryERM.GetAmountRoundingPrecision);
+                CurrPeriodInboundQty += FixedAppItemLedgerEntry.Quantity;
+              END;
+            END;
+          UNTIL ValueEntry.NEXT = 0;
+
+        // Store the revaluation entries
+        ValueEntry.SETRANGE("Entry Type",ValueEntry."Entry Type"::Revaluation);
+        TempValueEntry.DELETEALL;
+        IF ValueEntry.FINDSET THEN
+          REPEAT
+            TempValueEntry := ValueEntry;
+            TempValueEntry.INSERT;
+          UNTIL ValueEntry.NEXT = 0;
+
+        // Add cost and quantity from previous period
+        CurrPeriodInboundCost += PrevPeriodCost;
+        CurrPeriodInboundQty += PrevPeriodQty;
+
+        // Validate Outbound entries for the period
+        OutboundValueEntry.SETRANGE("Item No.",Item."No.");
+        OutboundValueEntry.SETRANGE("Valuation Date",PeriodStartDate,AvgCostAdjmtEntryPoint."Valuation Date");
+        OutboundValueEntry.SETFILTER("Item Ledger Entry Quantity",'<%1',0);
+        IF OutboundValueEntry.FINDSET THEN
+          REPEAT
+            OutboundItemLedgerEntry.GET(OutboundValueEntry."Item Ledger Entry No.");
+            IF OutboundItemLedgerEntry."Applies-to Entry" = 0 THEN BEGIN
+              // If not fixed applied, unit cost should be equal to average cost for the period
+
+              // Add applied revaluation
+              RevaluationUnitCost := 0;
+              IF TempValueEntry.FINDSET THEN
+                REPEAT
+                  IF (OutboundValueEntry."Entry No." > TempValueEntry."Entry No.") OR
+                     (OutboundValueEntry."Posting Date" > TempValueEntry."Posting Date")
+                  THEN
+                    RevaluationUnitCost +=
+                      (TempValueEntry."Cost Amount (Actual)" + TempValueEntry."Cost Amount (Expected)") /
+                      TempValueEntry."Valued Quantity";
+                UNTIL TempValueEntry.NEXT = 0;
+
+              RefCostAmountwoReval := (CurrPeriodInboundCost / CurrPeriodInboundQty) * OutboundItemLedgerEntry.Quantity;
+              RefCostAmount :=
+                ROUND(
+                  RevaluationUnitCost * OutboundItemLedgerEntry.Quantity + RefCostAmountwoReval,LibraryERM.GetAmountRoundingPrecision);
+
+              OutboundItemLedgerEntry.CALCFIELDS("Cost Amount (Expected)","Cost Amount (Actual)");
+              OutboundCostAmount := OutboundItemLedgerEntry."Cost Amount (Expected)" + OutboundItemLedgerEntry."Cost Amount (Actual)";
+
+              // Reduce the inbound cost and quantity for validating with the next outboud ILE
+              CurrPeriodInboundCost += ROUND(RefCostAmountwoReval,LibraryERM.GetAmountRoundingPrecision);
+              CurrPeriodInboundQty += OutboundItemLedgerEntry.Quantity;
+              Assert.AreNearlyEqual(RefCostAmount,OutboundCostAmount,LibraryERM.GetAmountRoundingPrecision,
+                STRSUBSTNO(IncorrectCostTxt,OutboundItemLedgerEntry."Entry No."));
+            END ELSE BEGIN
+              // If fixed applied, verification is same as non-average cost items
+              FixedAppItemLedgerEntry.GET(OutboundItemLedgerEntry."Entry No.");
+              FixedAppItemLedgerEntry.SETRECFILTER;
+              CheckCostAmount(FixedAppItemLedgerEntry,TempItemJournalBuffer);
+            END;
+          UNTIL OutboundValueEntry.NEXT = 0;
+
+        // Prepare carry forward values for the next period
+        PeriodStartDate := AvgCostAdjmtEntryPoint."Valuation Date" + 1;
+        ValueEntry.SETRANGE("Valued Quantity");
+        ValueEntry.SETRANGE("Entry Type");
+        ValueEntry.CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)","Item Ledger Entry Quantity");
+        PrevPeriodCost += ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)";
+        PrevPeriodQty += ValueEntry."Item Ledger Entry Quantity";
+      UNTIL AvgCostAdjmtEntryPoint.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckCostAmount@38(VAR ItemLedgerEntry@1005 : Record 32;VAR TempItemJournalBuffer@1001 : TEMPORARY Record 5803);
+    VAR
+      ItemApplicationEntry@1002 : Record 339;
+      RefCostAmount@1000 : Decimal;
+    BEGIN
+      IF ItemLedgerEntry.FINDSET THEN
+        REPEAT
+          // Find all applications pointing to the ILE.
+          ItemApplicationEntry.SETRANGE("Outbound Item Entry No.",ItemLedgerEntry."Entry No.");
+          ItemApplicationEntry.SETFILTER(Quantity,'<%1',0);
+
+          // Calculate the reference cost amount on the ValuationDate
+          RefCostAmount := CalculateCostAmount(ItemApplicationEntry,TempItemJournalBuffer,ItemLedgerEntry."Completely Invoiced");
+
+          // Compare to actuals.
+          ItemLedgerEntry.CALCFIELDS("Cost Amount (Expected)","Cost Amount (Actual)");
+          Assert.AreEqual(
+            RefCostAmount,ItemLedgerEntry."Cost Amount (Actual)" + ItemLedgerEntry."Cost Amount (Expected)",
+            STRSUBSTNO(IncorrectCostTxt,ItemLedgerEntry."Entry No."));
+        UNTIL ItemLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckNonAverageCosting@31(Item@1000 : Record 27;VAR TempItemJournalBuffer@1002 : TEMPORARY Record 5803);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      // Check all outbound ILEs.
+      ItemLedgerEntry.RESET;
+      ItemLedgerEntry.SETRANGE("Item No.",Item."No.");
+      ItemLedgerEntry.SETRANGE(Positive,FALSE);
+      CheckCostAmount(ItemLedgerEntry,TempItemJournalBuffer);
+    END;
+
+    PROCEDURE CheckInboundEntriesCost@664(VAR TempItemLedgerEntry@1000 : TEMPORARY Record 32);
+    VAR
+      RefCostPerUnit@1001 : Decimal;
+      RefCost@1005 : Decimal;
+      ActualCost@1004 : Decimal;
+    BEGIN
+      TempItemLedgerEntry.FINDFIRST;
+      TempItemLedgerEntry.CALCFIELDS("Cost Amount (Expected)","Cost Amount (Actual)");
+      RefCostPerUnit :=
+        (TempItemLedgerEntry."Cost Amount (Expected)" + TempItemLedgerEntry."Cost Amount (Actual)") / TempItemLedgerEntry.Quantity;
+
+      // Check if the subsequent inbound entries have the same cost as the original inbound entry - to make sure the cost modification has been propagated
+      WHILE TempItemLedgerEntry.NEXT <> 0 DO BEGIN
+        TempItemLedgerEntry.CALCFIELDS("Cost Amount (Expected)","Cost Amount (Actual)");
+        ActualCost := TempItemLedgerEntry."Cost Amount (Expected)" + TempItemLedgerEntry."Cost Amount (Actual)";
+        RefCost := ROUND(RefCostPerUnit * TempItemLedgerEntry.Quantity,LibraryERM.GetAmountRoundingPrecision);
+        Assert.AreEqual(RefCost,ActualCost,STRSUBSTNO(IncorrectCostTxt,TempItemLedgerEntry."Entry No."));
+      END;
+    END;
+
+    PROCEDURE CheckProductionOrderCost@63(ProdOrder@1000 : Record 5405;VerifyVarianceinOutput@1008 : Boolean);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+      ValueEntry@1004 : Record 5802;
+      ProdOrderLine@1005 : Record 5406;
+      ConsumptionCost@1002 : Decimal;
+      OutpuCostwithoutVariance@1003 : Decimal;
+      OutputCostinclVariance@1009 : Decimal;
+      RefOutputCostinclVariance@1006 : Decimal;
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,ProdOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrder."No.");
+      ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Production);
+      ItemLedgerEntry.SETRANGE("Order No.",ProdOrder."No.");
+      IF ProdOrderLine.FINDSET THEN BEGIN
+        OutpuCostwithoutVariance := 0;
+        ConsumptionCost := 0;
+        REPEAT
+          ItemLedgerEntry.SETRANGE("Order Line No.",ProdOrderLine."Line No.");
+          IF ItemLedgerEntry.FINDSET THEN
+            REPEAT
+              ItemLedgerEntry.CALCFIELDS("Cost Amount (Expected)","Cost Amount (Actual)");
+              IF ItemLedgerEntry."Entry Type" = ItemLedgerEntry."Entry Type"::Consumption THEN
+                ConsumptionCost += ItemLedgerEntry."Cost Amount (Expected)" + ItemLedgerEntry."Cost Amount (Actual)"
+              ELSE
+                IF ItemLedgerEntry."Entry Type" = ItemLedgerEntry."Entry Type"::Output THEN BEGIN
+                  ValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+                  IF VerifyVarianceinOutput THEN BEGIN
+                    ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntry."Entry No.");
+                    ValueEntry.CALCSUMS("Cost Amount (Actual)");
+                    OutputCostinclVariance := ROUND(ValueEntry."Cost Amount (Actual)",LibraryERM.GetAmountRoundingPrecision);
+                  END;
+                  ValueEntry.SETFILTER("Entry Type",'<>%1',ValueEntry."Entry Type"::Variance);
+                  ValueEntry.CALCSUMS("Cost Amount (Actual)");
+                  OutpuCostwithoutVariance += ValueEntry."Cost Amount (Actual)";
+                END;
+            UNTIL ItemLedgerEntry.NEXT = 0;
+          Assert.AreEqual(
+            -ConsumptionCost,OutpuCostwithoutVariance,
+            STRSUBSTNO(OutputConsumpMismatchTxt,ProdOrderLine."Prod. Order No.",ProdOrderLine."Line No."));
+          IF VerifyVarianceinOutput THEN BEGIN
+            RefOutputCostinclVariance :=
+              ROUND(ProdOrderLine."Unit Cost" * ProdOrderLine.Quantity,LibraryERM.GetAmountRoundingPrecision);
+            Assert.AreEqual(
+              -RefOutputCostinclVariance,OutputCostinclVariance,
+              STRSUBSTNO(OutputVarianceMismatchTxt,ProdOrderLine."Prod. Order No.",ProdOrderLine."Line No."));
+          END;
+        UNTIL ProdOrderLine.NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE CreatePurchasePrice@134(VAR PurchasePrice@1001 : Record 7012;VendorNo@1000 : Code[20];ItemNo@1002 : Code[20];StartingDate@1003 : Date;CurrencyCode@1004 : Code[10];VariantCode@1005 : Code[10];UnitOfMeasureCode@1006 : Code[10];MinimumQuantity@1007 : Decimal);
+    BEGIN
+      PurchasePrice.INIT;
+      PurchasePrice.VALIDATE("Vendor No.",VendorNo);
+      PurchasePrice.VALIDATE("Item No.",ItemNo);
+      PurchasePrice.VALIDATE("Starting Date",StartingDate);
+      PurchasePrice.VALIDATE("Currency Code",CurrencyCode);
+      PurchasePrice.VALIDATE("Variant Code",VariantCode);
+      PurchasePrice.VALIDATE("Unit of Measure Code",UnitOfMeasureCode);
+      PurchasePrice.VALIDATE("Minimum Quantity",MinimumQuantity);
+      PurchasePrice.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateRevaluationJournal@123(VAR ItemJournalBatch@1006 : Record 233;VAR Item@1000 : Record 27;NewPostingDate@1013 : Date;NewDocNo@1012 : Code[20];NewCalculatePer@1011 : Option;NewByLocation@1010 : Boolean;NewByVariant@1009 : Boolean;NewUpdStdCost@1008 : Boolean;NewCalcBase@1007 : Option;NewShowDialog@1005 : Boolean);
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      ItemJournalLine.VALIDATE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.VALIDATE("Journal Batch Name",ItemJournalBatch.Name);
+      CalculateInventoryValue(
+        ItemJournalLine,Item,NewPostingDate,NewDocNo,NewCalculatePer,NewByLocation,
+        NewByVariant,NewUpdStdCost,NewCalcBase,NewShowDialog);
+    END;
+
+    PROCEDURE CreateRevaluationJnlLines@33(VAR Item@1000 : Record 27;ItemJournalLine@1010 : Record 83;DocNo@1008 : Code[20];CalculatePer@1007 : Option;ReCalcStdCost@1002 : Option;ByLocation@1006 : Boolean;ByVariant@1005 : Boolean;UpdStdCost@1004 : Boolean;PostingDate@1003 : Date);
+    VAR
+      TmpItem@1009 : Record 27;
+      CalcInvtValue@1001 : Report 5899;
+    BEGIN
+      ItemJournalLine.DELETEALL;
+      CalcInvtValue.SetItemJnlLine(ItemJournalLine);
+      IF Item.HASFILTER THEN
+        TmpItem.COPYFILTERS(Item)
+      ELSE BEGIN
+        Item.GET(Item."No.");
+        TmpItem.SETRANGE("No.",Item."No.");
+      END;
+      CalcInvtValue.SETTABLEVIEW(TmpItem);
+      CalcInvtValue.InitializeRequest(PostingDate,DocNo,TRUE,CalculatePer,ByLocation,ByVariant,UpdStdCost,ReCalcStdCost,TRUE);
+      CalcInvtValue.USEREQUESTPAGE(FALSE);
+      CalcInvtValue.RUNMODAL;
+    END;
+
+    PROCEDURE CreateSalesPrice@133(VAR SalesPrice@1000 : Record 7002;SalesType@1003 : Option;SalesCode@1001 : Code[20];ItemNo@1002 : Code[20];StartingDate@1004 : Date;CurrencyCode@1005 : Code[10];VariantCode@1006 : Code[10];UnitOfMeasureCode@1007 : Code[10];MinimumQuantity@1008 : Decimal);
+    BEGIN
+      SalesPrice.INIT;
+      SalesPrice.VALIDATE("Sales Type",SalesType);
+      SalesPrice.VALIDATE("Sales Code",SalesCode);
+      SalesPrice.VALIDATE("Item No.",ItemNo);
+      SalesPrice.VALIDATE("Starting Date",StartingDate);
+      SalesPrice.VALIDATE("Currency Code",CurrencyCode);
+      SalesPrice.VALIDATE("Variant Code",VariantCode);
+      SalesPrice.VALIDATE("Unit of Measure Code",UnitOfMeasureCode);
+      SalesPrice.VALIDATE("Minimum Quantity",MinimumQuantity);
+      SalesPrice.INSERT(TRUE);
+    END;
+
+    PROCEDURE ImplementPriceChange@135(SalesPriceWorksheet@1000 : Record 7023);
+    VAR
+      ImplementPriceChange@1001 : Report 7053;
+    BEGIN
+      CLEAR(ImplementPriceChange);
+      ImplementPriceChange.InitializeRequest(TRUE);
+      ImplementPriceChange.USEREQUESTPAGE(FALSE);
+      ImplementPriceChange.SETTABLEVIEW(SalesPriceWorksheet);
+      ImplementPriceChange.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE FindFirstValueEntry@62(ItemLedgerEntryNo@1001 : Integer;VAR FirstEntryNo@1003 : Integer;VAR FirstPostingDate@1002 : Date);
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      ValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntryNo);
+      ValueEntry.FINDSET;
+      REPEAT
+        IF (ValueEntry."Item Ledger Entry Quantity" <> 0) AND
+           ((FirstEntryNo = 0) OR (FirstEntryNo > ValueEntry."Entry No."))
+        THEN BEGIN
+          FirstEntryNo := ValueEntry."Entry No.";
+          FirstPostingDate := ValueEntry."Posting Date";
+        END;
+      UNTIL (ValueEntry.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE FindLastValuationDate@40(ItemLedgerEntryNo@1001 : Integer) LastValuationDate : Date;
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      ValueEntry.SETCURRENTKEY("Item Ledger Entry No.","Entry Type");
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntryNo);
+      ValueEntry.FINDSET;
+      REPEAT
+        IF LastValuationDate < ValueEntry."Valuation Date" THEN
+          LastValuationDate := ValueEntry."Valuation Date";
+      UNTIL (ValueEntry.NEXT = 0);
+      EXIT(LastValuationDate);
+    END;
+
+    PROCEDURE PostInvtCostToGL@37(PerPostingGroup@1002 : Boolean;PostingDate@1102 : Date;DocNo@1001 : Code[20]);
+    VAR
+      PostValueEntryToGL@1104 : Record 5811;
+      PostInventoryCosttoGL@1000 : Report 1002;
+      PostMethod@1004 : 'per Posting Group,per Entry';
+    BEGIN
+      COMMIT;
+
+      PostValueEntryToGL.SETFILTER("Posting Date",'=%1',PostingDate);
+      IF PerPostingGroup THEN BEGIN
+        PostMethod := PostMethod::"per Posting Group";
+        PostInventoryCosttoGL.InitializeRequest(PostMethod,DocNo,TRUE);
+      END ELSE BEGIN
+        PostMethod := PostMethod::"per Entry";
+        PostInventoryCosttoGL.InitializeRequest(PostMethod,'',TRUE);
+      END;
+      PostInventoryCosttoGL.SETTABLEVIEW(PostValueEntryToGL);
+      PostInventoryCosttoGL.USEREQUESTPAGE(FALSE);
+      PostInventoryCosttoGL.SAVEASPDF(STRSUBSTNO(TempPathTxt,TEMPORARYPATH,DocNo));
+    END;
+
+    PROCEDURE PostInvtCostToGLTest@2(PostMethod@1004 : Option;ItemNo@1102 : Code[20];DocumentNo@1001 : Code[20];ShowDim@1005 : Boolean;ShowOnlyWarnings@1006 : Boolean);
+    VAR
+      PostValueEntryToGL@1104 : Record 5811;
+      PostInvtCostToGLTest@1000 : Report 1003;
+    BEGIN
+      COMMIT;
+      PostValueEntryToGL.SETRANGE("Item No.",ItemNo);
+      PostInvtCostToGLTest.InitializeRequest(PostMethod,DocumentNo,ShowDim,ShowOnlyWarnings);
+      PostInvtCostToGLTest.SETTABLEVIEW(PostValueEntryToGL);
+      PostInvtCostToGLTest.USEREQUESTPAGE(FALSE);
+    END;
+
+    LOCAL PROCEDURE PrepareBufferforRoundingCheck@81(Item@1000 : Record 27;VAR TempItemJnlBuffer@1001 : TEMPORARY Record 5803);
+    VAR
+      InboundItemLedgerEntry@1002 : Record 32;
+    BEGIN
+      // Create a buffer entry for each inbound entry - only consider invoiced quantity and cost
+      // Note: Rounding entries are created only after inbound and outbound entries have been invoiced completely
+      TempItemJnlBuffer.DELETEALL;
+      InboundItemLedgerEntry.SETRANGE("Item No.",Item."No.");
+      InboundItemLedgerEntry.SETRANGE(Positive,TRUE);
+      InboundItemLedgerEntry.SETRANGE("Completely Invoiced",TRUE);
+      IF InboundItemLedgerEntry.FINDSET THEN
+        REPEAT
+          TempItemJnlBuffer.INIT;
+          TempItemJnlBuffer."Line No." := InboundItemLedgerEntry."Entry No.";
+          TempItemJnlBuffer.Quantity := InboundItemLedgerEntry."Invoiced Quantity";
+          InboundItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)");
+          TempItemJnlBuffer."Inventory Value (Calculated)" := InboundItemLedgerEntry."Cost Amount (Actual)";
+          TempItemJnlBuffer.INSERT;
+        UNTIL InboundItemLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE RoundAmount@4(Amount@1000 : Decimal) : Decimal;
+    BEGIN
+      EXIT(ROUND(Amount,LibraryERM.GetAmountRoundingPrecision,'='));
+    END;
+
+    PROCEDURE SuggestCapacityStandardCost@32(VAR WorkCenter@1001 : Record 99000754;VAR MachineCenter@1000 : Record 99000758;StandardCostWorksheetName@1003 : Code[10];StandardCostAdjustmentFactor@1006 : Integer;StandardCostRoundingMethod@1007 : Code[10]);
+    VAR
+      TmpWorkCenter@1004 : Record 99000754;
+      TmpMachineCenter@1005 : Record 99000758;
+      SuggestCapacityStandardCost@1002 : Report 5852;
+    BEGIN
+      CLEAR(SuggestCapacityStandardCost);
+      SuggestCapacityStandardCost.Initialize(
+        StandardCostWorksheetName,StandardCostAdjustmentFactor,0,0,StandardCostRoundingMethod,'','');
+      IF WorkCenter.HASFILTER THEN
+        TmpWorkCenter.COPYFILTERS(WorkCenter)
+      ELSE BEGIN
+        WorkCenter.GET(WorkCenter."No.");
+        TmpWorkCenter.SETRANGE("No.",WorkCenter."No.");
+      END;
+      SuggestCapacityStandardCost.SETTABLEVIEW(TmpWorkCenter);
+
+      IF MachineCenter.HASFILTER THEN
+        TmpMachineCenter.COPYFILTERS(MachineCenter)
+      ELSE BEGIN
+        MachineCenter.GET(MachineCenter."No.");
+        TmpMachineCenter.SETRANGE("No.",MachineCenter."No.");
+      END;
+      SuggestCapacityStandardCost.SETTABLEVIEW(TmpMachineCenter);
+      SuggestCapacityStandardCost.USEREQUESTPAGE(FALSE);
+      SuggestCapacityStandardCost.RUN;
+    END;
+
+    PROCEDURE SuggestSalesPriceWorksheet@137(Item@1000 : Record 27;SalesCode@1001 : Code[20];SalesType@1005 : Option;PriceLowerLimit@1003 : Decimal;UnitPriceFactor@1006 : Decimal);
+    VAR
+      SalesPrice@1002 : Record 7002;
+      SuggestSalesPriceOnWksh@1004 : Report 7052;
+    BEGIN
+      CLEAR(SuggestSalesPriceOnWksh);
+      SuggestSalesPriceOnWksh.InitializeRequest2(
+        SalesType,SalesCode,WORKDATE,WORKDATE,'',Item."Base Unit of Measure",FALSE,PriceLowerLimit,UnitPriceFactor,'');
+      SuggestSalesPriceOnWksh.USEREQUESTPAGE(FALSE);
+      SalesPrice.SETRANGE("Item No.",Item."No.");
+      SuggestSalesPriceOnWksh.SETTABLEVIEW(SalesPrice);
+      SuggestSalesPriceOnWksh.RUNMODAL;
+    END;
+
+    PROCEDURE SuggestItemPriceWorksheet@136(Item@1001 : Record 27;SalesCode@1000 : Code[20];SalesType@1004 : Option;PriceLowerLimit@1003 : Decimal;UnitPriceFactor@1005 : Decimal);
+    VAR
+      SuggestItemPriceOnWksh@1002 : Report 7051;
+    BEGIN
+      CLEAR(SuggestItemPriceOnWksh);
+      SuggestItemPriceOnWksh.InitializeRequest2(
+        SalesType,SalesCode,WORKDATE,WORKDATE,'',Item."Base Unit of Measure",PriceLowerLimit,UnitPriceFactor,'',TRUE);
+      SuggestItemPriceOnWksh.USEREQUESTPAGE(FALSE);
+      Item.SETRANGE("No.",Item."No.");
+      SuggestItemPriceOnWksh.SETTABLEVIEW(Item);
+      SuggestItemPriceOnWksh.RUNMODAL;
+    END;
+
+    PROCEDURE SuggestItemPriceWorksheet2@1(Item@1001 : Record 27;SalesCode@1000 : Code[20];SalesType@1004 : Option;PriceLowerLimit@1003 : Decimal;UnitPriceFactor@1005 : Decimal;CurrencyCode@1006 : Code[10]);
+    VAR
+      TmpItem@1007 : Record 27;
+      SuggestItemPriceOnWksh@1002 : Report 7051;
+    BEGIN
+      CLEAR(SuggestItemPriceOnWksh);
+      SuggestItemPriceOnWksh.InitializeRequest2(
+        SalesType,SalesCode,WORKDATE,WORKDATE,CurrencyCode,Item."Base Unit of Measure",PriceLowerLimit,UnitPriceFactor,'',TRUE);
+      IF Item.HASFILTER THEN
+        TmpItem.COPYFILTERS(Item)
+      ELSE BEGIN
+        Item.GET(Item."No.");
+        TmpItem.SETRANGE("No.",Item."No.");
+      END;
+      SuggestItemPriceOnWksh.SETTABLEVIEW(TmpItem);
+      SuggestItemPriceOnWksh.USEREQUESTPAGE(FALSE);
+      SuggestItemPriceOnWksh.RUNMODAL;
+    END;
+
+    PROCEDURE SuggestItemStandardCost@28(VAR Item@1000 : Record 27;StandardCostWorksheetName@1002 : Code[10];StandardCostAdjustmentFactor@1004 : Integer;StandardCostRoundingMethod@1005 : Code[10]);
+    VAR
+      TmpItem@1003 : Record 27;
+      SuggestItemStandardCost@1001 : Report 5851;
+    BEGIN
+      CLEAR(SuggestItemStandardCost);
+      SuggestItemStandardCost.Initialize(StandardCostWorksheetName,StandardCostAdjustmentFactor,0,0,StandardCostRoundingMethod,'','');
+      IF Item.HASFILTER THEN
+        TmpItem.COPYFILTERS(Item)
+      ELSE BEGIN
+        Item.GET(Item."No.");
+        TmpItem.SETRANGE("No.",Item."No.");
+      END;
+      SuggestItemStandardCost.SETTABLEVIEW(TmpItem);
+      SuggestItemStandardCost.USEREQUESTPAGE(FALSE);
+      SuggestItemStandardCost.RUN;
+    END;
+
+    PROCEDURE UpdateUnitCost@71(VAR ProductionOrder@1000 : Record 5405;CalcMethod@1002 : Option;UpdateReservations@1003 : Boolean);
+    VAR
+      TmpProductionOrder@1004 : Record 5405;
+      UpdateUnitCost@1001 : Report 99001014;
+    BEGIN
+      CLEAR(UpdateUnitCost);
+      UpdateUnitCost.InitializeRequest(CalcMethod,UpdateReservations);
+      IF ProductionOrder.HASFILTER THEN
+        TmpProductionOrder.COPYFILTERS(ProductionOrder)
+      ELSE BEGIN
+        ProductionOrder.GET(ProductionOrder.Status,ProductionOrder."No.");
+        TmpProductionOrder.SETRANGE(Status,ProductionOrder.Status);
+        TmpProductionOrder.SETRANGE("No.",ProductionOrder."No.");
+      END;
+      UpdateUnitCost.SETTABLEVIEW(TmpProductionOrder);
+      UpdateUnitCost.USEREQUESTPAGE(FALSE);
+      UpdateUnitCost.RUN;
+    END;
+
+    LOCAL PROCEDURE UpdateBufferforRoundingCheck@94(VAR TempItemJournalBuffer@1001 : TEMPORARY Record 5803;EntryNo@1000 : Integer;Quantity@1003 : Decimal;CostAmount@1002 : Decimal);
+    BEGIN
+      // Reduce the cost and quantity of outbound entry from the inbound buffer - only for completely invoiced outbound entries
+      IF TempItemJournalBuffer.GET(EntryNo) THEN BEGIN
+        TempItemJournalBuffer.Quantity += Quantity;
+        TempItemJournalBuffer."Inventory Value (Calculated)" += CostAmount;
+        TempItemJournalBuffer.MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyInboundEntriesRounding@93(VAR TempItemJournalBuffer@1008 : TEMPORARY Record 5803);
+    BEGIN
+      // Verify that if the residual quantity is zero, the residual cost should also be zero
+      TempItemJournalBuffer.SETRANGE(Quantity,0);
+      TempItemJournalBuffer.SETFILTER("Inventory Value (Calculated)",'<>%1',0);
+      // Throws only the first rounding error
+      IF TempItemJournalBuffer.FINDFIRST THEN
+        Assert.Fail(
+          STRSUBSTNO(IncorrectRoundingTxt,TempItemJournalBuffer."Inventory Value (Calculated)",TempItemJournalBuffer."Line No."));
+    END;
+
+    BEGIN
+    {
+      Unsupported version tags:
+
+      Contains all utility functions related to Costing.
+    }
+    END.
+  }
+}
+

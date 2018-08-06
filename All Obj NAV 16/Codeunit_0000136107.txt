@@ -1,0 +1,2222 @@
+OBJECT Codeunit 136107 Service Posting - Shipment
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    EventSubscriberInstance=Manual;
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1006 : Codeunit 130000;
+      LibraryInventory@1010 : Codeunit 132201;
+      LibraryService@1001 : Codeunit 131902;
+      LibraryUtility@1007 : Codeunit 131000;
+      LibrarySales@1012 : Codeunit 130509;
+      LibraryERM@1013 : Codeunit 131300;
+      LibraryResource@1011 : Codeunit 130511;
+      LibraryWarehouse@1014 : Codeunit 132204;
+      LibraryRandom@1009 : Codeunit 130440;
+      LibraryVariableStorage@1016 : Codeunit 131004;
+      isInitialized@1000 : Boolean;
+      NothingToPostError@1002 : TextConst 'ENU=There is nothing to post.';
+      UnknownError@1003 : TextConst 'ENU=Unknown error.';
+      WarningMsg@1008 : TextConst 'ENU=The field Automatic Cost Posting should not be set to Yes if field Use Legacy G/L Entry Locking in General Ledger Setup table is set to No because of possibility of deadlocks.';
+      ExpectedMsg@1005 : TextConst 'ENU=Expected Cost Posting to G/L has been changed';
+      ExpectedCostPostingConfirm@1004 : TextConst 'ENU=If you change the Expected Cost Posting to G/L';
+      InvPostBuffNotTempErr@1015 : TextConst 'ENU=Invoice Post. Buffer variable in the codeunit 5988 must be temporary';
+      WhseShptIsCreatedMsg@1017 : TextConst '@@@={Locked};ENU=Warehouse Shipment Header has been created.';
+      WhseShptIsNotCreatedErr@1018 : TextConst '@@@={Locked};ENU=There are no Warehouse Shipment Lines created.';
+
+    [Test]
+    PROCEDURE ShipWithZeroQuantity@1();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceLine@1005 : Record 5902;
+    BEGIN
+      // [SCENARIO 20882] An error "There is nothing to post" when Service Order is Posted as Ship with "Qty. to Ship" as 0.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item and "Qty. to Ship" as 0.
+      Initialize;
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdateQtyToShipZero(ServiceLine);
+
+      // [WHEN] Post the Service Order with Ship Option.
+      ASSERTERROR LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Error is generated as There is Nothing to Post when Service Order is posted as Ship with Qty. to Ship as 0.
+      Assert.AreEqual(STRSUBSTNO(NothingToPostError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartialShipManual@8();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated as "Qty. to Ship" for shipping Item partly ("Auto cost Posting" and "Expected Cost Posting" are False).
+
+      PartShipServiceOrder(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartialShipAutoEx@56();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated as "Qty. to Ship" for shipping Item partly ("Auto cost Posting" and "Expected Cost Posting" are True).
+
+      PartShipServiceOrder(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartialShipAuto@57();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated as "Qty. to Ship" for shipping Item partly ("Auto cost Posting" is True and "Expected Cost Posting" is False).
+
+      PartShipServiceOrder(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE PartShipServiceOrder@121(AutomaticCostPosting@1005 : Boolean;ExpectedCostPostingToGL@1004 : Boolean);
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+      TempServiceLine@1000 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+
+      // 2. Exercise: Post Service Order as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Service Line, Service Shipment, Item Ledger Entry Quantity is updated as Qty To Ship after Posting.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE PartialShipResourceAndCost@14();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+      TempServiceLine@1006 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated as "Qty. to Ship" for shipping Resource, Cost partly and validating the Quantity.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource and Cost.
+      Initialize;
+      ExecuteUIHandlers;
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      UpdatePartialQtyToShip(ServiceLine);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+
+      // [WHEN] Post Service Order as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Service Line, Posted shipment document are created with correct Qty To Ship after Posting.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE FullShipManual@15();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated as "Qty. to Ship" for shipping Items fully with the Ship option ("Auto cost Posting" and "Expected Cost Posting" are False).
+
+      FullShipServiceOrder(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE FullShipAutoEx@24();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated as "Qty. to Ship" for shipping Items fully with the Ship option ("Auto cost Posting" and "Expected Cost Posting" are True).
+
+      FullShipServiceOrder(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE FullShipAuto@28();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated as "Qty. to Ship" for shipping Items fully with the Ship option ("Auto cost Posting" is True and "Expected Cost Posting" is False).
+
+      FullShipServiceOrder(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE FullShipServiceOrder@81(AutomaticCostPosting@1005 : Boolean;ExpectedCostPostingToGL@1004 : Boolean);
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+      TempServiceLine@1000 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdateQuantity(ServiceLine);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+
+      // 2. Exercise: Post Service Order as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Service Line, Service Shipment, Item Ledger Entry Quantity is updated as Qty To Ship after Posting.
+      // Item Ledger Entry is created correctly.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE FullShipResourceAndCost@2();
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+      TempServiceLine@1006 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated as "Qty. to Ship" for shipping Resources and Costs fully with the Ship option.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line, Update Quantity on Service Line.
+      Initialize;
+      ExecuteUIHandlers;
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      UpdateQuantity(ServiceLine);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+
+      // [WHEN] Post Service Order as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Service Line, Service Shipment is updated with correct Quantity as Qty To Ship after Posting..
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE FullShipAndInvoiceManual@18();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated correctly after shipping Items fully with the Ship and Invoice option ("Auto cost Posting" and "Expected Cost Posting" are False).
+
+      FullShipAndInvoiceServiceOrder(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE FullShipAndInvoiceAutoEx@43();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated correctly after shipping Items fully with the Ship and Invoice option ("Auto cost Posting" and "Expected Cost Posting" are True).
+
+      FullShipAndInvoiceServiceOrder(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE FullShipAndInvoiceAuto@44();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated correctly after shipping Items fully with the Ship and Invoice option ("Auto cost Posting" is True and "Expected Cost Posting" is False).
+
+      FullShipAndInvoiceServiceOrder(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE FullShipAndInvoiceServiceOrder@83(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdateQuantity(ServiceLine);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+
+      // 2. Exercise: Post Service Order as Ship and Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Service Line, Service Shipment, Item Ledger Entry Quantity is updated as Qty To Ship after Posting.
+      VerifyQtyOnServShipAndInvoice(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE FullShipAndInvoiceResourceCost@23();
+    VAR
+      ServiceHeader@1003 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+      TempServiceLine@1006 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated correctly after shipping Resources and Costs fully with the Ship and Invoice option.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource and
+      // [GIVEN] "Auto cost Posting" and "Expected Cost Posting" are set to False).
+      Initialize;
+      ExecuteUIHandlers;
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      UpdateQuantity(ServiceLine);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+
+      // [WHEN] Post Service Order as Ship and Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // [THEN] Service Line, Service Shipment Quantity is updated with correct Qty To Ship after Posting.
+      VerifyQtyOnServShipAndInvoice(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartShipTwiceManual@27();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated correctly after Shipping Items with the Ship option in two steps ("Auto cost Posting" and "Expected Cost Posting" are False)
+
+      PartShipTwiceServiceOrder(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartShipTwiceAutoEx@75();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated correctly after Shipping Items with the Ship option in two steps ("Auto cost Posting" and "Expected Cost Posting" are True)
+
+      PartShipTwiceServiceOrder(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartShipTwiceAuto@69();
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated correctly after Shipping Items with the Ship option in two steps ("Auto cost Posting" is True and "Expected Cost Posting" is False)
+
+      PartShipTwiceServiceOrder(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE PartShipTwiceServiceOrder@92(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+
+      // 2. Exercise: Post Service Order in Two parts as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Service Line, Service Shipment, Item Ledger Entry Quantity is updated as Qty To Ship after Posting.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE PartShipTwiceResourceAndCost@70();
+    VAR
+      ServiceHeader@1003 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+      TempServiceLine@1006 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 20882] "Quantity Shipped" is updated correctly after Ship of Service Order in two parts having Resource and Cost.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource and Cost.
+      Initialize;
+      ExecuteUIHandlers;
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      UpdatePartialQtyToShip(ServiceLine);
+
+      // [WHEN] Post Service Order in Two Parts as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Service Line, Service Shipment Quantity is updated as Qty To Ship after Posting.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE ShipTwiceAndInvoiceManual@71();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items with the Ship option after posting partially with the Ship and Invoice Option ("Auto cost Posting" and "Expected Cost Posting" are False)
+
+      ShipTwiceAndInvoice(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE ShipTwiceAndInvoiceShipAutoEx@72();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items with the Ship option after posting partially with the Ship and Invoice Option ("Auto cost Posting" and "Expected Cost Posting" are True)
+
+      ShipTwiceAndInvoice(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE ShipTwiceAndInvoiceShipAuto@76();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items with the Ship option after posting partially with the Ship and Invoice Option ("Auto cost Posting" is True and "Expected Cost Posting" is False)
+
+      ShipTwiceAndInvoice(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE ShipTwiceAndInvoice@106(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item.
+
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+
+      // 2. Exercise: Post Service Order in two parts as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Service Line, Service Shipment, Item Ledger Entry Quantity is updated as Qty To Ship after Posting.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE ShipTwiceAndInvoiceResandCost@74();
+    VAR
+      ServiceHeader@1003 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+      TempServiceLine@1006 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 20882] Shipping Resources and Costs with Ship option after posting partially with Ship and Invoice option.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource and Cost.
+      Initialize;
+      ExecuteUIHandlers;
+      SetupCostPostingInventory(TRUE,FALSE);
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      UpdatePartialQtyToShip(ServiceLine);
+
+      // [WHEN] Post Service Order in two parts as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Service Line, Service Shipment are updated as Qty To Ship after Posting.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE PartShipInvoiceAndShipManual@22();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items previously partially Shipped and then Invoiced ("Auto cost Posting" and "Expected Cost Posting" are False)
+
+      PartShipInvoiceAndShip(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartShipInvoiceAndShipAutoEx@32();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items previously partially Shipped and then Invoiced ("Auto cost Posting" and "Expected Cost Posting" are True)
+
+      PartShipInvoiceAndShip(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE PartShipInvoiceAndShipAuto@33();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items previously partially Shipped and then Invoiced ("Auto cost Posting" is True and "Expected Cost Posting" is False)
+
+      PartShipInvoiceAndShip(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE PartShipInvoiceAndShip@94(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Post the Service Order
+      // partially as Ship . Post the Service Order partially as Invoice.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      UpdatePartialQtyToInv(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 2. Exercise: Post Service Order fully as Ship.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line, Item Ledger Entry
+      // and Value Entry are created with the Quantity equal to the quantity that was shipped second time.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+      VerifyValueEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE PartialShipInvoiceResourceCost@40();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      TempServiceLine@1003 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 20882] Shipping Resources and Costs that were previously partially Shipped and then Invoiced.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource and Cost.
+      // Post the Service Order partially as Ship . Post the Service Order partially as Invoice.
+      Initialize;
+      ExecuteUIHandlers;
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      UpdatePartialQtyToShip(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      UpdatePartialQtyToInv(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // [WHEN] Post Service Order fully as Ship.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line is created
+      // with the Quantity equal to the quantity that was shipped second time.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE PartShipAndInvoiceShipManual@36();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items that were partially posted earlier with the Ship and Invoice Option ("Auto cost Posting" and "Expected Cost Posting" are False)
+
+      PartShipAndInvoiceShip(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartShipAndInvoiceShipAutoEx@35();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items that were partially posted earlier with the Ship and Invoice Option ("Auto cost Posting" and "Expected Cost Posting" are True)
+
+      PartShipAndInvoiceShip(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartShipAndInvoiceShipAuto@30();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items that were partially posted earlier with the Ship and Invoice Option ("Auto cost Posting" is True and "Expected Cost Posting" is False)
+
+      PartShipAndInvoiceShip(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE PartShipAndInvoiceShip@104(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Post the Service Order
+      // partially as Ship and Invoice.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartQtyToShipAndInvoice(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 2. Exercise: Post Service Order fully as Ship.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line, Item Ledger Entry
+      // and Value Entry are created with the Quantity equal to the quantity that was shipped second time. Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+      VerifyValueEntry(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE PartShipAndInvoiceResourceCost@38();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      TempServiceLine@1003 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 20882] Shipping Resources and Costs that were earlier partially posted with the Ship and Invoice Options.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource and Cost.
+      // Post the Service Order partially as Ship and Invoice.
+      Initialize;
+      ExecuteUIHandlers;
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      UpdatePartQtyToShipAndInvoice(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // [WHEN] Post Service Order fully as Ship.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line is created
+      // with the Quantity equal to the quantity that was shipped second time. Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartShipAndConsumeShipManual@42();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items that were partially Shipped and then Consumed ("Auto cost Posting" and "Expected Cost Posting" are False)
+
+      PartShipAndConumeShip(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartShipAndConsumeShipAutoEx@41();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items that were partially Shipped and then Consumed ("Auto cost Posting" and "Expected Cost Posting" are True)
+
+      PartShipAndConumeShip(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PartShipAndConsumeShipAuto@39();
+    BEGIN
+      // [SCENARIO 20882] Shipping Items that were partially Shipped and then Consumed ("Auto cost Posting" is True and "Expected Cost Posting" is False)
+
+      PartShipAndConumeShip(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE PartShipAndConumeShip@112(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Post the Service Order
+      // partially as Ship and Consume.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartQtyToShipAndConume(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // 2. Exercise: Post Service Order fully as Ship.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line, Item Ledger Entry
+      // and Value Entry are created with the Quantity equal to the quantity that was shipped second time. Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+      VerifyValueEntry(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    PROCEDURE PartShipAndConsumeResourceCost@46();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      TempServiceLine@1003 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 20882] Shipping Resources that were partially Shipped and then Consumed.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource.
+      // Post the Service Order partially as Ship and Consume.
+      Initialize;
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForResource(ServiceLine,ServiceHeader);
+      UpdatePartQtyToShipAndConume(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // [WHEN] Post Service Order fully as Ship.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line is created
+      // with the Quantity equal to the quantity that was shipped second time. Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartShipAndPartShipManual@50();
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Partially Shipping the Items which were partially Shipped before, but reverted by Undo Shipment ("Auto cost Posting" and "Expected Cost Posting" are False)
+
+      UndoPartShipAndPartShip(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartShipAndPartShipAutoEx@49();
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Partially Shipping the Items which were partially Shipped before, but reverted by Undo Shipment ("Auto cost Posting" and "Expected Cost Posting" are True)
+
+      UndoPartShipAndPartShip(TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE UndoPartShipAndPartShip@122(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Post the Service Order
+      // partially as Ship. Undo Shipment.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      CreateServiceItemLine(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // 2. Exercise: Post Service Order partially as Ship again.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to the Quantity that was shipped for Service Line. Service Shipment
+      // Line, Item Ledger Entry and Value Entry are created with the Quantity equal to the quantity that was shipped second time.
+      // Verify Service Ledger Entry.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+      VerifyValueEntry(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartialAndPartShipAuto@47();
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Partially Shipping the Items which were partially Shipped before, but reverted by Undo Shipment ("Auto cost Posting" is True and "Expected Cost Posting" is False)
+
+      UndoPartShipAndPartShip(TRUE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE PartUndoShipResourceAndCost@53();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      TempServiceLine@1003 : TEMPORARY Record 5902;
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Partially Shipping the Resources, Costs, G/L Accounts which were partially Shipped before, but reverted by Undo Shipment.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource, Cost and G/L Account.
+      // [GIVEN] Post the Service Order partially as Ship. Undo Shipment.
+      Initialize;
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      CreateServiceLineForGLAccount(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // [WHEN] Post Service Order partially as Ship again.
+      UpdateFullyOnlyQtyToShip(ServiceLine);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Quantity Shipped on Service Line is equal to the Quantity that was shipped for Service Line. Service Shipment Line is
+      // created with the Quantity equal to the quantity that was shipped second time. Verify Service Ledger Entry.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartShipAndFullShipManual@59();
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Fully Shipping the Items which were partially Shipped before, but reverted by Undo Shipment ("Auto cost Posting" and "Expected Cost Posting" are False)
+
+      UndoPartShipAndFullShip(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartShipAndFullShipAutoEx@58();
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Fully Shipping the Items which were partially Shipped before, but reverted by Undo Shipment ("Auto cost Posting" and "Expected Cost Posting" are True)
+
+      UndoPartShipAndFullShip(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartShipAndFullShipAuto@55();
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Fully Shipping the Items which were partially Shipped before, but reverted by Undo Shipment ("Auto cost Posting" is True and "Expected Cost Posting" is False)
+
+      UndoPartShipAndFullShip(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE UndoPartShipAndFullShip@135(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as TRUE and Expected Cost Posting to G/L as TRUE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Post the Service Order
+      // partially as Ship. Undo Shipment.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // 2. Exercise: Post Service Order fully as Ship again.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line, Item Ledger Entry
+      // and Value Entry are created with the Quantity equal to the quantity that was shipped second time. Verify existence of G/L Entry.
+      // Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+      VerifyValueEntry(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoShipFullResourceAndCost@51();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      TempServiceLine@1003 : TEMPORARY Record 5902;
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Fully Shipping the Resources, Costs, G/L Accounts which were partially Shipped before, but reverted by Undo Shipment.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource, Cost and G/L Account.
+      // [GIVEN] Post the Service Order partially as Ship. Undo Shipment.
+      Initialize;
+      ExecuteUIHandlers;
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      CreateServiceLineForGLAccount(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // [WHEN] Post Service Order fully as Ship again.
+      UpdateFullyOnlyQtyToShip(ServiceLine);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line is
+      // created with the Quantity equal to the quantity that was shipped second time. Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoFullShipAndShipManual@64();
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Fully Shipping the Items which were fully Shipped before, but reverted by Undo Shipment ("Auto cost Posting" and "Expected Cost Posting" are False)
+
+      UndoFullShipAndShip(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoFullShipAndShipAutoEx@63();
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Fully Shipping the Items which were fully Shipped before, but reverted by Undo Shipment ("Auto cost Posting" and "Expected Cost Posting" are True)
+
+      UndoFullShipAndShip(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoFullShipAndShipAuto@61();
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Fully Shipping the Items which were fully Shipped before, but reverted by Undo Shipment ("Auto cost Posting" is True and "Expected Cost Posting" is False)
+
+      UndoFullShipAndShip(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE UndoFullShipAndShip@84(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Post the Service Order
+      // fully as Ship. Undo Shipment.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdateQuantity(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // 2. Exercise: Post Service Order fully as Ship again.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment
+      // Line, Item Ledger Entry and Value Entry are created with the Quantity equal to the quantity that was shipped second time.
+      // Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+      VerifyValueEntry(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoShipResourceCostGL@60();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      TempServiceLine@1003 : TEMPORARY Record 5902;
+    BEGIN
+      // [FEATURE] [Undo Shipment]
+      // [SCENARIO 20882] Fully Shipping the Resources, Costs, G/L Accounts which were fully Shipped before, but reverted by Undo Shipment.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource, Cost and G/L Account.
+      // [GIVEN] Post the Service Order fully as Ship. Undo Shipment.
+      Initialize;
+      ExecuteUIHandlers;
+      CreateServiceOrderResAndCost(ServiceHeader,ServiceLine);
+      CreateServiceLineForGLAccount(ServiceLine,ServiceHeader);
+      UpdateQuantity(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // [WHEN] Post Service Order fully as Ship again.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line is
+      // created with the Quantity equal to the quantity that was shipped second time. Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartConsumeFullShipManual@67();
+    BEGIN
+      // [FEATURE] [Undo Consumption]
+      // [SCENARIO 20882] Partially Shipping the Items which were Consumed before, but reverted by Undo Consumption ("Auto cost Posting" and "Expected Cost Posting" are False)
+
+      UndoPartConsumeFullyShip(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartConsumeFullShipAutoEx@66();
+    BEGIN
+      // [FEATURE] [Undo Consumption]
+      // [SCENARIO 20882] Partially Shipping the Items which were Consumed before, but reverted by Undo Consumption ("Auto cost Posting" and "Expected Cost Posting" are True)
+
+      UndoPartConsumeFullyShip(TRUE,TRUE)
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartConsumeFullShipAuto@65();
+    BEGIN
+      // [FEATURE] [Undo Consumption]
+      // [SCENARIO 20882] Partially Shipping the Items which were Consumed before, but reverted by Undo Consumption ("Auto cost Posting" is True and "Expected Cost Posting" is False)
+
+      UndoPartConsumeFullyShip(TRUE,FALSE)
+    END;
+
+    LOCAL PROCEDURE UndoPartConsumeFullyShip@96(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Post the Service Order
+      // partially as Ship and Consume. Undo Consumption.
+      Initialize;
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToConsume(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+      UndoConsumption(ServiceHeader."No.");
+
+      // 2. Exercise: Post Service Order fully as Ship.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment
+      // Line, Item Ledger Entry and Value Entry are created with the Quantity equal to the quantity that was shipped.
+      // Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine);
+      VerifyValueEntry(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoConsumeResourceCostAuto@68();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      TempServiceLine@1003 : TEMPORARY Record 5902;
+    BEGIN
+      // [FEATURE] [Undo Consumption]
+      // [SCENARIO 20882] Partially Shipping the Resources which were partially Shipped and Consumed before, but reverted by Undo Consumption.
+
+      // [GIVEN] Setup Automatic Cost Posting as TRUE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource.
+      // [GIVEN] Post the Service Order partially as Ship and Consume. Undo consumption.
+      Initialize;
+      SetupCostPostingInventory(TRUE,FALSE);
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForResource(ServiceLine,ServiceHeader);
+
+      UpdatePartialQtyToConsume(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+      UndoConsumption(ServiceHeader."No.");
+
+      // [WHEN] Post Service Order fully as Ship.
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Quantity Shipped on Service Line is equal to the Quantity of Service Line. Service Shipment Line is created with the
+      // Quantity equal to the quantity that was shipped. Verify Service Ledger Entry.
+      VerifyQuantityAfterFullShipmnt(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+      VerifyServiceLedgerEntry(TempServiceLine);
+    END;
+
+    [Test]
+    PROCEDURE PartiallyShipOrderWithItem@21();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+      TempServiceLine@1000 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 172912] Service Shipment Line after Posting Service Order Partially as Ship with Item.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item.
+      Initialize;
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+      GetServiceLines(ServiceLine,ServiceHeader."No.");
+      CopyServiceLines(TempServiceLine,ServiceLine);
+
+      // [WHEN] Post Service Order as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [THEN] Verify Quantity on Service Shipment Line is updated as Qty To Ship on Service Line.
+      VerifyQtyOnServiceShipmentLine(TempServiceLine);
+    END;
+
+    [Test]
+    PROCEDURE PartiallyInvoiceOrderWithItem@37();
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1002 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO 172912] Service Invoice Line after Posting Service Order Partially as Invoice with Item.
+
+      // [GIVEN] Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item.
+      // [GIVEN] Post the Service Order partially as Ship.
+      Initialize;
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdatePartialQtyToShip(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // [WHEN] Post the Service Order partially as Invoice.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      UpdatePartialQtyToInv(ServiceLine);
+      GetServiceLines(ServiceLine,ServiceHeader."No.");
+      CopyServiceLines(TempServiceLine,ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // [THEN] Verify Quantity on Service Invoice Line is updated as Qty To Invoice on Service Line.
+      VerifyServiceInvoiceLine(TempServiceLine);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceOrderWithBinCode@90();
+    VAR
+      Bin@1004 : Record 7354;
+      Item@1005 : Record 27;
+      ItemJournalLine@1006 : Record 83;
+      ItemJournalTemplate@1003 : Record 82;
+      ItemJournalBatch@1002 : Record 233;
+      Location@1011 : Record 14;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+      TempServiceLine@1009 : TEMPORARY Record 5902;
+    BEGIN
+      // [FEATURE] [Bin Content]
+      // [SCENARIO 235027] Bin Content after Posting Item Journal Line and Service Order Posting as Ship & Consume with Item and Bin.
+
+      // [GIVEN] Create New Location, Create New Bin, Create New Item, Create Item Journal Line, Post Item Journal.
+      // Create Service Order.
+      Initialize;
+      CreateLocationWithBinMandatory(Location);
+      LibraryWarehouse.CreateBin(
+        Bin,
+        Location.Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(Bin.FIELDNO(Code),DATABASE::Bin),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::Bin,Bin.FIELDNO(Code))),
+        '',
+        '');
+      LibraryInventory.CreateItem(Item);
+      ItemJournalTemplate.SETRANGE(Recurring,FALSE);
+      LibraryInventory.FindItemJournalTemplate(ItemJournalTemplate);
+      LibraryInventory.CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Name);
+      CreateItemJournalLineWithBin(ItemJournalLine,ItemJournalBatch,Bin,Item."No.");
+      LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+      CreateServiceOrderWithBinCode(ServiceHeader,Bin,Item."No.",ItemJournalLine.Quantity);
+      GetServiceLines(ServiceLine,ServiceHeader."No.");
+      CopyServiceLines(TempServiceLine,ServiceLine);
+
+      // [WHEN] Post Service Order with Ship & Consume.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // [THEN] Verify Bin Content.
+      VerifyBinContent(TempServiceLine,ItemJournalLine.Quantity - TempServiceLine."Qty. to Consume");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerTrue)]
+    PROCEDURE UndoConsumptionWithBinCode@95();
+    VAR
+      Bin@1004 : Record 7354;
+      Item@1005 : Record 27;
+      ItemJournalLine@1006 : Record 83;
+      ItemJournalTemplate@1008 : Record 82;
+      ItemJournalBatch@1003 : Record 233;
+      Location@1011 : Record 14;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+      TempServiceLine@1010 : TEMPORARY Record 5902;
+      WarehouseEntry@1007 : Record 7312;
+    BEGIN
+      // [FEATURE] [Bin Content] [Undo Consumption]
+      // [SCENARIO 235027] Bin Content, Service Shipment Line and Warehouse Entry after Posting Item Journal Line and Service Order Posting as Ship & Consume and Undo Consumption with Item and Bin.
+
+      // [GIVEN] Create New Location, Create New Bin, Create New Item, Create Item Journal Line, Post Item Journal.
+      // [GIVEN] Create Service Order, Post Service Order with Ship & Consume.
+      Initialize;
+      CreateLocationWithBinMandatory(Location);
+      LibraryWarehouse.CreateBin(
+        Bin,
+        Location.Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(Bin.FIELDNO(Code),DATABASE::Bin),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::Bin,Bin.FIELDNO(Code))),
+        '',
+        '');
+      LibraryInventory.CreateItem(Item);
+      ItemJournalTemplate.SETRANGE(Recurring,FALSE);
+      LibraryInventory.FindItemJournalTemplate(ItemJournalTemplate);
+      LibraryInventory.CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Name);
+      CreateItemJournalLineWithBin(ItemJournalLine,ItemJournalBatch,Bin,Item."No.");
+      LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+      CreateServiceOrderWithBinCode(ServiceHeader,Bin,Item."No.",ItemJournalLine.Quantity);
+      GetServiceLines(ServiceLine,ServiceHeader."No.");
+      CopyServiceLines(TempServiceLine,ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // [WHEN] Undo Consumption.
+      UndoConsumption(ServiceHeader."No.");
+
+      // [THEN] Verify Bin Content, Service Shipment Line and Warehouse Entry.
+      VerifyBinContent(TempServiceLine,TempServiceLine.Quantity);
+      VerifyServiceShipmentLine(TempServiceLine);
+      VerifyWarehouseEntry(TempServiceLine,WarehouseEntry."Entry Type"::"Positive Adjmt.",1); // 1 for Sign Factor
+      VerifyWarehouseEntry(TempServiceLine,WarehouseEntry."Entry Type"::"Negative Adjmt.",-1); // -1 for Sign Factor
+      VerifyItemLedgerAndValueEntriesAfterUndoConsumption(TempServiceLine);
+    END;
+
+    [Test]
+    PROCEDURE WarrantyLedgerEntryWithShipAndConsume@102();
+    VAR
+      ServiceHeader@1003 : Record 5900;
+      Quantity@1001 : Decimal;
+    BEGIN
+      // [FEATURE] [Warranty]
+      // [SCENARIO 305893] Quantity copied to Warranty Ledger Entry when Service Order Posted with Ship and Consume.
+
+      // [GIVEN]
+      Initialize;
+
+      // [WHEN] Create and Post Service Order with Ship And Consume.
+      Quantity := CreateAndPostServiceOrderWithWarranty(ServiceHeader);
+
+      // [THEN] Verify that the line exist with Quantity on Warranty Ledger Entry after Consumption.
+      VerifyWarrantyLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.",Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE WarrantyLedgerEntryWithUndoConsumption@100();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      Quantity@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Warranty] [Undo Consumption]
+      // [SCENARIO 305893] the Quantity is updated on Warranty Ledger Entry after UndoConsumption.
+
+      // [GIVEN] Create and Post Service Order with Ship And Consume.
+      Initialize;
+      Quantity := CreateAndPostServiceOrderWithWarranty(ServiceHeader);
+
+      // [WHEN] Undo Consumption.
+      UndoConsumption(ServiceHeader."No.");
+
+      // [THEN] Verify that the line exist with Negative Quantity on Warranty Ledger Entry after doing Undo Consumption.
+      VerifyWarrantyLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.",-1 * Quantity);
+    END;
+
+    [Test]
+    PROCEDURE InvoicePostBufferTemporary@242();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+      ServicePostingShipment@1002 : Codeunit 136107;
+    BEGIN
+      // [SCENARIO 379210] Invoice Post Buffer table must be temporary when posting service documents
+
+      Initialize;
+      BINDSUBSCRIPTION(ServicePostingShipment);
+
+      // [GIVEN] Service order with one line
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      UpdateQuantity(ServiceLine);
+
+      // [WHEN] Service Order is being posted
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // [THEN] Posting engine uses Invoice Post Buffer table as temporary
+      // Verification done inside the VerifyInvPostBufferTemporary
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE UndoMultilineConsumptionWithBinCode@107();
+    VAR
+      Location@1001 : Record 14;
+      ServiceHeader@1000 : Record 5900;
+      Item@1003 : ARRAY [3] OF Record 27;
+      Bin@1002 : ARRAY [3] OF Record 7354;
+      Qty@1004 : ARRAY [3] OF Decimal;
+      ServiceItemLineNo@1005 : Integer;
+      i@1006 : Integer;
+    BEGIN
+      // [FEATURE] [Bin Content] [Undo Consumption]
+      // [SCENARIO 379933] Undo Consumption works for mulitiline Serice Order with Bin content
+      Initialize;
+
+      // [GIVEN] Create New Location with Bin mandatory
+      CreateLocationWithBinMandatory(Location);
+
+      // [GIVEN] Create 3 new Bins, 3 new Items, make 3 positive adjustments for Items to be used in service order
+      CreateBinsAndItems(Location.Code,Bin,Item);
+      MakePosAdjForItemsWithBins(Bin,Item,Qty);
+
+      // [GIVEN] Create Service Order with Service Item
+      ServiceItemLineNo := CreateServiceHeaderWithServiceItemLine(ServiceHeader,Location.Code);
+      // [GIVEN] Create 3 service lines with new Items and Bins
+      FOR i := 1 TO ARRAYLEN(Bin) DO
+        CreateServiceLineForItemWithBin(ServiceHeader,ServiceItemLineNo,Bin[i],Item[i]."No.",Qty[i]);
+
+      // [GIVEN] Post Service Order with Ship & Consume.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // [WHEN] Undo Consumption.
+      UndoConsumption(ServiceHeader."No.");
+
+      // [THEN] Verify that 3 Service Shipment Lines for undo consumption have been created
+      VerifyServiceShipmentLinesAfterUndoConsumption(Item,Bin,Qty);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateWhseShpt_MessageHandler,WarehouseShipmentPageHandler)]
+    PROCEDURE WhseShptFromServiceOrderWithGreenLocationAndBlankQtyToConsume@105();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      DummyWarehouseShipmentLine@1001 : Record 7321;
+    BEGIN
+      // [FEATURE] [Warehouse]
+      // [SCENARIO 380057] Warehouse Shipment is created for Service Order with Green location, item and zero "Qty. to Consume"
+      Initialize;
+
+      // [GIVEN] Service Order with item on Green location ("Require Shipment" = TRUE), "Qty. to Consume" = 0
+      CreateServiceOrderWithGreenLocationAndQtyToConsume(ServiceHeader,0);
+      // [GIVEN] Perform "Release to Ship" action
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // [WHEN] Perform "Create Whse. Shipment" action
+      LibraryVariableStorage.Enqueue(STRSUBSTNO('%1 %2',1,WhseShptIsCreatedMsg));
+      CreateWhseShipmentFromServiceHeader(ServiceHeader);
+      // CreateWhseShpt_MessageHandler
+
+      // [THEN] Warehouse shipment has been created
+      // WarehouseShipmentPageHandler
+      DummyWarehouseShipmentLine.SETRANGE("Location Code",ServiceHeader."Location Code");
+      Assert.RecordIsNotEmpty(DummyWarehouseShipmentLine);
+    END;
+
+    [Test]
+    PROCEDURE NoWhseShptFromServiceOrderWithGreenLocationAndQtyToConsume@172();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      DummyWarehouseShipmentLine@1001 : Record 7321;
+    BEGIN
+      // [FEATURE] [Warehouse]
+      // [SCENARIO 380057] Warehouse Shipment is not created for Service Order with Green location, item and "Qty. to Consume"
+      Initialize;
+
+      // [GIVEN] Service Order with item on Green location ("Require Shipment" = TRUE), "Qty. to Consume" <> 0
+      CreateServiceOrderWithGreenLocationAndQtyToConsume(ServiceHeader,LibraryRandom.RandInt(10));
+      // [GIVEN] Perform "Release to Ship" action
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // [WHEN] Perform "Create Whse. Shipment" action
+      LibraryVariableStorage.Enqueue(STRSUBSTNO('%1 %2',0,WhseShptIsCreatedMsg));
+      ASSERTERROR CreateWhseShipmentFromServiceHeader(ServiceHeader);
+
+      // [THEN] Warehouse shipment is not created
+      Assert.ExpectedErrorCode('Dialog');
+      Assert.ExpectedError(WhseShptIsNotCreatedErr);
+
+      DummyWarehouseShipmentLine.SETRANGE("Location Code",ServiceHeader."Location Code");
+      Assert.RecordIsEmpty(DummyWarehouseShipmentLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerTrue)]
+    PROCEDURE ReversedLedgerEntriesOnUndoShipmentArePostedWithOriginalPostingDate@111();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+      TempServiceLine@1003 : TEMPORARY Record 5902;
+    BEGIN
+      // [FEATURE] [Undo Shipment] [Service Shipment]
+      // [SCENARIO 211697] Undoing shipment should create item ledger entries and resource ledger entries with the same posting date as on the original service shipment line.
+      Initialize;
+
+      // [GIVEN] Service Order with posting date = WORKDATE.
+      CreateServiceOrder(ServiceHeader);
+
+      // [GIVEN] Service lines with item and resource.
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+      CreateServiceLineForResource(ServiceLine,ServiceHeader);
+
+      // [GIVEN] The service lines are set to be partially shipped.
+      UpdatePartialQtyToShip(ServiceLine);
+
+      // [GIVEN] Posting Date on all service lines is set to "D" > WORKDATE.
+      UpdatePostingDateOnServiceLines(ServiceLine,LibraryRandom.RandDateFrom(ServiceHeader."Posting Date",30));
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+
+      // [GIVEN] The service lines are posted with Ship option.
+      LibraryService.PostServiceOrderWithPassedLines(ServiceHeader,TempServiceLine,TRUE,FALSE,FALSE);
+
+      // [WHEN] Undo Shipment.
+      LibraryService.UndoShipmentLinesByServiceOrderNo(TempServiceLine."Document No.");
+
+      // [THEN] Posting Date on reversed item and resource ledger entries is equal to "D".
+      VerifyItemEntriesAfterUndoShipment(TempServiceLine."Document No.");
+      VerifyResourceEntriesAfterUndoShipment(TempServiceLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE Initialize@20();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryService.SetupServiceMgtNoSeries;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      COMMIT;
+      isInitialized := TRUE;
+    END;
+
+    LOCAL PROCEDURE CopyServiceLines@82(VAR ServiceLineOld@1001 : Record 5902;VAR ServiceLine@1000 : Record 5902);
+    BEGIN
+      REPEAT
+        ServiceLineOld.INIT;
+        ServiceLineOld := ServiceLine;
+        ServiceLineOld.INSERT;
+      UNTIL ServiceLine.NEXT = 0
+    END;
+
+    LOCAL PROCEDURE CreateBinsAndItems@118(LocationCode@1002 : Code[10];VAR Bin@1000 : ARRAY [3] OF Record 7354;VAR Item@1001 : ARRAY [3] OF Record 27);
+    VAR
+      i@1003 : Integer;
+    BEGIN
+      FOR i := 1 TO ARRAYLEN(Bin) DO BEGIN
+        LibraryWarehouse.CreateBin(
+          Bin[i],
+          LocationCode,
+          COPYSTR(
+            LibraryUtility.GenerateRandomCode(Bin[i].FIELDNO(Code),DATABASE::Bin),
+            1,
+            LibraryUtility.GetFieldLength(DATABASE::Bin,Bin[i].FIELDNO(Code))),
+          '',
+          '');
+        LibraryInventory.CreateItem(Item[i]);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrder@171(VAR ServiceHeader@1001 : Record 5900);
+    BEGIN
+      // Create a new Service Order - Service Header, Service Item, Service Item Line.
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      CreateServiceItemLine(ServiceHeader);
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrderResAndCost@91(VAR ServiceHeader@1001 : Record 5900;VAR ServiceLine@1002 : Record 5902);
+    BEGIN
+      // Create a new Service Order - Service Header, Service Item, Service Item Line.
+      CreateServiceOrder(ServiceHeader);
+      CreateServiceLineForResource(ServiceLine,ServiceHeader);
+      CreateServiceLineForCost(ServiceLine,ServiceHeader);
+    END;
+
+    LOCAL PROCEDURE CreateServiceItemLine@3(ServiceHeader@1001 : Record 5900);
+    VAR
+      ServiceItem@1000 : Record 5940;
+      ServiceItemLine@1002 : Record 5901;
+      Counter@1003 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Lines - Boundary 2 is important.
+      FOR Counter := 2 TO 2 + LibraryRandom.RandInt(8) DO BEGIN
+        CLEAR(ServiceItem);
+        LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+        LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceHeaderWithServiceItemLine@124(VAR ServiceHeader@1000 : Record 5900;LocationCode@1003 : Code[10]) : Integer;
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+      ServiceItem@1004 : Record 5940;
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      UpdateLocationOnServiceHeader(ServiceHeader,LocationCode);
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      EXIT(ServiceItemLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForCost@11(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1004 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+      ServiceCost@1003 : Record 5905;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      LibraryService.FindServiceCost(ServiceCost);
+      REPEAT
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Cost,ServiceCost.Code);
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.MODIFY(TRUE);
+        ServiceCost.NEXT;
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForGLAccount@62(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1004 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        LibraryService.CreateServiceLine(
+          ServiceLine,ServiceHeader,ServiceLine.Type::"G/L Account",LibraryERM.CreateGLAccountWithSalesSetup);
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForItem@16(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1004 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItemNo);
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForResource@4(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1004 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,LibraryResource.CreateResourceNo);
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForItemWithBin@133(ServiceHeader@1000 : Record 5900;ServiceItemLineNo@1005 : Integer;Bin@1001 : Record 7354;ItemNo@1003 : Code[20];VAR Quantity@1004 : Decimal);
+    VAR
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ItemNo);
+      UpdateItemBinAndQuantity(ServiceLine,Bin,ServiceItemLineNo,Quantity);
+      Quantity := ServiceLine."Qty. to Consume";
+    END;
+
+    LOCAL PROCEDURE CreateLocationWithBinMandatory@88(VAR Location@1002 : Record 14);
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Location.VALIDATE("Bin Mandatory",TRUE);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalLineWithBin@89(VAR ItemJournalLine@1000 : Record 83;ItemJournalBatch@1002 : Record 233;Bin@1001 : Record 7354;ItemNo@1004 : Code[20]);
+    BEGIN
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,LibraryRandom.RandDec(100,2));
+      ItemJournalLine.VALIDATE("Location Code",Bin."Location Code");
+      ItemJournalLine.VALIDATE("Bin Code",Bin.Code);
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrderWithBinCode@117(VAR ServiceHeader@1000 : Record 5900;Bin@1001 : Record 7354;ItemNo@1008 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1006 : Record 5901;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      UpdateLocationOnServiceHeader(ServiceHeader,Bin."Location Code");
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ItemNo);
+      UpdateItemBinAndQuantity(ServiceLine,Bin,ServiceItemLine."Line No.",Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrderWithGreenLocationAndQtyToConsume@125(VAR ServiceHeader@1006 : Record 5900;QtyToConsume@1005 : Decimal);
+    VAR
+      ServiceLine@1003 : Record 5902;
+      ServiceItemLine@1002 : Record 5901;
+      ServiceItem@1001 : Record 5940;
+      Location@1000 : Record 14;
+      WarehouseEmployee@1004 : Record 7301;
+    BEGIN
+      LibraryWarehouse.CreateLocationWMS(Location,FALSE,FALSE,FALSE,TRUE,TRUE);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,TRUE);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      UpdateLocationOnServiceHeader(ServiceHeader,Location.Code);
+
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+
+      CreateServiceLine(
+        ServiceHeader,ServiceLine,LibraryInventory.CreateItemNo,ServiceItem."No.",
+        QtyToConsume + LibraryRandom.RandInt(10),QtyToConsume);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostServiceOrderWithWarranty@170(VAR ServiceHeader@1000 : Record 5900) Quantity : Decimal;
+    VAR
+      Item@1004 : Record 27;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1005 : Record 5902;
+      ServiceItem@1001 : Record 5940;
+    BEGIN
+      CreateServiceItemWithWarrantyStartingDate(ServiceItem);
+      LibraryInventory.CreateItem(Item);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      Quantity := LibraryRandom.RandDec(10,2);
+      CreateServiceLine(ServiceHeader,ServiceLine,Item."No.",ServiceItemLine."Service Item No.",Quantity,Quantity);  // Qt. to consume should be equal to Quantity.
+      CreateServiceLine(ServiceHeader,ServiceLine,Item."No.",ServiceItemLine."Service Item No.",Quantity,0);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+      EXIT(Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateServiceLine@110(VAR ServiceHeader@1004 : Record 5900;VAR ServiceLine@1003 : Record 5902;ItemNo@1002 : Code[20];ServiceItemNo@1001 : Code[20];Quantity@1000 : Decimal;QuantityToConsume@1005 : Decimal);
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ItemNo);
+      ServiceLine.VALIDATE("Service Item No.",ServiceItemNo);
+      ServiceLine.VALIDATE(Quantity,Quantity);
+      ServiceLine.VALIDATE("Qty. to Consume",QuantityToConsume);
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceItemWithWarrantyStartingDate@97(VAR ServiceItem@1001 : Record 5940);
+    BEGIN
+      LibraryService.CreateServiceItem(ServiceItem,CreateCustomer);
+      ServiceItem.VALIDATE("Warranty Starting Date (Parts)",WORKDATE);
+      ServiceItem.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@85() : Code[20];
+    VAR
+      Customer@1001 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateWhseShipmentFromServiceHeader@139(ServiceHeader@1001 : Record 5900);
+    VAR
+      GetSourceDocOutbound@1000 : Codeunit 5752;
+    BEGIN
+      GetSourceDocOutbound.CreateFromServiceOrder(ServiceHeader);
+    END;
+
+    LOCAL PROCEDURE GetServiceLines@80(VAR ServiceLine@1000 : Record 5902;DocumentNo@1001 : Code[20]);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE MakePosAdjForItemsWithBins@127(VAR Bin@1001 : ARRAY [3] OF Record 7354;VAR Item@1000 : ARRAY [3] OF Record 27;VAR Qty@1003 : ARRAY [3] OF Decimal);
+    VAR
+      ItemJournalTemplate@1004 : Record 82;
+      ItemJournalBatch@1005 : Record 233;
+      ItemJournalLine@1006 : Record 83;
+      i@1007 : Integer;
+    BEGIN
+      ItemJournalTemplate.SETRANGE(Recurring,FALSE);
+      LibraryInventory.FindItemJournalTemplate(ItemJournalTemplate);
+      LibraryInventory.CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Name);
+
+      FOR i := 1 TO ARRAYLEN(Bin) DO BEGIN
+        CreateItemJournalLineWithBin(ItemJournalLine,ItemJournalBatch,Bin[i],Item[i]."No.");
+        Qty[i] := ItemJournalLine.Quantity;
+      END;
+
+      LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE SaveServiceLineInTempTable@7(VAR TempServiceLine@1001 : TEMPORARY Record 5902;ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        TempServiceLine := ServiceLine;
+        TempServiceLine.INSERT;
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SetupCostPostingInventory@12(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1002 : Boolean);
+    VAR
+      InventorySetup@1000 : Record 313;
+    BEGIN
+      // Sometimes this function triggers a message and a confirm dialog
+      // This is to make sure the corresponding handlers are always executed
+      // (otherwise tests would fail)
+      ExecuteUIHandlers;
+
+      InventorySetup.GET;
+      InventorySetup.VALIDATE("Automatic Cost Posting",AutomaticCostPosting);
+      InventorySetup.VALIDATE("Expected Cost Posting to G/L",ExpectedCostPostingToGL);
+      InventorySetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UndoShipment@77(ServiceDocumentNo@1001 : Code[20]);
+    VAR
+      ServiceShipmentLine@1000 : Record 5991;
+    BEGIN
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceDocumentNo);
+      CODEUNIT.RUN(CODEUNIT::"Undo Service Shipment Line",ServiceShipmentLine);
+    END;
+
+    LOCAL PROCEDURE UndoConsumption@98(ServiceDocumentNo@1001 : Code[20]);
+    VAR
+      ServiceShipmentLine@1000 : Record 5991;
+    BEGIN
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceDocumentNo);
+      CODEUNIT.RUN(CODEUNIT::"Undo Service Consumption Line",ServiceShipmentLine);
+    END;
+
+    LOCAL PROCEDURE UpdatePartialQtyToInv@34(VAR ServiceLine@1002 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE("Qty. to Invoice",ServiceLine."Quantity Shipped" * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdatePartQtyToShipAndConume@52(VAR ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,LibraryRandom.RandInt(10));  // Required field - value is not important to test case.
+        ServiceLine.VALIDATE("Qty. to Ship",ServiceLine.Quantity * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.VALIDATE("Qty. to Consume",ServiceLine."Qty. to Ship");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdatePartQtyToShipAndInvoice@48(VAR ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,LibraryRandom.RandInt(10));  // Required field - value is not important to test case.
+        ServiceLine.VALIDATE("Qty. to Ship",ServiceLine.Quantity * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.VALIDATE("Qty. to Invoice",ServiceLine."Qty. to Ship");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateFullyOnlyQtyToShip@73(VAR ServiceLine@1002 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE("Qty. to Ship",ServiceLine.Quantity);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateQuantity@17(VAR ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,LibraryRandom.RandInt(10));  // Required field - value is not important to test case.
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateQtyToShipZero@6(VAR ServiceLine@1002 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,LibraryRandom.RandInt(10));
+        ServiceLine.VALIDATE("Qty. to Ship",0);  // Value 0 is important for the test case.
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdatePartialQtyToShip@9(VAR ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,LibraryRandom.RandInt(10));  // Required field - value is not important to test case.
+        ServiceLine.VALIDATE("Qty. to Ship",ServiceLine.Quantity * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdatePartialQtyToConsume@93(VAR ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,LibraryRandom.RandInt(10));  // Required field - value is not important to test case.
+        ServiceLine.VALIDATE("Qty. to Consume",ServiceLine.Quantity * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateLocationOnServiceHeader@108(VAR ServiceHeader@1000 : Record 5900;LocationCode@1001 : Code[10]);
+    BEGIN
+      ServiceHeader.VALIDATE("Location Code",LocationCode);
+      ServiceHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItemBinAndQuantity@10(VAR ServiceLine@1000 : Record 5902;Bin@1003 : Record 7354;ServiceItemLineNo@1005 : Integer;Quantity@1006 : Decimal);
+    BEGIN
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLineNo);
+      ServiceLine.VALIDATE("Bin Code",Bin.Code);
+      ServiceLine.VALIDATE(Quantity,Quantity);
+      ServiceLine.VALIDATE("Qty. to Ship",Quantity * LibraryUtility.GenerateRandomFraction);
+      ServiceLine.VALIDATE("Qty. to Consume",ServiceLine."Qty. to Ship");
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdatePostingDateOnServiceLines@113(VAR ServiceLine@1000 : Record 5902;NewPostingDate@1001 : Date);
+    BEGIN
+      WITH ServiceLine DO BEGIN
+        SETRANGE("Document Type","Document Type");
+        SETRANGE("Document No.","Document No.");
+        FINDSET;
+        REPEAT
+          VALIDATE("Posting Date",NewPostingDate);
+          MODIFY(TRUE);
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyBinContent@101(ServiceLine@1000 : Record 5902;Quantity@1001 : Decimal);
+    VAR
+      BinContent@1004 : Record 7302;
+    BEGIN
+      BinContent.SETRANGE("Location Code",ServiceLine."Location Code");
+      BinContent.SETRANGE("Bin Code",ServiceLine."Bin Code");
+      BinContent.FINDFIRST;
+      BinContent.TESTFIELD("Item No.",ServiceLine."No.");
+      BinContent.CALCFIELDS(Quantity);
+      BinContent.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceInvoiceLine@119(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      ServiceInvoiceHeader@1001 : Record 5992;
+      ServiceInvoiceLine@1002 : Record 5993;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",TempServiceLine."Document No.");
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceInvoiceLine.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      REPEAT
+        ServiceInvoiceLine.SETRANGE("Service Item No.",TempServiceLine."Service Item No.");
+        ServiceInvoiceLine.FINDFIRST;
+        ServiceInvoiceLine.TESTFIELD("No.",TempServiceLine."No.");
+        ServiceInvoiceLine.TESTFIELD(Quantity,TempServiceLine."Qty. to Invoice");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyUpdatedShipQtyAfterShip@45(VAR TempServiceLine@1002 : TEMPORARY Record 5902);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Verify that the value of the field Quantity Shipped of the new Service Line is equal to the value of the field
+      // Qty. to Ship of the relevant old Service Line.
+      TempServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.GET(TempServiceLine."Document Type",TempServiceLine."Document No.",TempServiceLine."Line No.");
+        ServiceLine.TESTFIELD("Quantity Shipped",TempServiceLine."Qty. to Ship" + TempServiceLine."Quantity Shipped");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnServShipAndInvoice@19(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      ServiceShipmentLine@1004 : Record 5991;
+    BEGIN
+      // Verify that the value of the field Quantity Invoiced of the Service Shipment Line is equal to the value of the field Qty. to
+      // Invoice of the relevant Service Line.
+      TempServiceLine.FINDSET;
+      ServiceShipmentLine.SETRANGE("Order No.",TempServiceLine."Document No.");
+      REPEAT
+        ServiceShipmentLine.SETRANGE("Order Line No.",TempServiceLine."Line No.");
+        ServiceShipmentLine.FINDFIRST;
+        ServiceShipmentLine.TESTFIELD("Quantity Invoiced",TempServiceLine."Qty. to Invoice");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQuantityAfterFullShipmnt@25(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Verify that the Qty. to Ship is 0 and the value of the field Quantity Shipped in Service Line is equal to the value of the field
+      // Quantity of the Service Line.
+      TempServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.GET(TempServiceLine."Document Type",TempServiceLine."Document No.",TempServiceLine."Line No.");
+        ServiceLine.TESTFIELD("Quantity Shipped",ServiceLine.Quantity);
+        ServiceLine.TESTFIELD("Qty. to Ship",0);
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnServiceShipmentLine@26(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      ServiceShipmentLine@1004 : Record 5991;
+    BEGIN
+      // Verify that the values of the fields Qty. Shipped Not Invoiced and Quantity of Service Shipment Line are equal to the value of
+      // the field Qty. to Ship of the relevant Service Line.
+      TempServiceLine.FINDSET;
+      ServiceShipmentLine.SETRANGE("Order No.",TempServiceLine."Document No.");
+      REPEAT
+        ServiceShipmentLine.SETRANGE("Order Line No.",TempServiceLine."Line No.");
+        ServiceShipmentLine.FINDLAST;  // Find the Shipment Line for the second shipment.
+        ServiceShipmentLine.TESTFIELD("Qty. Shipped Not Invoiced",TempServiceLine."Qty. to Ship");
+        ServiceShipmentLine.TESTFIELD(Quantity,TempServiceLine."Qty. to Ship");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnItemLedgerEntry@29(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      // Verify that the value of the field Quantity of the Item Ledger Entry is equal to the value of the field Qty. to Ship of the
+      // relevant Service Line.
+      TempServiceLine.FINDSET;
+      ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Shipment");
+      ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Service);
+      ItemLedgerEntry.SETRANGE("Order No.",TempServiceLine."Document No.");
+      REPEAT
+        ItemLedgerEntry.SETRANGE("Document Line No.",TempServiceLine."Line No.");
+        ItemLedgerEntry.FINDLAST;  // Find the Item Ledger Entry for the second shipment.
+        ItemLedgerEntry.TESTFIELD(Quantity,-TempServiceLine."Qty. to Ship (Base)");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntry@31(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      ValueEntry@1001 : Record 5802;
+      ServiceShipmentHeader@1002 : Record 5990;
+    BEGIN
+      // Verify that the value ofthe field Valued Quantity of the Value Entry is equal to the value of the field Qty. to Ship of
+      // the relevant Service Line.
+      TempServiceLine.FINDSET;
+      ServiceShipmentHeader.SETRANGE("Order No.",TempServiceLine."Document No.");
+      ServiceShipmentHeader.FINDLAST;  // Find the second shipment.
+      ValueEntry.SETRANGE("Document Type",ValueEntry."Document Type"::"Service Shipment");
+      ValueEntry.SETRANGE("Document No.",ServiceShipmentHeader."No.");
+      REPEAT
+        ValueEntry.SETRANGE("Document Line No.",TempServiceLine."Line No.");
+        ValueEntry.FINDFIRST;
+        ValueEntry.TESTFIELD("Valued Quantity",-TempServiceLine."Qty. to Ship (Base)");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyServiceLedgerEntry@54(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      ServiceLedgerEntry@1001 : Record 5907;
+      ServiceShipmentHeader@1002 : Record 5990;
+    BEGIN
+      // Verify that the Service Ledger Entry created corresponds with the relevant Service Line by matching the fields No., Posting Date
+      // and Bill-to Customer No.
+      TempServiceLine.FINDSET;
+      ServiceShipmentHeader.SETRANGE("Order No.",TempServiceLine."Document No.");
+      ServiceShipmentHeader.FINDLAST;  // Find the second shipment.
+      ServiceLedgerEntry.SETRANGE("Document Type",ServiceLedgerEntry."Document Type"::Shipment);
+      ServiceLedgerEntry.SETRANGE("Document No.",ServiceShipmentHeader."No.");
+      REPEAT
+        ServiceLedgerEntry.SETRANGE("Document Line No.",TempServiceLine."Line No.");
+        ServiceLedgerEntry.FINDFIRST;
+        ServiceLedgerEntry.TESTFIELD("No.",TempServiceLine."No.");
+        ServiceLedgerEntry.TESTFIELD("Posting Date",TempServiceLine."Posting Date");
+        ServiceLedgerEntry.TESTFIELD("Bill-to Customer No.",TempServiceLine."Bill-to Customer No.");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyServiceShipmentLine@103(ServiceLine@1000 : Record 5902);
+    VAR
+      ServiceShipmentLine@1003 : Record 5991;
+    BEGIN
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceLine."Document No.");
+      ServiceShipmentLine.FINDLAST;
+      ServiceShipmentLine.TESTFIELD("Location Code",ServiceLine."Location Code");
+      ServiceShipmentLine.TESTFIELD("Bin Code",ServiceLine."Bin Code");
+      ServiceShipmentLine.TESTFIELD(Quantity,-ServiceLine."Qty. to Consume");
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseEntry@99(ServiceLine@1001 : Record 5902;EntryType@1003 : Option;SignFactor@1002 : Integer);
+    VAR
+      WarehouseEntry@1000 : Record 7312;
+    BEGIN
+      WarehouseEntry.SETRANGE("Source Document",WarehouseEntry."Source Document"::"Serv. Order");
+      WarehouseEntry.SETRANGE("Source No.",ServiceLine."Document No.");
+      WarehouseEntry.SETRANGE("Entry Type",EntryType);
+      WarehouseEntry.FINDFIRST;
+      WarehouseEntry.TESTFIELD("Location Code",ServiceLine."Location Code");
+      WarehouseEntry.TESTFIELD("Bin Code",ServiceLine."Bin Code");
+      WarehouseEntry.TESTFIELD("Item No.",ServiceLine."No.");
+      WarehouseEntry.TESTFIELD(Quantity,ServiceLine."Qty. to Consume" * SignFactor);
+      WarehouseEntry.TESTFIELD("Qty. (Base)",ServiceLine."Qty. to Consume" * SignFactor);
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerAndValueEntriesAfterUndoConsumption@109(VAR TempServiceLineBeforePosting@1000 : TEMPORARY Record 5902);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+      RelatedItemLedgerEntry@1003 : Record 32;
+      Tolerance@1004 : Decimal;
+    BEGIN
+      // Verify that the value of the field Quantity of the Item Ledger Entry is equal to the value of the field Qty. to Ship of the
+      // relevant Service Line.
+      Tolerance := 0.000005;
+      TempServiceLineBeforePosting.SETRANGE(Type,TempServiceLineBeforePosting.Type::Item);
+      TempServiceLineBeforePosting.FINDSET;
+      ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Shipment");
+      ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::"Negative Adjmt.");
+      ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Service);
+      ItemLedgerEntry.SETRANGE("Order No.",TempServiceLineBeforePosting."Document No.");
+      ItemLedgerEntry.SETRANGE(Correction,FALSE);
+      REPEAT
+        ItemLedgerEntry.SETRANGE("Order Line No.",TempServiceLineBeforePosting."Line No.");
+        ItemLedgerEntry.FINDLAST;  // Find the Item Ledger Entry for the second action.
+        Assert.AreNearlyEqual(
+          ItemLedgerEntry.Quantity,-TempServiceLineBeforePosting."Qty. to Consume",Tolerance,
+          'Quantity and Quantity Consumed are nearly equal');
+        Assert.AreNearlyEqual(
+          ItemLedgerEntry."Invoiced Quantity",-TempServiceLineBeforePosting."Qty. to Consume",Tolerance,
+          'Quantity Consumed and Invoiced Quantity are nearly equal');
+        RelatedItemLedgerEntry.SETRANGE("Applies-to Entry",ItemLedgerEntry."Applies-to Entry");
+        RelatedItemLedgerEntry.FINDFIRST;
+        ItemLedgerEntry.TESTFIELD("Cost Amount (Actual)",-RelatedItemLedgerEntry."Cost Amount (Actual)");
+        ItemLedgerEntry.TESTFIELD("Sales Amount (Actual)",0);
+        VerifyValueEntryAfterUndoConsumption(ItemLedgerEntry);
+      UNTIL TempServiceLineBeforePosting.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntryAfterUndoConsumption@86(VAR ItemLedgerEntry@1003 : Record 32);
+    VAR
+      ValueEntry@1001 : Record 5802;
+    BEGIN
+      // Verify that the value ofthe field Valued Quantity of the Value Entry is equal to the value of the field Qty. to Ship of
+      // the relevant Service Line.
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntry."Entry No.");
+      ValueEntry.FINDLAST;
+      ValueEntry.TESTFIELD("Valued Quantity",ItemLedgerEntry.Quantity);
+      ValueEntry.TESTFIELD("Item Ledger Entry Type",ItemLedgerEntry."Entry Type");
+      ItemLedgerEntry.TESTFIELD("Cost Amount (Actual)",ItemLedgerEntry."Cost Amount (Actual)");
+    END;
+
+    LOCAL PROCEDURE VerifyWarrantyLedgerEntry@87(ServiceOrderNo@1001 : Code[20];CustomerNo@1003 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      WarrantyLedgerEntry@1000 : Record 5908;
+    BEGIN
+      WarrantyLedgerEntry.SETRANGE("Service Order No.",ServiceOrderNo);
+      WarrantyLedgerEntry.SETRANGE("Customer No.",CustomerNo);
+      WarrantyLedgerEntry.SETRANGE(Quantity,Quantity);
+      WarrantyLedgerEntry.SETRANGE(Open,FALSE);
+      WarrantyLedgerEntry.FINDFIRST;
+    END;
+
+    [EventSubscriber(Table,49,OnAfterInsertEvent)]
+    PROCEDURE VerifyInvPostBufferTemporary@263(VAR Rec@1000 : Record 49;RunTrigger@1001 : Boolean);
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      RecRef.GETTABLE(Rec);
+      Assert.IsTrue(RecRef.ISTEMPORARY,InvPostBuffNotTempErr);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceShipmentLinesAfterUndoConsumption@144(Item@1000 : ARRAY [3] OF Record 27;Bin@1001 : ARRAY [3] OF Record 7354;Qty@1002 : ARRAY [3] OF Decimal);
+    VAR
+      DummyServiceShipmentLine@1003 : Record 5991;
+      i@1004 : Integer;
+    BEGIN
+      FOR i := 1 TO ARRAYLEN(Bin) DO BEGIN
+        DummyServiceShipmentLine.SETRANGE("No.",Item[i]."No.");
+        DummyServiceShipmentLine.SETRANGE("Bin Code",Bin[i].Code);
+        DummyServiceShipmentLine.SETRANGE(Quantity,-Qty[i]);
+        Assert.RecordIsNotEmpty(DummyServiceShipmentLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyItemEntriesAfterUndoShipment@145(ServiceOrderNo@1000 : Code[20]);
+    VAR
+      ItemLedgerEntry@1003 : Record 32;
+      ServiceShipmentLine@1001 : Record 5991;
+    BEGIN
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceOrderNo);
+      ServiceShipmentLine.SETRANGE(Type,ServiceShipmentLine.Type::Item);
+      ServiceShipmentLine.FINDFIRST;
+      ItemLedgerEntry.SETRANGE("Document No.",ServiceShipmentLine."Document No.");
+      ItemLedgerEntry.FINDSET;
+      REPEAT
+        ItemLedgerEntry.TESTFIELD("Posting Date",ServiceShipmentLine."Posting Date");
+      UNTIL ItemLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyResourceEntriesAfterUndoShipment@115(ServiceOrderNo@1000 : Code[20]);
+    VAR
+      ResLedgerEntry@1003 : Record 203;
+      ServiceShipmentLine@1001 : Record 5991;
+    BEGIN
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceOrderNo);
+      ServiceShipmentLine.SETRANGE(Type,ServiceShipmentLine.Type::Resource);
+      ServiceShipmentLine.FINDFIRST;
+      ResLedgerEntry.SETRANGE("Document No.",ServiceShipmentLine."Document No.");
+      ResLedgerEntry.FINDSET;
+      REPEAT
+        ResLedgerEntry.TESTFIELD("Posting Date",ServiceShipmentLine."Posting Date");
+      UNTIL ResLedgerEntry.NEXT = 0;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@13(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.IsTrue((STRPOS(Question,ExpectedCostPostingConfirm) = 1) OR
+        (STRPOS(Question,'You must confirm Service Cost') = 1) OR
+        (STRPOS(Question,'Do you want to undo the selected shipment line(s)?') = 1) OR
+        (STRPOS(Question,'Do you want to undo consumption of the selected shipment line(s)?') = 1),
+        'Unexpected confirm dialog: ' + Question);
+      Reply := TRUE
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@5(Msg@1000 : Text[1024]);
+    BEGIN
+      IF STRPOS(Msg,WarningMsg) = 1 THEN
+        EXIT;
+      Assert.IsTrue(STRPOS(Msg,ExpectedMsg) = 1,'Unexpected message dialog: ' + Msg)
+    END;
+
+    [MessageHandler]
+    PROCEDURE CreateWhseShpt_MessageHandler@146(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.ExpectedMessage(LibraryVariableStorage.DequeueText,Message);
+    END;
+
+    LOCAL PROCEDURE ExecuteUIHandlers@78();
+    BEGIN
+      MESSAGE(STRSUBSTNO(ExpectedMsg));
+      IF CONFIRM(STRSUBSTNO(ExpectedCostPostingConfirm)) THEN ;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerTrue@79(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE
+    END;
+
+    [PageHandler]
+    PROCEDURE WarehouseShipmentPageHandler@150(VAR WarehouseShipment@1000 : TestPage 7335);
+    BEGIN
+      WarehouseShipment.CLOSE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Shipment] [Service]
+
+      Unsupported version tags:
+      NA: Unable to Execute
+    }
+    END.
+  }
+}
+

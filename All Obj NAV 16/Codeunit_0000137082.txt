@@ -1,0 +1,613 @@
+OBJECT Codeunit 137082 SCM Manufacturing - Routings
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryManufacturing@1001 : Codeunit 132202;
+      LibraryUtility@1002 : Codeunit 131000;
+      CodeCoverageMgt@1004 : Codeunit 9990;
+      LibraryCalcComplexity@1003 : Codeunit 130010;
+      Assert@1005 : Codeunit 130000;
+      NotLinearCCErr@1006 : TextConst 'ENU=Computational cost is not linear.';
+      CircularReferenceErr@1007 : TextConst '@@@="%1 = Routing No.";ENU=Circular reference in routing %1';
+      WrongNoOfTerminationProcessesErr@1008 : TextConst '@@@="%1 = Routing No., %2 = No. of operations";ENU=Actual number of termination processes in route %1 is %2';
+      WrongNoOfStartProcessesErr@1010 : TextConst '@@@="%1 = Routing No., %2 = No. of operations";ENU=Actual number of start processes in route %1 is %2';
+      NoLineWithinFilterErr@1009 : TextConst 'ENU=There is no Routing Line within the filter';
+      isInitialized@1000 : Boolean;
+
+    [Test]
+    PROCEDURE SimpleSerialRouting@2();
+    VAR
+      WorkCenter@1002 : Record 99000754;
+      RoutingHeader@1000 : Record 99000763;
+      RoutingLine@1001 : ARRAY [3] OF Record 99000764;
+      I@1003 : Integer;
+    BEGIN
+      // [FEATURE] [Serial Routing]
+      // [SCENARIO 221561] Certification of a serial routing should update sequence numbers on routing operations
+
+      Initialize;
+
+      // [GIVEN] Create a serial routing with 3 operations
+      // [GIVEN] 1 -> 2 -> 3
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO
+        LibraryManufacturing.CreateRoutingLine(
+          RoutingHeader,RoutingLine[I],'',FORMAT(I),RoutingLine[I].Type::"Work Center",WorkCenter."No.");
+
+      // [WHEN] Certify the routing
+      CertifyRoutingAndRefreshLines(RoutingHeader,RoutingLine);
+
+      // [THEN] The field "Sequence No. (Forward)" in operations has numbers from 1 to 3
+      // [THEN] The field "Sequence No. (Backeward)" in operations has numbers from 3 to 1
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO BEGIN
+        RoutingLine[I].FIND;
+        RoutingLine[I].TESTFIELD("Sequence No. (Forward)",I);
+        RoutingLine[I].TESTFIELD("Sequence No. (Backward)",ARRAYLEN(RoutingLine) - I + 1);
+      END;
+
+      // [THEN] "Previous Operation No." is blank in the starting operation
+      // [THEN] "Next Operation No." is blank in the terminal operation
+      RoutingLine[1].TESTFIELD("Next Operation No.",RoutingLine[2]."Operation No.");
+      RoutingLine[1].TESTFIELD("Previous Operation No.",'');
+
+      RoutingLine[2].TESTFIELD("Next Operation No.",RoutingLine[3]."Operation No.");
+      RoutingLine[2].TESTFIELD("Previous Operation No.",RoutingLine[1]."Operation No.");
+
+      RoutingLine[3].TESTFIELD("Next Operation No.",'');
+      RoutingLine[3].TESTFIELD("Previous Operation No.",RoutingLine[2]."Operation No.");
+    END;
+
+    [Test]
+    PROCEDURE SimpleParallelRouting@3();
+    VAR
+      WorkCenter@1001 : Record 99000754;
+      RoutingHeader@1003 : Record 99000763;
+      RoutingLine@1002 : ARRAY [3] OF Record 99000764;
+      I@1000 : Integer;
+    BEGIN
+      // [FEATURE] [Parallel Routing]
+      // [SCENARIO 221561] Certification of a parallel routing should update sequence numbers on routing operations
+
+      Initialize;
+
+      // [GIVEN] Create a parallel routing with 3 operations
+      // [GIVEN] 1 -> 2 -> 3
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO
+        LibraryManufacturing.CreateRoutingLine(
+          RoutingHeader,RoutingLine[I],'',FORMAT(I),RoutingLine[I].Type::"Work Center",WorkCenter."No.");
+
+      // [GIVEN] Setup sequential execuion of the operations by filling the "Next Operation No." field
+      SetNextOperationNo(RoutingLine[1],RoutingLine[2]."Operation No.");
+      SetNextOperationNo(RoutingLine[2],RoutingLine[3]."Operation No.");
+
+      // [WHEN] Certify the routing
+      CertifyRoutingAndRefreshLines(RoutingHeader,RoutingLine);
+
+      // [THEN] The field "Sequence No. (Forward)" in operations has numbers from 1 to 3
+      // [THEN] The field "Sequence No. (Backeward)" in operations has numbers from 3 to 1
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO BEGIN
+        RoutingLine[I].FIND;
+        RoutingLine[I].TESTFIELD("Sequence No. (Forward)",I);
+        RoutingLine[I].TESTFIELD("Sequence No. (Backward)",ARRAYLEN(RoutingLine) - I + 1);
+      END;
+
+      // [THEN] "Previous Operation No." is blank in the starting operation
+      // [THEN] "Next Operation No." is blank in the terminal operation
+      RoutingLine[1].TESTFIELD("Previous Operation No.",'');
+      RoutingLine[2].TESTFIELD("Previous Operation No.",RoutingLine[1]."Operation No.");
+      RoutingLine[3].TESTFIELD("Previous Operation No.",RoutingLine[2]."Operation No.");
+    END;
+
+    [Test]
+    PROCEDURE CertifyRoutingTwoParallelOperations@11();
+    VAR
+      WorkCenter@1001 : Record 99000754;
+      RoutingHeader@1003 : Record 99000763;
+      RoutingLine@1002 : ARRAY [4] OF Record 99000764;
+      I@1000 : Integer;
+    BEGIN
+      // [FEATURE] [Parallel Routing]
+      // [SCENARIO 221561] Two parallel operations should receive the same sequence no. on certifying a routing
+
+      Initialize;
+
+      // [GIVEN] Create a parallel routing with 4 operations
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO
+        LibraryManufacturing.CreateRoutingLine(
+          RoutingHeader,RoutingLine[I],'',FORMAT(I),RoutingLine[I].Type::"Work Center",WorkCenter."No.");
+
+      // [GIVEN] Setup the execution path: starting operation 1, operations 2 and 3 are executed in parallel, terminal operation 4
+      // [GIVEN]   1
+      // [GIVEN]  / \
+      // [GIVEN] 2   3
+      // [GIVEN]  \ /
+      // [GIVEN]   4
+      SetNextOperationNo(RoutingLine[1],STRSUBSTNO('%1|%2',RoutingLine[2]."Operation No.",RoutingLine[3]."Operation No."));
+      SetNextOperationNo(RoutingLine[2],RoutingLine[4]."Operation No.");
+      SetNextOperationNo(RoutingLine[3],RoutingLine[4]."Operation No.");
+
+      // [WHEN] Certify the routing
+      CertifyRoutingAndRefreshLines(RoutingHeader,RoutingLine);
+
+      // [THEN] "Sequence No. (Forward)" in operation 1 is "1", "Sequence No. (Backward)" is "3"
+      // [THEN] The following sequence is generated:
+      // [THEN]  "Sequence No. (Forward)": 1           "Sequence No. (Backward)": 3
+      // [THEN]                           / \                                    / \
+      // [THEN]                          2   2                                  2   2
+      // [THEN]                           \ /                                    \ /
+      // [THEN]                            3                                      1
+      RoutingLine[1].TESTFIELD("Sequence No. (Forward)",1);
+      RoutingLine[1].TESTFIELD("Sequence No. (Backward)",3);
+
+      RoutingLine[2].TESTFIELD("Sequence No. (Forward)",2);
+      RoutingLine[2].TESTFIELD("Sequence No. (Backward)",2);
+
+      RoutingLine[3].TESTFIELD("Sequence No. (Forward)",2);
+      RoutingLine[3].TESTFIELD("Sequence No. (Backward)",2);
+
+      RoutingLine[4].TESTFIELD("Sequence No. (Forward)",3);
+      RoutingLine[4].TESTFIELD("Sequence No. (Backward)",1);
+    END;
+
+    [Test]
+    PROCEDURE CertifyParallelRoutingImbalancedExecutionTree@12();
+    VAR
+      WorkCenter@1001 : Record 99000754;
+      RoutingHeader@1003 : Record 99000763;
+      RoutingLine@1002 : ARRAY [5] OF Record 99000764;
+      I@1000 : Integer;
+    BEGIN
+      // [FEATURE] [Parallel Routing]
+      // [SCENARIO 221561] Verify sequence numbers on two parallel executions paths having different number of operations
+
+      Initialize;
+
+      // [GIVEN] Create a parallel routing with 5 operations
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO
+        LibraryManufacturing.CreateRoutingLine(
+          RoutingHeader,RoutingLine[I],'',FORMAT(I),RoutingLine[I].Type::"Work Center",WorkCenter."No.");
+
+      // [GIVEN] Setup the execution path: starting operation 1, operations 2 and 3 are executed in parallel
+      // [GIVEN] Operation 4 is executed sequentially after op. 3, both 2 and 4 lead to the terminal operation 5
+      // [GIVEN]    1
+      // [GIVEN]   / \
+      // [GIVEN]  2   3
+      // [GIVEN]  |   |
+      // [GIVEN]  |   4
+      // [GIVEN]   \ /
+      // [GIVEN]    5
+      SetNextOperationNo(RoutingLine[1],STRSUBSTNO('%1|%2',RoutingLine[2]."Operation No.",RoutingLine[3]."Operation No."));
+      SetNextOperationNo(RoutingLine[2],RoutingLine[5]."Operation No.");
+      SetNextOperationNo(RoutingLine[3],RoutingLine[4]."Operation No.");
+      SetNextOperationNo(RoutingLine[4],RoutingLine[5]."Operation No.");
+
+      // [WHEN] Certify the routing
+      CertifyRoutingAndRefreshLines(RoutingHeader,RoutingLine);
+
+      // [THEN] The following sequence is generated:
+      // [THEN]  "Sequence No. (Forward)": 1           "Sequence No. (Backward)": 4
+      // [THEN]                           / \                                    / \
+      // [THEN]                          2   2                                  2   3
+      // [THEN]                          |   |                                  |   |
+      // [THEN]                          |   3                                  |   2
+      // [THEN]                           \ /                                    \ /
+      // [THEN]                            4                                      1
+      RoutingLine[1].TESTFIELD("Sequence No. (Forward)",1);
+      RoutingLine[1].TESTFIELD("Sequence No. (Backward)",4);
+
+      RoutingLine[2].TESTFIELD("Sequence No. (Forward)",2);
+      RoutingLine[2].TESTFIELD("Sequence No. (Backward)",2);
+
+      RoutingLine[3].TESTFIELD("Sequence No. (Forward)",2);
+      RoutingLine[3].TESTFIELD("Sequence No. (Backward)",3);
+
+      RoutingLine[4].TESTFIELD("Sequence No. (Forward)",3);
+      RoutingLine[4].TESTFIELD("Sequence No. (Backward)",2);
+
+      RoutingLine[5].TESTFIELD("Sequence No. (Forward)",4);
+      RoutingLine[5].TESTFIELD("Sequence No. (Backward)",1);
+    END;
+
+    [Test]
+    PROCEDURE CertifyParallelRoutingWithCrossParallelOperations@45();
+    VAR
+      WorkCenter@1003 : Record 99000754;
+      RoutingHeader@1002 : Record 99000763;
+      RoutingLine@1001 : ARRAY [6] OF Record 99000764;
+      I@1000 : Integer;
+    BEGIN
+      // [FEATURE] [Parallel Routing]
+      // [SCENARIO 221561] Verify sequence numbers on two parallel execution paths with cross-sections
+
+      Initialize;
+
+      // [GIVEN] Parallel routing with the following structure
+      // [GIVEN]    1
+      // [GIVEN]   / \
+      // [GIVEN]  2   3
+      // [GIVEN]  | X |
+      // [GIVEN]  4   5
+      // [GIVEN]   \ /
+      // [GIVEN]    6
+      // [GIVEN] Operation 4 and 5 are both executed in parallel after 2 and 3
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO
+        LibraryManufacturing.CreateRoutingLine(
+          RoutingHeader,RoutingLine[I],'',FORMAT(I),RoutingLine[I].Type::"Work Center",WorkCenter."No.");
+
+      SetNextOperationNo(RoutingLine[1],STRSUBSTNO('%1|%2',RoutingLine[2]."Operation No.",RoutingLine[3]."Operation No."));
+      SetNextOperationNo(RoutingLine[2],STRSUBSTNO('%1|%2',RoutingLine[4]."Operation No.",RoutingLine[5]."Operation No."));
+      SetNextOperationNo(RoutingLine[3],STRSUBSTNO('%1|%2',RoutingLine[4]."Operation No.",RoutingLine[5]."Operation No."));
+      SetNextOperationNo(RoutingLine[4],RoutingLine[6]."Operation No.");
+      SetNextOperationNo(RoutingLine[5],RoutingLine[6]."Operation No.");
+
+      // [WHEN] Certify the routing
+      CertifyRoutingAndRefreshLines(RoutingHeader,RoutingLine);
+
+      // [THEN] The following sequence is generated:
+      // [THEN]  "Sequence No. (Forward)": 1           "Sequence No. (Backward)": 4
+      // [THEN]                           / \                                    / \
+      // [THEN]                          2   2                                  3   3
+      // [THEN]                          | X |                                  | X |
+      // [THEN]                          3   3                                  2   2
+      // [THEN]                           \ /                                    \ /
+      // [THEN]                            4                                      1
+      RoutingLine[1].TESTFIELD("Sequence No. (Forward)",1);
+      RoutingLine[1].TESTFIELD("Sequence No. (Backward)",4);
+
+      RoutingLine[2].TESTFIELD("Sequence No. (Forward)",2);
+      RoutingLine[2].TESTFIELD("Sequence No. (Backward)",3);
+
+      RoutingLine[3].TESTFIELD("Sequence No. (Forward)",2);
+      RoutingLine[3].TESTFIELD("Sequence No. (Backward)",3);
+
+      RoutingLine[4].TESTFIELD("Sequence No. (Forward)",3);
+      RoutingLine[4].TESTFIELD("Sequence No. (Backward)",2);
+
+      RoutingLine[5].TESTFIELD("Sequence No. (Forward)",3);
+      RoutingLine[5].TESTFIELD("Sequence No. (Backward)",2);
+
+      RoutingLine[6].TESTFIELD("Sequence No. (Forward)",4);
+      RoutingLine[6].TESTFIELD("Sequence No. (Backward)",1);
+    END;
+
+    [Test]
+    PROCEDURE CertifyParallelRoutingFailedWithoutManualSequence@5();
+    VAR
+      WorkCenter@1001 : Record 99000754;
+      RoutingHeader@1003 : Record 99000763;
+      RoutingLine@1002 : ARRAY [2] OF Record 99000764;
+    BEGIN
+      // [FEATURE] [Parallel Routing]
+      // [SCENARIO 221561] Certification of a parallel routing should fail if "Next Operation No." is not filled on operations
+
+      Initialize;
+
+      // [GIVEN] Create a parallel routing without filling the "Next Operation No." field
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine[1],'',LibraryUtility.GenerateGUID,RoutingLine[1].Type::"Work Center",WorkCenter."No.");
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine[2],'',LibraryUtility.GenerateGUID,RoutingLine[2].Type::"Work Center",WorkCenter."No.");
+
+      // [WHEN] Certify the routing
+      ASSERTERROR ChangeRoutingStatus(RoutingHeader,RoutingHeader.Status::Certified);
+
+      // [THEN] Certification fails
+      Assert.ExpectedError(STRSUBSTNO(WrongNoOfTerminationProcessesErr,RoutingHeader."No.",2));
+    END;
+
+    [Test]
+    PROCEDURE CertifyParallelRoutingFailedWithCircularReference@6();
+    VAR
+      WorkCenter@1001 : Record 99000754;
+      RoutingHeader@1003 : Record 99000763;
+      RoutingLine@1002 : ARRAY [3] OF Record 99000764;
+      I@1000 : Integer;
+    BEGIN
+      // [FEATURE] [Parallel Routing]
+      // [SCENARIO 221561] Certification of a parallel routing should fail with an error message if the routing setup contains circular reference
+
+      Initialize;
+
+      // [GIVEN] Create a parallel routing with 3 operations
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO
+        LibraryManufacturing.CreateRoutingLine(
+          RoutingHeader,RoutingLine[I],'',FORMAT(I),RoutingLine[I].Type::"Work Center",WorkCenter."No.");
+
+      // [GIVEN] Starting operation 1, next operations 2 and 3 are executed in parallel.
+      // [GIVEN] Next operation for op. 2 is 1 (circular reference)
+      // [GIVEN]    --1
+      // [GIVEN]   \ / \
+      // [GIVEN]    2   3
+      SetNextOperationNo(RoutingLine[1],STRSUBSTNO('%1|%2',RoutingLine[2]."Operation No.",RoutingLine[3]."Operation No."));
+      SetNextOperationNo(RoutingLine[2],RoutingLine[1]."Operation No.");
+
+      // [WHEN] Certify the routing
+      ASSERTERROR ChangeRoutingStatus(RoutingHeader,RoutingHeader.Status::Certified);
+
+      // [THEN] Certification fails. Error message "Circular reference in routing" is thrown.
+      Assert.ExpectedError(STRSUBSTNO(CircularReferenceErr,RoutingHeader."No."));
+    END;
+
+    [Test]
+    PROCEDURE CertifyParallelRoutingNoStartingOperationFail@7();
+    VAR
+      WorkCenter@1000 : Record 99000754;
+      RoutingHeader@1002 : Record 99000763;
+      RoutingLine@1001 : ARRAY [2] OF Record 99000764;
+    BEGIN
+      // [FEATURE] [Parallel Routing]
+      // [SCENARIO 221561] Certification of a parallel routing should fail if no starting operation is specified in the routing setup
+
+      Initialize;
+
+      // [GIVEN] Create parallel routing with two operations, set "Next Operation No." in both lines
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine[1],'',LibraryUtility.GenerateGUID,RoutingLine[1].Type::"Work Center",WorkCenter."No.");
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine[2],'',LibraryUtility.GenerateGUID,RoutingLine[2].Type::"Work Center",WorkCenter."No.");
+
+      SetNextOperationNo(RoutingLine[1],LibraryUtility.GenerateGUID);
+      SetNextOperationNo(RoutingLine[2],LibraryUtility.GenerateGUID);
+
+      // [WHEN] Certify the routing
+      ASSERTERROR ChangeRoutingStatus(RoutingHeader,RoutingHeader.Status::Certified);
+
+      // [THEN] Certification fails.
+      Assert.ExpectedError(NoLineWithinFilterErr);
+    END;
+
+    [Test]
+    PROCEDURE CertifyParallelRoutingTwoStartingOperationsFail@8();
+    VAR
+      WorkCenter@1001 : Record 99000754;
+      RoutingHeader@1003 : Record 99000763;
+      RoutingLine@1002 : ARRAY [3] OF Record 99000764;
+      I@1000 : Integer;
+    BEGIN
+      // [FEATURE] [Parallel Routing]
+      // [SCENARIO 221561] Certification of a parallel routing should fail if the routing setup contains two starting operations
+
+      Initialize;
+
+      // [GIVEN] Create parallel routing with 3 operations
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO
+        LibraryManufacturing.CreateRoutingLine(
+          RoutingHeader,RoutingLine[I],'',FORMAT(I),RoutingLine[I].Type::"Work Center",WorkCenter."No.");
+
+      // [GIVEN] In operation 1 and 2, set "Next Operation No." = "3"
+      // [GIVEN]  1   2
+      // [GIVEN]   \ /
+      // [GIVEN]    3
+      SetNextOperationNo(RoutingLine[1],RoutingLine[3]."Operation No.");
+      SetNextOperationNo(RoutingLine[2],RoutingLine[3]."Operation No.");
+
+      // [WHEN] Certify the routing
+      ASSERTERROR CertifyRoutingAndRefreshLines(RoutingHeader,RoutingLine);
+
+      // [THEN] Certification fails. Error message: "Actual number of starting processes is 2"
+      Assert.ExpectedError(STRSUBSTNO(WrongNoOfStartProcessesErr,RoutingHeader."No.",2));
+    END;
+
+    [Test]
+    PROCEDURE CertifyParallelRoutingTwoTerminalOperationsFail@9();
+    VAR
+      WorkCenter@1001 : Record 99000754;
+      RoutingHeader@1003 : Record 99000763;
+      RoutingLine@1002 : ARRAY [3] OF Record 99000764;
+      I@1000 : Integer;
+    BEGIN
+      // [FEATURE] [Parallel Routing]
+      // [SCENARIO 221561] Certification of a parallel routing should fail if the routing setup contains two terminal operations
+
+      Initialize;
+
+      // [GIVEN] Create parallel routing with 3 operations
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO
+        LibraryManufacturing.CreateRoutingLine(
+          RoutingHeader,RoutingLine[I],'',FORMAT(I),RoutingLine[I].Type::"Work Center",WorkCenter."No.");
+
+      // [GIVEN] Starting operation - "1", operation "2" and "3" are executed in parallel after it
+      // [GIVEN]    1
+      // [GIVEN]   / \
+      // [GIVEN]  2   3
+      SetNextOperationNo(RoutingLine[1],STRSUBSTNO('%1|%2',RoutingLine[2]."Operation No.",RoutingLine[3]."Operation No."));
+
+      // [WHEN] Certify the routing
+      ASSERTERROR CertifyRoutingAndRefreshLines(RoutingHeader,RoutingLine);
+
+      // [THEN] Certification fails. Error message: "Actual number of termination processes is 2"
+      Assert.ExpectedError(STRSUBSTNO(WrongNoOfTerminationProcessesErr,RoutingHeader."No.",2));
+    END;
+
+    [Test]
+    PROCEDURE PerformanceOnCerifyingParallelRouting@25();
+    VAR
+      CodeCoverage@1007 : Record 2000000049;
+      SmallNoOfOperations@1000 : Integer;
+      MediumNoOfOperations@1001 : Integer;
+      LargeNoOfOperations@1002 : Integer;
+      SmallNoOfHits@1004 : Integer;
+      MediumNoOfHits@1005 : Integer;
+      LargeNoOfHits@1006 : Integer;
+    BEGIN
+      // [FEATURE] [Performance] [Parallel Routing]
+      // [SCENARIO 221561] Calculation of routing operations sequence should have linear performance
+
+      Initialize;
+
+      // [GIVEN] Parallel routing with the following structure
+      // [GIVEN]     1
+      // [GIVEN]    / \
+      // [GIVEN]   2   3
+      // [GIVEN]    \ /
+      // [GIVEN]     4
+      // [GIVEN]    / \
+      // [GIVEN]   5   6
+      // [GIVEN]    \ /
+      // [GIVEN]     7
+      // [GIVEN]    / \
+      // [GIVEN]    ...
+
+      CodeCoverageMgt.StopApplicationCoverage;
+      SmallNoOfOperations := 1;
+      MediumNoOfOperations := 5;
+      LargeNoOfOperations := 10;
+
+      CodeCoverageMgt.StartApplicationCoverage;
+      CreateAndCertifyRoutingWithCrossOperations(SmallNoOfOperations);
+      CodeCoverageMgt.StopApplicationCoverage;
+      SmallNoOfHits :=
+        GetCodeCoverageForObject(CodeCoverage."Object Type"::Codeunit,CODEUNIT::"Check Routing Lines",'SetRtngLineSequenceBack') +
+        GetCodeCoverageForObject(CodeCoverage."Object Type"::Codeunit,CODEUNIT::"Check Routing Lines",'SetRtngLineSequenceForward');
+
+      CodeCoverageMgt.StartApplicationCoverage;
+      CreateAndCertifyRoutingWithCrossOperations(MediumNoOfOperations);
+      CodeCoverageMgt.StopApplicationCoverage;
+      MediumNoOfHits :=
+        GetCodeCoverageForObject(CodeCoverage."Object Type"::Codeunit,CODEUNIT::"Check Routing Lines",'SetRtngLineSequenceBack') +
+        GetCodeCoverageForObject(CodeCoverage."Object Type"::Codeunit,CODEUNIT::"Check Routing Lines",'SetRtngLineSequenceForward');
+
+      CodeCoverageMgt.StartApplicationCoverage;
+      CreateAndCertifyRoutingWithCrossOperations(LargeNoOfOperations);
+      CodeCoverageMgt.StopApplicationCoverage;
+      LargeNoOfHits :=
+        GetCodeCoverageForObject(CodeCoverage."Object Type"::Codeunit,CODEUNIT::"Check Routing Lines",'SetRtngLineSequenceBack') +
+        GetCodeCoverageForObject(CodeCoverage."Object Type"::Codeunit,CODEUNIT::"Check Routing Lines",'SetRtngLineSequenceForward');
+
+      // [WHEN] Certify the routing
+      // [THEN] Performance should be linear
+      Assert.IsTrue(
+        LibraryCalcComplexity.IsLinear(
+          SmallNoOfOperations,MediumNoOfOperations,LargeNoOfOperations,SmallNoOfHits,MediumNoOfHits,LargeNoOfHits),
+        NotLinearCCErr);
+    END;
+
+    LOCAL PROCEDURE Initialize@14();
+    BEGIN
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CertifyRoutingAndRefreshLines@48(VAR RoutingHeader@1000 : Record 99000763;VAR RoutingLine@1001 : ARRAY [6] OF Record 99000764);
+    VAR
+      I@1002 : Integer;
+    BEGIN
+      ChangeRoutingStatus(RoutingHeader,RoutingHeader.Status::Certified);
+      FOR I := 1 TO ARRAYLEN(RoutingLine) DO
+        RoutingLine[I].FIND;
+    END;
+
+    LOCAL PROCEDURE ChangeRoutingStatus@15(VAR RoutingHeader@1000 : Record 99000763;NewStatus@1001 : Option);
+    BEGIN
+      RoutingHeader.VALIDATE(Status,NewStatus);
+      RoutingHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndCertifyRoutingWithCrossOperations@47(NoOfOperations@1002 : Integer);
+    VAR
+      RoutingHeader@1000 : Record 99000763;
+    BEGIN
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      CreateRoutingLinesSequence(RoutingHeader,NoOfOperations);
+      ChangeRoutingStatus(RoutingHeader,RoutingHeader.Status::Certified);
+    END;
+
+    LOCAL PROCEDURE CreateRoutingLinesSequence@36(VAR RoutingHeader@1000 : Record 99000763;NoOfRoutingBlocks@1003 : Integer);
+    VAR
+      WorkCenter@1005 : Record 99000754;
+      RoutingLine@1001 : ARRAY [4] OF Record 99000764;
+      PrevRoutingLine@1002 : Record 99000764;
+      I@1004 : Integer;
+      J@1007 : Integer;
+    BEGIN
+      // To reproduce the performance bug, we need a "braided" routing consisting of blocks, 4 operations in each.
+      // Each block has an entry and output operations, the other two in between are executed in parallel
+
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      FOR I := 1 TO NoOfRoutingBlocks DO BEGIN
+        FOR J := 1 TO 4 DO
+          LibraryManufacturing.CreateRoutingLine(
+            RoutingHeader,RoutingLine[J],'',FORMAT(4 * I + J),RoutingLine[J].Type::"Work Center",WorkCenter."No.");
+
+        // If there is a previous block, connect it with the next one
+        IF PrevRoutingLine."Operation No." <> '' THEN
+          SetNextOperationNo(PrevRoutingLine,RoutingLine[1]."Operation No.");
+
+        SetNextOperationNo(RoutingLine[1],STRSUBSTNO('%1|%2',RoutingLine[2]."Operation No.",RoutingLine[3]."Operation No."));
+        SetNextOperationNo(RoutingLine[2],RoutingLine[4]."Operation No.");
+        SetNextOperationNo(RoutingLine[3],RoutingLine[4]."Operation No.");
+
+        PrevRoutingLine := RoutingLine[4];
+      END;
+    END;
+
+    LOCAL PROCEDURE GetCodeCoverageForObject@73(ObjectType@1002 : Option;ObjectID@1001 : Integer;CodeLine@1003 : Text) NoOfHits : Integer;
+    VAR
+      CodeCoverage@1000 : Record 2000000049;
+      CodeCoverageMgt@1004 : Codeunit 9990;
+    BEGIN
+      CodeCoverageMgt.Refresh;
+      WITH CodeCoverage DO BEGIN
+        SETRANGE("Line Type","Line Type"::Code);
+        SETRANGE("Object Type",ObjectType);
+        SETRANGE("Object ID",ObjectID);
+        SETFILTER("No. of Hits",'>%1',0);
+        SETFILTER(Line,'@*' + CodeLine + '*');
+        IF FINDSET THEN
+          REPEAT
+            NoOfHits += "No. of Hits";
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE SetNextOperationNo@17(VAR RoutingLine@1000 : Record 99000764;NextOperationNo@1001 : Code[30]);
+    BEGIN
+      RoutingLine.VALIDATE("Next Operation No.",NextOperationNo);
+      RoutingLine.MODIFY(TRUE);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [SCM] [Production] [Routing]
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,1174 @@
+OBJECT Codeunit 137016 SCM Create Pick Data Driven
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      TempItem@1002 : TEMPORARY Record 27;
+      TempSalesLine@1021 : TEMPORARY Record 37;
+      TempSalesLine2@1020 : TEMPORARY Record 37;
+      TempSalesLine3@1019 : TEMPORARY Record 37;
+      TempTransferLine@1018 : TEMPORARY Record 5741;
+      TempWhseInternalPickLine@1017 : TEMPORARY Record 7334;
+      TempTransferLine2@1015 : TEMPORARY Record 5741;
+      TempWhseInternalPickLine2@1014 : TEMPORARY Record 7334;
+      TempProdOrderComponent@1012 : TEMPORARY Record 5407;
+      TempProdOrderComponent2@1011 : TEMPORARY Record 5407;
+      TempWhseShipmentLine@1010 : TEMPORARY Record 7321;
+      TempWhseShipmentLine2@1004 : TEMPORARY Record 7321;
+      TempLocation@1016 : TEMPORARY Record 14;
+      LibraryUtility@1008 : Codeunit 131000;
+      LibraryWarehouse@1000 : Codeunit 132204;
+      LibraryInventory@1022 : Codeunit 132201;
+      LibraryManufacturing@1023 : Codeunit 132202;
+      LibraryPurchase@1032 : Codeunit 130512;
+      LibrarySales@1031 : Codeunit 130509;
+      Assert@1005 : Codeunit 130000;
+      ErrorNothingToHandle@1006 : TextConst 'ENU=Nothing to handle.';
+      ErrorWrongMessage@1007 : TextConst 'ENU=Wrong actual message.';
+      ErrorNoWhseLines@1013 : TextConst 'ENU=Warehouse Activity Line within the filter.';
+      isInitialized@1001 : Boolean;
+      MultipleReservations@1003 : Integer;
+
+    [Normal]
+    [HandlerFunctions(MessageHandler)]
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      // Initialize setup.
+      IF isInitialized THEN
+        EXIT;
+
+      // Setup Demonstration data.
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      isInitialized := TRUE;
+      AssignNoSeries;
+
+      COMMIT;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AvailableToPick@49(IsDirected@1006 : Boolean;RequireShipment@1007 : Boolean;RequirePick@1008 : Boolean;BinMandatory@1009 : Boolean;NoOfPurchaseDocs@1002 : Integer);
+    VAR
+      DocumentType@1001 : 'Shipment,Rel. Prod. Order,Int. Pick,Sales Order,Transfer Order,Rel. Prod. Order - Invt.';
+      SourceDocNo@1004 : Code[20];
+      WhseDocNo@1005 : Code[20];
+      Log@1003 : Text[1024];
+      AvailableQty@1000 : Decimal;
+      ErrorCount@1010 : Integer;
+    BEGIN
+      Initialize;
+
+      // Setup
+      CLEAR(Log);
+      ErrorCount := 0;
+      SetupTestData(IsDirected,RequireShipment,RequirePick,BinMandatory,NoOfPurchaseDocs);
+
+      // Action
+      TempItem.FINDSET;
+      REPEAT
+        AvailableQty := GetExpectedAvailableQty(DocumentType,SourceDocNo,WhseDocNo,TempItem."No.");
+        ASSERTERROR BEGIN
+          VerifyAvailability(DocumentType,WhseDocNo,SourceDocNo,AvailableQty);
+          ERROR('');
+        END;
+        IF GETLASTERRORTEXT <> '' THEN BEGIN
+          ErrorCount += 1;
+          Log := COPYSTR(Log + COPYSTR(GETLASTERRORTEXT,1,50) + '|',1,1000);
+        END;
+        CLEARLASTERROR;
+      UNTIL TempItem.NEXT = 0;
+
+      // Verification
+      Assert.IsTrue(STRLEN(Log) = 0,FORMAT(ErrorCount) + ' error(s):' + Log);
+
+      // Tear down
+      TearDown;
+    END;
+
+    [Test]
+    PROCEDURE WMSSingleReservations@17();
+    BEGIN
+      AvailableToPick(TRUE,TRUE,TRUE,TRUE,1);
+    END;
+
+    [Test]
+    PROCEDURE WMSMultipleReservations@20();
+    BEGIN
+      AvailableToPick(TRUE,TRUE,TRUE,TRUE,2);
+    END;
+
+    [Test]
+    PROCEDURE NonWMS@1();
+    BEGIN
+      AvailableToPick(FALSE,TRUE,TRUE,FALSE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE Inventory@3();
+    BEGIN
+      AvailableToPick(FALSE,FALSE,TRUE,FALSE,1);
+    END;
+
+    [Test]
+    PROCEDURE NonWMSBin@4();
+    BEGIN
+      AvailableToPick(FALSE,TRUE,TRUE,TRUE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE InventoryBin@10();
+    BEGIN
+      AvailableToPick(FALSE,FALSE,TRUE,TRUE,1);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ProcessFirstDemand@27(DocumentType@1000 : 'Shipment,Rel. Prod. Order,Int. Pick,Sales Order,Transfer Order,Rel. Prod. Order - Invt.';ItemNo@1010 : Code[20];LocationCode@1011 : Code[10];Qty@1001 : Decimal;QtyToReserve@1014 : Decimal;QtyToHandle@1015 : Decimal);
+    VAR
+      Bin@1016 : Record 7354;
+      BinContent@1006 : Record 7302;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+      WhseShipmentHeader@1007 : Record 7320;
+      WhseShipmentLine@1008 : Record 7321;
+      WhseActivityLine@1009 : Record 5767;
+      WhseInternalPickHeader@1018 : Record 7333;
+      WhseInternalPickLine@1021 : Record 7334;
+      TransferHeader@1023 : Record 5740;
+      TransferLine@1024 : Record 5741;
+      ProductionOrder@1026 : Record 5405;
+      ProdOrderComponent@1004 : Record 5407;
+      Location@1005 : Record 14;
+      ReleaseTransferDocument@1025 : Codeunit 5708;
+      BinCode@1020 : Code[20];
+      ZoneCode@1019 : Code[10];
+    BEGIN
+      Location.GET(LocationCode);
+      CASE DocumentType OF
+        DocumentType::Shipment:
+          BEGIN
+            CreateReserveSalesOrder(SalesHeader,SalesLine,ItemNo,LocationCode,Qty,QtyToReserve);
+            LibrarySales.ReleaseSalesDocument(SalesHeader);
+            LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+            WhseShipmentLine.SETRANGE("Source Document",WhseShipmentLine."Source Document"::"Sales Order");
+            WhseShipmentLine.SETRANGE("Source No.",SalesHeader."No.");
+            WhseShipmentLine.FINDFIRST;
+            TempWhseShipmentLine := WhseShipmentLine;
+            TempWhseShipmentLine.INSERT;
+            IF WhseShipmentLine."Bin Code" = '' THEN BEGIN
+              GetZoneAndBin(ZoneCode,BinCode,LocationCode,ItemNo,FALSE);
+              IF BinCode <> '' THEN
+                WhseShipmentLine."Bin Code" := BinCode;
+            END;
+            WhseShipmentLine.MODIFY(TRUE);
+            WhseShipmentHeader.GET(WhseShipmentLine."No.");
+            BinContent.SETRANGE("Location Code",LocationCode);
+            BinContent.SETRANGE("Item No.",ItemNo);
+            BinContent.SETFILTER("Bin Code",'<>%1',WhseShipmentLine."Bin Code");
+            IF Location."Bin Mandatory" AND
+               (BinContent.COUNT = 0)
+            THEN BEGIN // Item exists in the same bin as specified on the warehouse shipment line.
+              ASSERTERROR LibraryWarehouse.CreatePick(WhseShipmentHeader);
+              Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorNothingToHandle) > 0,
+                'Creating picks with same bin on Take & Place lines not allowed');
+              CLEARLASTERROR;
+              Bin.SETRANGE("Location Code",LocationCode);
+              Bin.SETFILTER(Code,'<>%1',WhseShipmentLine."Bin Code");
+              Bin.FINDFIRST;
+              WhseShipmentHeader.GET(WhseShipmentLine."No.");
+              LibraryWarehouse.ReopenWhseShipment(WhseShipmentHeader);
+              WhseShipmentLine.VALIDATE("Bin Code",Bin.Code);
+              WhseShipmentLine.MODIFY(TRUE);
+            END;
+            LibraryWarehouse.CreatePick(WhseShipmentHeader);
+            RegisterWhseActivity(
+              WhseActivityLine."Activity Type"::Pick,WhseActivityLine."Source Document"::"Sales Order",
+              WhseActivityLine."Whse. Document Type"::Shipment,SalesHeader."No.",WhseShipmentHeader."No.",'','',QtyToHandle);
+          END;
+        DocumentType::"Int. Pick":
+          BEGIN
+            LibraryWarehouse.CreateWhseInternalPickHeader(WhseInternalPickHeader,LocationCode);
+            GetZoneAndBin(ZoneCode,BinCode,LocationCode,'',FALSE);
+            WhseInternalPickHeader."To Zone Code" := ZoneCode;
+            WhseInternalPickHeader."To Bin Code" := BinCode;
+            WhseInternalPickHeader.MODIFY(TRUE);
+            LibraryWarehouse.CreateWhseInternalPickLine(WhseInternalPickHeader,WhseInternalPickLine,ItemNo,Qty);
+            TempWhseInternalPickLine := WhseInternalPickLine;
+            TempWhseInternalPickLine.INSERT;
+            CreatePickFromInternalPick(WhseInternalPickHeader);
+            RegisterWhseActivity(
+              WhseActivityLine."Activity Type"::Pick,WhseActivityLine."Source Document"::" ",
+              WhseActivityLine."Whse. Document Type"::"Internal Pick",WhseInternalPickHeader."No.",WhseInternalPickHeader."No.",
+              '','',QtyToHandle);
+          END;
+        DocumentType::"Sales Order":
+          BEGIN
+            CreateReserveSalesOrder(SalesHeader,SalesLine,ItemNo,LocationCode,Qty,QtyToReserve);
+            LibrarySales.ReleaseSalesDocument(SalesHeader);
+            TempSalesLine := SalesLine;
+            TempSalesLine.INSERT;
+            CreateInvtPutPick(WhseActivityLine."Source Document"::"Sales Order",SalesHeader."No.");
+            RegisterWhseActivity(
+              WhseActivityLine."Activity Type"::"Invt. Pick",WhseActivityLine."Source Document"::"Sales Order",
+              WhseActivityLine."Whse. Document Type"::" ",SalesHeader."No.",'','','',QtyToHandle);
+          END;
+        DocumentType::"Transfer Order":
+          BEGIN
+            CreateReserveTransferOrder(
+              TransferHeader,TransferLine,ItemNo,LocationCode,Qty,QtyToReserve);
+            ReleaseTransferDocument.RUN(TransferHeader);
+            TempTransferLine := TransferLine;
+            TempTransferLine.INSERT;
+            CreateInvtPutPick(WhseActivityLine."Source Document"::"Outbound Transfer",TransferHeader."No.");
+            RegisterWhseActivity(
+              WhseActivityLine."Activity Type"::"Invt. Pick",WhseActivityLine."Source Document"::"Outbound Transfer",
+              WhseActivityLine."Whse. Document Type"::" ",TransferHeader."No.",'','','',QtyToHandle);
+          END;
+        DocumentType::"Rel. Prod. Order":
+          BEGIN
+            CreateReserveProdOrder(ProductionOrder,LocationCode,ItemNo,Qty,QtyToReserve);
+            ProdOrderComponent.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+            ProdOrderComponent.SETRANGE(Status,ProductionOrder.Status);
+            ProdOrderComponent.SETRANGE("Item No.",ItemNo);
+            ProdOrderComponent.FINDFIRST;
+            TempProdOrderComponent := ProdOrderComponent;
+            TempProdOrderComponent.INSERT;
+            ProductionOrder.SetHideValidationDialog(TRUE);
+            ProductionOrder.CreatePick(USERID,0,FALSE,FALSE,FALSE);
+            IF NOT Location."Directed Put-away and Pick" THEN
+              GetZoneAndBin(ZoneCode,BinCode,LocationCode,ItemNo,FALSE)
+            ELSE
+              BinCode := '';
+            RegisterWhseActivity(
+              WhseActivityLine."Activity Type"::Pick,WhseActivityLine."Source Document"::"Prod. Consumption",
+              WhseActivityLine."Whse. Document Type"::Production,ProductionOrder."No.",ProductionOrder."No.",'',BinCode,QtyToHandle);
+          END;
+        DocumentType::"Rel. Prod. Order - Invt.":
+          BEGIN
+            CreateReserveProdOrder(ProductionOrder,LocationCode,ItemNo,Qty,QtyToReserve);
+            ProdOrderComponent.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+            ProdOrderComponent.SETRANGE(Status,ProductionOrder.Status);
+            ProdOrderComponent.SETRANGE("Item No.",ItemNo);
+            ProdOrderComponent.FINDFIRST;
+            TempProdOrderComponent := ProdOrderComponent;
+            TempProdOrderComponent.INSERT;
+            CreateInvtPutPick(WhseActivityLine."Source Document"::"Prod. Consumption",ProductionOrder."No.");
+            RegisterWhseActivity(
+              WhseActivityLine."Activity Type"::"Invt. Pick",WhseActivityLine."Source Document"::"Prod. Consumption",
+              WhseActivityLine."Whse. Document Type"::" ",ProductionOrder."No.",'','','',QtyToHandle);
+          END;
+      END
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ProcessFinalDemand@28(DocumentType@1014 : 'Shipment,Rel. Prod. Order,Int. Pick,Sales Order,Transfer Order,Rel. Prod. Order - Invt.';ItemNo@1011 : Code[20];LocationCode@1010 : Code[10];Qty@1002 : Decimal;QtyToReserve@1005 : Decimal);
+    VAR
+      SalesHeader@1009 : Record 36;
+      SalesLine@1008 : Record 37;
+      WhseShipmentLine@1003 : Record 7321;
+      WhseShipmentHeader@1015 : Record 7320;
+      WhseInternalPickHeader@1017 : Record 7333;
+      WhseInternalPickLine@1016 : Record 7334;
+      TransferHeader@1024 : Record 5740;
+      TransferLine@1025 : Record 5741;
+      ProductionOrder@1027 : Record 5405;
+      ProdOrderComponent@1004 : Record 5407;
+      ReleaseTransferDocument@1026 : Codeunit 5708;
+      ZoneCode@1019 : Code[10];
+      BinCode@1018 : Code[20];
+    BEGIN
+      CASE DocumentType OF
+        DocumentType::Shipment:
+          BEGIN
+            CreateReserveSalesOrder(SalesHeader,SalesLine,ItemNo,LocationCode,Qty,QtyToReserve);
+            LibrarySales.ReleaseSalesDocument(SalesHeader);
+            LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+            WhseShipmentLine.SETRANGE("Source Document",WhseShipmentLine."Source Document"::"Sales Order");
+            WhseShipmentLine.SETRANGE("Source No.",SalesHeader."No.");
+            WhseShipmentLine.FINDFIRST;
+            TempWhseShipmentLine2 := WhseShipmentLine;
+            TempWhseShipmentLine2.INSERT;
+            IF WhseShipmentLine."Bin Code" = '' THEN BEGIN
+              GetZoneAndBin(ZoneCode,BinCode,LocationCode,ItemNo,FALSE);
+              IF BinCode <> '' THEN
+                WhseShipmentLine."Bin Code" := BinCode;
+            END;
+            WhseShipmentLine.MODIFY(TRUE);
+            WhseShipmentHeader.GET(WhseShipmentLine."No.");
+          END;
+        DocumentType::"Int. Pick":
+          BEGIN
+            LibraryWarehouse.CreateWhseInternalPickHeader(WhseInternalPickHeader,LocationCode);
+            GetZoneAndBin(ZoneCode,BinCode,LocationCode,'',FALSE);
+            WhseInternalPickHeader."To Zone Code" := ZoneCode;
+            WhseInternalPickHeader."To Bin Code" := BinCode;
+            WhseInternalPickHeader.MODIFY(TRUE);
+            LibraryWarehouse.CreateWhseInternalPickLine(WhseInternalPickHeader,WhseInternalPickLine,ItemNo,Qty);
+            TempWhseInternalPickLine2 := WhseInternalPickLine;
+            TempWhseInternalPickLine2.INSERT;
+          END;
+        DocumentType::"Sales Order":
+          BEGIN
+            CreateReserveSalesOrder(SalesHeader,SalesLine,ItemNo,LocationCode,Qty,QtyToReserve);
+            LibrarySales.ReleaseSalesDocument(SalesHeader);
+            TempSalesLine3 := SalesLine;
+            TempSalesLine3.INSERT;
+          END;
+        DocumentType::"Transfer Order":
+          BEGIN
+            CreateReserveTransferOrder(TransferHeader,TransferLine,ItemNo,LocationCode,Qty,QtyToReserve);
+            TempTransferLine2 := TransferLine;
+            TempTransferLine2.INSERT;
+            ReleaseTransferDocument.RUN(TransferHeader);
+          END;
+        DocumentType::"Rel. Prod. Order",DocumentType::"Rel. Prod. Order - Invt.":
+          BEGIN
+            CreateReserveProdOrder(ProductionOrder,LocationCode,ItemNo,Qty,QtyToReserve);
+            ProdOrderComponent.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+            ProdOrderComponent.SETRANGE(Status,ProductionOrder.Status);
+            ProdOrderComponent.SETRANGE("Item No.",ItemNo);
+            ProdOrderComponent.FINDFIRST;
+            TempProdOrderComponent2 := ProdOrderComponent;
+            TempProdOrderComponent2.INSERT;
+          END;
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyAvailability@18(DocumentType@1003 : 'Shipment,Rel. Prod. Order,Int. Pick,Sales Order,Transfer Order,Rel. Prod. Order - Invt.';WhseDocHeaderNo@1007 : Code[20];SourceDocHeaderNo@1005 : Code[20];ExpectedQty@1015 : Decimal);
+    VAR
+      WhseActivityLine@1006 : Record 5767;
+      WhseShipmentHeader@1008 : Record 7320;
+      WhseInternalPickHeader@1010 : Record 7333;
+      WhseInternalPickLine@1009 : Record 7334;
+      SalesHeader@1012 : Record 36;
+      TransferHeader@1013 : Record 5740;
+      ProductionOrder@1014 : Record 5405;
+    BEGIN
+      CASE DocumentType OF
+        DocumentType::Shipment:
+          BEGIN
+            WhseShipmentHeader.GET(WhseDocHeaderNo);
+            IF ExpectedQty > 0 THEN BEGIN
+              LibraryWarehouse.CreatePick(WhseShipmentHeader);
+              CheckPick(WhseActivityLine."Action Type"::Take,WhseActivityLine."Source Document"::"Sales Order",
+                WhseActivityLine."Whse. Document Type"::Shipment,SourceDocHeaderNo,WhseDocHeaderNo,ExpectedQty);
+              CheckPick(WhseActivityLine."Action Type"::Place,WhseActivityLine."Source Document"::"Sales Order",
+                WhseActivityLine."Whse. Document Type"::Shipment,SourceDocHeaderNo,WhseDocHeaderNo,ExpectedQty);
+            END
+            ELSE BEGIN
+              ASSERTERROR LibraryWarehouse.CreatePick(WhseShipmentHeader);
+              Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorNothingToHandle) > 0,ErrorWrongMessage);
+              CLEARLASTERROR;
+            END;
+          END;
+        DocumentType::"Int. Pick":
+          BEGIN
+            WhseInternalPickHeader.GET(WhseDocHeaderNo);
+            WhseInternalPickLine.SETRANGE("No.",WhseDocHeaderNo);
+            WhseInternalPickLine.FINDFIRST;
+            IF ExpectedQty > 0 THEN BEGIN
+              CreatePickFromInternalPick(WhseInternalPickHeader);
+              CheckPick(WhseActivityLine."Action Type"::Take,WhseActivityLine."Source Document"::" ",
+                WhseActivityLine."Whse. Document Type"::"Internal Pick",WhseDocHeaderNo,WhseDocHeaderNo,ExpectedQty);
+              CheckPick(WhseActivityLine."Action Type"::Place,WhseActivityLine."Source Document"::" ",
+                WhseActivityLine."Whse. Document Type"::"Internal Pick",WhseDocHeaderNo,WhseDocHeaderNo,ExpectedQty);
+            END
+            ELSE BEGIN
+              ASSERTERROR CreatePickFromInternalPick(WhseInternalPickHeader);
+              Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorNothingToHandle) > 0,ErrorWrongMessage);
+              CLEARLASTERROR;
+            END;
+          END;
+        DocumentType::"Sales Order":
+          BEGIN
+            SalesHeader.GET(SalesHeader."Document Type"::Order,SourceDocHeaderNo);
+            CreateInvtPutPick(WhseActivityLine."Source Document"::"Sales Order",SalesHeader."No.");
+            IF ExpectedQty > 0 THEN
+              CheckPick(WhseActivityLine."Action Type"::Take,WhseActivityLine."Source Document"::"Sales Order",
+                WhseActivityLine."Whse. Document Type"::" ",SourceDocHeaderNo,'',ExpectedQty)
+            ELSE BEGIN
+              ASSERTERROR CheckPick(WhseActivityLine."Action Type"::Take,WhseActivityLine."Source Document"::"Sales Order",
+                  WhseActivityLine."Whse. Document Type"::" ",SourceDocHeaderNo,'',ExpectedQty);
+              Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorNoWhseLines) > 0,ErrorWrongMessage);
+              CLEARLASTERROR;
+            END;
+          END;
+        DocumentType::"Transfer Order":
+          BEGIN
+            TransferHeader.GET(SourceDocHeaderNo);
+            CreateInvtPutPick(WhseActivityLine."Source Document"::"Outbound Transfer",TransferHeader."No.");
+            IF ExpectedQty > 0 THEN
+              CheckPick(WhseActivityLine."Action Type"::Take,WhseActivityLine."Source Document"::"Outbound Transfer",
+                WhseActivityLine."Whse. Document Type"::" ",SourceDocHeaderNo,'',ExpectedQty)
+            ELSE BEGIN
+              ASSERTERROR CheckPick(WhseActivityLine."Action Type"::Take,WhseActivityLine."Source Document"::"Outbound Transfer",
+                  WhseActivityLine."Whse. Document Type"::" ",SourceDocHeaderNo,'',ExpectedQty);
+              Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorNoWhseLines) > 0,ErrorWrongMessage);
+              CLEARLASTERROR;
+            END;
+          END;
+        DocumentType::"Rel. Prod. Order":
+          BEGIN
+            ProductionOrder.GET(ProductionOrder.Status::Released,SourceDocHeaderNo);
+            ProductionOrder.SetHideValidationDialog(TRUE);
+            IF ExpectedQty > 0 THEN BEGIN
+              ProductionOrder.CreatePick(USERID,0,FALSE,FALSE,FALSE);
+              CheckPick(WhseActivityLine."Action Type"::Take,WhseActivityLine."Source Document"::"Prod. Consumption",
+                WhseActivityLine."Whse. Document Type"::Production,SourceDocHeaderNo,WhseDocHeaderNo,ExpectedQty);
+            END ELSE BEGIN
+              ASSERTERROR ProductionOrder.CreatePick(USERID,0,FALSE,FALSE,FALSE);
+              Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorNothingToHandle) > 0,ErrorWrongMessage);
+              CLEARLASTERROR;
+            END;
+          END;
+        DocumentType::"Rel. Prod. Order - Invt.":
+          BEGIN
+            ProductionOrder.GET(ProductionOrder.Status::Released,SourceDocHeaderNo);
+            CreateInvtPutPick(WhseActivityLine."Source Document"::"Prod. Consumption",ProductionOrder."No.");
+            IF ExpectedQty > 0 THEN
+              CheckPick(WhseActivityLine."Action Type"::Take,WhseActivityLine."Source Document"::"Prod. Consumption",
+                WhseActivityLine."Whse. Document Type"::" ",SourceDocHeaderNo,'',ExpectedQty)
+            ELSE BEGIN
+              ASSERTERROR CheckPick(WhseActivityLine."Action Type"::Take,WhseActivityLine."Source Document"::"Prod. Consumption",
+                  WhseActivityLine."Whse. Document Type"::" ",SourceDocHeaderNo,'',ExpectedQty);
+              Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorNoWhseLines) > 0,ErrorWrongMessage);
+              CLEARLASTERROR;
+            END;
+          END;
+      END
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SetupLocation@6(VAR Location@1000 : Record 14;IsDirected@1001 : Boolean;ShipmentRequired@1002 : Boolean;PickRequired@1008 : Boolean;BinMandatory@1003 : Boolean);
+    VAR
+      Bin@1004 : Record 7354;
+      SalesReceivablesSetup@1006 : Record 311;
+      WarehouseEmployee@1007 : Record 7301;
+      BinCount@1005 : Integer;
+    BEGIN
+      Location.INIT;
+      IF NOT IsDirected THEN BEGIN
+        LibraryWarehouse.CreateLocationWMS(Location,BinMandatory,PickRequired,PickRequired,ShipmentRequired,ShipmentRequired);
+        Location."Directed Put-away and Pick" := IsDirected;
+        Location."Default Bin Selection" := Location."Default Bin Selection"::"Fixed Bin";
+        IF BinMandatory THEN
+          FOR BinCount := 1 TO 4 DO
+            LibraryWarehouse.CreateBin(Bin,Location.Code,'bin' + FORMAT(BinCount),'','');
+      END
+      ELSE BEGIN
+        Location.SETRANGE("Directed Put-away and Pick",IsDirected);
+        Location.FINDFIRST;
+        TempLocation := Location;
+        TempLocation.INSERT;
+      END;
+
+      Location."Always Create Pick Line" := FALSE;
+      Location."Bin Capacity Policy" := Location."Bin Capacity Policy"::"Never Check Capacity";
+      Location.MODIFY(TRUE);
+
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup."Stockout Warning" := FALSE;
+      SalesReceivablesSetup."Credit Warnings" := SalesReceivablesSetup."Credit Warnings"::"No Warning";
+      SalesReceivablesSetup.MODIFY(TRUE);
+
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE GetZoneAndBin@45(VAR ZoneCode@1001 : Code[10];VAR BinCode@1002 : Code[20];LocationCode@1000 : Code[20];ExcludedItem@1006 : Code[20];CheckTypeCode@1005 : Boolean);
+    VAR
+      Bin@1004 : Record 7354;
+      BinType@1003 : Record 7303;
+      BinContent@1007 : Record 7302;
+    BEGIN
+      ZoneCode := '';
+      BinCode := '';
+
+      BinType.SETRANGE(Pick,TRUE);
+      BinType.SETRANGE("Put Away",TRUE);
+      BinType.FINDFIRST;
+
+      Bin.SETRANGE("Location Code",LocationCode);
+      Bin.SETRANGE("Block Movement",Bin."Block Movement"::" ");
+      IF CheckTypeCode THEN
+        Bin.SETRANGE("Bin Type Code",BinType.Code)
+      ELSE
+        Bin.SETFILTER("Bin Type Code",'<>%1',BinType.Code);
+
+      IF Bin.FINDSET THEN
+        REPEAT
+          BinContent.SETRANGE("Location Code",LocationCode);
+          BinContent.SETRANGE("Bin Code",Bin.Code);
+          BinContent.SETCURRENTKEY("Item No.");
+          BinContent.SETRANGE("Item No.",ExcludedItem);
+          IF NOT BinContent.FINDFIRST THEN BEGIN
+            ZoneCode := Bin."Zone Code";
+            BinCode := Bin.Code;
+            EXIT;
+          END;
+        UNTIL Bin.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ProcessPurchaseOrder@47(ItemNo@1003 : Code[20];LocationCode@1002 : Code[10];PartialReceive@1012 : Boolean;Qty@1011 : Decimal);
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      WhseReceiptLine@1010 : Record 7317;
+      WhseActivityLine@1009 : Record 5767;
+      PostedWhseReceiptHeader@1008 : Record 7318;
+      Location@1013 : Record 14;
+      WhsePostReceipt@1007 : Codeunit 5760;
+      BinCode@1006 : Code[20];
+      ZoneCode@1014 : Code[10];
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Qty);
+      PurchaseLine."Location Code" := LocationCode;
+      PurchaseLine.MODIFY(TRUE);
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+
+      Location.GET(LocationCode);
+      IF Location."Directed Put-away and Pick" OR Location."Require Receive" THEN BEGIN
+        LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+        WhseReceiptLine.SETRANGE("Source Document",WhseReceiptLine."Source Document"::"Purchase Order");
+        WhseReceiptLine.SETRANGE("Source No.",PurchaseHeader."No.");
+        WhseReceiptLine.FINDFIRST;
+
+        IF Location."Bin Mandatory" AND (WhseReceiptLine."Bin Code" = '') THEN BEGIN
+          GetZoneAndBin(ZoneCode,BinCode,Location.Code,ItemNo,FALSE);
+          WhseReceiptLine."Bin Code" := BinCode;
+          WhseReceiptLine.MODIFY(TRUE);
+        END;
+
+        WhsePostReceipt.RUN(WhseReceiptLine);
+        PostedWhseReceiptHeader.SETCURRENTKEY("Whse. Receipt No.");
+        PostedWhseReceiptHeader.SETRANGE("Whse. Receipt No.",WhseReceiptLine."No.");
+        PostedWhseReceiptHeader.FINDFIRST;
+
+        IF Location."Bin Mandatory" THEN
+          GetZoneAndBin(ZoneCode,BinCode,Location.Code,'',Location."Directed Put-away and Pick")
+        ELSE
+          BinCode := '';
+        RegisterWhseActivity(
+          WhseActivityLine."Activity Type"::"Put-away",WhseActivityLine."Source Document"::"Purchase Order",
+          WhseActivityLine."Whse. Document Type"::Receipt,PurchaseHeader."No.",PostedWhseReceiptHeader."No.",
+          '',BinCode,PutAwayQty(PartialReceive,WhseReceiptLine.Quantity));
+      END
+      ELSE BEGIN
+        CreateInvtPutPick(WhseActivityLine."Source Document"::"Purchase Order",PurchaseHeader."No.");
+        IF Location."Bin Mandatory" THEN
+          GetZoneAndBin(ZoneCode,BinCode,Location.Code,ItemNo,FALSE)
+        ELSE
+          BinCode := '';
+        RegisterWhseActivity(
+          WhseActivityLine."Activity Type"::"Invt. Put-away",WhseActivityLine."Source Document"::"Purchase Order",
+          WhseActivityLine."Whse. Document Type"::" ",PurchaseHeader."No.",'','',BinCode,
+          PutAwayQty(PartialReceive,PurchaseLine.Quantity));
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateReserveSalesOrder@23(VAR SalesHeader@1001 : Record 36;VAR SalesLine@1005 : Record 37;ItemNo@1002 : Code[20];LocationCode@1003 : Code[10];Qty@1004 : Decimal;QtyToReserve@1000 : Decimal);
+    VAR
+      Customer@1008 : Record 18;
+      ReservationManagement@1006 : Codeunit 99000845;
+      FullReservation@1007 : Boolean;
+    BEGIN
+      IF Qty <= 0 THEN
+        EXIT;
+      LibrarySales.CreateCustomer(Customer);
+      CLEAR(SalesHeader);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      SalesHeader.VALIDATE("External Document No.",SalesHeader."No.");
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Qty);
+      SalesLine."Location Code" := LocationCode;
+      SalesLine.MODIFY(TRUE);
+
+      IF QtyToReserve > 0 THEN BEGIN
+        FullReservation := (Qty = QtyToReserve);
+        ReservationManagement.SetSalesLine(SalesLine);
+        ReservationManagement.AutoReserve(FullReservation,'',SalesLine."Shipment Date",
+          ROUND(QtyToReserve / SalesLine."Qty. per Unit of Measure",0.00001),QtyToReserve);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateReserveTransferOrder@13(VAR TransferHeader@1001 : Record 5740;VAR TransferLine@1005 : Record 5741;ItemNo@1002 : Code[20];SourceLocation@1003 : Code[10];Qty@1004 : Decimal;QtyToReserve@1000 : Decimal);
+    VAR
+      Location@1009 : Record 14;
+      Location2@1006 : Record 14;
+      Item@1011 : Record 27;
+      InventoryPostingSetup@1012 : Record 5813;
+      ReservationManagement@1008 : Codeunit 99000845;
+      Direction@1010 : 'Outbound,Inbound';
+      FullReservation@1007 : Boolean;
+    BEGIN
+      IF Qty <= 0 THEN
+        EXIT;
+
+      Item.GET(ItemNo);
+      IF NOT InventoryPostingSetup.GET(SourceLocation,Item."Inventory Posting Group") THEN
+        LibraryInventory.CreateInventoryPostingSetup(InventoryPostingSetup,SourceLocation,Item."Inventory Posting Group");
+
+      SetupLocation(Location,FALSE,FALSE,FALSE,FALSE);
+      SetupLocation(Location2,FALSE,FALSE,FALSE,FALSE);
+      Location2."Use As In-Transit" := TRUE;
+      Location2.MODIFY(TRUE);
+
+      CLEAR(TransferHeader);
+      LibraryWarehouse.CreateTransferHeader(TransferHeader,SourceLocation,Location.Code,Location2.Code);
+      LibraryWarehouse.CreateTransferLine(TransferHeader,TransferLine,ItemNo,Qty);
+
+      IF QtyToReserve > 0 THEN BEGIN
+        FullReservation := (Qty = QtyToReserve);
+        ReservationManagement.SetTransferLine(TransferLine,Direction::Outbound);
+        ReservationManagement.AutoReserve(FullReservation,'',TransferLine."Shipment Date",
+          ROUND(QtyToReserve / TransferLine."Qty. per Unit of Measure",0.00001),QtyToReserve);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateReserveProdOrder@7(VAR ProductionOrder@1000 : Record 5405;LocationCode@1001 : Code[10];ItemNo@1005 : Code[20];Qty@1002 : Decimal;QtyToReserve@1003 : Decimal);
+    VAR
+      ProductionBOMHeader@1004 : Record 99000771;
+      ProductionBOMLine@1006 : Record 99000772;
+      Item@1007 : Record 27;
+      ProdOrderComponent@1010 : Record 5407;
+      ManufacturingSetup@1011 : Record 99000765;
+      ReservationManagement@1009 : Codeunit 99000845;
+      FullReservation@1008 : Boolean;
+    BEGIN
+      IF Qty <= 0 THEN
+        EXIT;
+      ManufacturingSetup.GET;
+      ManufacturingSetup."Components at Location" := LocationCode;
+      ManufacturingSetup.MODIFY(TRUE);
+
+      LibraryInventory.CreateItem(Item);
+      ProductionBOMLine.SETCURRENTKEY(Type,"No.");
+      ProductionBOMLine.SETRANGE(Type,ProductionBOMLine.Type::Item);
+      ProductionBOMLine.SETRANGE("No.",ItemNo);
+      IF NOT ProductionBOMLine.FINDFIRST THEN BEGIN
+        LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,Item."Base Unit of Measure");
+        LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,ItemNo,1);
+        ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::Certified);
+      END
+      ELSE
+        ProductionBOMHeader.GET(ProductionBOMLine."Production BOM No.");
+
+      Item."Replenishment System" := Item."Replenishment System"::"Prod. Order";
+      Item."Production BOM No." := ProductionBOMHeader."No.";
+      Item.MODIFY(TRUE);
+
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,Item."No.",Qty);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,TRUE,TRUE,TRUE,TRUE,TRUE);
+
+      IF QtyToReserve > 0 THEN BEGIN
+        FullReservation := (Qty = QtyToReserve);
+        ProdOrderComponent.SETRANGE(Status,ProductionOrder.Status);
+        ProdOrderComponent.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+        ProdOrderComponent.FINDFIRST;
+        ReservationManagement.SetProdOrderComponent(ProdOrderComponent);
+        ReservationManagement.AutoReserve(FullReservation,'',ProdOrderComponent."Due Date",
+          ROUND(QtyToReserve / ProdOrderComponent."Qty. per Unit of Measure",0.00001),QtyToReserve);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE RegisterWhseActivity@14(ActivityType@1005 : Option;SourceDocument@1003 : Option;WhseDocType@1010 : Option;SourceNo@1000 : Code[20];WhseDocNo@1009 : Code[20];TakeBinCode@1007 : Code[20];PlaceBinCode@1008 : Code[20];QtyToHandle@1006 : Decimal);
+    VAR
+      WhseActivityLine@1001 : Record 5767;
+      WhseActivityHeader@1002 : Record 5766;
+    BEGIN
+      CLEAR(WhseActivityLine);
+      WhseActivityLine.RESET;
+      WhseActivityLine.SETRANGE("Source Document",SourceDocument);
+      WhseActivityLine.SETRANGE("Source No.",SourceNo);
+      WhseActivityLine.SETRANGE("Whse. Document Type",WhseDocType);
+      WhseActivityLine.SETRANGE("Whse. Document No.",WhseDocNo);
+      WhseActivityLine.FINDSET;
+
+      REPEAT
+        WhseActivityLine.VALIDATE("Qty. to Handle",QtyToHandle);
+        IF (WhseActivityLine."Action Type" = WhseActivityLine."Action Type"::Take) AND
+           (TakeBinCode <> '')
+        THEN
+          WhseActivityLine."Bin Code" := TakeBinCode;
+        IF (WhseActivityLine."Action Type" = WhseActivityLine."Action Type"::Place) AND
+           (PlaceBinCode <> '')
+        THEN
+          WhseActivityLine."Bin Code" := PlaceBinCode;
+        WhseActivityLine.MODIFY(TRUE);
+      UNTIL WhseActivityLine.NEXT = 0;
+
+      CLEAR(WhseActivityHeader);
+      WhseActivityHeader.SETCURRENTKEY(Type,"No.");
+      WhseActivityHeader.SETRANGE(Type,ActivityType);
+      WhseActivityHeader.SETRANGE("No.",WhseActivityLine."No.");
+      WhseActivityHeader.FINDFIRST;
+
+      IF QtyToHandle > 0 THEN
+        IF WhseActivityLine."Activity Type" IN
+           [WhseActivityLine."Activity Type"::"Invt. Put-away",WhseActivityLine."Activity Type"::"Invt. Pick"]
+        THEN
+          LibraryWarehouse.PostInventoryActivity(WhseActivityHeader,FALSE)
+        ELSE
+          LibraryWarehouse.RegisterWhseActivity(WhseActivityHeader);
+    END;
+
+    LOCAL PROCEDURE CreatePickFromInternalPick@67(VAR WhseInternalPickHeader@1000 : Record 7333);
+    VAR
+      WhseInternalPickLine@1001 : Record 7334;
+      WhseInternalPickRelease@1002 : Codeunit 7315;
+    BEGIN
+      WhseInternalPickLine.SETRANGE("No.",WhseInternalPickHeader."No.");
+      WhseInternalPickLine.FINDFIRST;
+      IF WhseInternalPickHeader.Status = WhseInternalPickHeader.Status::Open THEN
+        WhseInternalPickRelease.Release(WhseInternalPickHeader);
+      WhseInternalPickLine.SetHideValidationDialog(TRUE);
+      WhseInternalPickLine.CreatePickDoc(WhseInternalPickLine,WhseInternalPickHeader);
+    END;
+
+    LOCAL PROCEDURE CreateInvtPutPick@12(SourceDocument@1002 : ',Sales Order,Sales Return Order,Purchase Order,Purchase Return Order,Inbound Transfer,Outbound Transfer,Prod. Consumption,Prod. Output';SourceNo@1001 : Code[20]);
+    VAR
+      WhseRequest@1000 : Record 5765;
+      CreateInvtPutAwayPickMvmt@1003 : Report 7323;
+    BEGIN
+      WhseRequest.RESET;
+      WhseRequest.SETCURRENTKEY("Source Document","Source No.");
+      WhseRequest.SETRANGE("Source Document",SourceDocument);
+      WhseRequest.SETRANGE("Source No.",SourceNo);
+      CreateInvtPutAwayPickMvmt.InitializeRequest(TRUE,TRUE,FALSE,FALSE,FALSE);
+      CreateInvtPutAwayPickMvmt.SETTABLEVIEW(WhseRequest);
+      CreateInvtPutAwayPickMvmt.USEREQUESTPAGE(FALSE);
+      CreateInvtPutAwayPickMvmt.RUNMODAL;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CheckPick@19(LineType@1000 : Option;SourceDoc@1004 : Option;WhseDocType@1005 : Option;SourceDocNo@1003 : Code[20];WhseDocNo@1006 : Code[20];ExpectedQty@1001 : Decimal);
+    VAR
+      WhseActivityLine@1002 : Record 5767;
+      ActualQty@1008 : Decimal;
+    BEGIN
+      CLEAR(WhseActivityLine);
+      WhseActivityLine.SETRANGE("Source Document",SourceDoc);
+      WhseActivityLine.SETRANGE("Source No.",SourceDocNo);
+      WhseActivityLine.SETRANGE("Whse. Document Type",WhseDocType);
+      WhseActivityLine.SETRANGE("Whse. Document No.",WhseDocNo);
+      WhseActivityLine.FINDSET;
+      IF WhseActivityLine."Action Type" <> WhseActivityLine."Action Type"::" " THEN BEGIN
+        WhseActivityLine.SETRANGE("Action Type",LineType);
+        WhseActivityLine.FINDSET;
+      END;
+
+      ActualQty := 0;
+      REPEAT
+        ActualQty += WhseActivityLine.Quantity;
+      UNTIL WhseActivityLine.NEXT = 0;
+
+      Assert.AreEqual(ExpectedQty,ActualQty,'');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE GetExpectedAvailableQty@61(VAR DocumentType@1004 : 'Shipment,Rel. Prod. Order,Int. Pick,Sales Order,Transfer Order,Rel. Prod. Order - Invt.';VAR SourceDocNo@1009 : Code[20];VAR WhseDocNo@1008 : Code[20];ItemNo@1003 : Code[20]) : Decimal;
+    VAR
+      PurchaseLine@1005 : Record 39;
+      WhseActivityLine@1007 : Record 5767;
+      Location@1017 : Record 14;
+      DemandQty@1013 : Decimal;
+      SupplyQty@1012 : Decimal;
+      RequestQty@1015 : Decimal;
+    BEGIN
+      // Calculate demand qty by collecting quantities on Sales Orders, Transfer Orders, Internal Picks and Released Prod. Orders.
+      // Extract request qty from last document in the scenario.
+      DemandQty := 0;
+
+      TempWhseShipmentLine.SETRANGE("Item No.",ItemNo);
+      IF TempWhseShipmentLine.FINDFIRST THEN
+        DemandQty += TempWhseShipmentLine.Quantity;
+
+      TempWhseShipmentLine2.SETRANGE("Item No.",ItemNo);
+      IF TempWhseShipmentLine2.FINDFIRST THEN BEGIN
+        DocumentType := DocumentType::Shipment;
+        SourceDocNo := TempWhseShipmentLine2."Source No.";
+        WhseDocNo := TempWhseShipmentLine2."No.";
+        RequestQty := TempWhseShipmentLine2.Quantity;
+      END;
+
+      TempSalesLine.SETRANGE("No.",ItemNo);
+      IF TempSalesLine.FINDFIRST THEN
+        DemandQty += TempSalesLine.Quantity;
+
+      TempSalesLine2.SETRANGE("No.",ItemNo);
+      IF TempSalesLine2.FINDFIRST THEN BEGIN
+        TempSalesLine2.CALCFIELDS("Reserved Quantity");
+        DemandQty += TempSalesLine2."Reserved Quantity";
+      END;
+
+      TempSalesLine3.SETRANGE("No.",ItemNo);
+      IF TempSalesLine3.FINDFIRST THEN BEGIN
+        DocumentType := DocumentType::"Sales Order";
+        SourceDocNo := TempSalesLine3."Document No.";
+        WhseDocNo := '';
+        RequestQty := TempSalesLine3.Quantity;
+      END;
+
+      TempTransferLine.SETRANGE("Item No.",ItemNo);
+      IF TempTransferLine.FINDFIRST THEN
+        DemandQty += TempTransferLine.Quantity;
+
+      TempTransferLine2.SETRANGE("Item No.",ItemNo);
+      IF TempTransferLine2.FINDFIRST THEN BEGIN
+        DocumentType := DocumentType::"Transfer Order";
+        SourceDocNo := TempTransferLine2."Document No.";
+        WhseDocNo := '';
+        RequestQty := TempTransferLine2.Quantity;
+      END;
+
+      TempWhseInternalPickLine.SETRANGE("Item No.",ItemNo);
+      IF TempWhseInternalPickLine.FINDFIRST THEN
+        DemandQty += TempWhseInternalPickLine.Quantity;
+
+      TempWhseInternalPickLine2.SETRANGE("Item No.",ItemNo);
+      IF TempWhseInternalPickLine2.FINDFIRST THEN BEGIN
+        DocumentType := DocumentType::"Int. Pick";
+        SourceDocNo := '';
+        WhseDocNo := TempWhseInternalPickLine2."No.";
+        RequestQty := TempWhseInternalPickLine2.Quantity;
+      END;
+
+      TempProdOrderComponent.SETRANGE("Item No.",ItemNo);
+      IF TempProdOrderComponent.FINDFIRST THEN
+        DemandQty += TempProdOrderComponent."Expected Quantity";
+
+      TempProdOrderComponent2.SETRANGE("Item No.",ItemNo);
+      IF TempProdOrderComponent2.FINDFIRST THEN BEGIN
+        Location.GET(TempProdOrderComponent2."Location Code");
+        IF Location."Require Shipment" THEN
+          DocumentType := DocumentType::"Rel. Prod. Order"
+        ELSE
+          DocumentType := DocumentType::"Rel. Prod. Order - Invt.";
+        WhseDocNo := TempProdOrderComponent2."Prod. Order No.";
+        SourceDocNo := TempProdOrderComponent2."Prod. Order No.";
+        RequestQty := TempProdOrderComponent2."Expected Quantity";
+      END;
+
+      // Calculate supply based on received Purchase Orders.
+      SupplyQty := 0;
+      PurchaseLine.SETRANGE("No.",ItemNo);
+      PurchaseLine.FINDSET;
+      REPEAT
+        Location.GET(PurchaseLine."Location Code");
+        SupplyQty += PurchaseLine."Quantity Received";
+        // For WMS and Require Receipt and Put-away locations, exclude quantities received but not put-away.
+        IF Location."Require Receive" AND Location."Require Put-away" THEN BEGIN
+          WhseActivityLine.SETRANGE("Activity Type",WhseActivityLine."Activity Type"::"Put-away");
+          WhseActivityLine.SETRANGE("Item No.",ItemNo);
+          WhseActivityLine.SETRANGE("Source Document",WhseActivityLine."Source Document"::"Purchase Order");
+          WhseActivityLine.SETRANGE("Source No.",PurchaseLine."Document No.");
+          IF WhseActivityLine.FINDFIRST THEN
+            SupplyQty -= WhseActivityLine."Qty. to Handle";
+        END;
+      UNTIL PurchaseLine.NEXT = 0;
+
+      // Expected qty to pick is minimum betqeen requested qty for the last document, and available qty to pick.
+      IF SupplyQty - DemandQty >= 0 THEN
+        EXIT(GetMin(SupplyQty - DemandQty,RequestQty));
+      EXIT(0);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SetupTestData@53(IsDirected@1001 : Boolean;RequireShip@1002 : Boolean;RequirePick@1003 : Boolean;BinMandatory@1004 : Boolean;MultipleResFactor@1006 : Integer);
+    VAR
+      Location@1005 : Record 14;
+      DocumentType@1000 : 'Shipment,Rel. Prod. Order,Int. Pick,Sales Order,Transfer Order,Rel. Prod. Order - Invt.';
+    BEGIN
+      // Test Data creation.
+      // Parameters:
+      // 1. Location for test.
+      // 2. First document type.
+      // 3. Final document type.
+      // 4. Is the put-away partial?
+      // 5. Total Qty on purchase order(s).
+      // 6. Qty on first document.
+      // 7. Qty to reserve on first document.
+      // 8. Qty to handle on the first pick generated.
+      // 9. Qty on reserved sales order.
+      // 10. Qty to reserve on the sales order.
+      // 11. Qty on final document.
+      // 12. Qty to reserve on final document.
+      // Available Qty to Pick = Qty put-away from Purchase Order(s) - Qty on first document - Qty reserved on sales order.
+
+      TempItem.DELETEALL;
+      TempLocation.DELETEALL;
+      TempWhseShipmentLine.DELETEALL;
+      TempWhseShipmentLine2.DELETEALL;
+      TempSalesLine.DELETEALL;
+      TempSalesLine2.DELETEALL;
+      TempSalesLine3.DELETEALL;
+      TempWhseInternalPickLine.DELETEALL;
+      TempWhseInternalPickLine2.DELETEALL;
+      TempProdOrderComponent.DELETEALL;
+      TempProdOrderComponent2.DELETEALL;
+      TempTransferLine.DELETEALL;
+      TempTransferLine2.DELETEALL;
+      MultipleReservations := MultipleResFactor;
+
+      SetupLocation(Location,IsDirected,RequireShip,RequirePick,BinMandatory);
+      IF IsDirected THEN BEGIN
+        // TDS Scenarios.
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,5,0,2,4,4,2,0);  // Line 1.
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,5,5,2,0,0,5,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,5,0,2,4,3,1,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,5,0,2,4,3,2,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,5,5,2,0,0,5,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,9,7,1,0,0,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,9,7,1,1,1,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,5,0,2,5,5,5,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,7,7,7,0,0,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,7,7,1,2,2,1,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,3,2,0,0,0,8,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,3,2,0,4,4,10,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,3,3,0,7,7,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,10,0,0,0,0,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,5,5,5,0,0,4,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,5,5,2,1,1,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Int. Pick",FALSE,10,5,5,2,0,0,7,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Int. Pick",FALSE,10,5,5,2,2,2,8,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Int. Pick",FALSE,10,10,2,0,0,0,8,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Int. Pick",FALSE,10,3,3,0,1,1,8,0);
+        SetupTestDataLine(Location,DocumentType::"Int. Pick",DocumentType::"Int. Pick",FALSE,10,10,0,0,0,0,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",TRUE,10,5,0,2,1,1,4,0);
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order",DocumentType::"Rel. Prod. Order",TRUE,10,3,3,0,4,4,5,0);
+
+        // Extended scenarios for other document types, using same quantities as in TDS.
+        // Bug 176926
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order",DocumentType::"Rel. Prod. Order",TRUE,10,5,0,2,4,4,2,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",FALSE,10,5,5,2,0,0,5,0);
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order",DocumentType::"Rel. Prod. Order",TRUE,10,5,0,2,4,3,1,0);
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order",DocumentType::"Rel. Prod. Order",FALSE,10,5,0,2,4,3,2,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",TRUE,10,5,5,2,0,0,5,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",TRUE,10,9,7,1,0,0,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",FALSE,10,9,7,1,1,1,3,0);
+
+        // Bug 176926
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order",DocumentType::"Rel. Prod. Order",FALSE,10,5,0,2,5,5,5,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",TRUE,10,7,7,7,0,0,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",FALSE,10,7,7,1,2,2,1,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",TRUE,10,3,2,0,0,0,8,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",TRUE,10,3,2,0,4,4,10,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",TRUE,10,3,3,0,7,7,3,0);
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order",DocumentType::"Rel. Prod. Order",FALSE,10,10,0,0,0,0,3,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",FALSE,10,5,5,5,0,0,4,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",TRUE,10,5,5,2,1,1,3,0);
+        SetupTestDataLine(Location,DocumentType::"Int. Pick",DocumentType::"Int. Pick",TRUE,10,5,0,2,4,3,1,0);
+        SetupTestDataLine(Location,DocumentType::"Int. Pick",DocumentType::"Int. Pick",FALSE,10,5,0,2,4,3,2,0);
+      END;
+
+      IF (NOT IsDirected) AND RequireShip THEN BEGIN
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,5,0,3,1,1,4,0);  // Line 1.
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,10,0,3,0,0,8,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,9,3,2,1,1,5,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,6,6,2,1,1,5,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,6,2,0,1,1,4,3);
+        // Bug 159270.
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,2,2,0,0,0,10,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,6,2,0,0,0,4,3);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,6,6,2,1,1,4,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,6,2,6,0,0,4,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,6,6,0,1,1,4,0);
+        // Bug 159270.
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,FALSE,10,2,0,2,4,4,6,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::"Rel. Prod. Order",FALSE,10,6,0,6,4,4,6,0);
+
+        // Partial receive scenarios.
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,5,0,3,1,1,4,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,9,0,3,0,0,8,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,8,3,2,1,1,5,0);
+        SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,6,6,2,1,1,5,0);
+        // Bug 166551.
+        // SetupTestDataLine(Location,DocumentType::Shipment,DocumentType::Shipment,TRUE,10,6,2,0,1,1,3,3);
+      END;
+
+      IF (NOT IsDirected) AND (NOT RequireShip) AND RequirePick THEN BEGIN
+        SetupTestDataLine(Location,DocumentType::"Sales Order",DocumentType::"Sales Order",TRUE,10,5,5,2,1,1,3,0);  // Line 1.
+        SetupTestDataLine(Location,DocumentType::"Sales Order",DocumentType::"Sales Order",TRUE,10,9,2,0,0,0,5,0);
+        SetupTestDataLine(Location,DocumentType::"Sales Order",DocumentType::"Sales Order",TRUE,10,5,2,0,1,1,3,0);
+        SetupTestDataLine(Location,DocumentType::"Transfer Order",DocumentType::"Transfer Order",FALSE,10,5,0,2,1,1,4,0);
+        SetupTestDataLine(Location,DocumentType::"Transfer Order",DocumentType::"Transfer Order",FALSE,10,9,3,2,1,1,5,0);
+        SetupTestDataLine(Location,DocumentType::"Transfer Order",DocumentType::"Transfer Order",FALSE,10,5,3,2,0,0,8,0);
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order - Invt.",
+          DocumentType::"Rel. Prod. Order - Invt.",FALSE,10,4,4,0,1,1,7,0);
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order - Invt.",
+          DocumentType::"Rel. Prod. Order - Invt.",TRUE,10,5,5,2,1,1,3,0);
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order - Invt.",
+          DocumentType::"Rel. Prod. Order - Invt.",TRUE,10,9,2,0,0,0,5,0);
+        SetupTestDataLine(Location,DocumentType::"Rel. Prod. Order - Invt.",
+          DocumentType::"Rel. Prod. Order - Invt.",TRUE,10,5,2,0,1,1,3,0);
+      END;
+      COMMIT;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SetupTestDataLine@56(Location@1020 : Record 14;FirstDocumentType@1000 : 'Shipment,Rel. Prod. Order,Int. Pick,Sales Order,Transfer Order,Rel. Prod. Order - Invt.';FinalDocumentType@1015 : 'Shipment,Rel. Prod. Order,Int. Pick,Sales Order,Transfer Order,Rel. Prod. Order - Invt.';PartialReceive@1003 : Boolean;SuppliedQty@1008 : Decimal;FirstDocQty@1001 : Decimal;FirstDocQtyReserved@1004 : Decimal;FirstDocQtyToHandle@1005 : Decimal;SecondDocQty@1006 : Decimal;SecondDocQtyReserved@1007 : Decimal;FinalDocQty@1013 : Decimal;FinalDocQtyReserved@1014 : Decimal);
+    VAR
+      SalesHeader@1010 : Record 36;
+      SalesLine@1009 : Record 37;
+      Item@1016 : Record 27;
+      AllocatedQty@1002 : Decimal;
+      DocCount@1019 : Integer;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      TempItem := Item;
+      TempItem.INSERT;
+
+      AllocatedQty := 0;
+      FOR DocCount := 1 TO MultipleReservations DO BEGIN
+        ProcessPurchaseOrder(Item."No.",Location.Code,PartialReceive AND (DocCount = 1),ROUND(SuppliedQty / MultipleReservations,1));
+        AllocatedQty += ROUND(SuppliedQty / MultipleReservations,1);
+      END;
+      IF SuppliedQty - AllocatedQty > 0 THEN
+        ProcessPurchaseOrder(Item."No.",Location.Code,FALSE,SuppliedQty - AllocatedQty);
+
+      ProcessFirstDemand(FirstDocumentType,Item."No.",Location.Code,FirstDocQty,FirstDocQtyReserved,FirstDocQtyToHandle);
+      CreateReserveSalesOrder(SalesHeader,SalesLine,Item."No.",Location.Code,SecondDocQty,SecondDocQtyReserved);
+      IF SecondDocQty > 0 THEN BEGIN
+        TempSalesLine2 := SalesLine;
+        TempSalesLine2.INSERT;
+      END;
+      ProcessFinalDemand(FinalDocumentType,Item."No.",Location.Code,FinalDocQty,FinalDocQtyReserved);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE PutAwayQty@15(PartialReceive@1000 : Boolean;QtyReceived@1001 : Decimal) : Decimal;
+    BEGIN
+      IF PartialReceive THEN
+        EXIT(QtyReceived - 1);
+      EXIT(QtyReceived);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE GetMin@16(FirstQty@1000 : Decimal;SecondQty@1001 : Decimal) : Decimal;
+    BEGIN
+      IF FirstQty < SecondQty THEN
+        EXIT(FirstQty);
+      EXIT(SecondQty);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AssignNoSeries@59();
+    VAR
+      InventorySetup@1004 : Record 313;
+      WarehouseSetup@1003 : Record 5769;
+      ManufacturingSetup@1005 : Record 99000765;
+      SalesReceivablesSetup@1006 : Record 311;
+      PurchasesPayablesSetup@1008 : Record 312;
+    BEGIN
+      InventorySetup.GET;
+      InventorySetup."Transfer Order Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      InventorySetup."Inventory Put-away Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      InventorySetup."Inventory Pick Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      InventorySetup."Posted Transfer Shpt. Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      InventorySetup.MODIFY(TRUE);
+
+      WarehouseSetup.GET;
+      WarehouseSetup."Whse. Receipt Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      WarehouseSetup."Whse. Put-away Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      WarehouseSetup."Whse. Pick Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      WarehouseSetup."Whse. Ship Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      WarehouseSetup."Whse. Internal Pick Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      WarehouseSetup.MODIFY(TRUE);
+
+      ManufacturingSetup.GET;
+      ManufacturingSetup."Released Order Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      ManufacturingSetup."Production BOM Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      ManufacturingSetup.MODIFY(TRUE);
+
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup."Customer Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      SalesReceivablesSetup."Order Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      SalesReceivablesSetup.MODIFY(TRUE);
+
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup."Vendor Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      PurchasesPayablesSetup."Order Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      PurchasesPayablesSetup."Posted Receipt Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      PurchasesPayablesSetup.MODIFY(TRUE);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@2(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE TearDown@22();
+    VAR
+      Location@1000 : Record 14;
+      ManufacturingSetup@1001 : Record 99000765;
+    BEGIN
+      TempLocation.SETRANGE("Directed Put-away and Pick",TRUE);
+      IF TempLocation.FINDFIRST THEN BEGIN
+        Location.GET(TempLocation.Code);
+        Location."Always Create Pick Line" := TempLocation."Always Create Pick Line";
+        Location."Bin Capacity Policy" := TempLocation."Bin Capacity Policy";
+        Location.MODIFY(TRUE);
+      END;
+      ManufacturingSetup.GET;
+      ManufacturingSetup."Components at Location" := '';
+      ManufacturingSetup.MODIFY(TRUE);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Warehouse] [Pick] [SCM]
+      Unsupported version tags:
+      CA: Unable to Execute
+      IN: Unable to Execute
+
+      This is the automation CU for feature 93629 - Refactoring of Availability Calculation. See TDS for details.
+      Main scenario:
+      Setup:
+      1. Create a supply for an item: one or more Purchase Orders, received and put-away.
+         Number of inbound ILEs is controlled by NoOfPurchaseDocs parameter.
+      2. Create multiple demand for an item:
+        a. First document: Sales Order and Shipment, Internal Pick, Released Prod. Order, Transfer Order.
+        b. Second document: Sales Order with reservation.
+        c. Last document: Sales Order and Shipment, Internal Pick, Released Prod. Order, Transfer Order.
+
+      Action:
+      3. Create pick from last document.
+
+      Verify:
+      4. Validate pick - for positive and partial scenarios.
+         Verify pick was not created - for negative scenarios.
+
+      Test is data driven, so the setup is decoupled from the verification. First the data bed is created and then
+      action and verification are performed for each item.
+      At the end of the execution, an error report is validated.
+    }
+    END.
+  }
+}
+

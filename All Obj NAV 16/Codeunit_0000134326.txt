@@ -1,0 +1,1091 @@
+OBJECT Codeunit 134326 ERM Purchase Blanket Order
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1002 : Codeunit 130000;
+      LibraryERM@1022 : Codeunit 131300;
+      LibraryUtility@1003 : Codeunit 131000;
+      LibraryInventory@1012 : Codeunit 132201;
+      LibraryWarehouse@1015 : Codeunit 132204;
+      LibraryPurchase@1006 : Codeunit 130512;
+      LibraryService@1011 : Codeunit 131902;
+      LibraryRandom@1001 : Codeunit 130440;
+      LibrarySetupStorage@1018 : Codeunit 131009;
+      DocumentTypeRef@1016 : 'Quote,Blanket Order,Order,Invoice,Return Order,Credit Memo,Posted Receipt,Posted Invoice,Posted Return Shipment,Posted Credit Memo';
+      IsInitialized@1000 : Boolean;
+      AmountErrorMessage@1004 : TextConst 'ENU=%1 must be %2 in %3.';
+      FieldError@1005 : TextConst 'ENU=%1 not updated correctly.';
+      VATEditableError@1008 : TextConst 'ENU=VAT Amount field must not be editable.';
+      FailedToDeletePurchaseBlanketOrder@1009 : TextConst 'ENU=Failed to delete Purchase Blanket Order';
+      RecordNotFound@1010 : TextConst 'ENU=DB:RecordNotFound';
+      NoFilterMsg@1014 : TextConst 'ENU=There should be no record with in the filter.';
+      QuantityReceivedMustNotBeGreaterErr@1017 : TextConst 'ENU=Quantity Received in the associated blanket order must not be greater than Quantity in Purchase Line Document Type';
+
+    [Test]
+    PROCEDURE PurchaseBlanketOrderCreation@3();
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      // [SCENARIO] Test that a Purchase Blanket Order Header and Lines exist after Purchase Blanket Order creation.
+
+      // Setup.
+      Initialize;
+
+      // Exercise: Create Purchase Blanket Order with Multiple Purchase Line.
+      CreatePurchaseBlanketOrder(
+        PurchaseHeader,PurchaseLine,LibraryRandom.RandInt(5),LibraryPurchase.CreateVendorNo,LibraryInventory.CreateItemNo);
+
+      // Verify: Verify that Correct Purchase Blanket Order created.
+      PurchaseHeader.GET(PurchaseHeader."Document Type",PurchaseHeader."No.");
+      PurchaseLine.GET(PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.");
+    END;
+
+    [Test]
+    PROCEDURE VATAmountPurchaseBlanketOrder@4();
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      GeneralLedgerSetup@1006 : Record 98;
+      VATAmountLine@1005 : Record 290;
+      QtyType@1003 : 'General,Invoicing,Shipping';
+    BEGIN
+      // [SCENARIO] Test VAT Amount calculated correctly on Purchase Blanket Order.
+
+      // Setup: Create a Purchase Blanket Order with Multiple Purchase Line.
+      Initialize;
+      CreatePurchaseBlanketOrder(PurchaseHeader,PurchaseLine,
+        LibraryRandom.RandInt(5),LibraryPurchase.CreateVendorNo,LibraryInventory.CreateItemNo);
+
+      // Exercise: Calculate VAT Amount on VAT Amount Line from Purchase Line.
+      PurchaseLine.CalcVATAmountLines(QtyType::Invoicing,PurchaseHeader,PurchaseLine,VATAmountLine);
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+
+      // Verify: Verify VAT Amount on Purchase Blanket Order.
+      GeneralLedgerSetup.GET;
+      PurchaseHeader.CALCFIELDS(Amount);
+      Assert.AreNearlyEqual(
+        PurchaseHeader.Amount * PurchaseLine."VAT %" / 100,VATAmountLine."VAT Amount",GeneralLedgerSetup."Amount Rounding Precision",
+        STRSUBSTNO(AmountErrorMessage,VATAmountLine.FIELDCAPTION("VAT Amount"),PurchaseHeader.Amount * PurchaseLine."VAT %" / 100,
+          VATAmountLine.TABLECAPTION));
+    END;
+
+    [Test]
+    PROCEDURE PurchaseBlanketOrderReport@5();
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      BlanketPurchaseOrder@1002 : Report 410;
+      FilePath@1000 : Text[1024];
+    BEGIN
+      // [SCENARIO] Test that a Report generated from Purchase Blanket Order and it contains some data.
+
+      // Setup: Create a Purchase Blanket Order with Multiple Purchase Line.
+      Initialize;
+      CreatePurchaseBlanketOrder(PurchaseHeader,PurchaseLine,
+        LibraryRandom.RandInt(5),LibraryPurchase.CreateVendorNo,LibraryInventory.CreateItemNo);
+
+      // Exercise: Generate Purchase Blanket Order Report and save it as external file.
+      PurchaseHeader.SETRANGE("Document Type",PurchaseHeader."Document Type"::"Blanket Order");
+      PurchaseHeader.SETRANGE("No.",PurchaseHeader."No.");
+      BlanketPurchaseOrder.SETTABLEVIEW(PurchaseHeader);
+      FilePath := TEMPORARYPATH + FORMAT(PurchaseHeader."Document Type") + PurchaseHeader."No." + '.xlsx';
+      BlanketPurchaseOrder.SAVEASEXCEL(FilePath);
+
+      // Verify: Verify that saved files have some data.
+      LibraryUtility.CheckFileNotEmpty(FilePath);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseOrderFromBlanketOrder@6();
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseHeader2@1005 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      PurchaseLine2@1004 : Record 39;
+      QtyToReceive@1002 : Decimal;
+    BEGIN
+      // [SCENARIO] Test that Quantity Received field updated after posting Purchase Order. Create Purchase Order from Purchase Blanket Order.
+
+      // Setup: Create Purchase Blanket Order with Quantity greater than 1. Change the Quantity to Receive and store it in a variable
+      // with Multiple Purchase Line.
+      Initialize;
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Blanket Order",'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,'',2 * LibraryRandom.RandInt(10));
+      PurchaseLine.VALIDATE("Qty. to Receive",PurchaseLine.Quantity - 1);
+      PurchaseLine.MODIFY(TRUE);
+      QtyToReceive := PurchaseLine."Qty. to Receive";
+
+      // Exercise: Create Purchase Order from Purchase Blanket Order and post it.
+      LibraryPurchase.BlanketPurchaseOrderMakeOrder(PurchaseHeader);
+      PurchaseLine2.SETRANGE("Blanket Order No.",PurchaseLine."Document No.");
+      PurchaseLine2.SETRANGE("Document Type",PurchaseLine2."Document Type"::Order);
+      PurchaseLine2.FINDFIRST;
+      PurchaseHeader2.GET(PurchaseLine2."Document Type",PurchaseLine2."Document No.");
+      PurchaseHeader2.VALIDATE("Vendor Invoice No.",PurchaseHeader2."No.");
+      PurchaseHeader2.MODIFY(TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader2,TRUE,TRUE);
+
+      // Verify: Verify that the correct Quantity has been updated on Purchase Blanket Order Line.
+      PurchaseLine.GET(PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.");
+      Assert.AreEqual(
+        QtyToReceive,PurchaseLine."Quantity Received",STRSUBSTNO(FieldError,PurchaseLine.FIELDCAPTION("Quantity Received")));
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE LocationOnPurchaseBlanketOrder@7();
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseHeader2@1004 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      PurchaseLine2@1003 : Record 39;
+      Location@1002 : Record 14;
+    BEGIN
+      // [SCENARIO] Test that Correct Location updated on Purchase Header after creating Purchase Order from Purchase Blanket Order.
+
+      // Setup: Create a Purchase Blanket Order. Find a Location and Update it on Purcahse Header with Multiple Purchase Line.
+      Initialize;
+      CreatePurchaseBlanketOrder(PurchaseHeader,PurchaseLine,
+        LibraryRandom.RandInt(5),LibraryPurchase.CreateVendorNo,LibraryInventory.CreateItemNo);
+      Location.SETRANGE("Bin Mandatory",FALSE);
+      Location.FINDFIRST;
+      UpdatePurchaseHeaderWithLocation(PurchaseHeader,Location.Code);
+
+      // Exercise: Create Purchase Order From Purchase Blanket Order.
+      LibraryPurchase.BlanketPurchaseOrderMakeOrder(PurchaseHeader);
+      PurchaseLine2.SETRANGE("Blanket Order No.",PurchaseHeader."No.");
+      PurchaseLine2.SETRANGE("Document Type",PurchaseLine2."Document Type"::Order);
+      PurchaseLine2.FINDFIRST;
+
+      // Verify: Verify that correct Location has been updated on the newly created Purchase Order.
+      PurchaseHeader2.GET(PurchaseLine2."Document Type",PurchaseLine2."Document No.");
+      Assert.AreEqual(
+        Location.Code,PurchaseHeader2."Location Code",STRSUBSTNO(FieldError,PurchaseHeader2.FIELDCAPTION("Location Code")));
+    END;
+
+    [Test]
+    PROCEDURE PurchOrdrInvDiscFrmPurchBlnket@1();
+    VAR
+      GeneralLedgerSetup@1003 : Record 98;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      InvDiscountAmount@1005 : Decimal;
+    BEGIN
+      // [SCENARIO] Check Invoice Discount has been flow correctly on Purchase Order after Make Order from Purchase Blanket order.
+
+      // Setup: Create a Purchase Blanket Order and Calculate Invoice Discount with 1 Fix Purchase Line.
+      Initialize;
+      CreatePurchaseBlanketOrder(PurchaseHeader,PurchaseLine,
+        1,CreateVendorInvDiscount(LibraryPurchase.CreateVendorNo),LibraryInventory.CreateItemNo);
+      CODEUNIT.RUN(CODEUNIT::"Purch.-Calc.Discount",PurchaseLine);
+      PurchaseLine.GET(PurchaseHeader."Document Type",PurchaseHeader."No.",PurchaseLine."Line No.");
+      InvDiscountAmount := PurchaseLine."Inv. Discount Amount";
+
+      // Exercise: Create Purchase Order From Purchase Blanket Order.
+      LibraryPurchase.BlanketPurchaseOrderMakeOrder(PurchaseHeader);
+
+      // Verify: Verify Invoice Discount on Created Purchase Order.
+      GeneralLedgerSetup.GET;
+      PurchaseLine.SETRANGE("Blanket Order No.",PurchaseHeader."No.");
+      PurchaseLine.SETRANGE("Document Type",PurchaseHeader."Document Type"::Order);
+      PurchaseLine.FINDFIRST;
+      Assert.AreNearlyEqual(InvDiscountAmount,PurchaseLine."Inv. Discount Amount",GeneralLedgerSetup."Amount Rounding Precision",
+        STRSUBSTNO(AmountErrorMessage,PurchaseLine.FIELDCAPTION("Inv. Discount Amount"),InvDiscountAmount,PurchaseLine.TABLECAPTION));
+    END;
+
+    [Test]
+    [HandlerFunctions(BlanketOrderStatisticsHandler)]
+    PROCEDURE VATAmountNonEditableOnStatistics@9();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      PurchaseOrderStatistics@1002 : TestPage 403;
+    BEGIN
+      // [SCENARIO] Check that field 'VAT Amount' is not editable on Purchase Blanket Order Statistics page.
+
+      // Setup: Create Purchase Blanket Order and open Statistics page.
+      Initialize;
+      CreatePurchaseBlanketOrder(PurchaseHeader,PurchaseLine,1,LibraryPurchase.CreateVendorNo,LibraryInventory.CreateItemNo);
+      PurchaseOrderStatistics.OPENEDIT;
+      PurchaseOrderStatistics.FILTER.SETFILTER("No.",PurchaseHeader."No.");
+
+      // Exercise: Invoke Drill Down on field 'No. of VAT Lines' to open 'VAT Amount Lines' page.
+      PurchaseOrderStatistics.NoOfVATLines_Invoicing.DRILLDOWN;
+
+      // Verify: Verification is done in 'BlanketOrderStatisticsHandler' handler method.
+    END;
+
+    [Test]
+    PROCEDURE PurchaseOrderFromPurchaseBlanketOrderWithPostingDateBlank@2();
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      PurchasesPayablesSetup@1005 : Record 312;
+    BEGIN
+      // [SCENARIO] Check that blank Posting Date is populating on the created Purchase Order from Blanket Order while Default Posting Date is set to No Date on the Purchase & Payables Setup.
+
+      // Setup: Update Purchase & Payables Setup and create a Purchase Blanket Order.
+      Initialize;
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"No Date");
+      CreatePurchaseBlanketOrder(PurchaseHeader,PurchaseLine,
+        LibraryRandom.RandInt(5),LibraryPurchase.CreateVendorNo,LibraryInventory.CreateItemNo);  // Take Randon value for Number of lines.
+
+      // Exercise: Create Purchase Order From Purchase Blanket Order.
+      LibraryPurchase.BlanketPurchaseOrderMakeOrder(PurchaseHeader);
+
+      // Verify: Verify that Posting Date must be blank on the newly created Purchase Order.
+      PurchaseLine.SETRANGE("Blanket Order No.",PurchaseHeader."No.");
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.FINDFIRST;
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      PurchaseHeader.TESTFIELD("Posting Date",0D);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseOrderCreationFromBlanketOrder@17();
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      Vendor@1005 : Record 23;
+    BEGIN
+      // [SCENARIO] Check Blanket Order No. and Blanket Order Line No. in Purchase Order created from Purchase Blanket Order.
+
+      // Setup.
+      Initialize;
+      LibraryPurchase.CreateVendor(Vendor);
+      CreatePurchaseBlanketOrder(PurchaseHeader,PurchaseLine,1,Vendor."No.",LibraryInventory.CreateItemNo);  // Using 1 to create single Purchase Line.
+
+      // Exercise: Create Purchase Order From Purchase Blanket Order.
+      LibraryPurchase.BlanketPurchaseOrderMakeOrder(PurchaseHeader);
+
+      // Verify: Verify that newly created Purchase Line contains correct Blanket Order No. and Blanket Order Line No.
+      VerifyBlanketOrderDetailsOnPurchaseLine(
+        PurchaseLine,PurchaseLine."Document Type"::Order,Vendor."No.",PurchaseHeader."No.",PurchaseLine."Line No.");
+    END;
+
+    [Test]
+    PROCEDURE PurchaseBlanketOrderUsingCopyDocument@25();
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      PurchaseLine2@1001 : Record 39;
+    BEGIN
+      // [SCENARIO] Check that Purchase Blanket Order created using Copy Document does not contain Blanket Order No. and Blanket Order Line No.
+
+      // Setup.
+      Initialize;
+      CreatePurchaseOrderFromBlanketOrder(PurchaseLine);
+
+      // Exercise: Create a new Purchase Blanket Order from the Purchase Order created using Purchase Blanket Order.
+      CopyPurchaseDocument(
+        PurchaseHeader,PurchaseLine."Buy-from Vendor No.",PurchaseLine."Document No.",
+        PurchaseHeader."Document Type"::"Blanket Order",DocumentTypeRef::Order,FALSE);
+
+      // Verify: Verify Blanket Order created after Copy Purchase Document Batch Job doesn't contain Blanket Order No. and Line No.
+      PurchaseLine2.SETRANGE("Document No.",PurchaseHeader."No.");
+      VerifyBlanketOrderDetailsOnPurchaseLine(
+        PurchaseLine2,PurchaseLine."Document Type"::"Blanket Order",PurchaseLine."Buy-from Vendor No.",'',0);
+    END;
+
+    [Test]
+    PROCEDURE DeletePurchaseBlanketOrder@81();
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      // [SCENARIO] Check that Purchase Blanket Order can be deleted successfully after Purchase Order Posting.
+
+      // Setup: Post the Order created after Making Order from Blanket Purchase Order.
+      Initialize;
+      CreatePurchaseOrderFromBlanketOrder(PurchaseLine);
+      PurchaseHeader.GET(PurchaseHeader."Document Type"::Order,PurchaseLine."Document No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      PurchaseHeader.GET(PurchaseHeader."Document Type"::"Blanket Order",PurchaseLine."Blanket Order No.");
+      PurchaseHeader.DELETE(TRUE);
+
+      // Exercise:
+      ASSERTERROR PurchaseHeader.GET(PurchaseHeader."Document Type"::"Blanket Order",PurchaseLine."Blanket Order No.");
+
+      // Verify: Verify that Blanket Order created earlier can be successfully deleted after posting Purchase Order and show error while trying to GET the same doucment.
+      Assert.VerifyFailure(RecordNotFound,FailedToDeletePurchaseBlanketOrder);
+    END;
+
+    [Test]
+    PROCEDURE CreatePurchOrderFromBlanketOrderWithItemCharge@33();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      // [SCENARIO] Verify Puchase Order created from Blanket Order with Item Charge.
+
+      // Setup: Create Purchase Blanket Order with Item Charge.
+      Initialize;
+      CreatePurchaseBlanketOrderWithItemCharge(PurchaseHeader);
+      FindPurchaseLine(PurchaseLine,PurchaseLine."Document Type"::"Blanket Order",PurchaseHeader."Buy-from Vendor No.");
+
+      // Exercise.
+      LibraryPurchase.BlanketPurchaseOrderMakeOrder(PurchaseHeader); // Create Purchase Order from Blanket Purchase Order.
+
+      // Verify: Verify Puchase Order created from Blanket Order with Item Charge.
+      VerifyBlanketOrderDetailsOnPurchaseLine(
+        PurchaseLine,PurchaseLine."Document Type"::Order,PurchaseHeader."Buy-from Vendor No.",PurchaseHeader."No.",
+        PurchaseLine."Line No.");
+    END;
+
+    [Test]
+    PROCEDURE ExtTextOnPurchBlnktOrd@28();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      // [SCENARIO] Verify Exetended Text on Blanket Purchase Order.
+
+      // Setup: Create Blanket Purchase Header.
+      Initialize;
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Blanket Order",'');
+
+      // Exercise: Create Item, Blanket Purchase Order Line.
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,CreateExtendedTextItem,LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+
+      // Verify: Verify Extended Text on Blanket Purchase Order Line.
+      Assert.IsFalse(FindExtendedTextLine(PurchaseLine."Document Type"::"Blanket Order",PurchaseLine.Description),NoFilterMsg);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseOrderUnitCostFromBlanketOrder@19();
+    VAR
+      PurchaseHeaderBlanket@1001 : Record 38;
+      PurchaseLineBlanket@1000 : Record 39;
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      Location@1005 : Record 14;
+      ItemUnitOfMeasure@1007 : Record 5404;
+      ItemNo@1006 : Code[20];
+    BEGIN
+      // [SCENARIO 362692] Fields "Location Code", "Unit of Measure", "Direct Unit Cost", "Line Discount %" are copied from Blanket Order to Purchase Order when Blanket Order and Line set manually
+      Initialize;
+      ItemNo := LibraryInventory.CreateItemNo;
+      LibraryInventory.CreateItemUnitOfMeasureCode(ItemUnitOfMeasure,ItemNo,1);
+      LibraryWarehouse.CreateLocation(Location);
+
+      // [GIVEN] Purchase Blanket Order for item "X"
+      CreatePurchaseBlanketOrder(PurchaseHeaderBlanket,PurchaseLineBlanket,1,LibraryPurchase.CreateVendorNo,ItemNo); // 1 line is enough for test
+      PurchaseLineBlanket.VALIDATE("Location Code",Location.Code);
+      PurchaseLineBlanket.VALIDATE("Unit of Measure Code",ItemUnitOfMeasure.Code);
+      PurchaseLineBlanket.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(100,2));
+      PurchaseLineBlanket.VALIDATE("Line Discount %",LibraryRandom.RandDec(100,2));
+      PurchaseLineBlanket.MODIFY(TRUE);
+
+      // [GIVEN] Purchase Order with a line for the item "X"
+      LibraryPurchase.CreatePurchHeader(
+        PurchaseHeader,PurchaseHeader."Document Type"::Order,PurchaseHeaderBlanket."Buy-from Vendor No.");
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,PurchaseLineBlanket."No.",PurchaseLineBlanket.Quantity);
+
+      // [WHEN] "Blanket Order Line No." is set manually
+      UpdatePurchaseLineWithBlanketOrder(
+        PurchaseLine,PurchaseHeaderBlanket."No.",PurchaseLineBlanket."Line No.");
+
+      // [THEN] Fields "Location Code", "Unit of Measure", "Direct Unit Cost", "Line Discount %", "Line Discount Amount" are copied from Blanket Order Line
+      WITH PurchaseLine DO BEGIN
+        Assert.AreEqual(
+          PurchaseLineBlanket."Location Code","Location Code",FIELDCAPTION("Location Code"));
+        Assert.AreEqual(
+          PurchaseLineBlanket."Unit of Measure","Unit of Measure",FIELDCAPTION("Unit of Measure"));
+        Assert.AreEqual(
+          PurchaseLineBlanket."Direct Unit Cost","Direct Unit Cost",FIELDCAPTION("Direct Unit Cost"));
+        Assert.AreEqual(
+          PurchaseLineBlanket."Line Discount %","Line Discount %",FIELDCAPTION("Line Discount %"));
+        Assert.AreEqual(
+          PurchaseLineBlanket."Line Discount Amount","Line Discount Amount",FIELDCAPTION("Line Discount Amount"));
+      END;
+    END;
+
+    [Test]
+    PROCEDURE CrMemoFromBlanketOrderByCopyDocument@38();
+    VAR
+      PurchaseLineOrder@1001 : Record 39;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      PurchasesPayablesSetup@1007 : Record 312;
+    BEGIN
+      // [FEATURE] [Copy Document]
+      // [SCENARIO 375760] Blanket Order fields should be empty when create Credit Memo using Copy Document
+      Initialize;
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"Work Date");
+
+      // [GIVEN] Purchase Order from Blanket Order
+      CreatePurchaseOrderFromBlanketOrder(PurchaseLineOrder);
+
+      // [WHEN] Copy Document to Credit Memo from Purchase Order
+      CopyPurchaseDocument(
+        PurchaseHeader,PurchaseLineOrder."Buy-from Vendor No.",PurchaseLineOrder."Document No.",
+        PurchaseHeader."Document Type"::"Credit Memo",DocumentTypeRef::Order,FALSE);
+
+      // [THEN] "Blanket Order No."/ "Blanket Order Line No." fields are empty in Purchase Credit Memo line
+      VerifyBlanketOrderDetailsOnPurchaseLine(
+        PurchaseLine,PurchaseHeader."Document Type"::"Credit Memo",PurchaseLineOrder."Buy-from Vendor No.",'',0);
+    END;
+
+    [Test]
+    PROCEDURE ReturnOrderFromBlanketOrderByCopyDocument@39();
+    VAR
+      PurchaseLineOrder@1001 : Record 39;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      PurchasesPayablesSetup@1007 : Record 312;
+    BEGIN
+      // [FEATURE] [Copy Document]
+      // [SCENARIO 375760] Blanket Order fields should be empty when create Return Order using Copy Document
+      Initialize;
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"Work Date");
+
+      // [GIVEN] Purchase Order from Blanket Order
+      CreatePurchaseOrderFromBlanketOrder(PurchaseLineOrder);
+
+      // [WHEN] Copy Document to Return Order from Purchase Order
+      CopyPurchaseDocument(
+        PurchaseHeader,PurchaseLineOrder."Buy-from Vendor No.",PurchaseLineOrder."Document No.",
+        PurchaseHeader."Document Type"::"Return Order",DocumentTypeRef::Order,FALSE);
+
+      // [THEN] "Blanket Order No."/ "Blanket Order Line No." fields are empty in Purchase Return Order line
+      VerifyBlanketOrderDetailsOnPurchaseLine(
+        PurchaseLine,PurchaseHeader."Document Type"::"Return Order",PurchaseLineOrder."Buy-from Vendor No.",'',0);
+    END;
+
+    [Test]
+    [HandlerFunctions(GetPostedDocLinesPageHandler)]
+    PROCEDURE CrMemoFromBlanketOrderByGetDocLinesToReverse@71();
+    VAR
+      PurchaseLineOrder@1001 : Record 39;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      PurchasesPayablesSetup@1007 : Record 312;
+      PurchaseCreditMemoPage@1005 : TestPage 52;
+    BEGIN
+      // [FEATURE] [Get Document Lines To Reverse]
+      // [SCENARIO 375760] Blanket Order fields should be empty when create Credit Memo using Get Document Lines To Reverse
+      Initialize;
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"Work Date");
+
+      // [GIVEN] Posted Purchase Order from Blanket Order
+      CreateAndPostPurchaseOrderFromBlanketOrder(PurchaseLineOrder);
+
+      // [GIVEN] Credit Memo Header
+      LibraryPurchase.CreatePurchHeader(
+        PurchaseHeader,PurchaseHeader."Document Type"::"Credit Memo",PurchaseLineOrder."Buy-from Vendor No.");
+
+      // [WHEN] Get Document Lines To Reverse to Credit Memo from Purchase Order
+      PurchaseCreditMemoPage.OPENEDIT;
+      PurchaseCreditMemoPage.GOTORECORD(PurchaseHeader);
+      PurchaseCreditMemoPage.GetPostedDocumentLinesToReverse.INVOKE;
+
+      // [THEN] "Blanket Order No."/ "Blanket Order Line No." fields are empty in Purchase Credit Memo line
+      VerifyBlanketOrderDetailsOnPurchaseLine(
+        PurchaseLine,PurchaseHeader."Document Type"::"Credit Memo",PurchaseLineOrder."Buy-from Vendor No.",'',0);
+    END;
+
+    [Test]
+    [HandlerFunctions(GetPostedDocLinesPageHandler)]
+    PROCEDURE ReturnOrderFromBlanketOrderByGetDocLinesToReverse@70();
+    VAR
+      PurchaseLineOrder@1001 : Record 39;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      PurchasesPayablesSetup@1007 : Record 312;
+      PurchaseReturnOrderPage@1005 : TestPage 6640;
+    BEGIN
+      // [FEATURE] [Get Document Lines To Reverse]
+      // [SCENARIO 375760] Blanket Order fields should be empty when create Return Order using Get Document Lines To Reverse
+      Initialize;
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"Work Date");
+
+      // [GIVEN] Posted Purchase Order from Blanket Order
+      CreateAndPostPurchaseOrderFromBlanketOrder(PurchaseLineOrder);
+
+      // [GIVEN] Return Order Header
+      LibraryPurchase.CreatePurchHeader(
+        PurchaseHeader,PurchaseHeader."Document Type"::"Return Order",PurchaseLineOrder."Buy-from Vendor No.");
+
+      // [WHEN] Get Document Lines To Reverse to Return Order from Purchase Order
+      PurchaseReturnOrderPage.OPENEDIT;
+      PurchaseReturnOrderPage.GOTORECORD(PurchaseHeader);
+      PurchaseReturnOrderPage.GetPostedDocumentLinesToReverse.INVOKE;
+
+      // [THEN] "Blanket Order No."/ "Blanket Order Line No." fields are empty in Purchase Return Order line
+      VerifyBlanketOrderDetailsOnPurchaseLine(
+        PurchaseLine,PurchaseHeader."Document Type"::"Return Order",PurchaseLineOrder."Buy-from Vendor No.",'',0);
+    END;
+
+    [Test]
+    PROCEDURE SecondPurchaseInvoiceByCopyDocumentRecalculateYes@106();
+    VAR
+      PurchasesPayablesSetup@1000 : Record 312;
+      PurchaseLineOrder@1002 : Record 39;
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1005 : Record 39;
+      InvoiceNo@1003 : Code[20];
+    BEGIN
+      // [FEATURE] [Copy Document]
+      // [SCENARIO 375760] Blanket Order fields should be empty when create Purchase Invoice using Copy Document with Recalculate Lines = Yes
+      Initialize;
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"Work Date");
+
+      // [GIVEN] Posted Purchase Order from Blanket Order
+      InvoiceNo := CreateAndPostPurchaseOrderFromBlanketOrder(PurchaseLineOrder);
+
+      // [WHEN] Copy Document to Purchase Invoice from Purchase Order with Recalculate Lines = Yes
+      CopyPurchaseDocument(
+        PurchaseHeader,PurchaseLineOrder."Buy-from Vendor No.",InvoiceNo,
+        PurchaseHeader."Document Type"::Invoice,DocumentTypeRef::"Posted Invoice",TRUE);
+
+      // [THEN] "Blanket Order No."/ "Blanket Order Line No." fields are empty in Purchase Invoice line
+      VerifyBlanketOrderDetailsOnPurchaseLine(
+        PurchaseLine,PurchaseHeader."Document Type"::Invoice,PurchaseLineOrder."Buy-from Vendor No.",'',0);
+    END;
+
+    [Test]
+    PROCEDURE PostSecondPurchaseInvoiceByCopyDocumentRecalculateNo@108();
+    VAR
+      PurchasesPayablesSetup@1000 : Record 312;
+      PurchaseLineOrder@1001 : Record 39;
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1005 : Record 39;
+      InvoiceNo@1003 : Code[20];
+    BEGIN
+      // [FEATURE] [Copy Document]
+      // [SCENARIO 375760] Blanket Order fields should be filled in and Purchase Invoice should not be posted when it is copied with Recalculate Lines = No
+      Initialize;
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"Work Date");
+
+      // [GIVEN] Posted Purchase Order from Blanket Order
+      InvoiceNo := CreateAndPostPurchaseOrderFromBlanketOrder(PurchaseLineOrder);
+
+      // [GIVEN] Copy Document to Purchase Invoice from Purchase Order with Recalculate Lines = No
+      CopyPurchaseDocument(
+        PurchaseHeader,PurchaseLineOrder."Buy-from Vendor No.",InvoiceNo,
+        PurchaseHeader."Document Type"::Invoice,DocumentTypeRef::"Posted Invoice",FALSE);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader."Document Type"::Invoice,PurchaseHeader."Buy-from Vendor No.");
+
+      // [WHEN] Post second Purchase Invoice
+      ASSERTERROR LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [THEN] "Blanket Order No."/ "Blanket Order Line No." fields in Purchase Invoice line are equal to the fields in Purchase Order
+      PurchaseLine.TESTFIELD("Blanket Order No.",PurchaseLineOrder."Blanket Order No.");
+      PurchaseLine.TESTFIELD("Blanket Order Line No.",PurchaseLineOrder."Blanket Order Line No.");
+      // [THEN] Error raised "Quantity Received in the associated blanket order must not be greater than Quantity in Purchase Line Document Type"
+      Assert.ExpectedError(QuantityReceivedMustNotBeGreaterErr);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseInvoiceAfterCrMemoFromBlanketOrder@29();
+    VAR
+      PurchaseLineOrder@1001 : Record 39;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      PurchasesPayablesSetup@1007 : Record 312;
+      InvoiceNo@1003 : Code[20];
+      CrMemoNo@1005 : Code[20];
+    BEGIN
+      // [FEATURE] [Copy Document]
+      // [SCENARIO 375760] Posting new Invoice after correction of first Purchase Invoice from Blanket Order by Credit Memo
+      Initialize;
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"Work Date");
+
+      // [GIVEN] Posted Purchase Order from Blanket Order with Quantity = "X"
+      InvoiceNo := CreateAndPostPurchaseOrderFromBlanketOrder(PurchaseLineOrder);
+
+      // [GIVEN] Copy and Post Purchase Credit Memo from Posted Invoice with Recalculate Lines = No
+      CopyPurchaseDocument(
+        PurchaseHeader,PurchaseLineOrder."Buy-from Vendor No.",InvoiceNo,
+        PurchaseHeader."Document Type"::"Credit Memo",DocumentTypeRef::"Posted Invoice",FALSE);
+      CrMemoNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [GIVEN] Copy Purchase Invoice from Credit Memo with Recalculate Lines = No
+      CopyPurchaseDocument(
+        PurchaseHeader,PurchaseLineOrder."Buy-from Vendor No.",CrMemoNo,
+        PurchaseHeader."Document Type"::Invoice,DocumentTypeRef::"Posted Credit Memo",FALSE);
+
+      // [WHEN] Post new copied Purchase Invoice
+      InvoiceNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [THEN] "Blanket Order No."/ "Blanket Order Line No." fields are empty in Posted Purchase Invoice line
+      VerifyBlanketOrderFieldsOnPurchaseInvoiceLine(InvoiceNo,'',0);
+      // [THEN] Quantity Received in Blanket Order is equal to "X"
+      FindPurchaseLine(PurchaseLine,PurchaseHeader."Document Type"::"Blanket Order",PurchaseLineOrder."Buy-from Vendor No.");
+      PurchaseLine.TESTFIELD("Quantity Received",PurchaseLineOrder.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseInvoiceAfterCrMemoWithManuallySetBlanketFieldsFromBlanketOrder@34();
+    VAR
+      PurchaseLineOrder@1006 : Record 39;
+      PurchaseHeader@1005 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      PurchLineBOAfterCrM@1009 : Record 39;
+      PurchasesPayablesSetup@1002 : Record 312;
+      InvoiceNo@1001 : Code[20];
+      CrMemoNo@1000 : Code[20];
+    BEGIN
+      // [FEATURE] [Copy Document]
+      // [SCENARIO 375760] Posting new Invoice after correction of Purchase Invoice from Blanket Order by Credit Memo with manually updated Blanket fields
+      Initialize;
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"Work Date");
+
+      // [GIVEN] Posted Purchase Order from Blanket Order with Quantity = "X"
+      InvoiceNo := CreateAndPostPurchaseOrderFromBlanketOrder(PurchaseLineOrder);
+
+      // [GIVEN] Copy and Post Purchase Credit Memo from Posted Invoice with Recalculate Lines = No, set "Blanket Order No./Line No."
+      CopyPurchaseDocument(
+        PurchaseHeader,PurchaseLineOrder."Buy-from Vendor No.",InvoiceNo,
+        PurchaseHeader."Document Type"::"Credit Memo",DocumentTypeRef::"Posted Invoice",FALSE);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader."Document Type"::"Credit Memo",PurchaseLineOrder."Buy-from Vendor No.");
+      PurchaseLine.VALIDATE("Blanket Order No.",PurchaseLineOrder."Blanket Order No.");
+      PurchaseLine.VALIDATE("Blanket Order Line No.",PurchaseLineOrder."Blanket Order Line No.");
+      PurchaseLine.MODIFY(TRUE);
+      CrMemoNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      FindPurchaseLine(PurchLineBOAfterCrM,PurchaseHeader."Document Type"::"Blanket Order",PurchaseLineOrder."Buy-from Vendor No.");
+
+      // [GIVEN] Copy Purchase Invoice from Credit Memo with Recalculate Lines = No
+      CopyPurchaseDocument(
+        PurchaseHeader,PurchaseLineOrder."Buy-from Vendor No.",CrMemoNo,
+        PurchaseHeader."Document Type"::Invoice,DocumentTypeRef::"Posted Credit Memo",FALSE);
+
+      // [WHEN] Post copied Purchase Invoice
+      InvoiceNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [THEN] "Blanket Order No."/ "Blanket Order Line No." fields are filled in Posted Purchase Invoice line
+      VerifyBlanketOrderFieldsOnPurchaseInvoiceLine(InvoiceNo,PurchLineBOAfterCrM."Document No.",PurchLineBOAfterCrM."Line No.");
+      // [THEN] Quantity Received in Blanket Order is 0 after posting of Credit Memo
+      PurchLineBOAfterCrM.TESTFIELD("Quantity Received",0);
+      // [THEN] Quantity Received in Blanket Order is equal to "X"
+      FindPurchaseLine(PurchaseLine,PurchaseHeader."Document Type"::"Blanket Order",PurchaseLineOrder."Buy-from Vendor No.");
+      PurchaseLine.TESTFIELD("Quantity Received",PurchaseLineOrder.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE AmountCanBeUpdatedOnInvoicedBlanketPurchaseOrderItemChargeLine@20();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      NewDirectUnitCost@1002 : Decimal;
+    BEGIN
+      // [FEATURE] [Item Charge]
+      // [SCENARIO 202722] Direct Unit Cost could be updated on Blanket Purchase Order line with item charge after the line is invoiced.
+      Initialize;
+
+      // [GIVEN] Blanket Purchase Order line with Item Charge partially invoiced.
+      MockBlanketPurchaseHeader(PurchaseHeader);
+      MockPurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::"Charge (Item)");
+
+      // [WHEN] Update Direct Unit Cost on the line.
+      NewDirectUnitCost := LibraryRandom.RandDecInRange(11,20,2);
+      PurchaseLine.VALIDATE("Direct Unit Cost",NewDirectUnitCost);
+
+      // [THEN] The unit cost is updated.
+      PurchaseLine.TESTFIELD("Direct Unit Cost",NewDirectUnitCost);
+    END;
+
+    [Test]
+    PROCEDURE InvoicedBlanketPurchaseOrderItemChargeLineCanBeDeleted@21();
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      // [FEATURE] [Item Charge]
+      // [SCENARIO 202722] Invoiced Blanket Purchase Order line with item charge could be deleted.
+      Initialize;
+
+      // [GIVEN] Blanket Purchase Order line with Item Charge partially invoiced.
+      MockBlanketPurchaseHeader(PurchaseHeader);
+      MockPurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::"Charge (Item)");
+
+      // [WHEN] Delete the purchase line.
+      PurchaseLine.DELETE(TRUE);
+
+      // [THEN] The purchase line has been deleted.
+      PurchaseLine.SETRANGE("Document Type",PurchaseHeader."Document Type");
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      Assert.RecordIsEmpty(PurchaseLine);
+    END;
+
+    [Test]
+    PROCEDURE OrderDocumentDateEqualsToWorkDateWhenDefPostingDateNoDate@18();
+    VAR
+      PurchasesPayablesSetup@1003 : Record 312;
+    BEGIN
+      // [SCENARIO 218835] Create Sales Order from Blanket Order when "Default Posting Date" = "No Date" in Sales & Receivable setup
+      Initialize;
+
+      // [GIVEN] TAB312."Default Posting Date" = "No Date"
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"No Date");
+
+      // [GIVEN] Purchase Blanket Order with "Document Date" = 01.01.2017
+      // [WHEN] Create Purchase Order from the Blanket Purchase Order on 02.01.2017
+      // [THEN] "Document Date" of the Purchase Order equals to 02.01.2017
+      VerifyDocumentDates;
+    END;
+
+    [Test]
+    PROCEDURE OrderDocumentDateEqualsToWorkDateWhenDefPostingDateWorkDate@32();
+    VAR
+      PurchasesPayablesSetup@1003 : Record 312;
+    BEGIN
+      // [SCENARIO 218835] Create Sales Order from Blanket Order when "Default Posting Date" = "Work Date" in Sales & Receivable setup
+      Initialize;
+
+      // [GIVEN] TAB312."Default Posting Date" = "Work Date"
+      UpdatePurchasePayablesSetup(PurchasesPayablesSetup."Default Posting Date"::"Work Date");
+
+      // [GIVEN] Purchase Blanket Order with "Document Date" = 01.01.2017
+      // [WHEN] Create Purchase Order from the Blanket Purchase Order on 02.01.2017
+      // [THEN] "Document Date" of the Purchase Order equals to 02.01.2017
+      VerifyDocumentDates;
+    END;
+
+    LOCAL PROCEDURE Initialize@12();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      LibrarySetupStorage.Restore;
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      LibrarySetupStorage.Save(DATABASE::"Purchases & Payables Setup");
+      IsInitialized := TRUE;
+    END;
+
+    LOCAL PROCEDURE CreateExtendedTextItem@59() : Code[20];
+    VAR
+      Item@1002 : Record 27;
+      ExtendedTextHeader@1001 : Record 279;
+      ExtendedTextLine@1000 : Record 280;
+    BEGIN
+      // Create Item.
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Automatic Ext. Texts",TRUE);
+      Item.MODIFY(TRUE);
+
+      // Create Extended Text Header and Line.
+      LibraryService.CreateExtendedTextHeaderItem(ExtendedTextHeader,Item."No.");
+      ExtendedTextHeader.VALIDATE("Purchase Blanket Order",FALSE);
+      ExtendedTextHeader.MODIFY(TRUE);
+      LibraryService.CreateExtendedTextLineItem(ExtendedTextLine,ExtendedTextHeader);
+      ExtendedTextLine.VALIDATE(Text,Item."No.");
+      ExtendedTextLine.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseBlanketOrder@11(VAR PurchaseHeader@1002 : Record 38;VAR PurchaseLine@1000 : Record 39;NoOfLines@1001 : Integer;VendorNo@1004 : Code[20];ItemNo@1005 : Code[20]);
+    VAR
+      Counter@1003 : Integer;
+    BEGIN
+      // Create Multiple Purchase Lines with Random Quantity more than one and Direct Unit Cost. greater than 99 (Standard Value).
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Blanket Order",VendorNo);
+      FOR Counter := 1 TO NoOfLines DO BEGIN
+        LibraryPurchase.CreatePurchaseLine(
+          PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,LibraryRandom.RandDec(10,2));
+        PurchaseLine.VALIDATE("Direct Unit Cost",100 + LibraryRandom.RandDec(10,2));
+      END;
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseBlanketOrderWithItemCharge@14(VAR PurchaseHeader@1002 : Record 38);
+    VAR
+      Location@1003 : Record 14;
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      // Create Multiple Purchase Header, Find Location and update on Header.
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Blanket Order",'');
+      Location.SETRANGE("Bin Mandatory",FALSE);
+      Location.FINDFIRST;
+      UpdatePurchaseHeaderWithLocation(PurchaseHeader,Location.Code);
+
+      // Create Purchase Line with Item and update Direct Unit Cost.
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,'',LibraryRandom.RandDec(50,2));  // Used Random Value for Quantity.
+      UpdatePurchaseLine(PurchaseLine);
+
+      // Find Charge Item and create Purchase Line with Item (Charge) and update Direct Unit Cost.
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::"Charge (Item)",
+        LibraryInventory.CreateItemChargeNo,PurchaseLine.Quantity);
+      UpdatePurchaseLine(PurchaseLine);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderFromBlanketOrder@8(VAR PurchaseLine@1000 : Record 39);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      Vendor@1002 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      CreatePurchaseBlanketOrder(PurchaseHeader,PurchaseLine,1,Vendor."No.",LibraryInventory.CreateItemNo);  // Using 1 to create single Purchase Line.
+      LibraryPurchase.BlanketPurchaseOrderMakeOrder(PurchaseHeader); // Create Purchase Order from Blanket Purchase Order.
+      PurchaseLine.SETRANGE("Blanket Order No.",PurchaseHeader."No.");
+      FindPurchaseLine(PurchaseLine,PurchaseLine."Document Type"::Order,Vendor."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrderFromBlanketOrder@61(VAR PurchaseLine@1001 : Record 39) : Code[20];
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      CreatePurchaseOrderFromBlanketOrder(PurchaseLine);
+      PurchaseHeader.GET(PurchaseHeader."Document Type"::Order,PurchaseLine."Document No.");
+      EXIT(LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE));
+    END;
+
+    LOCAL PROCEDURE CreateVendorInvDiscount@16(VendorNo@1001 : Code[20]) : Code[20];
+    VAR
+      VendorInvoiceDisc@1000 : Record 24;
+      LibraryERM@1002 : Codeunit 131300;
+    BEGIN
+      LibraryERM.CreateInvDiscForVendor(VendorInvoiceDisc,VendorNo,'',0); // Set Zero for Charge Amount.
+      VendorInvoiceDisc.VALIDATE("Discount %",LibraryRandom.RandDec(10,2));  // Take Random Discount.
+      VendorInvoiceDisc.MODIFY(TRUE);
+      EXIT(VendorNo);
+    END;
+
+    LOCAL PROCEDURE MockBlanketPurchaseHeader@58(VAR PurchaseHeader@1000 : Record 38);
+    BEGIN
+      WITH PurchaseHeader DO BEGIN
+        INIT;
+        "Document Type" := "Document Type"::"Blanket Order";
+        "No." := LibraryUtility.GenerateRandomCode(FIELDNO("No."),DATABASE::"Purchase Header");
+        "Buy-from Vendor No." := LibraryUtility.GenerateGUID;
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE MockPurchaseLine@92(VAR PurchaseLine@1001 : Record 39;PurchaseHeader@1000 : Record 38;LineType@1002 : Option);
+    BEGIN
+      WITH PurchaseLine DO BEGIN
+        INIT;
+        "Document Type" := PurchaseHeader."Document Type";
+        "Document No." := PurchaseHeader."No.";
+        "Line No." := LibraryUtility.GetNewRecNo(PurchaseLine,FIELDNO("Line No."));
+        Type := LineType;
+        "No." := LibraryUtility.GenerateGUID;
+        Quantity := LibraryRandom.RandIntInRange(11,20);
+        "Quantity Invoiced" := LibraryRandom.RandInt(10);
+        "Direct Unit Cost" := LibraryRandom.RandDec(10,2);
+        "Line Amount" := Quantity * "Direct Unit Cost";
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CopyPurchaseDocument@26(VAR PurchaseHeader@1000 : Record 38;VendorNo@1003 : Code[20];DocumentNo@1004 : Code[20];DocumentType@1007 : Option;FromDocType@1006 : Option;Recalculate@1002 : Boolean);
+    BEGIN
+      CLEAR(PurchaseHeader);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocumentType,VendorNo);
+      LibraryPurchase.CopyPurchaseDocument(PurchaseHeader,FromDocType,DocumentNo,TRUE,Recalculate);  // Set TRUE for Include Header
+    END;
+
+    LOCAL PROCEDURE FindExtendedTextLine@30(DocumentType@1001 : Option;Description@1002 : Text[50]) : Boolean;
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",DocumentType);
+      PurchaseLine.SETRANGE(Type,PurchaseLine.Type::" ");  // Blank value for Type.
+      PurchaseLine.SETRANGE(Description,Description);
+      EXIT(PurchaseLine.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE FindPurchaseLine@40(VAR PurchaseLine@1000 : Record 39;DocumentType@1001 : Option;BuyFromVendorNo@1002 : Code[20]);
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",DocumentType);
+      PurchaseLine.SETRANGE("Buy-from Vendor No.",BuyFromVendorNo);
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseHeaderWithLocation@24(VAR PurchaseHeader@1000 : Record 38;LocationCode@1001 : Code[10]);
+    BEGIN
+      PurchaseHeader.VALIDATE("Location Code",LocationCode);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseLine@31(VAR PurchaseLine@1000 : Record 39);
+    BEGIN
+      PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(100,2));  // Use Random Value for Direct Unit Cost.
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseLineWithBlanketOrder@35(VAR PurchaseLine@1000 : Record 39;BlanketOrderNo@1001 : Code[20];BlanketOrderLineNo@1002 : Integer);
+    BEGIN
+      PurchaseLine.VALIDATE("Blanket Order No.",BlanketOrderNo);
+      PurchaseLine.VALIDATE("Blanket Order Line No.",BlanketOrderLineNo);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchasePayablesSetup@82(DefaultPostingDate@1002 : Option);
+    VAR
+      PurchasesPayablesSetup@1000 : Record 312;
+    BEGIN
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.VALIDATE("Default Posting Date",DefaultPostingDate);
+      PurchasesPayablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyBlanketOrderDetailsOnPurchaseLine@119(VAR PurchaseLine@1000 : Record 39;DocumentType@1002 : Option;VendorNo@1003 : Code[20];BlanketOrderNo@1004 : Code[20];BlanketOrderLineNo@1005 : Integer);
+    BEGIN
+      FindPurchaseLine(PurchaseLine,DocumentType,VendorNo);
+      PurchaseLine.TESTFIELD("Blanket Order No.",BlanketOrderNo);
+      PurchaseLine.TESTFIELD("Blanket Order Line No.",BlanketOrderLineNo);
+    END;
+
+    LOCAL PROCEDURE VerifyBlanketOrderFieldsOnPurchaseInvoiceLine@50(InvoiceNo@1001 : Code[20];BlanketOrderNo@1002 : Code[20];BlanketOrderLineNo@1003 : Integer);
+    VAR
+      PurchInvLine@1000 : Record 123;
+    BEGIN
+      WITH PurchInvLine DO BEGIN
+        SETRANGE("Document No.",InvoiceNo);
+        SETRANGE(Type,Type::Item);
+        FINDFIRST;
+        TESTFIELD("Blanket Order No.",BlanketOrderNo);
+        TESTFIELD("Blanket Order Line No.",BlanketOrderLineNo);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyDocumentDates@36();
+    VAR
+      BlanketPurchaseHeader@1003 : Record 38;
+      BlanketPurchaseLine@1002 : Record 39;
+      PurchaseHeader@1001 : Record 38;
+      PaymentTerms@1005 : Record 3;
+      Vendor@1004 : Record 23;
+      PurchHeaderNo@1000 : Code[20];
+    BEGIN
+      Vendor.GET(LibraryPurchase.CreateVendorNo);
+      LibraryERM.CreatePaymentTermsDiscount(PaymentTerms,FALSE);
+      Vendor.VALIDATE("Payment Terms Code",PaymentTerms.Code);
+      Vendor.MODIFY(TRUE);
+
+      CreatePurchaseBlanketOrder(
+        BlanketPurchaseHeader,BlanketPurchaseLine,1,Vendor."No.",LibraryInventory.CreateItemNo);
+      BlanketPurchaseHeader.VALIDATE("Document Date",BlanketPurchaseHeader."Document Date" - 1);
+      BlanketPurchaseHeader.MODIFY;
+
+      PurchHeaderNo := LibraryPurchase.BlanketPurchaseOrderMakeOrder(BlanketPurchaseHeader);
+      PurchaseHeader.GET(PurchaseHeader."Document Type"::Order,PurchHeaderNo);
+
+      WITH PurchaseHeader DO BEGIN
+        TESTFIELD("Document Date",WORKDATE);
+        TESTFIELD("Prepayment Due Date",CALCDATE(PaymentTerms."Due Date Calculation","Document Date"));
+        TESTFIELD("Prepmt. Pmt. Discount Date",CALCDATE(PaymentTerms."Discount Date Calculation","Document Date"));
+        TESTFIELD("Due Date",CALCDATE(PaymentTerms."Due Date Calculation","Document Date"));
+        TESTFIELD("Pmt. Discount Date",CALCDATE(PaymentTerms."Discount Date Calculation","Document Date"));
+      END;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@78(Message@1000 : Text[1024]);
+    BEGIN
+      // Message Handler.
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE BlanketOrderStatisticsHandler@13(VAR VATAmountLines@1001 : TestPage 9401);
+    BEGIN
+      Assert.IsFalse(VATAmountLines."VAT Amount".EDITABLE,STRSUBSTNO(VATEditableError));
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE GetPostedDocLinesPageHandler@84(VAR PostedPurchaseDocumentLines@1000 : TestPage 5855);
+    BEGIN
+      PostedPurchaseDocumentLines.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Blanket Order] [Purchase]
+      Unsupported version tags:
+      NA: Unable to Compile
+
+      Create and Verify various functionalities of Purchase Blanket Order.
+        1. Test that a Purchase Blanket Order Header and Lines exist after Purchase Blanket Order creation.
+        2. Test VAT Amount calculated correctly on Purchase Blanket Order.
+        3. Test that a Report generated from Purchase Blanket Order and it contains some data.
+        4. Test that Quantity Received field updated after posting Purchase Order. Create Purchase Order from Purchase Blanket Order.
+        5. Test that Correct Location updated on Purchase Header after creating Purchase Order from Purchase Blanket Order.
+        6. Check Invoice Discount has been flow correctly on Purchase Order after Make Order from Purchase Blanket order.
+        7. Check that field 'VAT Amount' is not editable on Purchase Blanket Order Statistics page.
+        8. Check that blank Posting Date is populating on the created Purchase Order from Blanket Order while Default Posting Date is set to No Date on the Purchase & Payables Setup.
+        9. Test Blanket Order No. and Blanket Order Line No. in Purchase Order created from Purchase Blanket Order.
+       10. Test that Purchase Blanket Order created using Copy Document does not contain Blanket Order No. and Blanket Order Line No.
+       11. Test that Purchase Blanket Order can be deleted successfully after Purchase Order Posting.
+       12. Verify Puchase Order created from Blanket Order with Item Charge.
+       13. Verify Error on Update Quantity after partially invoiced of Blanket Puchase Order Line where Type is 'Charge (Item)'.
+       14. Verify Exetended Text on Blanket Purchase Order.
+       15. Verify Exetended Text on Purchase Order created by Blanket Purchase Order.
+
+      This test code unit replaces Manual Test Suite (TS0137).
+
+      TS_TFS ID=21545
+      Covers Test Cases:
+        TFS_TC_ID= 122396 and 136777: TC00669
+        TFS_TC_ID= 122397 and 136778: TC00670
+        TFS_TC_ID= 122398 and 136779: TC00671
+        TFS_TC_ID= 122399 and 136780: TC00672
+        TFS_TC_ID= 122400 and 136781: TC00673
+        TFS_TC_ID= 122401 and 136782: TC00674
+        TFS_TC_ID= 122402 and 136783: TC00675
+
+        Covers Test Cases for WI - 219040
+        ------------------------------------------------------------------------------
+        Test Function Name                                         TFS ID
+        ------------------------------------------------------------------------------
+        PurchOrdrInvDiscFrmPurchBlnket                             127392
+
+        Covers Test Cases for WI - 260981
+        ------------------------------------------------------------------------------
+        Test Function Name                                         TFS ID
+        ------------------------------------------------------------------------------
+        VATAmountNonEditableOnStatistics                           127319
+
+        Covers Test Cases for WI - 264826
+        ------------------------------------------------------------------------------
+        Test Function Name                                         TFS ID
+        ------------------------------------------------------------------------------
+        PurchaseOrderFromPurchaseBlanketOrderWithPostingDateBlank  263320
+
+        Covers Test Cases for WI - 273878
+        ----------------------------------------------------------------------------------------------------------------------
+        Test Function Name                                                                                            TFS ID
+        ----------------------------------------------------------------------------------------------------------------------
+        PurchaseOrderCreationFromBlanketOrder, PurchaseBlanketOrderUsingCopyDocument, DeletePurchaseBlanketOrder      271655
+
+        Covers Test Cases for WI - 313049
+        ----------------------------------------------------------------------------------------------------------------------
+        Test Function Name                                                                                            TFS ID
+        ----------------------------------------------------------------------------------------------------------------------
+        CreatePurchOrderFromBlanketOrderWithItemCharge, ErrorOnUpdateQuantityOfBlanketOrderLine                       290156
+
+      Covers Test Cases for WI - 320046
+      ----------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                            TFS ID
+      ----------------------------------------------------------------------------------------------------------------------
+      ExtTextOnPurchBlnktOrd                                                                                        297688
+    }
+    END.
+  }
+}
+

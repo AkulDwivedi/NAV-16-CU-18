@@ -1,0 +1,263 @@
+OBJECT Codeunit 137206 SCM Move Neg. Sales Lines
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SalesReceivablesSetup@1008 : Record 311;
+      LibraryInventory@1000 : Codeunit 132201;
+      LibrarySales@1010 : Codeunit 130509;
+      LibraryRandom@1002 : Codeunit 130440;
+      Assert@1003 : Codeunit 130000;
+      isInitialized@1004 : Boolean;
+      FromDocType@1009 : 'Quote,Blanket Order,Order,Invoice,Return Order,Credit Memo';
+      ErrorNoNegLines@1005 : TextConst 'ENU=There are no negative sales lines to move.';
+      ToDocType@1006 : ',,Order,Invoice,Return Order,Credit Memo';
+      SalesHeaderNo@1007 : Code[20];
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1059 : Codeunit 131305;
+    BEGIN
+      CLEAR(SalesHeaderNo);
+      UpdateSalesReceivablesSetup;
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE MoveNegativeSalesLines@22(FromDocType@1002 : Option;ToDocType@1003 : Option;FromDocTypeRep@1004 : Option;ToDocTypeRep@1005 : Option;InitialSign@1006 : Integer);
+    VAR
+      SalesHeader@1000 : Record 36;
+      TempSalesLine@1001 : TEMPORARY Record 37;
+    BEGIN
+      // Setup: Create a Purchase Return Order with negative lines.
+      Initialize;
+      CreateSalesDocWithMixedLines(SalesHeader,TempSalesLine,FromDocType,InitialSign);
+
+      // Exercise: Run Move Negative Lines to generate a Purchase Order.
+      MoveNegSalesLines(SalesHeader,FromDocTypeRep,ToDocTypeRep);
+
+      // Verify: Examine the moved lines.
+      VerifyNegSalesLines(TempSalesLine,ToDocType,SalesHeaderNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,SalesOrderPageHandler)]
+    PROCEDURE SalesRetOrderToOrder@21();
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      MoveNegativeSalesLines(SalesHeader."Document Type"::"Return Order",SalesHeader."Document Type"::Order,
+        FromDocType::"Return Order",ToDocType::Order,-1);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,SalesInvoicePageHandler)]
+    PROCEDURE SalesCrMemoToInvoice@20();
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      MoveNegativeSalesLines(SalesHeader."Document Type"::"Credit Memo",SalesHeader."Document Type"::Invoice,
+        FromDocType::"Credit Memo",ToDocType::Invoice,-1);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,SalesCrMemoPageHandler)]
+    PROCEDURE SalesInvoiceToCrMemo@19();
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      MoveNegativeSalesLines(SalesHeader."Document Type"::Invoice,SalesHeader."Document Type"::"Credit Memo",
+        FromDocType::Invoice,ToDocType::"Credit Memo",-1);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,SalesRetOrderPageHandler)]
+    PROCEDURE SalesOrderToRetOrder@17();
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      MoveNegativeSalesLines(SalesHeader."Document Type"::Order,SalesHeader."Document Type"::"Return Order",
+        FromDocType::Order,ToDocType::"Return Order",-1);
+    END;
+
+    [Test]
+    PROCEDURE NegTestSalesOrderToRetOrder@14();
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      ASSERTERROR
+        MoveNegativeSalesLines(SalesHeader."Document Type"::Order,SalesHeader."Document Type"::"Return Order",
+          FromDocType::Order,ToDocType::"Return Order",1);
+
+      // Verify: Error message.
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorNoNegLines) > 0,'Actual:' + GETLASTERRORTEXT + ';Expected:' + ErrorNoNegLines);
+      CLEARLASTERROR;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateSalesReceivablesSetup@13();
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Credit Warnings",SalesReceivablesSetup."Credit Warnings"::"No Warning");
+      SalesReceivablesSetup.VALIDATE("Stockout Warning",FALSE);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateSalesDocWithMixedLines@1(VAR SalesHeader@1000 : Record 36;VAR TempSalesLine@1002 : TEMPORARY Record 37;DocumentType@1003 : Option;InitialSign@1006 : Integer);
+    VAR
+      SalesLine@1004 : Record 37;
+      Item@1005 : Record 27;
+      Customer@1008 : Record 18;
+      Count@1007 : Integer;
+      i@1001 : Integer;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,Customer."No.");
+      TempSalesLine.DELETEALL;
+
+      // Create a Sales document with mixed lines: alternating positive and negative quantities.
+      Count := 5 + LibraryRandom.RandInt(8);
+      FOR i := 1 TO Count DO BEGIN
+        LibraryInventory.CreateItem(Item);
+        LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",
+          POWER(InitialSign,i) * LibraryRandom.RandDec(10,2));
+        IF SalesLine.Quantity < 0 THEN BEGIN
+          TempSalesLine := SalesLine;
+          TempSalesLine.INSERT;
+        END;
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE MoveNegSalesLines@9(SalesHeader@1001 : Record 36;FromDocType@1004 : Option;ToDocType@1002 : Option);
+    VAR
+      MoveNegSalesLines@1000 : Report 6699;
+    BEGIN
+      CLEAR(MoveNegSalesLines);
+      MoveNegSalesLines.SetSalesHeader(SalesHeader);
+      MoveNegSalesLines.InitializeRequest(FromDocType,ToDocType,ToDocType);
+      MoveNegSalesLines.USEREQUESTPAGE(FALSE);
+      MoveNegSalesLines.RUNMODAL;
+      MoveNegSalesLines.ShowDocument;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyNegSalesLines@12(VAR TempSalesLine@1000 : TEMPORARY Record 37;NewDocumentType@1004 : Option;NewSalesHeaderNo@1001 : Code[20]);
+    VAR
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Get generated sales header and lines
+      SalesHeader.GET(NewDocumentType,NewSalesHeaderNo);
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.FINDSET;
+      TempSalesLine.FINDSET;
+
+      // Verify migrated lines.
+      REPEAT
+        TempSalesLine.SETRANGE("Sell-to Customer No.",SalesLine."Sell-to Customer No.");
+        TempSalesLine.SETRANGE(Type,SalesLine.Type);
+        TempSalesLine.SETRANGE("No.",SalesLine."No.");
+        TempSalesLine.SETRANGE(Description,SalesLine.Description);
+        TempSalesLine.SETRANGE("Location Code",SalesLine."Location Code");
+        TempSalesLine.SETRANGE(Quantity,-SalesLine.Quantity);
+        TempSalesLine.SETRANGE("Unit of Measure",SalesLine."Unit of Measure");
+        Assert.AreEqual(1,TempSalesLine.COUNT,'Too many migrated negative lines!');
+        TempSalesLine.FINDFIRST;
+        TempSalesLine.DELETE(TRUE);
+      UNTIL SalesLine.NEXT = 0;
+
+      // Check there are no un-migrated lines.
+      TempSalesLine.RESET;
+      Assert.AreEqual(0,TempSalesLine.COUNT,'Remaining un-migrated lines.');
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@11(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [PageHandler]
+    PROCEDURE SalesOrderPageHandler@8(VAR SalesOrder@1000 : Page 42);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      SalesHeader.INIT;
+      SalesOrder.GETRECORD(SalesHeader);
+      SalesHeaderNo := SalesHeader."No.";
+    END;
+
+    [PageHandler]
+    PROCEDURE SalesRetOrderPageHandler@10(VAR SalesReturnOrder@1000 : Page 6630);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      SalesHeader.INIT;
+      SalesReturnOrder.GETRECORD(SalesHeader);
+      SalesHeaderNo := SalesHeader."No.";
+    END;
+
+    [PageHandler]
+    PROCEDURE SalesInvoicePageHandler@15(VAR SalesInvoice@1000 : Page 43);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      SalesHeader.INIT;
+      SalesInvoice.GETRECORD(SalesHeader);
+      SalesHeaderNo := SalesHeader."No.";
+    END;
+
+    [PageHandler]
+    PROCEDURE SalesCrMemoPageHandler@16(VAR SalesCreditMemo@1000 : Page 44);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      SalesHeader.INIT;
+      SalesCreditMemo.GETRECORD(SalesHeader);
+      SalesHeaderNo := SalesHeader."No.";
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Move Negative Sales Lines] [Sales]
+      Unsupported version tags:
+      US: Unable to Execute
+      CA: Unable to Execute
+
+      Test case: 129112 - [RTC] Batch Job:= Move Negative Sales Lines
+
+      Test Move Negative Sales Lines report for various types of Sales documents:
+      - Sales Order
+      - Sales Return Order
+      - Sales Credit Memo
+      - Sales Invoice
+    }
+    END.
+  }
+}
+

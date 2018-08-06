@@ -1,0 +1,174 @@
+OBJECT Codeunit 137018 SCM Adjmt. of Expected Cost
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibrarySales@1006 : Codeunit 130509;
+      LibraryPurchase@1007 : Codeunit 130512;
+      LibraryPatterns@1002 : Codeunit 132212;
+      Assert@1004 : Codeunit 130000;
+      IsInitialized@1005 : Boolean;
+
+    [Test]
+    PROCEDURE VSTF324950@1();
+    VAR
+      Item@1000 : Record 27;
+      OldInventorySetup@1001 : Record 313;
+      PurchaseHeader@1002 : Record 38;
+      SalesHeader@1003 : Record 36;
+      ValueEntry@1004 : Record 5802;
+      Qty@1005 : Decimal;
+    BEGIN
+      Initialize;
+      Qty := 100;
+      // Inventory setup for test
+      OldInventorySetup.GET;
+      SetInventorySetup(
+        OldInventorySetup,TRUE,TRUE,TRUE,
+        OldInventorySetup."Automatic Cost Adjustment"::Always);
+
+      // make item
+      LibraryPatterns.MAKEItemSimple(Item,Item."Costing Method"::FIFO,0);
+
+      // purchase
+      LibraryPatterns.POSTPurchaseOrder(PurchaseHeader,Item,'','',Qty,WORKDATE,10,TRUE,FALSE);
+
+      // Sales order - shipment only
+      LibraryPatterns.POSTSalesOrder(SalesHeader,Item,'','',Qty,WORKDATE,0,TRUE,FALSE);
+
+      // Now invoice of sales order
+      PartialInvoiceOfSales(SalesHeader,Qty / 4);
+
+      PurchaseOrderWithItemCharge(PurchaseHeader,100);
+      PurchaseOrderWithItemCharge(PurchaseHeader,200);
+
+      // Now invoice of sales order
+      PartialInvoiceOfSales(SalesHeader,Qty / 4);
+
+      // verify correct ValueEntries
+      VerifyValueEntries(ValueEntry,75);
+      VerifyValueEntries(ValueEntry,250);
+
+      // restore Inventory Setup
+      SetInventorySetup(
+        OldInventorySetup,FALSE,
+        OldInventorySetup."Automatic Cost Posting",
+        OldInventorySetup."Expected Cost Posting to G/L",OldInventorySetup."Automatic Cost Adjustment");
+    END;
+
+    LOCAL PROCEDURE Initialize@10();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE SetInventorySetup@11(InventorySetup@1000 : Record 313;NewSetup@1001 : Boolean;AutomaticCostPosting@1002 : Boolean;ExpectedCostPosting@1003 : Boolean;AutomaticCostAdjustment@1004 : Integer);
+    VAR
+      SavedInventorySetup@1005 : Record 313;
+    BEGIN
+      WITH InventorySetup DO BEGIN
+        IF NewSetup THEN BEGIN
+          "Automatic Cost Posting" := AutomaticCostPosting;
+          "Expected Cost Posting to G/L" := ExpectedCostPosting;
+          "Automatic Cost Adjustment" := AutomaticCostAdjustment;
+          "Average Cost Calc. Type" := "Average Cost Calc. Type"::Item;
+          "Average Cost Period" := "Average Cost Period"::Day;
+        END ELSE BEGIN
+          SavedInventorySetup.GET;
+          SavedInventorySetup."Automatic Cost Posting" := AutomaticCostPosting;
+          SavedInventorySetup."Expected Cost Posting to G/L" := ExpectedCostPosting;
+          SavedInventorySetup."Automatic Cost Adjustment" := AutomaticCostAdjustment;
+          SavedInventorySetup."Average Cost Calc. Type" := "Average Cost Calc. Type";
+          SavedInventorySetup."Average Cost Period" := "Average Cost Period";
+          InventorySetup := SavedInventorySetup;
+        END;
+        MODIFY;
+      END;
+      CODEUNIT.RUN(CODEUNIT::"Change Average Cost Setting",InventorySetup);
+    END;
+
+    LOCAL PROCEDURE PartialInvoiceOfSales@12(VAR SalesHeader@1000 : Record 36;QuantityToInv@1001 : Decimal);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      WITH SalesLine DO BEGIN
+        SETRANGE("Document Type",SalesHeader."Document Type");
+        SETRANGE("Document No.",SalesHeader."No.");
+        SETRANGE(Type,Type::Item);
+        FINDFIRST;
+        VALIDATE("Qty. to Invoice",QuantityToInv);
+        MODIFY;
+
+        SalesHeader.FIND('=');
+        LibrarySales.PostSalesDocument(SalesHeader,FALSE,TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE PurchaseOrderWithItemCharge@13(VAR PurchaseHeader@1000 : Record 38;DirectUnitCost@1001 : Decimal);
+    VAR
+      PurchaseHeaderItemCharge@1002 : Record 38;
+      Vendor@1003 : Record 23;
+      PurchRcptLine@1004 : Record 121;
+    BEGIN
+      Vendor.GET(PurchaseHeader."Buy-from Vendor No.");
+
+      PurchRcptLine.SETCURRENTKEY("Buy-from Vendor No.");
+      PurchRcptLine.SETRANGE("Buy-from Vendor No.",PurchaseHeader."Buy-from Vendor No.");
+      PurchRcptLine.SETRANGE(Type,PurchRcptLine.Type::Item);
+      PurchRcptLine.FINDFIRST;
+
+      // Purchase Order for Item Charge
+      LibraryPurchase.CreatePurchHeader(PurchaseHeaderItemCharge,PurchaseHeader."Document Type",Vendor."No.");
+
+      // Line for Item Charge
+      LibraryPatterns.ASSIGNPurchChargeToPurchRcptLine(PurchaseHeaderItemCharge,PurchRcptLine,1,DirectUnitCost);
+
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeaderItemCharge,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntries@14(VAR ValueEntry@1000 : Record 5802;EntryCost@1001 : Decimal);
+    BEGIN
+      // last value entry has to have Cost Amount Expected = 75, Cost Amount Actual has to equal -75
+      // previous value entry has to have Cost Amount Expected = 250, Cost Amount Actual has to equal -250
+      WITH ValueEntry DO BEGIN
+        IF "Entry No." = 0 THEN
+          FINDLAST
+        ELSE
+          GET("Entry No." - 1);
+
+        Assert.AreEqual(EntryCost,"Cost Amount (Expected)",'');
+        Assert.AreEqual(-EntryCost,"Cost Amount (Actual)",'');
+      END;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Automatic Cost Adjustment] [Expected Cost] [SCM]
+    }
+    END.
+  }
+}
+

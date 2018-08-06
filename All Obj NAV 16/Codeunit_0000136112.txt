@@ -1,0 +1,1961 @@
+OBJECT Codeunit 136112 Working On Service Orders
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryService@1001 : Codeunit 131902;
+      LibraryUtility@1016 : Codeunit 131000;
+      Assert@1014 : Codeunit 130000;
+      LibraryInventory@1098 : Codeunit 132201;
+      LibrarySales@1998 : Codeunit 130509;
+      LibraryERM@1020 : Codeunit 131300;
+      ServiceItemNoForReplacement@1006 : Code[20];
+      StandServiceItemGroupCode@1012 : Code[10];
+      IsInitialized@1000 : Boolean;
+      CountError@1019 : TextConst 'ENU=Count in %1 must be equal to 0.';
+      ServiceItemError@1002 : TextConst 'ENU=The Service Mgt. Setup allows only one Service Item Line in each Service Header.';
+      UnknownError@1003 : TextConst 'ENU=Unexpected Error.';
+      StatusChangeError@1004 : TextConst 'ENU=You cannot change %1 to Finished in %2 %3.%4 %5 in %6 %7 line is preventing it.';
+      QuoteStatusError@1005 : TextConst 'ENU=The Repair Status %1 cannot be used in service orders.';
+      SplitResourceErrorServiceTier@1010 : TextConst 'ENU="Type must be equal to ''Resource''  in Service Line: Document Type=%1, Document No.=%2, Line No.=%3. Current value is ''%4''."';
+      ShippedQuantityErrorService@1011 : TextConst 'ENU="Quantity Shipped must be equal to ''0''  in Service Line: Document Type=%1, Document No.=%2, Line No.=%3. Current value is ''%4''."';
+      UnitPriceUpdationError@1009 : TextConst 'ENU=The %1 cannot be greater than the %2 set on the %3.';
+      FaultResolCodesRlshipError@1017 : TextConst 'ENU=Occurence must be greater than 0.';
+      NoOfLinesError@1015 : TextConst 'ENU=Number of lines must be %1.';
+      ServiceCommentLineExistError@1013 : TextConst 'ENU=%1 for %2 %3 must not exist.';
+      PostingDate@1018 : Date;
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@61();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      CLEAR(LibraryService);
+      IF IsInitialized THEN
+        EXIT;
+
+      CLEAR(PostingDate);
+      // Create Demonstration Database
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateAccountInServiceCosts;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryService.SetupServiceMgtNoSeries;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    PROCEDURE CommentOnCopyCommentManual@57();
+    VAR
+      ServiceMgtSetup@1004 : Record 5911;
+      ServiceHeader@1000 : Record 5900;
+      ServiceShipmentHeader@1005 : Record 5990;
+      ServiceInvoiceHeader@1008 : Record 5992;
+      ServiceCommentLine@1007 : Record 5906;
+      SetupModified@1003 : Boolean;
+    BEGIN
+      // Covers document number TC0152 - refer to TFS ID 21731.
+      // Test No Comments Exist on Posted Service Shipment and Posted Service Invoice after Posting Service Order as Ship and Invoice with
+      // "Copy Comments Order to Invoice" and "Copy Comments Order to Shpt." fields as False on Service Management Setup.
+
+      // 1. Setup: Set "Copy Comments Order to Invoice" and "Copy Comments Order to Shpt." fields as False on Service Management Setup,
+      // Create Service Order and Create Comments on Service Order.
+      SetupModified := CreateServiceOrder(ServiceHeader,ServiceMgtSetup,FALSE);
+
+      // 2. Exercise: Post Service Order Partially as Ship and Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Verify that the No Comments Exist on Posted Service Shipment and Posted Service Invoice.
+      ServiceShipmentHeader.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceShipmentHeader.FINDFIRST;
+      ServiceCommentLine.SETRANGE("Table Name",ServiceCommentLine."Table Name"::"Service Shipment Header");
+      ServiceCommentLine.SETRANGE("No.",ServiceShipmentHeader."No.");
+      Assert.IsFalse(
+        ServiceCommentLine.FINDFIRST,STRSUBSTNO(ServiceCommentLineExistError,ServiceCommentLine.TABLECAPTION,
+          ServiceShipmentHeader.TABLECAPTION,ServiceShipmentHeader."No."));
+
+      ServiceInvoiceHeader.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceCommentLine.SETRANGE("Table Name",ServiceCommentLine."Table Name"::"Service Invoice Header");
+      ServiceCommentLine.SETRANGE("No.",ServiceInvoiceHeader."No.");
+      Assert.IsFalse(
+        ServiceCommentLine.FINDFIRST,STRSUBSTNO(ServiceCommentLineExistError,ServiceCommentLine.TABLECAPTION,
+          ServiceInvoiceHeader.TABLECAPTION,ServiceInvoiceHeader."No."));
+
+      // 4. Teardown: Rollback "Copy Comments Order to Invoice" and "Copy Comments Order to Shpt." fields as True on Service Management
+      // Setup.
+      IF SetupModified THEN
+        ModifyServiceSetupCopyComment(ServiceMgtSetup,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE CommentOnCopyCommentAutomatic@35();
+    VAR
+      ServiceMgtSetup@1004 : Record 5911;
+      ServiceHeader@1000 : Record 5900;
+      TempServiceCommentLine@1001 : TEMPORARY Record 5906;
+      SetupModified@1003 : Boolean;
+    BEGIN
+      // Covers document number TC0152 - refer to TFS ID 21731.
+      // Test Comments on Posted Service Shipment and Posted Service Invoice after Posting Service Order as Ship and Invoice with
+      // "Copy Comments Order to Invoice" and "Copy Comments Order to Shpt." fields as True on Service Management Setup.
+
+      // 1. Setup: Set "Copy Comments Order to Invoice" and "Copy Comments Order to Shpt." fields as True on Service Management Setup,
+      // Create Service Order and Create Comments on Service Order.
+      SetupModified := CreateServiceOrder(ServiceHeader,ServiceMgtSetup,TRUE);
+
+      // 2. Exercise: Post Service Order Partially as Ship and Invoice.
+      SaveComments(TempServiceCommentLine,ServiceHeader);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Verify that the Comments on Posted Service Shipment and Posted Service Invoice are Comments on Service Order.
+      VerifyCommentsOnPostedShipment(TempServiceCommentLine);
+      VerifyCommentsOnPostedInvoice(TempServiceCommentLine);
+
+      // 4. Teardown: Rollback "Copy Comments Order to Invoice" and "Copy Comments Order to Shpt." fields as False on Service Management
+      // Setup.
+      IF SetupModified THEN
+        ModifyServiceSetupCopyComment(ServiceMgtSetup,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ModalFormHandlerStandardCode)]
+    PROCEDURE ServiceItemLinkServiceItemLine@27();
+    VAR
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1007 : Record 5902;
+      ServiceMgtSetup@1005 : Record 5911;
+      SetupModified@1006 : Boolean;
+    BEGIN
+      // Covers document number TC0151 - refer to TFS ID 21731.
+      // Test Service Item No. on Service Line is Service Item No. on Service Item Line with "Link Service to Service Item" field
+      // as True on Service Management Setup.
+
+      // 1. Set "Link Service to Service Item" field as False on Service Management Setup, Create Standard Service Code, Create
+      // Standard Service Line for Create Standard Service Code, Create Service Order - Service Header and Service Item Line,
+      // Run Service Line Form.
+      SetupModified := RunServiceLineForm(ServiceItemLine,ServiceMgtSetup,TRUE);
+
+      // 2. Verify: Verify that "Service Item No." on Service Line is Service Item No. on Service Item Line.
+      ServiceLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceLine.FINDFIRST;
+      ServiceLine.TESTFIELD("Service Item No.",ServiceItemLine."Service Item No.");
+
+      // 3. Teardown: Rollback "Link Service to Service Item" field as True on Service Management Setup.
+      IF SetupModified THEN
+        ModifySetupLinkServiceItem(ServiceMgtSetup,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ModalFormHandlerStandardCode)]
+    PROCEDURE ServiceItemNoLinkServItemLine@98();
+    VAR
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1007 : Record 5902;
+      ServiceMgtSetup@1005 : Record 5911;
+      SetupModified@1006 : Boolean;
+    BEGIN
+      // Covers document number TC0151 - refer to TFS ID 21731.
+      // Test Service Item No. blank on Service Line with "Link Service to Service Item" field as False on Service Management Setup.
+
+      // 1. Set "Link Service to Service Item" field as False on Service Management Setup, Create Standard Service Code, Create
+      // Standard Service Line for Create Standard Service Code, Create Service Order - Service Header and Service Item Line,
+      // Run Service Line Form.
+      SetupModified := RunServiceLineForm(ServiceItemLine,ServiceMgtSetup,FALSE);
+
+      // 2. Verify: Verify that "Service Item No." is blank on Service Line.
+      ServiceLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceLine.FINDFIRST;
+      ServiceLine.TESTFIELD("Service Item No.",'');
+
+      // 3. Teardown: Rollback "Link Service to Service Item" field as True on Service Management Setup.
+      IF SetupModified THEN
+        ModifySetupLinkServiceItem(ServiceMgtSetup,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE OneServiceItemLinePerOrder@1();
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+      ServiceHeader@1003 : Record 5900;
+      ServiceItemLine@1004 : Record 5901;
+      DefaultSetupValue@1001 : Boolean;
+    BEGIN
+      // Covers document number TC0150 - refer to TFS ID 21731.
+      // Test error occurs on entering second Service Item Line with "One Service Item Line/Order" field True on Service Management Setup.
+
+      // 1. Setup: Set "One Service Item Line/Order" field True on Service Management Setup.
+      Initialize;
+      ServiceMgtSetup.GET;
+      DefaultSetupValue := ServiceMgtSetup."One Service Item Line/Order";
+      ServiceMgtSetup.VALIDATE("One Service Item Line/Order",TRUE);
+      ServiceMgtSetup.MODIFY(TRUE);
+
+      // 2. Exercise: Create Service Order with One Service Item Line.
+      CreateServiceOrderWithOneLine(ServiceHeader,ServiceItemLine);
+
+      // 3. Verify: Verify that Service Order Shows error "One Service Item Line per Order" on creation of second Service Item Line.
+      ASSERTERROR LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      Assert.AreEqual(STRSUBSTNO(ServiceItemError),GETLASTERRORTEXT,UnknownError);
+
+      // 4. Teardown: Rollback "One Service Item Line/Order" field to Default Value on Service Management Setup.
+      ServiceMgtSetup.VALIDATE("One Service Item Line/Order",DefaultSetupValue);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE TwoServiceItemLinePerOrder@10();
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+      ServiceHeader@1003 : Record 5900;
+      ServiceItemLine@1004 : Record 5901;
+      DefaultSetupValue@1001 : Boolean;
+    BEGIN
+      // Covers document number TC0150 - refer to TFS ID 21731.
+      // Test second Service Item Line Successfully Created with "One Service Item Line/Order" field False on Service Management Setup.
+
+      // 1. Setup: Set "One Service Item Line/Order" field False on Service Management Setup.
+      Initialize;
+      ServiceMgtSetup.GET;
+      DefaultSetupValue := ServiceMgtSetup."One Service Item Line/Order";
+      ServiceMgtSetup.VALIDATE("One Service Item Line/Order",FALSE);
+      ServiceMgtSetup.MODIFY(TRUE);
+
+      // 2. Exercise: Create Service Order with One Service Item Line.
+      CreateServiceOrderWithOneLine(ServiceHeader,ServiceItemLine);
+
+      // 3. Verify: Verify that the Second Service Item Line Successfully Created without any Error.
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      Assert.AreEqual(ServiceItemLine.COUNT,2,STRSUBSTNO(NoOfLinesError,2));
+
+      // 4. Teardown: Rollback "One Service Item Line/Order" field to Default Value on Service Management Setup.
+      ServiceMgtSetup.VALIDATE("One Service Item Line/Order",DefaultSetupValue);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE OneServiceItemLineAfterShip@32();
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+      ServiceHeader@1003 : Record 5900;
+      ServiceItemLine@1004 : Record 5901;
+      ServiceLine@1007 : Record 5902;
+      Item@1006 : Record 27;
+      DefaultSetupValue@1001 : Boolean;
+    BEGIN
+      // Covers document number TC0150 - refer to TFS ID 21731.
+      // Test error occurs on entering second Service Item Line after Posting Service Order as Ship with "One Service Item Line/Order"
+      // field True on Service Management Setup.
+
+      // 1. Setup: Create Service Order with One Service Item Line.
+      Initialize;
+      CreateServiceOrderWithOneLine(ServiceHeader,ServiceItemLine);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItem(Item));
+      UpdateQuantityOnServiceLine(ServiceLine,ServiceItemLine."Line No.");
+
+      // 2. Exercise: Post Service Order with Ship Option, Set "One Service Item Line/Order" field True on Service Management Setup.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      ServiceMgtSetup.GET;
+      DefaultSetupValue := ServiceMgtSetup."One Service Item Line/Order";
+      ServiceMgtSetup.VALIDATE("One Service Item Line/Order",TRUE);
+      ServiceMgtSetup.MODIFY(TRUE);
+
+      // 3. Verify: Verify that Service Order Shows error "One Service Item Line per Order" on creation of second Service Item Line.
+      CLEAR(ServiceItemLine);
+      ASSERTERROR LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      Assert.AreEqual(STRSUBSTNO(ServiceItemError),GETLASTERRORTEXT,UnknownError);
+
+      // 4. Teardown: Rollback "One Service Item Line/Order" field to Default Value on Service Management Setup.
+      ServiceMgtSetup.VALIDATE("One Service Item Line/Order",DefaultSetupValue);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE EmailQueueWithStatusChange@15();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceItemLine@1002 : Record 5901;
+      ServiceEMailQueue@1003 : Record 5935;
+    BEGIN
+      // Covers document number TC0149 - refer to TFS ID 21731.
+      // Test Email Queue entries after Status change with "Notify Customer" value "By E-Mail" on Service Order.
+
+      // 1. Setup: Create Service Order, Set "Notify Customer" value on Service Header.
+      CreateServiceOrderWithNotify(ServiceHeader,ServiceItemLine);
+
+      // 2. Exercise: Change Status on Service Header to Finished, Change Status on Service Header to "In Process" and again Change to
+      // Finished.
+      UpdateStatusOnServiceHeader(ServiceHeader,ServiceHeader.Status::Finished);
+      UpdateStatusOnServiceHeader(ServiceHeader,ServiceHeader.Status::"In Process");
+      UpdateStatusOnServiceHeader(ServiceHeader,ServiceHeader.Status::Finished);
+
+      // 3. Verify: Verify that the Service Email Queue Entries Created.
+      ServiceEMailQueue.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceEMailQueue.SETRANGE("Document No.",ServiceHeader."No.");
+      Assert.AreEqual(ServiceEMailQueue.COUNT,2,STRSUBSTNO(NoOfLinesError,2));
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE EmailRepairStatusChange@18();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceItemLine@1002 : Record 5901;
+      ServiceEMailQueue@1003 : Record 5935;
+      RepairStatus@1005 : Record 5927;
+    BEGIN
+      // Covers document number TC0149 - refer to TFS ID 21731.
+      // Test Email Queue entries after Repair Status Code change on Service Item Line with "Notify Customer" value "By E-Mail" on
+      // Service Order.
+
+      // 1. Setup: Create Service Order, Set "Notify Customer" value on Service Header.
+      CreateServiceOrderWithNotify(ServiceHeader,ServiceItemLine);
+      CreateRepairStatusCodeFinish(RepairStatus);
+
+      // 2. Exercise: Change Repair Status Code on Service Item Line to Finished.
+      ServiceItemLine.VALIDATE("Repair Status Code",RepairStatus.Code);
+      ServiceItemLine.MODIFY(TRUE);
+
+      // 3. Verify: Verify that the Service Email Queue Entry Created.
+      ServiceEMailQueue.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceEMailQueue.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceEMailQueue.FINDFIRST;
+    END;
+
+    [Test]
+    PROCEDURE StatusChangeToPending@24();
+    VAR
+      RepairStatus@1005 : Record 5927;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0148 - refer to TFS ID 21731.
+      // Test Status on Service Header is Pending after changing Repair Status Code on first Service Item Line to Finished.
+
+      // 1. Setup: Create Service Order with Three Service Item Lines with Service Item No., Item No. and Description.
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+      CreateRepairStatusCodeFinish(RepairStatus);
+
+      // 2. Exercise: Change Repair Status Code on First Service Item Line to Finished.
+      UpdateRepairStatusOnFirstLine(ServiceHeader,RepairStatus.Code);
+
+      // 3. Verify: Verify Status on Service Header is Pending.
+      ServiceHeader.GET(ServiceItemLine."Document Type",ServiceItemLine."Document No.");
+      ServiceHeader.TESTFIELD(Status,ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    PROCEDURE StatusChangeToFinished@25();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0148 - refer to TFS ID 21731.
+      // Test Status on Service Header is Finished after changing Repair Status Code on all Service Item Line to Finished.
+
+      // 1. Setup: Create Service Order with Three Service Item Lines with Service Item No., Item No. and Description.
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+
+      // 2. Exercise: Change Repair Status Code on All Service Item Line to Finished.
+      UpdateRepairStatusFinished(ServiceItemLine);
+
+      // 3. Verify: Verify Status on Service Header is Finished.
+      ServiceHeader.GET(ServiceItemLine."Document Type",ServiceItemLine."Document No.");
+      ServiceHeader.TESTFIELD(Status,ServiceHeader.Status::Finished);
+    END;
+
+    [Test]
+    PROCEDURE RepairStatusChangeToPartly@26();
+    VAR
+      RepairStatus@1005 : Record 5927;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0148 - refer to TFS ID 21731.
+      // Test Status on Service Header is Pending after changing Repair Status Code on first Service Item Line to Partly Served.
+
+      // 1. Setup: Create Service Order with Three Service Item Lines with Service Item No., Item No. and Description,
+      // Change Repair Status Code on All Service Item Line to Finished.
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+      UpdateRepairStatusFinished(ServiceItemLine);
+
+      // 2. Exercise: Change Repair Status Code on First Service Item Line to Partial.
+      CLEAR(RepairStatus);
+      CreateRepairStatusCodePartial(RepairStatus);
+      UpdateRepairStatusOnFirstLine(ServiceHeader,RepairStatus.Code);
+
+      // 3. Verify: Verify Status on Service Header is Pending.
+      ServiceHeader.GET(ServiceItemLine."Document Type",ServiceItemLine."Document No.");
+      ServiceHeader.TESTFIELD(Status,ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    PROCEDURE StatusChangeToInProcess@37();
+    VAR
+      RepairStatus@1005 : Record 5927;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0148 - refer to TFS ID 21731.
+      // Test Status on Service Header is "In Process" after changing Repair Status Code on first Service Item Line to "In Process".
+
+      // 1. Setup: Create Service Order with Three Service Item Lines with Service Item No., Item No. and Description,
+      // Change Repair Status Code on All Service Item Line to Finished.
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+      UpdateRepairStatusFinished(ServiceItemLine);
+
+      // 2. Exercise: Change Repair Status Code on First Service Item Line to "In Process".
+      CreateRepairStatusInProcess(RepairStatus);
+      UpdateRepairStatusOnFirstLine(ServiceHeader,RepairStatus.Code);
+
+      // 3. Verify: Verify Status on Service Header is "In Process".
+      ServiceHeader.GET(ServiceItemLine."Document Type",ServiceItemLine."Document No.");
+      ServiceHeader.TESTFIELD(Status,ServiceHeader.Status::"In Process");
+    END;
+
+    [Test]
+    PROCEDURE RepairCodeManualStatusChange@28();
+    VAR
+      RepairStatus@1005 : Record 5927;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0148 - refer to TFS ID 21731.
+      // Test Status on Service Header is "In Process" after changing Repair Status Code on second Service Item Line to "In Process" after
+      // Changing Status on Service Header to Finished.
+
+      // 1. Setup: Create Service Order with Three Service Item Lines with Service Item No., Item No. and Description,
+      // Change Status on Service Header to finished.
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+      UpdateStatusOnServiceHeader(ServiceHeader,ServiceHeader.Status::Finished);
+
+      // 2. Exercise: Change Repair Status Code on Second Service Item Line to "In Process".
+      CreateRepairStatusInProcess(RepairStatus);
+      UpdateRepairStatusOnSecondLine(ServiceHeader,RepairStatus.Code);
+
+      // 3. Verify: Verify Status on Service Header is "In Process".
+      ServiceHeader.GET(ServiceItemLine."Document Type",ServiceItemLine."Document No.");
+      ServiceHeader.TESTFIELD(Status,ServiceHeader.Status::"In Process");
+    END;
+
+    [Test]
+    PROCEDURE StatusChangeToOnHold@70();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0148 - refer to TFS ID 21731.
+      // Test Status on Service Header is "On Hold" after changing Repair Status Code on all Service Item Line to "Spare Part" after
+      // Changing Status on Service Header to Finished.
+
+      // 1. Setup: Create Service Order with Three Service Item Lines with Service Item No., Item No. and Description,
+      // Change Status on Service Header to Finished.
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+      UpdateStatusOnServiceHeader(ServiceHeader,ServiceHeader.Status::Finished);
+
+      // 2. Exercise: Change Repair Status Code on All Service Item Line to "Spare Part".
+      UpdateRepairStatusSparePart(ServiceItemLine);
+
+      // 3. Verify: Verify Status on Service Header is "On Hold".
+      ServiceHeader.GET(ServiceItemLine."Document Type",ServiceItemLine."Document No.");
+      ServiceHeader.TESTFIELD(Status,ServiceHeader.Status::"On Hold");
+    END;
+
+    [Test]
+    PROCEDURE StatusNotChangeToFinished@89();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0148 - refer to TFS ID 21731.
+      // Test error occurs on changing Status on Service Header to Finished after changing Repair Status to "Spare Part" on all Service
+      // Item Lines.
+
+      // 1. Setup: Create Service Order with Three Service Item Lines with Service Item No., Item No. and Description.
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+
+      // 2. Exercise: Change Repair Status Code on All Service Item Line to "Spare Part".
+      UpdateRepairStatusSparePart(ServiceItemLine);
+
+      // 3. Verify: Verify that Service Order shows Error "Status Cannot be Change" on changing the Status on Service Header to Finished.
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.FINDFIRST;
+      ASSERTERROR UpdateStatusOnServiceHeader(ServiceHeader,ServiceHeader.Status::Finished);
+      Assert.AreEqual(
+        STRSUBSTNO(StatusChangeError,ServiceHeader.FIELDCAPTION(Status),ServiceHeader.TABLECAPTION,ServiceHeader."No.",
+          ServiceItemLine.FIELDCAPTION("Repair Status Code"),ServiceItemLine."Repair Status Code",ServiceItemLine.TABLECAPTION,
+          ServiceItemLine."Line No."),ConvertMessage(GETLASTERRORTEXT),UnknownError);
+    END;
+
+    [Test]
+    PROCEDURE RepairStatusChangeToQuote@99();
+    VAR
+      RepairStatus@1005 : Record 5927;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0148 - refer to TFS ID 21731.
+      // Test error occurs on changing Repair Status to Quote on Service Item Line.
+
+      // 1. Setup: Create Service Order with Three Service Item Lines with Service Item No., Item No. and Description.
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+
+      // 2. Exercise: Change Repair Status Code on All Service Item Line to "Spare Part".
+      UpdateRepairStatusSparePart(ServiceItemLine);
+
+      // 3. Verify: Verify that Error "Quote Cannot be used" occurs on Changing Repair Status Code on Service Item Line to Quote.
+      CreateRepairStatusQuote(RepairStatus);
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.FINDFIRST;
+      ASSERTERROR ServiceItemLine.VALIDATE("Repair Status Code",RepairStatus.Code);
+      Assert.AreEqual(STRSUBSTNO(QuoteStatusError,RepairStatus.Code),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    PROCEDURE RepairStatusToInProcess@41();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0148 - refer to TFS ID 21731.
+      // Test Status on Service Header is "In Process" after changing Repair Status Code on all Service Item Line to "Spare Part" after
+      // Changing Repair Status Code to Blank on all Service Item Lines.
+
+      // 1. Setup: Create Service Order with Three Service Item Lines with Service Item No., Item No. and Description,
+      // Change Repair Status Code on All Service Item Line to "Spare Part".
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+      UpdateRepairStatusSparePart(ServiceItemLine);
+
+      // 2. Exercise: Change Repair Status Code on All Service Item Line to Blank, change Repair Status Code on All Service Item Line to
+      // "In Process".
+      UpdateRepairStatusBlank(ServiceItemLine);
+      UpdateRepairStatusInProcess(ServiceItemLine);
+
+      // 3. Verify: Verify Status on Service Header is "In Process".
+      ServiceHeader.GET(ServiceItemLine."Document Type",ServiceItemLine."Document No.");
+      ServiceHeader.TESTFIELD(Status,ServiceHeader.Status::"In Process");
+    END;
+
+    [Test]
+    PROCEDURE ServiceLineStartingFee@7();
+    VAR
+      CostType@1006 : 'Travel,Support,Other';
+    BEGIN
+      // Covers document number TC0147 - refer to TFS ID 21731.
+      // Test values on Service Line after running Insert Fee with Service Cost Type Other.
+
+      ServiceLineInsertFee(CostType::Other);
+    END;
+
+    [Test]
+    PROCEDURE ServiceLineTravelFee@80();
+    VAR
+      CostType@1000 : 'Travel,Support,Other';
+    BEGIN
+      // Covers document number TC0147 - refer to TFS ID 21731.
+      // Test values on Service Line after running Insert Fee with Service Cost Type Travel.
+
+      ServiceLineInsertFee(CostType::Travel);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ServiceLineInsertFee@73(CostType@1000 : 'Travel,Support,Other');
+    VAR
+      Customer@1006 : Record 18;
+      ServiceHeader@1005 : Record 5900;
+      ServiceLine@1004 : Record 5902;
+      ServiceCost@1003 : Record 5905;
+      ServiceZone@1007 : Record 5957;
+      ServiceMgtSetup@1002 : Record 5911;
+      ServOrderManagement@1001 : Codeunit 5900;
+    BEGIN
+      // 1. Setup: Create Service Cost with Cost Type, Create a new Service Order - Service Header and Service Line.
+      Initialize;
+      Customer.GET(CreateCustomer);
+      LibraryService.CreateServiceZone(ServiceZone);
+      Customer.VALIDATE("Service Zone Code",ServiceZone.Code);
+      Customer.MODIFY(TRUE);
+      IF CostType = CostType::Travel THEN
+        CreateServiceCost(ServiceCost,ServiceCost."Cost Type"::Travel,Customer."Service Zone Code")
+      ELSE BEGIN
+        CreateServiceCost(ServiceCost,ServiceCost."Cost Type"::Other,'');
+        ServiceMgtSetup.GET;
+        ServiceMgtSetup.VALIDATE("Service Order Starting Fee",ServiceCost.Code);
+        ServiceMgtSetup.MODIFY(TRUE);
+      END;
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      ServiceLine.VALIDATE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.VALIDATE("Document No.",ServiceHeader."No.");
+
+      // 2. Exercise: Add fee to the Service Line by Insert Starting Fee function.
+      ServiceLine.INIT;
+      IF CostType = CostType::Travel THEN
+        ServOrderManagement.InsertServCost(ServiceLine,0,FALSE)
+      ELSE
+        ServOrderManagement.InsertServCost(ServiceLine,1,FALSE);
+
+      // 3. Verify: Verify that the values on the Service Line correspond to the values of the Service cost validated in the
+      // Service Mgt. Setup.
+      VerifyInsertFeeOnServiceLine(ServiceHeader,ServiceCost);
+    END;
+
+    [Test]
+    PROCEDURE SplitServiceLineTypeItem@4();
+    VAR
+      Customer@1000 : Record 18;
+      Item@1004 : Record 27;
+      ServiceCost@1007 : Record 5905;
+      GLAccount@1005 : Record 15;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1006 : Record 5902;
+    BEGIN
+      // Covers document number TC0146 - refer to TFS ID 21731.
+      // Test error occurs on running Split Resource Line with Type Item, Cost and G/L Account.
+
+      // 1. Setup: Create Service Order with Service Item Line with Description.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+
+      // 2. Exercise: Create Service Line with Type Item, Cost and G/L Account.
+      LibraryService.FindServiceCost(ServiceCost);
+      LibraryERM.FindGLAccount(GLAccount);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItem(Item));
+      UpdateQuantityOnServiceLine(ServiceLine,ServiceItemLine."Line No.");
+
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Cost,ServiceCost.Code);
+      UpdateQuantityOnServiceLine(ServiceLine,ServiceItemLine."Line No.");
+
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::"G/L Account",GLAccount."No.");
+      UpdateQuantityOnServiceLine(ServiceLine,ServiceItemLine."Line No.");
+      COMMIT;
+
+      // 3. Verify: Verify that Shows Error "Type must be Resource" on Split Resource line for all Service Lines.
+      VerifySplitLineError(ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmMessageHandler)]
+    PROCEDURE SplitServiceLineTypeResource@52();
+    VAR
+      Resource@1007 : Record 156;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1006 : Record 5902;
+      LibraryResource@1000 : Codeunit 130511;
+    BEGIN
+      // Covers document number TC0146 - refer to TFS ID 21731.
+      // Test Split Resource Line on Service Line with Type Resource.
+
+      // 1. Setup: Create Service Order with Two Service Item Line, Create Service Line with Type Resource.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      LibraryResource.FindResource(Resource);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,Resource."No.");
+      UpdateQuantityOnServiceLine(ServiceLine,ServiceItemLine."Line No.");
+
+      // 2. Exercise: Split Service Line.
+      ServiceLine.SplitResourceLine;
+
+      // 3. Verify: Verify that the Service Line Splited.
+      VerifySplitLines(ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmMessageHandler)]
+    PROCEDURE SplitServiceLineAfterPosting@105();
+    VAR
+      Resource@1007 : Record 156;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1006 : Record 5902;
+      LibraryResource@1000 : Codeunit 130511;
+    BEGIN
+      // Covers document number TC0146 - refer to TFS ID 21731.
+      // Test error occurs on running Split Resource Line after Posting Service Order as Ship.
+
+      // 1. Setup: Create Service Order with Two Service Item Line, Create Service Line with Type Resource.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      LibraryResource.FindResource(Resource);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,Resource."No.");
+      UpdateQuantityOnServiceLine(ServiceLine,ServiceItemLine."Line No.");
+
+      // 2. Exercise: Split Service Line, Post Service Order as Ship.
+      ServiceLine.SplitResourceLine;
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Verify that the Service Line Shows error "Quantity Shipped must be Zero" on Split Service Line.
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDFIRST;
+      ASSERTERROR ServiceLine.SplitResourceLine;
+      Assert.AreEqual(
+        STRSUBSTNO(ShippedQuantityErrorService,ServiceLine."Document Type",ServiceLine."Document No.",ServiceLine."Line No.",
+          ServiceLine."Quantity Shipped"),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmMessageHandler)]
+    PROCEDURE UnitPriceSplitServiceLine@115();
+    VAR
+      Customer@1000 : Record 18;
+      Resource@1007 : Record 156;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1006 : Record 5902;
+      LibraryResource@1004 : Codeunit 130511;
+    BEGIN
+      // Covers document number TC0146 - refer to TFS ID 21731.
+      // Test error occurs on updation Unit Price on Service Line greater than "Max. Labor Unit Price" on Service Header.
+
+      // 1. Setup: Create Service Order with Two Service Item Line, Create Service Line with Type Resource.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryResource.FindResource(Resource);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      ServiceHeader.VALIDATE("Max. Labor Unit Price",Resource."Unit Price" + RANDOM(20));  // Use Random because value is not important.
+      ServiceHeader.MODIFY(TRUE);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,Resource."No.");
+      UpdateQuantityOnServiceLine(ServiceLine,ServiceItemLine."Line No.");
+
+      // 2. Exercise: Split Service Line.
+      ServiceLine.SplitResourceLine;
+
+      // 3. Verify: Verify the Unit Price and Quantity on Splitted Service Line and shows error "Cannot be Greater" on entering
+      // Unit Price value on Service Line Greater than "Max. Labor Unit Price" on service Header.
+      VerifyUnitPrice(ServiceHeader,ServiceLine.Quantity,Resource."Unit Price");
+
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDFIRST;
+      ASSERTERROR ServiceLine.VALIDATE("Unit Price",ServiceHeader."Max. Labor Unit Price" + RANDOM(10));
+      Assert.AreEqual(
+        STRSUBSTNO(
+          UnitPriceUpdationError,ServiceLine.FIELDCAPTION("Unit Price"),
+          ServiceHeader.FIELDCAPTION("Max. Labor Unit Price"),
+          ServiceHeader.TABLECAPTION),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ModalFormHandler,MessageHandler)]
+    PROCEDURE ServiceItemCreated@22();
+    VAR
+      ServiceItem@1000 : Record 5940;
+      ServiceItem2@1004 : Record 5940;
+      ServiceHeader@1001 : Record 5900;
+      ServiceItemLine@1002 : Record 5901;
+      ServiceLine@1003 : Record 5902;
+    BEGIN
+      // Covers document number TC0145 - refer to TFS ID 21731.
+      // Test Service Item created after Posting Service Order as Ship with Service Item having Service Item Group with create New Service
+      // Item True.
+
+      // 1. Setup: Select Service Item Having Service Item Group Code with Create New Service Item True, Create Service Order.
+      Initialize;
+      SelectServiceItem(ServiceItem);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ServiceItem."Item No.");
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+      ServiceLine.MODIFY(TRUE);
+      ServiceLine.VALIDATE("No.",ServiceItem."Item No.");
+      ServiceLine.MODIFY(TRUE);
+
+      // 2. Exercise: Post Service Order as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Verify that New Service Item Created.
+      ServiceItem2.SETFILTER("No.",'<>%1',ServiceItem."No.");
+      ServiceItem2.SETRANGE("Item No.",ServiceItem."Item No.");
+      ServiceItem2.SETRANGE("Customer No.",ServiceItem."Customer No.");
+      ServiceItem2.SETRANGE(Status,ServiceItem2.Status::"Temporarily Installed");
+      ServiceItem2.FINDFIRST;
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmMessageHandler,MessageHandler,StringMenuHandler,ModalFormHandlerLookupOK)]
+    PROCEDURE ServiceItemCompReplacement@49();
+    VAR
+      ServiceItemLine@1002 : Record 5901;
+      ServiceItemComponent@1001 : Record 5941;
+      ParentServiceItemNo@1000 : Code[20];
+    BEGIN
+      // Covers document number TC0145 - refer to TFS ID 21731.
+      // Test Replaced Component on Service Item Component after Posting Service Order as Ship.
+
+      // 1. Create Service Order, Create Service Item from Service Order, Create Service Item Components, Create Service Line with
+      // "Item No." on Second Service Item Line choose "Replace Component", Post Service Order as Ship.
+      CreateAndPostServiceOrder(ServiceItemLine,ParentServiceItemNo,1);
+
+      // 2. Verify: Verify that the First Service Item Component Replaced and Replaced Component with Active False.
+      ServiceItemComponent.SETRANGE("Parent Service Item No.",ServiceItemNoForReplacement);
+      ServiceItemComponent.SETRANGE(Active,TRUE);
+      ServiceItemComponent.FINDFIRST;
+      ServiceItemComponent.TESTFIELD(Type,ServiceItemComponent.Type::Item);
+      ServiceItemComponent.TESTFIELD("No.",ServiceItemLine."Item No.");
+
+      ServiceItemComponent.SETRANGE(Active,FALSE);
+      ServiceItemComponent.FINDFIRST;
+      ServiceItemComponent.TESTFIELD(Type,ServiceItemComponent.Type::"Service Item");
+      ServiceItemComponent.TESTFIELD("No.",ServiceItemLine."Service Item No.");
+      ServiceItemComponent.TESTFIELD("Service Order No.",ServiceItemLine."Document No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmMessageHandler,MessageHandler,StringMenuHandlerForNew)]
+    PROCEDURE NewServiceItemCompCreation@69();
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+      ServiceItemComponent@1006 : Record 5941;
+      Quantity@1004 : Decimal;
+      ParentServiceItemNo@1008 : Code[20];
+    BEGIN
+      // Covers document number TC0145 - refer to TFS ID 21731.
+      // Test New Component on Service Item Component after Posting Service Order as Ship.
+
+      // 1. Create Service Order, Create Service Item from Service Order, Create Service Item Components, Create Service Line with
+      // "Item No." on Second Service Item Line choose "New Component", Post Service Order as Ship.
+      Quantity := RANDOM(10);
+      CreateAndPostServiceOrder(ServiceItemLine,ParentServiceItemNo,Quantity);
+
+      // 2. Verify: Verify that the New Service Item Component Created.
+      ServiceItemComponent.SETRANGE("Parent Service Item No.",ParentServiceItemNo);
+      ServiceItemComponent.SETRANGE(Active,TRUE);
+      ServiceItemComponent.SETRANGE(Type,ServiceItemComponent.Type::Item);
+      Assert.AreEqual(ServiceItemComponent.COUNT,Quantity,STRSUBSTNO(NoOfLinesError,Quantity));
+    END;
+
+    [Test]
+    PROCEDURE RepairStatusServiceQuote@6();
+    VAR
+      RepairStatus@1005 : Record 5927;
+      ServiceItem@1001 : Record 5940;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0144 - refer to TFS ID 21731.
+      // Test Repair Status Code on Service Item Line Successfully changed to Quote on Service Quote.
+
+      // 1. Setup: Create Service Header with Document Type Quote.
+      Initialize;
+      LibraryService.CreateServiceItem(ServiceItem,CreateCustomer);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Quote,ServiceItem."Customer No.");
+
+      // 2. Exercise: Create Service Item Line with Service Item No., Change Repair Status Code on Service Item Line to Initial.
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      UpdateRepairStatusInitial(ServiceItemLine);
+
+      // 3. Verify: Verify that Repair Status Code on Service Item Line to Quote is Successfully Changed.
+      CreateRepairStatusQuote(RepairStatus);
+      ServiceItemLine.VALIDATE("Repair Status Code",RepairStatus.Code);
+      ServiceItemLine.MODIFY(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE RepairStatusToWaitCustomer@55();
+    VAR
+      RepairStatus@1004 : Record 5927;
+      ServiceHeader@1000 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+    BEGIN
+      // Covers document number TC0144 - refer to TFS ID 21731.
+      // Test Repair Status Code on Service Item Line Successfully changed to "Wait Customer".
+
+      // 1. Create Service Header with Document Type Order, Create Service Item Line with Service Item No., Change Repair Status
+      // Code on Service Item Line to Initial.
+      RepairStatusInitial(ServiceHeader,ServiceItemLine);
+
+      // 2. Verify: Verify that Repair Status Code on Service Item Line to "Wait Customer" is Successfully Changed.
+      CreateRepairStatusWaitCustomer(RepairStatus);
+      ServiceItemLine.VALIDATE("Repair Status Code",RepairStatus.Code);
+      ServiceItemLine.MODIFY(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE FaultCodeOnPostedDocument@62();
+    VAR
+      TempServiceItemLine@1011 : TEMPORARY Record 5901;
+    BEGIN
+      // Covers document number TC0144 - refer to TFS ID 21731.
+      // Test Symptom Code and Resolution Code on Posted Service Shipment and Posted Service Invoice after Posting Service Order as Ship
+      // and Invoice.
+
+      // 1. Create Service Order, Create Fault Code and Resolution Code, Update Fault Area Code, Fault Code, Symptom Code
+      // and Resolution Code on Service Item Line, Post Service Order as Ship and Invoice.
+      PostServiceOrderFaultCode(TempServiceItemLine);
+
+      // 2. Verify: Verify Symptom Code and Resolution Code on Posted Service Shipment and Posted Service Invoice.
+      VerifyFaultCodePostedShipment(TempServiceItemLine);
+      VerifyFaultCodeOnPostedInvoice(TempServiceItemLine);
+    END;
+
+    [Test]
+    PROCEDURE FaultResolutionRelation@157();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+      TempServiceItemLine@1011 : TEMPORARY Record 5901;
+      FaultCode@1007 : Record 5918;
+      FaultResolRelationCalculate@1013 : Codeunit 5913;
+    BEGIN
+      // Covers document number TC0144 - refer to TFS ID 21731.
+      // Test Fault/Resolution Relationships entries after running Insert Fault/Resolution Relationships.
+
+      // 1. Setup: Create Service Order, Create Fault Code and Resolution Code, Update Fault Area Code, Fault Code, Symptom Code
+      // and Resolution Code on Service Item Line, Post Service Order as Ship and Invoice.
+      PostServiceOrderFaultCode(TempServiceItemLine);
+
+      // 2. Exercise: Create New Service Order with Same values on Service Item Line as on Previous Service Order,
+      // Run Insert Fault/Resolution Relationships.
+      CLEAR(ServiceHeader);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,TempServiceItemLine."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,TempServiceItemLine."Service Item No.");
+      FaultCode.GET(TempServiceItemLine."Fault Area Code",TempServiceItemLine."Symptom Code",TempServiceItemLine."Fault Code");
+      UpdateFaultResolution(ServiceItemLine,FaultCode,TempServiceItemLine."Resolution Code");
+
+      FaultResolRelationCalculate.CopyResolutionRelationToTable(WORKDATE,WORKDATE,TRUE,TRUE);
+
+      // 3. Verify: Verify Fault/Resolution Relationships Entry from Second Order.
+      VerifyFaultResolutionRelation(TempServiceItemLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(UpdateQuantityPageHandler,BatchPostServiceOrdersHandler,MessageHandler)]
+    PROCEDURE OrdersBatchPostWithStatus@125();
+    VAR
+      SalesAndReceivablesSetup@1004 : Record 311;
+      No@1001 : Code[20];
+      No2@1000 : Code[20];
+    BEGIN
+      // Test the functionality of Batch Post Service Orders and verify that no Service Order exist for Status In Process and posted date.
+
+      // 1. Setup: Create multiple Service Orders.
+      Initialize;
+      SalesAndReceivablesSetup.GET;
+      LibrarySales.SetStockoutWarning(FALSE);
+      No := CreateServiceOrderWithPage;
+      No2 := CreateServiceOrderWithPage;
+      COMMIT;
+
+      // 2. Exercise: Run the Batch Post Service Orders with any random date greater than WORKDATE through the handler.
+      BatchPostOrders(No,No2);
+
+      // 3. Verify: Verify that no Service Order exist for the Status In Process and the posted date.
+      VerifyServiceOrdersStatus(No,PostingDate);
+      VerifyServiceOrdersStatus(No2,PostingDate);
+
+      // 4. Tear Down: Restore the original value of Stockout Warning.
+      LibrarySales.SetStockoutWarning(SalesAndReceivablesSetup."Stockout Warning");
+    END;
+
+    [Test]
+    [HandlerFunctions(UpdateQuantityPageHandler,BatchPostServiceOrdersHandler,MessageHandler)]
+    PROCEDURE ServiceOrdersBatchPost@128();
+    VAR
+      SalesAndReceivablesSetup@1004 : Record 311;
+      No@1001 : Code[20];
+      No2@1000 : Code[20];
+    BEGIN
+      // Test the functionality of Batch Post Service Orders and verify that Posted Service Invoices exist for the Posting Date.
+
+      // 1. Setup: Create multiple Service Orders.
+      Initialize;
+      SalesAndReceivablesSetup.GET;
+      LibrarySales.SetStockoutWarning(FALSE);
+      No := CreateServiceOrderWithPage;
+      No2 := CreateServiceOrderWithPage;
+      SetBlueLocation(No,No2);
+      COMMIT;
+
+      // 2. Exercise: Run the Batch Post Service Orders with a random date greater than WORKDATE through the handler.
+      BatchPostOrders(No,No2);
+
+      // 3. Verify: Verify that Posted Service Invoice exist for the Posting Date.
+      VerifyPostedServiceInvoice(No,PostingDate);
+      VerifyPostedServiceInvoice(No2,PostingDate);
+
+      // 4. Tear Down: Restore the original value of Stockout Warning.
+      LibrarySales.SetStockoutWarning(SalesAndReceivablesSetup."Stockout Warning");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateAndPostServiceOrder@74(VAR ServiceItemLine@1000 : Record 5901;VAR ParentServiceItemNo@1007 : Code[20];Quantity@1006 : Decimal);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      // 1. Setup: Create Service Order, Create Service Item from Service Order, Create Service Item Components,
+      // Create Service Line with "Item No." on Second Service Item Line.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      CreateServiceItemLineWithItem(ServiceHeader);
+      CreateServiceItemFromOrder(ServiceHeader);
+      CreateServiceItemComponents(ServiceHeader);
+      CreateServiceLineReplacement(ServiceLine,ServiceHeader);
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      ServiceItemNoForReplacement := ServiceItemLine."Service Item No.";
+      ParentServiceItemNo := ServiceItemLine."Service Item No.";
+      UpdateQuantityOnServiceLine(ServiceLine,ServiceItemLine."Line No.");
+      ServiceLine.VALIDATE(Quantity,Quantity);
+      ServiceLine.MODIFY(TRUE);
+      ServiceItemLine.NEXT;
+      ServiceLine.VALIDATE("No.",ServiceItemLine."Item No.");
+
+      // 2. Exercise: Post Service Order as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateServiceOrder@21(VAR ServiceHeader@1000 : Record 5900;VAR ServiceMgtSetup@1001 : Record 5911;Modified@1003 : Boolean) SetupModified : Boolean;
+    BEGIN
+      Initialize;
+      ServiceMgtSetup.GET;
+      SetupModified := ModifyServiceSetupCopyComment(ServiceMgtSetup,Modified);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      CreateServiceItemLine(ServiceHeader);
+      CreateCommentsOnServiceOrder(ServiceHeader);
+      CreateServiceLineForItem(ServiceHeader);
+      UpdatePartialQtyOnServiceLines(ServiceHeader);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateServiceOrderWithOneLine@87(VAR ServiceHeader@1001 : Record 5900;VAR ServiceItemLine@1000 : Record 5901);
+    VAR
+      ServiceItem@1003 : Record 5940;
+    BEGIN
+      LibraryService.CreateServiceItem(ServiceItem,CreateCustomer);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateServiceOrderWithNotify@45(VAR ServiceHeader@1001 : Record 5900;VAR ServiceItemLine@1000 : Record 5901);
+    VAR
+      Customer@1002 : Record 18;
+    BEGIN
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("E-Mail",LibraryUtility.GenerateRandomCode(Customer.FIELDNO("E-Mail"),DATABASE::Customer));
+      Customer.MODIFY(TRUE);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      ServiceHeader.VALIDATE("Notify Customer",ServiceHeader."Notify Customer"::"By E-Mail");
+      ServiceHeader.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE PostServiceOrderFaultCode@40(VAR TempServiceItemLine@1000 : TEMPORARY Record 5901);
+    VAR
+      Customer@1010 : Record 18;
+      ServiceCost@1009 : Record 5905;
+      ServiceItem@1008 : Record 5940;
+      ServiceHeader@1007 : Record 5900;
+      ServiceItemLine@1006 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      FaultCode@1003 : Record 5918;
+      ResolutionCode@1002 : Record 5919;
+    BEGIN
+      // Create Service Order, Create Fault Code and Resolution Code, Update Fault Area Code, Fault Code, Symptom Code
+      // and Resolution Code on Service Item Line, Post Service Order as Ship and Invoice.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.FindServiceCost(ServiceCost);
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      UpdateRepairStatusInitial(ServiceItemLine);
+
+      CreateFaultCode(FaultCode);
+      IF NOT ResolutionCode.FINDFIRST THEN
+        LibraryService.CreateResolutionCode(ResolutionCode);
+      UpdateFaultResolution(ServiceItemLine,FaultCode,ResolutionCode.Code);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Cost,ServiceCost.Code);
+      UpdateQuantityOnServiceLine(ServiceLine,ServiceItemLine."Line No.");
+      TempServiceItemLine := ServiceItemLine;
+      TempServiceItemLine.INSERT;
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE RepairStatusInitial@77(VAR ServiceHeader@1001 : Record 5900;VAR ServiceItemLine@1000 : Record 5901);
+    VAR
+      Item@1004 : Record 27;
+      ServiceItem@1005 : Record 5940;
+    BEGIN
+      Initialize;
+      LibraryService.CreateServiceItem(ServiceItem,CreateCustomer);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      ServiceItemLine.VALIDATE("Item No.",LibraryInventory.CreateItem(Item));
+      ServiceItemLine.MODIFY(TRUE);
+
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      UpdateRepairStatusInitial(ServiceItemLine);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE RunServiceLineForm@46(VAR ServiceItemLine@1002 : Record 5901;VAR ServiceMgtSetup@1001 : Record 5911;Modified@1000 : Boolean) SetupModified : Boolean;
+    VAR
+      Customer@1003 : Record 18;
+      Item@1010 : Record 27;
+      ServiceItem@1009 : Record 5940;
+      ServiceHeader@1008 : Record 5900;
+      StandardServiceItemGrCode@1006 : Record 5998;
+      StandardServiceCode@1005 : Record 5996;
+      StandardServiceLine@1004 : Record 5997;
+    BEGIN
+      // 1. Setup: Set "Link Service to Service Item" field as False on Service Management Setup, Create Standard Service Code, Create
+      // Standard Service Line for Create Standard Service Code, Create Service Order - Service Header and Service Item Line.
+      Initialize;
+      ServiceMgtSetup.GET;
+      Customer.GET(CreateCustomer);
+      SetupModified := ModifySetupLinkServiceItem(ServiceMgtSetup,Modified);
+      LibraryService.CreateStandardServiceCode(StandardServiceCode);
+
+      StandServiceItemGroupCode := StandardServiceCode.Code;
+      LibraryService.CreateStandardServiceLine(StandardServiceLine,StandardServiceCode.Code);
+      UpdateStandardServiceLine(StandardServiceLine,StandardServiceLine.Type::Item,LibraryInventory.CreateItem(Item));
+
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      StandardServiceCode.VALIDATE("Currency Code",ServiceHeader."Currency Code");
+      StandardServiceCode.MODIFY(TRUE);
+
+      // 2. Exercise: Run Service Line Form.
+      StandardServiceItemGrCode.InsertServiceLines(ServiceItemLine);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateCommentsOnServiceOrder@64(ServiceHeader@1002 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+      ServiceCommentLine@1000 : Record 5906;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        LibraryService.CreateCommentLineForServHeader(ServiceCommentLine,ServiceItemLine,ServiceCommentLine.Type::Fault);
+        LibraryService.CreateCommentLineForServHeader(ServiceCommentLine,ServiceItemLine,ServiceCommentLine.Type::Resolution);
+        LibraryService.CreateCommentLineForServHeader(ServiceCommentLine,ServiceItemLine,ServiceCommentLine.Type::Accessory);
+        LibraryService.CreateCommentLineForServHeader(ServiceCommentLine,ServiceItemLine,ServiceCommentLine.Type::Internal);
+        LibraryService.CreateCommentLineForServHeader(
+          ServiceCommentLine,ServiceItemLine,ServiceCommentLine.Type::"Service Item Loaner");
+        LibraryService.CreateCommentLineForServHeader(ServiceCommentLine,ServiceItemLine,ServiceCommentLine.Type::General);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateFaultCode@101(VAR FaultCode@1000 : Record 5918);
+    VAR
+      FaultArea@1001 : Record 5915;
+      SymptomCode@1002 : Record 5916;
+    BEGIN
+      IF NOT FaultArea.FINDFIRST THEN
+        LibraryService.CreateFaultArea(FaultArea);
+
+      IF NOT SymptomCode.FINDFIRST THEN
+        LibraryService.CreateSymptomCode(SymptomCode);
+
+      FaultCode.SETRANGE("Fault Area Code",FaultArea.Code);
+      FaultCode.SETRANGE("Symptom Code",SymptomCode.Code);
+      IF NOT FaultCode.FINDFIRST THEN
+        LibraryService.CreateFaultCode(FaultCode,FaultArea.Code,SymptomCode.Code);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateRepairStatusCodeFinish@36(VAR RepairStatus@1001 : Record 5927);
+    BEGIN
+      RepairStatus.SETRANGE(Finished,TRUE);
+      IF NOT RepairStatus.FINDFIRST THEN BEGIN
+        LibraryService.CreateRepairStatus(RepairStatus);
+        RepairStatus.VALIDATE(Finished,TRUE);
+        RepairStatus.MODIFY(TRUE);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateRepairStatusCodePartial@48(VAR RepairStatus@1001 : Record 5927);
+    BEGIN
+      RepairStatus.SETRANGE("Partly Serviced",TRUE);
+      IF NOT RepairStatus.FINDFIRST THEN BEGIN
+        LibraryService.CreateRepairStatus(RepairStatus);
+        RepairStatus.VALIDATE("Partly Serviced",TRUE);
+        RepairStatus.MODIFY(TRUE);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateRepairStatusInProcess@53(VAR RepairStatus@1001 : Record 5927);
+    BEGIN
+      RepairStatus.SETRANGE("In Process",TRUE);
+      IF NOT RepairStatus.FINDFIRST THEN BEGIN
+        LibraryService.CreateRepairStatus(RepairStatus);
+        RepairStatus.VALIDATE("In Process",TRUE);
+        RepairStatus.MODIFY(TRUE);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateRepairStatusQuote@97(VAR RepairStatus@1001 : Record 5927);
+    BEGIN
+      RepairStatus.SETRANGE("Quote Finished",TRUE);
+      IF NOT RepairStatus.FINDFIRST THEN BEGIN
+        LibraryService.CreateRepairStatus(RepairStatus);
+        RepairStatus.VALIDATE("Quote Finished",TRUE);
+        RepairStatus.MODIFY(TRUE);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateRepairStatusWaitCustomer@56(VAR RepairStatus@1001 : Record 5927);
+    BEGIN
+      RepairStatus.SETRANGE("Waiting for Customer",TRUE);
+      IF NOT RepairStatus.FINDFIRST THEN BEGIN
+        LibraryService.CreateRepairStatus(RepairStatus);
+        RepairStatus.VALIDATE("Waiting for Customer",TRUE);
+        RepairStatus.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceCost@8(VAR ServiceCost@1000 : Record 5905;CostType@1003 : Option;ServiceZoneCode@1002 : Code[10]);
+    BEGIN
+      ServiceCost.SETRANGE("Cost Type",CostType);
+      ServiceCost.SETRANGE("Service Zone Code",ServiceZoneCode);
+      IF NOT ServiceCost.FINDFIRST THEN BEGIN
+        LibraryService.CreateServiceCost(ServiceCost);
+        ServiceCost.VALIDATE("Cost Type",CostType);
+        ServiceCost.VALIDATE("Account No.",LibraryERM.CreateGLAccountWithSalesSetup);
+
+        // Use Random because value is not important.
+        ServiceCost.VALIDATE("Default Quantity",RANDOM(10));
+        ServiceCost.VALIDATE("Default Unit Cost",RANDOM(10));
+        ServiceCost.VALIDATE("Service Zone Code",ServiceZoneCode);
+        ServiceCost.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceItemLine@11(ServiceHeader@1001 : Record 5900);
+    VAR
+      ServiceItem@1000 : Record 5940;
+      ServiceItemLine@1002 : Record 5901;
+      Counter@1003 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Lines - Boundary 2 is important.
+      FOR Counter := 2 TO 2 + RANDOM(8) DO BEGIN
+        CLEAR(ServiceItem);
+        LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+        LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceItemLineWithItem@42(ServiceHeader@1001 : Record 5900);
+    VAR
+      Item@1004 : Record 27;
+      ServiceItemLine@1000 : Record 5901;
+      Counter@1003 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Item Lines - Boundary 2 is important.
+      FOR Counter := 2 TO 2 + RANDOM(8) DO BEGIN
+        LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+        ServiceItemLine.VALIDATE("Item No.",LibraryInventory.CreateItem(Item));
+        ServiceItemLine.VALIDATE(Description,Item."No.");
+        ServiceItemLine.MODIFY(TRUE);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateServiceLineReplacement@39(VAR ServiceLine@1002 : Record 5902;ServiceHeader@1000 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.NEXT(2);
+
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ServiceItemLine."Item No.");
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForItem@16(ServiceHeader@1004 : Record 5900);
+    VAR
+      ServiceLine@1000 : Record 5902;
+      ServiceItemLine@1001 : Record 5901;
+      Item@1003 : Record 27;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItem(Item));
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateServiceItemFromOrder@33(ServiceHeader@1000 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+      ServItemManagement@1002 : Codeunit 5920;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        ServItemManagement.CreateServItemOnServItemLine(ServiceItemLine);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateServiceItemComponents@38(ServiceHeader@1001 : Record 5900);
+    VAR
+      ServiceItemComponent@1000 : Record 5941;
+      ServiceItemLine@1002 : Record 5901;
+      ServiceItemNo@1003 : Code[20];
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      ServiceItemNo := ServiceItemLine."Service Item No.";
+      ServiceItemLine.NEXT;
+      REPEAT
+        LibraryService.CreateServiceItemComponent(
+          ServiceItemComponent,ServiceItemNo,ServiceItemComponent.Type::"Service Item",ServiceItemLine."Service Item No.");
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ConvertMessage@65(ErrorMessage@1000 : Text[1024]) : Text[1024];
+    VAR
+      NewLine@1001 : Text[2];
+    BEGIN
+      // Remove New Line Character from Error Message.
+      NewLine[1] := 13;
+      NewLine[2] := 10;
+      EXIT(DELCHR(ErrorMessage,'=',NewLine));
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@92() : Code[20];
+    BEGIN
+      EXIT(LibrarySales.CreateCustomerNo);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ModifyServiceSetupCopyComment@13(VAR ServiceMgtSetup@1000 : Record 5911;ModifyValue@1001 : Boolean) : Boolean;
+    BEGIN
+      IF (ServiceMgtSetup."Copy Comments Order to Invoice" <> ModifyValue) OR
+         (ServiceMgtSetup."Copy Comments Order to Shpt." <> ModifyValue)
+      THEN BEGIN
+        ServiceMgtSetup.VALIDATE("Copy Comments Order to Invoice",ModifyValue);
+        ServiceMgtSetup.VALIDATE("Copy Comments Order to Shpt.",ModifyValue);
+        ServiceMgtSetup.MODIFY(TRUE);
+        EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ModifySetupLinkServiceItem@20(VAR ServiceMgtSetup@1000 : Record 5911;ModifyValue@1001 : Boolean) : Boolean;
+    BEGIN
+      IF ServiceMgtSetup."Link Service to Service Item" <> ModifyValue THEN BEGIN
+        ServiceMgtSetup.VALIDATE("Link Service to Service Item",ModifyValue);
+        ServiceMgtSetup.MODIFY(TRUE);
+        EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SelectServiceItem@58(VAR ServiceItem@1000 : Record 5940);
+    VAR
+      Item@1003 : Record 27;
+      ServiceItemGroup@1001 : Record 5904;
+    BEGIN
+      LibraryService.CreateServiceItemGroup(ServiceItemGroup);
+      ServiceItemGroup.VALIDATE("Create Service Item",TRUE);
+      ServiceItemGroup.MODIFY(TRUE);
+
+      LibraryService.CreateServiceItem(ServiceItem,CreateCustomer);
+      ServiceItem.VALIDATE("Item No.",LibraryInventory.CreateItem(Item));
+      ServiceItem.VALIDATE("Service Item Group Code",ServiceItemGroup.Code);
+      ServiceItem.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SaveComments@67(VAR TempServiceCommentLine@1000 : TEMPORARY Record 5906;ServiceHeader@1001 : Record 5900);
+    VAR
+      ServiceCommentLine@1002 : Record 5906;
+    BEGIN
+      ServiceCommentLine.SETRANGE("Table Name",ServiceCommentLine."Table Name"::"Service Header");
+      ServiceCommentLine.SETRANGE("Table Subtype",ServiceHeader."Document Type");
+      ServiceCommentLine.SETRANGE("No.",ServiceHeader."No.");
+      ServiceCommentLine.FINDSET;
+      REPEAT
+        TempServiceCommentLine := ServiceCommentLine;
+        TempServiceCommentLine.INSERT;
+      UNTIL ServiceCommentLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateFaultResolution@116(VAR ServiceItemLine@1000 : Record 5901;FaultCode@1001 : Record 5918;ResolutionCode@1002 : Code[10]);
+    BEGIN
+      ServiceItemLine.VALIDATE("Fault Area Code",FaultCode."Fault Area Code");
+      ServiceItemLine.VALIDATE("Symptom Code",FaultCode."Symptom Code");
+      ServiceItemLine.VALIDATE("Fault Code",FaultCode.Code);
+      ServiceItemLine.VALIDATE("Resolution Code",ResolutionCode);
+      ServiceItemLine.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdatePartialQtyOnServiceLines@9(ServiceHeader@1003 : Record 5900);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,RANDOM(10));  // Use Random because value is not important.
+        ServiceLine.VALIDATE("Qty. to Ship",ServiceLine.Quantity * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateQuantityOnServiceLine@12(VAR ServiceLine@1000 : Record 5902;ServiceItemLineLineNo@1001 : Integer);
+    BEGIN
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLineLineNo);
+      ServiceLine.VALIDATE(Quantity,RANDOM(10));  // Use Random because value is not important.
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateRepairStatusOnFirstLine@5(ServiceHeader@1000 : Record 5900;RepairStatusCode@1001 : Code[10]);
+    VAR
+      ServiceItemLine@1002 : Record 5901;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDFIRST;
+      ServiceItemLine.VALIDATE("Repair Status Code",RepairStatusCode);
+      ServiceItemLine.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateRepairStatusOnSecondLine@2(ServiceHeader@1000 : Record 5900;RepairStatusCode@1001 : Code[10]);
+    VAR
+      ServiceItemLine@1002 : Record 5901;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.NEXT(2);
+      ServiceItemLine.VALIDATE("Repair Status Code",RepairStatusCode);
+      ServiceItemLine.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateRepairStatusInitial@50(ServiceItemLine@1000 : Record 5901);
+    VAR
+      RepairStatus@1001 : Record 5927;
+    BEGIN
+      RepairStatus.SETRANGE(Initial,TRUE);
+      IF NOT RepairStatus.FINDFIRST THEN BEGIN
+        LibraryService.CreateRepairStatus(RepairStatus);
+        RepairStatus.VALIDATE(Initial,TRUE);
+        RepairStatus.MODIFY(TRUE);
+      END;
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        ServiceItemLine.VALIDATE("Repair Status Code",RepairStatus.Code);
+        ServiceItemLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateRepairStatusFinished@29(ServiceItemLine@1000 : Record 5901);
+    VAR
+      RepairStatus@1001 : Record 5927;
+    BEGIN
+      RepairStatus.SETRANGE(Finished,TRUE);
+      IF NOT RepairStatus.FINDFIRST THEN BEGIN
+        LibraryService.CreateRepairStatus(RepairStatus);
+        RepairStatus.VALIDATE(Finished,TRUE);
+        RepairStatus.MODIFY(TRUE);
+      END;
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        ServiceItemLine.VALIDATE("Repair Status Code",RepairStatus.Code);
+        ServiceItemLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateRepairStatusSparePart@76(ServiceItemLine@1000 : Record 5901);
+    VAR
+      RepairStatus@1001 : Record 5927;
+    BEGIN
+      RepairStatus.SETRANGE("Spare Part Ordered",TRUE);
+      IF NOT RepairStatus.FINDFIRST THEN BEGIN
+        LibraryService.CreateRepairStatus(RepairStatus);
+        RepairStatus.VALIDATE("Spare Part Ordered",TRUE);
+        RepairStatus.MODIFY(TRUE);
+      END;
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        ServiceItemLine.VALIDATE("Repair Status Code",RepairStatus.Code);
+        ServiceItemLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateRepairStatusBlank@43(ServiceItemLine@1000 : Record 5901);
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        ServiceItemLine.VALIDATE("Repair Status Code",'');
+        ServiceItemLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateRepairStatusInProcess@47(ServiceItemLine@1000 : Record 5901);
+    VAR
+      RepairStatus@1001 : Record 5927;
+    BEGIN
+      RepairStatus.SETRANGE("In Process",TRUE);
+      IF NOT RepairStatus.FINDFIRST THEN BEGIN
+        LibraryService.CreateRepairStatus(RepairStatus);
+        RepairStatus.VALIDATE("In Process",TRUE);
+        RepairStatus.MODIFY(TRUE);
+      END;
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        ServiceItemLine.VALIDATE("Repair Status Code",RepairStatus.Code);
+        ServiceItemLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateStatusOnServiceHeader@31(VAR ServiceHeader@1000 : Record 5900;Status@1001 : Option);
+    BEGIN
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.VALIDATE(Status,Status);
+      ServiceHeader.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateStandardServiceLine@3(VAR StandardServiceLine@1000 : Record 5997;Type@1001 : Option;No@1002 : Code[20]);
+    BEGIN
+      StandardServiceLine.VALIDATE(Type,Type);
+      StandardServiceLine.VALIDATE("No.",No);
+      StandardServiceLine.VALIDATE(Quantity,RANDOM(10));  // Validating as random because value is not important.
+      StandardServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE BatchPostOrders@135(No@1001 : Code[20];No2@1000 : Code[20]);
+    VAR
+      ServiceHeader@1005 : Record 5900;
+      BatchPostServiceOrders@1003 : Report 6001;
+    BEGIN
+      ServiceHeader.SETRANGE("Document Type",ServiceHeader."Document Type"::Order);
+      ServiceHeader.SETRANGE("No.",No,No2);
+      CLEAR(BatchPostServiceOrders);
+      BatchPostServiceOrders.SETTABLEVIEW(ServiceHeader);
+      BatchPostServiceOrders.RUN;
+    END;
+
+    LOCAL PROCEDURE CreateServiceItemLineForOrder@134(No@1005 : Code[20]);
+    VAR
+      Customer@1000 : Record 18;
+      ServiceHeader@1004 : Record 5900;
+      ServiceItem@1003 : Record 5940;
+      ServiceOrder@1001 : TestPage 5900;
+    BEGIN
+      Customer.GET(CreateCustomer);
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      ServiceOrder.OPENEDIT;
+      ServiceOrder.FILTER.SETFILTER("Document Type",FORMAT(ServiceHeader."Document Type"::Order));
+      ServiceOrder.FILTER.SETFILTER("No.",No);
+      ServiceOrder."Customer No.".SETVALUE(Customer."No.");
+      ServiceOrder.ServItemLines.ServiceItemNo.SETVALUE(ServiceItem."No.");
+      ServiceOrder.ServItemLines.NEW;
+      ServiceOrder.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrderWithPage@141() No : Code[20];
+    BEGIN
+      No := LibraryService.CreateServiceOrderHeaderUsingPage;
+      CreateServiceItemLineForOrder(No);
+      OpenServiceLinePage(No);
+    END;
+
+    LOCAL PROCEDURE OpenServiceLinePage@139(No@1001 : Code[20]);
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceOrder@1000 : TestPage 5900;
+    BEGIN
+      ServiceOrder.OPENVIEW;
+      ServiceOrder.FILTER.SETFILTER("Document Type",FORMAT(ServiceHeader."Document Type"::Order));
+      ServiceOrder.FILTER.SETFILTER("No.",No);
+      ServiceOrder.ServItemLines."Service Lines".INVOKE;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyCommentsOnPostedShipment@68(VAR TempServiceCommentLine@1001 : TEMPORARY Record 5906);
+    VAR
+      ServiceShipmentHeader@1000 : Record 5990;
+      ServiceCommentLine@1002 : Record 5906;
+    BEGIN
+      ServiceShipmentHeader.SETRANGE("Order No.",TempServiceCommentLine."No.");
+      ServiceShipmentHeader.FINDFIRST;
+      TempServiceCommentLine.FINDSET;
+      ServiceCommentLine.SETRANGE("Table Name",ServiceCommentLine."Table Name"::"Service Shipment Header");
+      ServiceCommentLine.SETRANGE("No.",ServiceShipmentHeader."No.");
+      ServiceCommentLine.FINDSET;
+      REPEAT
+        ServiceCommentLine.TESTFIELD("Table Line No.",TempServiceCommentLine."Table Line No.");
+        ServiceCommentLine.TESTFIELD("Line No.",TempServiceCommentLine."Line No.");
+        ServiceCommentLine.TESTFIELD(Type,TempServiceCommentLine.Type);
+        ServiceCommentLine.TESTFIELD(Comment,TempServiceCommentLine.Comment);
+        TempServiceCommentLine.NEXT;
+      UNTIL ServiceCommentLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyCommentsOnPostedInvoice@14(VAR TempServiceCommentLine@1001 : TEMPORARY Record 5906);
+    VAR
+      ServiceInvoiceHeader@1000 : Record 5992;
+      ServiceCommentLine@1002 : Record 5906;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",TempServiceCommentLine."No.");
+      ServiceInvoiceHeader.FINDFIRST;
+      TempServiceCommentLine.FINDSET;
+      ServiceCommentLine.SETRANGE("Table Name",ServiceCommentLine."Table Name"::"Service Invoice Header");
+      ServiceCommentLine.SETRANGE("No.",ServiceInvoiceHeader."No.");
+      ServiceCommentLine.FINDSET;
+      REPEAT
+        ServiceCommentLine.TESTFIELD("Table Line No.",TempServiceCommentLine."Table Line No.");
+        ServiceCommentLine.TESTFIELD("Line No.",TempServiceCommentLine."Line No.");
+        ServiceCommentLine.TESTFIELD(Type,TempServiceCommentLine.Type);
+        ServiceCommentLine.TESTFIELD(Comment,TempServiceCommentLine.Comment);
+        TempServiceCommentLine.NEXT;
+      UNTIL ServiceCommentLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyFaultCodePostedShipment@132(VAR TempServiceItemLine@1001 : TEMPORARY Record 5901);
+    VAR
+      ServiceShipmentHeader@1000 : Record 5990;
+      ServiceShipmentItemLine@1002 : Record 5989;
+    BEGIN
+      ServiceShipmentHeader.SETRANGE("Order No.",TempServiceItemLine."Document No.");
+      ServiceShipmentHeader.FINDFIRST;
+      ServiceShipmentItemLine.SETRANGE("No.",ServiceShipmentHeader."No.");
+      ServiceShipmentItemLine.FINDFIRST;
+      ServiceShipmentItemLine.TESTFIELD("Service Item No.",TempServiceItemLine."Service Item No.");
+      ServiceShipmentItemLine.TESTFIELD("Fault Area Code",TempServiceItemLine."Fault Area Code");
+      ServiceShipmentItemLine.TESTFIELD("Symptom Code",TempServiceItemLine."Symptom Code");
+      ServiceShipmentItemLine.TESTFIELD("Fault Code",TempServiceItemLine."Fault Code");
+      ServiceShipmentItemLine.TESTFIELD("Resolution Code",TempServiceItemLine."Resolution Code");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyFaultCodeOnPostedInvoice@145(VAR TempServiceItemLine@1001 : TEMPORARY Record 5901);
+    VAR
+      ServiceInvoiceHeader@1000 : Record 5992;
+      ServiceInvoiceLine@1002 : Record 5993;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",TempServiceItemLine."Document No.");
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceInvoiceLine.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      ServiceInvoiceLine.FINDFIRST;
+      ServiceInvoiceLine.TESTFIELD("Service Item No.",TempServiceItemLine."Service Item No.");
+      ServiceInvoiceLine.TESTFIELD("Fault Area Code",TempServiceItemLine."Fault Area Code");
+      ServiceInvoiceLine.TESTFIELD("Symptom Code",TempServiceItemLine."Symptom Code");
+      ServiceInvoiceLine.TESTFIELD("Fault Code",TempServiceItemLine."Fault Code");
+      ServiceInvoiceLine.TESTFIELD("Resolution Code",TempServiceItemLine."Resolution Code");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyFaultResolutionRelation@167(VAR TempServiceItemLine@1000 : TEMPORARY Record 5901);
+    VAR
+      FaultResolCodRelationship@1001 : Record 5920;
+      Assert@1002 : Codeunit 130000;
+    BEGIN
+      FaultResolCodRelationship.SETRANGE("Fault Area Code",TempServiceItemLine."Fault Area Code");
+      FaultResolCodRelationship.SETRANGE("Fault Code",TempServiceItemLine."Fault Code");
+      FaultResolCodRelationship.SETRANGE("Symptom Code",TempServiceItemLine."Symptom Code");
+      FaultResolCodRelationship.FINDFIRST;
+      FaultResolCodRelationship.TESTFIELD("Resolution Code",TempServiceItemLine."Resolution Code");
+      Assert.IsTrue(FaultResolCodRelationship.Occurrences > 0,FaultResolCodesRlshipError);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInsertFeeOnServiceLine@71(ServiceHeader@1000 : Record 5900;ServiceCost@1001 : Record 5905);
+    VAR
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDFIRST;
+      ServiceLine.TESTFIELD("No.",ServiceCost.Code);
+      ServiceLine.TESTFIELD(Quantity,ServiceCost."Default Quantity");
+      ServiceLine.TESTFIELD("Unit Cost (LCY)",ServiceCost."Default Unit Cost");
+    END;
+
+    LOCAL PROCEDURE VerifyPostedServiceInvoice@200(OrderNo@1001 : Code[20];PostingDate2@1002 : Date);
+    VAR
+      PostedServiceInvoice@1000 : TestPage 5978;
+    BEGIN
+      PostedServiceInvoice.OPENVIEW;
+      PostedServiceInvoice.FILTER.SETFILTER("Order No.",OrderNo);
+      PostedServiceInvoice."Posting Date".ASSERTEQUALS(PostingDate2);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceOrdersStatus@300(No@1002 : Code[20];PostingDate2@1000 : Date);
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      ServiceHeader.SETFILTER("No.",'<>%1',No);
+      ServiceHeader.SETRANGE(Status,ServiceHeader.Status::"In Process");
+      ServiceHeader.SETRANGE("Posting Date",PostingDate2);
+      Assert.AreEqual(0,ServiceHeader.COUNT,STRSUBSTNO(CountError,ServiceHeader));
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifySplitLines@88(ServiceLine@1000 : Record 5902);
+    VAR
+      ServiceLine2@1001 : Record 5902;
+    BEGIN
+      ServiceLine2.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine2.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine2.FINDSET;
+      REPEAT
+        ServiceLine2.TESTFIELD(Type,ServiceLine.Type);
+        ServiceLine2.TESTFIELD("No.",ServiceLine."No.");
+        ServiceLine2.TESTFIELD(Quantity,ServiceLine.Quantity / 2);  // Use 2 to Verify Split Line Quantity.
+      UNTIL ServiceLine2.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifySplitLineError@54(ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ASSERTERROR ServiceLine.SplitResourceLine;
+        Assert.AreEqual(
+          STRSUBSTNO(SplitResourceErrorServiceTier,ServiceLine."Document Type",ServiceLine."Document No.",ServiceLine."Line No.",
+            ServiceLine.Type),GETLASTERRORTEXT,UnknownError);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyUnitPrice@136(ServiceHeader@1000 : Record 5900;Quantity@1002 : Decimal;UnitPrice@1003 : Decimal);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.TESTFIELD("Unit Price",UnitPrice);
+        ServiceLine.TESTFIELD(Quantity,Quantity / 2);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SetBlueLocation@44(No1@1000 : Code[20];No2@1001 : Code[20]);
+    VAR
+      ServiceLine@1004 : Record 5902;
+      Location@1002 : Record 14;
+      LibraryWarehouse@1005 : Codeunit 132204;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      WITH ServiceLine DO BEGIN
+        SETRANGE("Document Type","Document Type"::Order);
+        SETFILTER("Document No.",'%1|%2',No1,No2);
+        FINDSET;
+        REPEAT
+          VALIDATE("Location Code",Location.Code);
+          MODIFY;
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE BatchPostServiceOrdersHandler@130(VAR BatchPostServiceOrders@1000 : TestRequestPage 6001);
+    BEGIN
+      BatchPostServiceOrders.Ship.SETVALUE(TRUE);
+      BatchPostServiceOrders.Invoice.SETVALUE(TRUE);
+
+      // Assign value to global variable using random value for date expression.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceOrders.PostingDate.SETVALUE(PostingDate);
+      BatchPostServiceOrders.ReplacePostingDate_Option.SETVALUE(TRUE);
+      BatchPostServiceOrders.ReplaceDocumentDate_Option.SETVALUE(TRUE);
+      BatchPostServiceOrders.CalcInvDiscount.SETVALUE(TRUE);
+      BatchPostServiceOrders.OK.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmMessageHandler@60(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@17(Question@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ModalFormHandler@23(VAR ServiceItemReplacement@1000 : Page 5985;VAR Response@1001 : Action);
+    BEGIN
+      Response := ACTION::OK;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ModalFormHandlerLookupOK@30(VAR ServiceItemComponentList@1000 : Page 5986;VAR Response@1001 : Action);
+    VAR
+      ServiceItemComponent@1002 : Record 5941;
+    BEGIN
+      // Modal form handler. Return Action as LookupOK for first record found.
+      ServiceItemComponent.SETRANGE("Parent Service Item No.",ServiceItemNoForReplacement);
+      ServiceItemComponent.FINDFIRST;
+      ServiceItemComponentList.SETRECORD(ServiceItemComponent);
+      Response := ACTION::LookupOK;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ModalFormHandlerStandardCode@19(VAR StandardServItemGrCodes@1003 : Page 5959;VAR Response@1000 : Action);
+    VAR
+      StandardServiceItemGrCode@1002 : Record 5998;
+    BEGIN
+      StandardServiceItemGrCode.SETRANGE(Code,StandServiceItemGroupCode);
+      StandardServiceItemGrCode.FINDFIRST;
+      StandardServItemGrCodes.SETRECORD(StandardServiceItemGrCode);
+      StandardServItemGrCodes.SETTABLEVIEW(StandardServiceItemGrCode);
+      Response := ACTION::LookupOK;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE StringMenuHandler@34(Options@1000 : Text[1024];VAR Choice@1001 : Integer;Instruction@1002 : Text[1024]);
+    BEGIN
+      // Choose the First option of the string menu.
+      Choice := 1;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE StringMenuHandlerForNew@72(Options@1000 : Text[1024];VAR Choice@1001 : Integer;Instruction@1002 : Text[1024]);
+    BEGIN
+      // Choose the Second option of the string menu.
+      Choice := 2;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE UpdateQuantityPageHandler@168(VAR ServiceLines@1000 : TestPage 5905);
+    VAR
+      Item@1002 : Record 27;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLines.Type.SETVALUE(ServiceLine.Type::Item);
+      ServiceLines."No.".SETVALUE(LibraryInventory.CreateItem(Item));
+
+      // Use random value for Quantity as value is not important.
+      ServiceLines.Quantity.SETVALUE(RANDOM(100) + LibraryUtility.GenerateRandomFraction);
+      ServiceLines.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Service]
+      Unsupported version tags:
+      NA: Unable to Execute
+
+      Test for CRM Working On Service Orders:
+        1. Test that it is possible to update the repair status with different options.
+        2. Test it is possible to register spare parts, replace components and service items.
+        3. Test it is possible to create service lines involving resource hours, split resource lines and set up unit price restrictions.
+        4. Test it is possible to create a service line with the inserted starting and travel fees for the service.
+        5. Test relationship between the two fields on Service Item Line and Service Order window.
+        6. Test an entry is automatically created in the Service E-Mail Queue.
+        7. Test it is possible to enter only one service item line for each service order.
+        8. Test the Service Item No. field in the Service Lines window.
+        9. Test the comments from the Service Order are copied to posted shipments or/and posted invoices after this Service Order has
+           been posted.
+       10. Test functionality of Batch Post Service Orders and verify that no Service Order exist for Status In Process and posted date.
+       11. Test the functionality of Batch Post Service Orders and verify that Posted Service Invoices exist for the Posting Date.
+
+      TFS_TS_ID = 21731
+      Covered Test cases:
+        TC0144 TFS_TC_ID=31797 and 11996
+        TC0145 TFS_TC_ID=31798 and 11997
+        TC0146 TFS_TC_ID=31799 and 11998
+        TC0147 TFS_TC_ID=31800 and 11999
+        TC0148 TFS_TC_ID=31801 and 12000
+        TC0149 TFS_TC_ID=31802 and 12001
+        TC0150 TFS_TC_ID=31803 and 12002
+        TC0151 TFS_TC_ID=31804 and 12003
+        TC0152 TFS_TC_ID=31805 and 12004
+
+      TFS_TS_ID = 252262
+      Covers Test cases:
+      ---------------------------------------------------------------------
+      Test Function Name                                            TFS ID
+      ---------------------------------------------------------------------
+      OrdersBatchPostWithStatus, ServiceOrdersBatchPost             129094
+    }
+    END.
+  }
+}
+

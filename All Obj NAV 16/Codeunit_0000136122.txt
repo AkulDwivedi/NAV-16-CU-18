@@ -1,0 +1,886 @@
+OBJECT Codeunit 136122 Service Batch Jobs
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryInventory@1013 : Codeunit 132201;
+      LibraryService@1003 : Codeunit 131902;
+      LibrarySales@1023 : Codeunit 130509;
+      LibraryERM@1012 : Codeunit 131300;
+      Assert@1001 : Codeunit 130000;
+      IsInitialized@1000 : Boolean;
+      OrderNo@1004 : Code[20];
+      ExistError@1005 : TextConst 'ENU=%1 for %2 must not exist.';
+      ServiceError@1009 : TextConst 'ENU=Invoiced Service Order must not exist.';
+      FromDateError@1008 : TextConst 'ENU=You must fill in the From Date field.';
+      ToDateError@1007 : TextConst 'ENU=You must fill in the To Date field.';
+      DateError@1006 : TextConst 'ENU=Date field must not be blank.';
+      ServiceItemError@1002 : TextConst 'ENU=Service Item log entries must not exist.';
+      ServiceLedgerEntryError@1011 : TextConst 'ENU=%1 must not exist.';
+      ExpectedConfirm@1010 : TextConst 'ENU=The Credit Memo doesn''t have a Corrected Invoice No. Do you want to continue?';
+
+    LOCAL PROCEDURE Initialize@49();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      // Lazy Setup.
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateAccountInCustomerPostingGroup;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryService.SetupServiceMgtNoSeries;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    [HandlerFunctions(ModalFormHandlerShipmentLine)]
+    PROCEDURE InvoiceServiceOrder@16();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      CustomerNo@1004 : Code[20];
+    BEGIN
+      // Covers document number TC-PP-RE-9 - refer to TFS ID 128082.
+      // Test Service Order Invoiced after posting Service Invoice created through Get Shipment Lines.
+
+      // 1. Setup: Create and Post Service Order with Service Line of Type Item.
+      Initialize;
+      CreateAndPostServiceOrder(ServiceHeader);
+      CustomerNo := ServiceHeader."Customer No.";
+
+      // Set Global Variable for Form Handler.
+      OrderNo := ServiceHeader."No.";
+
+      // 2. Exercise: Create Service Invoice from Get Shipment Lines and Post it.
+      CLEAR(ServiceHeader);
+      CreateInvoiceFromGetShipment(ServiceHeader,CustomerNo);
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // 3. Verify: Verify Service Line update for Service Order.
+      VerifyServiceLines(OrderNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ModalFormHandlerShipmentLine)]
+    PROCEDURE DeleteInvoicedServiceOrder@2();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      CustomerNo@1004 : Code[20];
+    BEGIN
+      // Covers document number TC-PP-RE-9 - refer to TFS ID 128082.
+      // Test Invoiced Service Order Deleted after run Delete Invoiced Service Order Batch Job.
+
+      // 1. Setup: Create and Post Service Order with Service Line of Type Item, Create Service Invoice from Get Shipment Lines and
+      // Post it.
+      Initialize;
+      CreateAndPostServiceOrder(ServiceHeader);
+      CustomerNo := ServiceHeader."Customer No.";
+
+      // Set Global Variable for Form Handler.
+      OrderNo := ServiceHeader."No.";
+
+      CLEAR(ServiceHeader);
+      CreateInvoiceFromGetShipment(ServiceHeader,CustomerNo);
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // 2. Exercise: Run Delete Invoiced Service Orders Batch Report.
+      RunDeleteInvoicedServiceOrders(OrderNo);
+
+      // 3. Verify: Verify Service Order Deleted.
+      Assert.IsFalse(
+        ServiceHeader.GET(ServiceHeader."Document Type"::Order,OrderNo),STRSUBSTNO(ExistError,ServiceHeader.TABLECAPTION,OrderNo));
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE PostServiceInvoices@3();
+    VAR
+      CustInvoiceDisc@1002 : Record 19;
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+      TempServiceLine@1016 : TEMPORARY Record 5902;
+      BatchPostServiceInvoices@1010 : Report 6004;
+    BEGIN
+      // Covers document number TC-PP-RE-10 - refer to TFS ID 128082.
+      // Test Service Invoice Posted after run Post Service Invoices Batch Job.
+
+      // 1. Setup: Create Customer, Create Service Invoice with Service Lines of Type Item, Resource, Cost and G/L Account,
+      // Save Service Lines in Temporary Table.
+      Initialize;
+      CreateCustomerInvoiceDiscount(CustInvoiceDisc);
+      CreateServiceDocument(ServiceHeader,ServiceHeader."Document Type"::Invoice,CustInvoiceDisc.Code);
+      GetServiceLines(ServiceLine,ServiceHeader);
+      CopyServiceLines(TempServiceLine,ServiceLine);
+
+      // 2. Exercise: Run Batch Post Service Invoices Report.
+      ServiceHeader.SETRANGE("No.",ServiceHeader."No.");
+      CLEAR(BatchPostServiceInvoices);
+      BatchPostServiceInvoices.SETTABLEVIEW(ServiceHeader);
+      BatchPostServiceInvoices.USEREQUESTPAGE(FALSE);
+      BatchPostServiceInvoices.InitializeRequest(WORKDATE,TRUE,TRUE,TRUE);
+      BatchPostServiceInvoices.RUN;
+
+      // 3. Verify: Verify Service Invoice Line after run Batch Job.
+      VerifyServiceInvoiceLine(TempServiceLine,ServiceHeader."No.",CustInvoiceDisc."Discount %");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,InvoiceESConfirmHandler)]
+    PROCEDURE PostServiceCreditMemos@5();
+    VAR
+      CustInvoiceDisc@1002 : Record 19;
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+      TempServiceLine@1016 : TEMPORARY Record 5902;
+      BatchPostServiceCrMemos@1010 : Report 6005;
+    BEGIN
+      // Covers document number TC-PP-RE-11 - refer to TFS ID 128082.
+      // Test Service Credit Memo Posted after run Post Service Credit Memos Batch Job.
+
+      // 1. Setup: Create Customer, Customer Invoice Discount, Create Service Credit Memo with Service Lines of Type Item, Resource,
+      // Cost and G/L Account, Save Service Lines in Temporary Table.
+      Initialize;
+      CreateCustomerInvoiceDiscount(CustInvoiceDisc);
+      CreateServiceDocument(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",CustInvoiceDisc.Code);
+      GetServiceLines(ServiceLine,ServiceHeader);
+      CopyServiceLines(TempServiceLine,ServiceLine);
+
+      // 2. Exercise: Run Batch Post Service Invoices Report.
+      ExecuteConfirmHandlerInvoiceES;
+      ServiceHeader.SETRANGE("No.",ServiceHeader."No.");
+      CLEAR(BatchPostServiceCrMemos);
+      BatchPostServiceCrMemos.SETTABLEVIEW(ServiceHeader);
+      BatchPostServiceCrMemos.USEREQUESTPAGE(FALSE);
+      BatchPostServiceCrMemos.InitializeRequest(WORKDATE,TRUE,TRUE,TRUE);
+      BatchPostServiceCrMemos.RUN;
+
+      // 3. Verify: Verify Service Credit Memo Line after run Batch Job.
+      VerifyServiceCreditMemoLine(TempServiceLine,ServiceHeader."No.",CustInvoiceDisc."Discount %");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE ServiceItemLog@18();
+    VAR
+      ServiceItem@1000 : Record 5940;
+    BEGIN
+      // Covers document number TC128951 TFS_TC_ID=13385.
+      // Test Service Item Log Entries after running Service Item Log Delete report.
+
+      // 1.Setup: Creating a Service Item.
+      Initialize;
+      LibraryService.CreateServiceItem(ServiceItem,'');
+
+      // 2.Exercise: Run the report for deleting the Service Item Log Entries.
+      DeleteServiceItemLogEntries(ServiceItem."No.");
+
+      // 3.Verify: Verify that the Service Item Log Entries must not exist.
+      VerifyServiceItemLog(ServiceItem."No.");
+    END;
+
+    [Test]
+    PROCEDURE InvoicedServiceOrder@17();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Covers document number TC129092 TFS_TC_ID=13528.
+      // Test Invoiced Service Order after running the Delete Invoiced Service Orders report.
+      // 1.Setup: Creating, posting Service Order and deleting Service Lines.
+      Initialize;
+      CreateServiceOrder(ServiceHeader,ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+      DeleteServiceLine(ServiceLine,ServiceHeader);
+
+      // 2.Exercise: Run the report to delete the invoiced Service Order.
+      DeleteInvoiceServiceOrders(ServiceHeader."No.");
+
+      // 3.Verify: Verify that invoiced Service Order must not exist.
+      Assert.IsFalse(ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No."),ServiceError);
+    END;
+
+    [Test]
+    PROCEDURE FaultResolRelationFromDate@45();
+    VAR
+      FaultResolCodRelationship@1000 : Record 5920;
+    BEGIN
+      // Covers document number TC129099 TFS_TC_ID=13535.
+      // Test the error messages after running Insert Fault/Resolution Relationships without From Date.
+
+      // 1. Setup: Create Fault Resolution Relationship code.
+      Initialize;
+      CreateFaultResolCodesRlship(FaultResolCodRelationship);
+
+      // 2.Exercise: Run the report for Insert Fault Resolution Relationship Code without From Date.
+      ASSERTERROR InsertFaultResolRelation(0D,WORKDATE,TRUE,TRUE);
+
+      // 3.Verify: Verify the Fault Resolution Code Relationship Report.
+      Assert.AreEqual(STRSUBSTNO(FromDateError),STRSUBSTNO(GETLASTERRORTEXT),DateError);
+    END;
+
+    [Test]
+    PROCEDURE FaultResolRelationManually@56();
+    VAR
+      FaultResolCodRelationship@1000 : Record 5920;
+    BEGIN
+      // Covers document number TC129099 TFS_TC_ID=13535.
+      // Test Fault/Resolution Relationships created manually after creating it.
+
+      // 1. Setup.
+      Initialize;
+
+      // 2.Exercise: Creating Fault Resolution Code Relationship.
+      CreateFaultResolCodesRlship(FaultResolCodRelationship);
+
+      // 3.Verify: The Fault Resolution Code Relationship must be created manually.
+      FaultResolCodRelationship.TESTFIELD("Created Manually",TRUE);
+    END;
+
+    [Test]
+    PROCEDURE FaultResolRelationToDate@27();
+    VAR
+      FaultResolCodRelationship@1000 : Record 5920;
+    BEGIN
+      // Covers document number TC129099 TFS_TC_ID=13535.
+      // Test the error messages after running Insert Fault/Resolution Relationships without To Date.
+
+      // 1. Setup: Create Fault Resolution Relationship code.
+      Initialize;
+      CreateFaultResolCodesRlship(FaultResolCodRelationship);
+
+      // 2.Exercise: Run the report for Insert Fault Resolution Relationship Code without To Date.
+      ASSERTERROR InsertFaultResolRelation(WORKDATE,0D,TRUE,TRUE);
+
+      // 3.Verify: Verify the Fault Resolution Code Relationship report.
+      Assert.AreEqual(STRSUBSTNO(ToDateError),STRSUBSTNO(GETLASTERRORTEXT),DateError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,ContractTemplateListHandler,MessageHandler)]
+    PROCEDURE PostPrepaidServiceContract@24();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceHeader@1003 : Record 5900;
+      SignServContractDoc@1002 : Codeunit 5944;
+    BEGIN
+      // Covers document number TC129100 TFS_TC_ID=13536.
+      // Test Service Ledger Entries after running the Post Prepaid Service Contract Entries report.
+
+      // 1.Setup: Creating a Service Contract, create Service Account Group Code, modify Service Contract,
+      // sign Service Contract, post Service Invoice, create Contract Credit Memo and post Credit Memo.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract);
+      ModifyServiceContractHeader(ServiceContractHeader);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      PostServiceInvoiceCreditMemo(ServiceContractHeader."Contract No.",ServiceHeader."Document Type"::Invoice);
+      ServiceContractHeader.FIND;
+      ModifyServiceContract(ServiceContractHeader);
+
+      CreateContractCreditMemo(ServiceContractHeader);
+      PostServiceInvoiceCreditMemo(ServiceContractHeader."Contract No.",ServiceHeader."Document Type"::"Credit Memo");
+
+      // 2.Exercise: Run the report for Post Prepaid Contract Entries.
+      PostPrepaidContractEntry(ServiceContractHeader."Contract No.");
+
+      // 3.Verify: Verify the Service Ledger Entries.
+      VerifyPostPrepaidContractEntry(ServiceContractHeader."Contract No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,ContractTemplateListHandler,MessageHandler)]
+    PROCEDURE UpdateServiceContractDiscount@15();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      DiscountPercent@1002 : Decimal;
+    BEGIN
+      // Covers document number TC129103 TFS_TC_ID=13539.
+      // Test Service Contract Quote Line Discount percent after running the Update Discount percent On Contract report.
+
+      // 1.Setup: Creating a Service Contract Quote.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractHeader."Contract Type"::Quote);
+
+      // 2.Exercise: Run the report for Updating the Line Discount Percent.
+      DiscountPercent := UpdateDiscPercentOnContract(ServiceContractHeader."Contract No.");
+
+      // 3.Verify: Verify the Service Contract Line Discount Percent.
+      VerifyDiscountPercentContract(ServiceContractHeader,DiscountPercent);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,ContractTemplateListHandler)]
+    PROCEDURE ChangeCustomerWithShipCode@14();
+    BEGIN
+      // Covers document number TC129104 TFS_TC_ID=13541.
+      // Test Change Customer with Ship to Code after running the Change Customer in Contract report.
+
+      ChangeCustomer(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,ContractTemplateListHandler)]
+    PROCEDURE ChangeCustomerWithoutShipCode@13();
+    BEGIN
+      // Covers document number TC129104 TFS_TC_ID=13541.
+      // Test Change Customer without Ship to Code after running the Change Customer in Contract report.
+
+      ChangeCustomer(FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ChangeCustomer@20(WithShiptoCode@1000 : Boolean);
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ShipToAddress@1001 : Record 222;
+      ShipToCode@1003 : Code[10];
+    BEGIN
+      // 1.Setup: Creating a Service Contract and selecting a Ship To Address.
+      Initialize;
+      ShipToCode := '';
+      CreateServiceContract(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract);
+      SelectShipToAddress(ShipToAddress);
+      IF WithShiptoCode THEN
+        ShipToCode := ShipToAddress.Code;
+
+      // 2.Exercise: Run the report for change the Customer and Ship To Code in Service Contract.
+      UpdateCustomerInContract(ServiceContractHeader,ShipToAddress."Customer No.",ShipToCode);
+
+      // 3.Verify: Verify the Customer and Ship To Code of Service Contract Header.
+      VerifyChangeCustomer(ServiceContractHeader."Contract No.",ShipToAddress."Customer No.",ShipToCode);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateAndPostServiceOrder@29(VAR ServiceHeader@1000 : Record 5900);
+    VAR
+      Customer@1004 : Record 18;
+      ServiceItemLine@1002 : Record 5901;
+    BEGIN
+      // Create Customer, Service Header, Service Item Line, Service Line with Type Item and Post Service Order as Ship.
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      CreateServiceLineWithItem(ServiceHeader,ServiceItemLine."Line No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateCustomerInvoiceDiscount@35(VAR CustInvoiceDisc@1001 : Record 19);
+    VAR
+      Customer@1003 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateInvDiscForCustomer(CustInvoiceDisc,Customer."No.",'',0);
+      CustInvoiceDisc.VALIDATE("Discount %",RANDOM(10));  // Use Random because value is not important.
+      CustInvoiceDisc.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateContractCreditMemo@54(ServiceContractHeader@1006 : Record 5965);
+    VAR
+      ServiceContractLine@1000 : Record 5964;
+    BEGIN
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractHeader."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      ServiceContractLine.FINDFIRST;
+      LibraryService.CreateContractLineCreditMemo(ServiceContractLine,FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateFaultResolCodesRlship@53(VAR FaultResolCodRelationship@1000 : Record 5920);
+    VAR
+      FaultArea@1001 : Record 5915;
+      ResolutionCode@1003 : Record 5919;
+      SymptomCode@1006 : Record 5916;
+      ServiceItemGroupCode@1004 : Record 5904;
+      FaultCode@1005 : Record 5918;
+    BEGIN
+      // Finding Fault Area Code, Symptom Code, Resolution Code,Service Item Group Code and creating Fault Code.
+      LibraryService.CreateFaultArea(FaultArea);
+      LibraryService.CreateSymptomCode(SymptomCode);
+      LibraryService.CreateResolutionCode(ResolutionCode);
+      LibraryService.CreateServiceItemGroup(ServiceItemGroupCode);
+      LibraryService.CreateFaultCode(FaultCode,FaultArea.Code,SymptomCode.Code);
+      LibraryService.CreateFaultResolCodesRlship(FaultResolCodRelationship,FaultCode,ResolutionCode.Code,ServiceItemGroupCode.Code);
+    END;
+
+    LOCAL PROCEDURE CreateInvoiceFromGetShipment@12(VAR ServiceHeader@1000 : Record 5900;CustomerNo@1003 : Code[20]);
+    VAR
+      ServiceLine@1002 : Record 5902;
+      ServiceInvoiceSubform@1001 : Page 5934;
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,CustomerNo);
+      ServiceLine.VALIDATE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.VALIDATE("Document No.",ServiceHeader."No.");
+      CLEAR(ServiceInvoiceSubform);
+      ServiceInvoiceSubform.SETTABLEVIEW(ServiceLine);
+      ServiceInvoiceSubform.SETRECORD(ServiceLine);
+      ServiceInvoiceSubform.GetShipment;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateServiceContract@51(VAR ServiceContractHeader@1000 : Record 5965;ServiceContractType@1005 : Option);
+    VAR
+      Customer@1001 : Record 18;
+      ServiceContractLine@1002 : Record 5964;
+      ServiceItem@1003 : Record 5940;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractType,Customer."No.");
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+
+      // Use Random to update values in Line Value and Line Cost fields.
+      ServiceContractLine.VALIDATE("Line Value",RANDOM(200));
+      ServiceContractLine.VALIDATE("Line Cost",RANDOM(200));
+      ServiceContractLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceDocument@23(VAR ServiceHeader@1000 : Record 5900;DocumentType@1018 : Option;CustomerNo@1001 : Code[20]);
+    VAR
+      ServiceLine@1002 : Record 5902;
+      Resource@1007 : Record 156;
+    BEGIN
+      // Service Header of Specified Document Type, Service Line with Type Item, Resource, Cost and G/L Account.
+      LibraryService.CreateServiceHeader(ServiceHeader,DocumentType,CustomerNo);
+      Resource.FINDFIRST;
+      CreateServiceLine(ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItemNo);
+      CreateServiceLine(ServiceHeader,ServiceLine.Type::Resource,Resource."No.");
+      CreateServiceLine(ServiceHeader,ServiceLine.Type::Cost,SelectServiceCost);
+      CreateServiceLine(ServiceHeader,ServiceLine.Type::"G/L Account",SelectGLAccount);
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLine@25(ServiceHeader@1001 : Record 5900;Type@1000 : Option;No@1002 : Code[20]);
+    VAR
+      ServiceLine@1003 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,Type,No);
+      ServiceLine.VALIDATE("Allow Invoice Disc.",TRUE);
+      ServiceLine.VALIDATE(Quantity,RANDOM(100));  // Use Random because value is not important.
+      ServiceLine.VALIDATE("VAT %",0);  // Use 0 to avoid VAT Calculation.
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateServiceLines@48(VAR ServiceLine@1004 : Record 5902;ServiceHeader@1001 : Record 5900;ServiceItemNo@1005 : Code[20]);
+    VAR
+      Item@1002 : Record 27;
+      Counter@1003 : Integer;
+    BEGIN
+      // To Create new Service Lines.
+      LibraryInventory.CreateItem(Item);
+      // Use Random to generate between 1 to 10 service lines.
+      FOR Counter := 1 TO 1 + RANDOM(9) DO BEGIN
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,Item."No.");
+        ServiceLine.VALIDATE("Service Item No.",ServiceItemNo);
+        // Use Random for Quantity and Unit Price.
+        ServiceLine.VALIDATE(Quantity,RANDOM(10));
+        ServiceLine.VALIDATE("Unit Price",RANDOM(200));
+        // For updating the field Qty. to Ship by 0.
+        IF Counter > 1 THEN
+          ServiceLine.VALIDATE("Qty. to Ship",0);
+        ServiceLine.MODIFY(TRUE);
+        Item.NEXT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineWithItem@21(ServiceHeader@1002 : Record 5900;ServiceItemLineLineNo@1003 : Integer);
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItemNo);
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLineLineNo);
+      ServiceLine.VALIDATE(Quantity,RANDOM(100));  // Use Random because value is not important.
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateServiceOrder@47(VAR ServiceHeader@1000 : Record 5900;VAR ServiceLine@1001 : Record 5902);
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1002 : Record 5901;
+    BEGIN
+      // To Create a new Service Header, Service Item Line and Service Lines.
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      CreateServiceLines(ServiceLine,ServiceHeader,ServiceItem."No.");
+    END;
+
+    LOCAL PROCEDURE CopyServiceLines@7(VAR TempServiceLine@1001 : TEMPORARY Record 5902;VAR FromServiceLine@1000 : Record 5902);
+    BEGIN
+      FromServiceLine.FINDSET;
+      REPEAT
+        TempServiceLine := FromServiceLine;
+        TempServiceLine.INSERT;
+      UNTIL FromServiceLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE DeleteInvoiceServiceOrders@42(ServiceOrderNo@1002 : Code[20]);
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      DeleteInvoicedServiceOrders@1000 : Report 5914;
+    BEGIN
+      ServiceHeader.SETRANGE("Document Type",ServiceHeader."Document Type"::Order);
+      ServiceHeader.SETRANGE("No.",ServiceOrderNo);
+      ServiceHeader.GET(ServiceHeader."Document Type"::Order,ServiceOrderNo);
+      CLEAR(DeleteInvoicedServiceOrders);
+      DeleteInvoicedServiceOrders.SETTABLEVIEW(ServiceHeader);
+      DeleteInvoicedServiceOrders.USEREQUESTPAGE(FALSE);
+      DeleteInvoicedServiceOrders.RUN;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE DeleteServiceItemLogEntries@34(ServiceItemNo@1001 : Code[20]);
+    VAR
+      ServiceItemLog@1002 : Record 5942;
+      DeleteServiceItemLog@1000 : Report 6010;
+    BEGIN
+      ServiceItemLog.SETRANGE("Service Item No.",ServiceItemNo);
+      ServiceItemLog.FINDFIRST;
+      CLEAR(DeleteServiceItemLog);
+      DeleteServiceItemLog.SETTABLEVIEW(ServiceItemLog);
+      DeleteServiceItemLog.USEREQUESTPAGE(FALSE);
+      DeleteServiceItemLog.RUN;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE DeleteServiceLine@38(VAR ServiceLine@1001 : Record 5902;ServiceHeader@1000 : Record 5900);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDSET;
+      ServiceLine.SETFILTER("Line No.",'<> %1',ServiceLine."Line No.");
+      ServiceLine.DELETEALL(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ExecuteConfirmHandlerInvoiceES@36();
+    BEGIN
+      IF CONFIRM(STRSUBSTNO(ExpectedConfirm)) THEN;
+    END;
+
+    LOCAL PROCEDURE GetServiceLines@9(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1001 : Record 5900);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDSET;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE InsertFaultResolRelation@44(FromDate@1004 : Date;ToDate@1003 : Date;BasedOnServItemGr@1002 : Boolean;RetainManuallyInserted@1001 : Boolean);
+    VAR
+      InsertFaultResolRelations@1000 : Report 6007;
+    BEGIN
+      CLEAR(InsertFaultResolRelations);
+      InsertFaultResolRelations.InitializeRequest(FromDate,ToDate,BasedOnServItemGr,RetainManuallyInserted);
+      InsertFaultResolRelations.USEREQUESTPAGE(FALSE);
+      InsertFaultResolRelations.RUN;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ModifyServiceContract@40(VAR ServiceContractHeader@1000 : Record 5965);
+    VAR
+      LockOpenServContract@1001 : Codeunit 5943;
+    BEGIN
+      LockOpenServContract.OpenServContract(ServiceContractHeader);
+      ServiceContractHeader.FIND;
+      ServiceContractHeader.VALIDATE("Expiration Date",WORKDATE);
+      ServiceContractHeader.MODIFY(TRUE);
+      LockOpenServContract.LockServContract(ServiceContractHeader);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ModifyServiceContractHeader@41(VAR ServiceContractHeader@1000 : Record 5965);
+    BEGIN
+      ServiceContractHeader.CALCFIELDS("Calcd. Annual Amount");
+      ServiceContractHeader.VALIDATE("Annual Amount",ServiceContractHeader."Calcd. Annual Amount");
+      ServiceContractHeader.VALIDATE("Starting Date",WORKDATE);
+      ServiceContractHeader.VALIDATE("Price Update Period",ServiceContractHeader."Service Period");
+      ServiceContractHeader.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE PostServiceInvoiceCreditMemo@37(ContractNo@1000 : Code[20];DocumentType@1001 : Option);
+    VAR
+      ServiceHeader@1003 : Record 5900;
+    BEGIN
+      ServiceHeader.SETRANGE("Document Type",DocumentType);
+      ServiceHeader.SETRANGE("Contract No.",ContractNo);
+      ServiceHeader.FINDFIRST;
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+    END;
+
+    LOCAL PROCEDURE PostPrepaidContractEntry@101(ContractNo@1000 : Code[20]);
+    VAR
+      ServiceLedgerEntry@1001 : Record 5907;
+      PostPrepaidContractEntries@1002 : Report 6032;
+      PostPrepaidContractAction@1003 : 'Post Prepaid Transactions,Print Only';
+    BEGIN
+      CLEAR(PostPrepaidContractEntries);
+      ServiceLedgerEntry.SETRANGE("Service Contract No.",ContractNo);
+      PostPrepaidContractEntries.SETTABLEVIEW(ServiceLedgerEntry);
+      PostPrepaidContractEntries.InitializeRequest(WORKDATE,WORKDATE,PostPrepaidContractAction::"Post Prepaid Transactions");
+      PostPrepaidContractEntries.USEREQUESTPAGE(FALSE);
+      PostPrepaidContractEntries.RUN;
+    END;
+
+    LOCAL PROCEDURE RunDeleteInvoicedServiceOrders@11(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      DeleteInvoicedServiceOrders@1001 : Report 5914;
+    BEGIN
+      ServiceHeader.GET(ServiceHeader."Document Type"::Order,DocumentNo);
+      CLEAR(DeleteInvoicedServiceOrders);
+      DeleteInvoicedServiceOrders.SETTABLEVIEW(ServiceHeader);
+      DeleteInvoicedServiceOrders.USEREQUESTPAGE(FALSE);
+      DeleteInvoicedServiceOrders.RUN;
+    END;
+
+    LOCAL PROCEDURE SelectGLAccount@50() : Code[20];
+    VAR
+      GLAccount@1000 : Record 15;
+    BEGIN
+      EXIT(LibraryERM.FindGLAccount(GLAccount));
+    END;
+
+    LOCAL PROCEDURE SelectServiceCost@46() : Code[10];
+    VAR
+      ServiceCost@1000 : Record 5905;
+    BEGIN
+      ServiceCost.SETFILTER("Account No.",'<>''''');
+      ServiceCost.SETRANGE("Service Zone Code",'');
+      ServiceCost.FINDFIRST;
+      EXIT(ServiceCost.Code);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SelectShipToAddress@39(VAR ShipToAddress@1000 : Record 222);
+    BEGIN
+      LibrarySales.CreateShipToAddress(ShipToAddress,LibrarySales.CreateCustomerNo);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateCustomerInContract@33(VAR ServiceContractHeader@1001 : Record 5965;CustomerNo@1005 : Code[20];ShipToCode@1006 : Code[10]);
+    VAR
+      ChangeCustomerInContract@1000 : Report 6037;
+    BEGIN
+      CLEAR(ChangeCustomerInContract);
+      ChangeCustomerInContract.SetRecord(ServiceContractHeader."Contract No.");
+      ChangeCustomerInContract.InitializeRequest(CustomerNo,ShipToCode);
+      ChangeCustomerInContract.USEREQUESTPAGE(FALSE);
+      ChangeCustomerInContract.RUN;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateDiscPercentOnContract@32(ContractNo@1000 : Code[20]) DiscountPercent : Decimal;
+    VAR
+      ServiceContractLine@1003 : Record 5964;
+      UpdDiscPctOnContract@1001 : Report 6035;
+    BEGIN
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractLine."Contract Type"::Quote);
+      ServiceContractLine.SETRANGE("Contract No.",ContractNo);
+      ServiceContractLine.FINDFIRST;
+      CLEAR(UpdDiscPctOnContract);
+      UpdDiscPctOnContract.SETTABLEVIEW(ServiceContractLine);
+      UpdDiscPctOnContract.USEREQUESTPAGE(FALSE);
+
+      // Use Random for Discount percent.
+      DiscountPercent := RANDOM(100);
+      UpdDiscPctOnContract.InitializeRequest(DiscountPercent);
+      UpdDiscPctOnContract.RUN;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyChangeCustomer@30(ContractNo@1000 : Code[20];CustomerNo@1002 : Code[20];ShipToCode@1003 : Code[10]);
+    VAR
+      ServiceContractHeader@1001 : Record 5965;
+    BEGIN
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type"::Contract,ContractNo);
+      ServiceContractHeader.TESTFIELD("Customer No.",CustomerNo);
+      ServiceContractHeader.TESTFIELD("Ship-to Code",ShipToCode);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyDiscountPercentContract@28(ServiceContractHeader@1000 : Record 5965;DiscountPercent@1001 : Decimal);
+    VAR
+      ServiceContractLine@1002 : Record 5964;
+    BEGIN
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractHeader."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      ServiceContractLine.FINDFIRST;
+      ServiceContractLine.TESTFIELD("Line Discount %",DiscountPercent);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceCreditMemoLine@6(VAR TempServiceLine@1002 : TEMPORARY Record 5902;PreAssignedNo@1000 : Code[20];Discount@1001 : Decimal);
+    VAR
+      GeneralLedgerSetup@1005 : Record 98;
+      ServiceCrMemoHeader@1004 : Record 5994;
+      ServiceCrMemoLine@1003 : Record 5995;
+    BEGIN
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceCrMemoHeader.FINDFIRST;
+      GeneralLedgerSetup.GET;
+      TempServiceLine.FINDSET;
+      REPEAT
+        ServiceCrMemoLine.GET(ServiceCrMemoHeader."No.",TempServiceLine."Line No.");
+        ServiceCrMemoLine.TESTFIELD("No.",TempServiceLine."No.");
+        Assert.AreNearlyEqual(
+          TempServiceLine.Amount * Discount / 100,
+          ServiceCrMemoLine."Inv. Discount Amount",GeneralLedgerSetup."Inv. Rounding Precision (LCY)",'');
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyServiceInvoiceLine@8(VAR TempServiceLine@1002 : TEMPORARY Record 5902;PreAssignedNo@1000 : Code[20];Discount@1001 : Decimal);
+    VAR
+      ServiceInvoiceHeader@1004 : Record 5992;
+      ServiceInvoiceLine@1003 : Record 5993;
+      GeneralLedgerSetup@1005 : Record 98;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceInvoiceHeader.FINDFIRST;
+      GeneralLedgerSetup.GET;
+      TempServiceLine.FINDSET;
+      REPEAT
+        ServiceInvoiceLine.GET(ServiceInvoiceHeader."No.",TempServiceLine."Line No.");
+        ServiceInvoiceLine.TESTFIELD("No.",TempServiceLine."No.");
+        Assert.AreNearlyEqual(
+          TempServiceLine.Amount * Discount / 100,
+          ServiceInvoiceLine."Inv. Discount Amount",GeneralLedgerSetup."Inv. Rounding Precision (LCY)",'');
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyServiceItemLog@26(ServiceItemNo@1000 : Code[20]);
+    VAR
+      ServiceItemLog@1001 : Record 5942;
+    BEGIN
+      ServiceItemLog.SETRANGE("Service Item No.",ServiceItemNo);
+      Assert.IsFalse(ServiceItemLog.FINDFIRST,ServiceItemError);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceLines@10(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDFIRST;
+
+      // Use 0 for Fully Ship and Invoice.
+      ServiceLine.TESTFIELD("Qty. to Ship",0);
+      ServiceLine.TESTFIELD("Qty. to Invoice",0);
+      ServiceLine.TESTFIELD("Quantity Invoiced",ServiceLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyPostPrepaidContractEntry@102(ContractNo@1000 : Code[20]);
+    VAR
+      ServiceLedgerEntry@1001 : Record 5907;
+    BEGIN
+      ServiceLedgerEntry.SETRANGE("Service Contract No.",ContractNo);
+      ServiceLedgerEntry.SETRANGE("Moved from Prepaid Acc.",FALSE);
+      ServiceLedgerEntry.SETRANGE(Open,FALSE);
+      Assert.IsFalse(ServiceLedgerEntry.FINDFIRST,STRSUBSTNO(ServiceLedgerEntryError,ServiceLedgerEntry.TABLECAPTION))
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@55(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ContractTemplateListHandler@19(VAR ServiceContractTemplateList@1001 : Page 6056;VAR Response@1000 : Action);
+    BEGIN
+      Response := ACTION::LookupOK;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@4(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ModalFormHandlerShipmentLine@1(VAR GetServiceShipmentLines@1000 : Page 5994;VAR Response@1001 : Action);
+    VAR
+      ServiceShipmentHeader@1002 : Record 5990;
+      ServiceShipmentLine@1003 : Record 5991;
+    BEGIN
+      ServiceShipmentHeader.SETRANGE("Order No.",OrderNo);
+      ServiceShipmentHeader.FINDFIRST;
+      ServiceShipmentLine.SETRANGE("Document No.",ServiceShipmentHeader."No.");
+      ServiceShipmentLine.FINDFIRST;
+
+      GetServiceShipmentLines.SETRECORD(ServiceShipmentLine);
+      GetServiceShipmentLines.GetShipmentLines;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE InvoiceESConfirmHandler@31(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := (Question = ExpectedConfirm);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Service]
+      Unsupported version tags:
+      NA: Unable to Execute
+
+      Test for Batch Job Testing:
+        1. Test Batch Job Testing.
+           a. TC-PP-RE-9  - Test Delete Invoiced Service Order Report.
+           b. TC-PP-RE-10 - Test Post Service Invoices Batch Report.
+           c. TC-PP-RE-11 - Test Post Service Credit Memos Batch Report.
+        2.  Test the functionality of Delete Service Item Log.
+        3.  Test the functionality of Delete Invoiced Service Orders.
+        4.  Test the functionality of Fault Resolution Relationship Codes.
+        5.  Test the functionality of Post Prepaid Service Contracts.
+        6.  Test the functionality of Update Service Contract Discount percent.
+        7.  Test the functionality of Change Customer in Service Contract.
+        8.  Check Contact Search for Change Log Entries.
+      Covered Test cases:
+        TFS_TC_ID=128082
+
+      Cover Test cases:
+        TFS_TS_ID = 167938
+        TC128951 TFS_TC_ID=128951
+        TC129092 TFS_TC_ID=129092
+        TC129099 TFS_TC_ID=129099
+        TC129100 TFS_TC_ID=129100
+        TC129103 TFS_TC_ID=129103
+        TC129104 TFS_TC_ID=129104
+
+      TFS_TS_ID = 257221
+      Covers Test Cases:
+      ----------------------------------------------
+      Test Function Name              TFS ID
+      ----------------------------------------------
+      ChangeLogForSearchContact       237031
+    }
+    END.
+  }
+}
+

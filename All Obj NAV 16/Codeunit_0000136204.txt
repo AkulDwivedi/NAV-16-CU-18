@@ -1,0 +1,855 @@
+OBJECT Codeunit 136204 Marketing Quotations Contacts
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryInventory@1011 : Codeunit 132201;
+      LibraryMarketing@1002 : Codeunit 131900;
+      LibraryRandom@1012 : Codeunit 130440;
+      LibrarySales@1008 : Codeunit 130509;
+      Assert@1005 : Codeunit 130000;
+      IsInitialized@1001 : Boolean;
+      SalesQuoteMustNotExistError@1006 : TextConst 'ENU="%1 with %2=%3, %4=%5 must not exist."';
+      SalesQuoteAlreadyAssignedError@1007 : TextConst 'ENU=A sales quote has already been assigned to this opportunity.';
+      UnknownError@1010 : TextConst 'ENU=Unknown error.';
+      CustomerTemplateCode2@1004 : Code[10];
+      SalesQuoteMustBeInProgressErr@1000 : TextConst '@@@="%1=Opportunity Status;%2=Status Value;%3=Opportunity No.;%4=Status Value.";ENU="%1 must be equal to ''%2''  in Opportunity: No.=%3. Current value is ''%4''."';
+      NoCustomerErr@1009 : TextConst '@@@=%1 - Contact No;ENU=There is no customer related to contact %1, which is specified in the opportunity.';
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler)]
+    PROCEDURE CreatingSalesQuoteOpportunity@1();
+    VAR
+      SalesHeader@1006 : Record 36;
+      Contact@1003 : Record 5050;
+      Opportunity@1002 : Record 5092;
+      CustomerTemplate@1000 : Record 5105;
+    BEGIN
+      // Covers document number TC0011 - refer to TFS ID 21733.
+      // [SCENARIO 21733] Test creation of a Sales Quote from the Opportunity for a Contact that is not registered as a Customer.
+
+      // [GIVEN] Create a new Customer Template, Contact, Sales Cycle, Opportunity.
+      Initialize;
+      CreateCustomerTemplate(CustomerTemplate);
+      CreateContactWithCustomerRelation(Contact);
+
+      // [WHEN] Assign the Sales Quote to the Opportunity created earlier.
+      CreateAndAssignQuoteToOpportunity(Opportunity,Contact."No.");
+
+      // [THEN] Check that the value of the Sell-to Contact No. is the same as the value of the Contact that was created earlier. Verify that the Sales Quote has been updated on Opportunity.
+      FindSalesDocument(SalesHeader,CustomerTemplate.Code,Contact."No.",SalesHeader."Document Type"::Quote);
+
+      SalesHeader.TESTFIELD("Sell-to Contact No.",Contact."No.");
+      SalesHeader.TESTFIELD("VAT Bus. Posting Group",CustomerTemplate."VAT Bus. Posting Group");
+      SalesHeader.TESTFIELD("Opportunity No.",Opportunity."No.");
+
+      Opportunity.TESTFIELD("Sales Document Type",Opportunity."Sales Document Type"::Quote);
+      Opportunity.TESTFIELD("Sales Document No.",SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler)]
+    PROCEDURE CreatingSalesQuoteOpportunityForPerson@27();
+    VAR
+      SalesHeader@1006 : Record 36;
+      Contact@1003 : Record 5050;
+      ContactPerson@1007 : Record 5050;
+      Opportunity@1002 : Record 5092;
+      CustomerTemplate@1000 : Record 5105;
+    BEGIN
+      // [SCENARIO 172048] Sales Quote should be assigned to the Opportunity for a Contact of type Person
+      Initialize;
+
+      // [GIVEN] The Customer with Contact 'C' of type Company.
+      CreateCustomerTemplate(CustomerTemplate);
+      CreateContactWithCustomerRelation(Contact);
+      // [GIVEN] The Contact 'P' of type Person.
+      LibraryMarketing.CreateContact(ContactPerson);
+      ContactPerson."Company No." := Contact."No.";
+      ContactPerson.Type := ContactPerson.Type::Person;
+      ContactPerson.MODIFY;
+
+      // [WHEN] Assign the Sales Quote to the Opportunity
+      CreateAndAssignQuoteToOpportunity(Opportunity,ContactPerson."No.");
+
+      // [THEN] The Sales Quote is created, where "Sell-to Contact No." is 'P'.
+      FindSalesDocument(SalesHeader,CustomerTemplate.Code,ContactPerson."No.",SalesHeader."Document Type"::Quote);
+      SalesHeader.TESTFIELD("Sell-to Contact No.",ContactPerson."No.");
+      SalesHeader.TESTFIELD("Opportunity No.",Opportunity."No.");
+      // [THEN] The Sales Quote is linked with the Opportunity.
+      Opportunity.TESTFIELD("Sales Document Type",Opportunity."Sales Document Type"::Quote);
+      Opportunity.TESTFIELD("Sales Document No.",SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerTrue,MessageHandler)]
+    PROCEDURE ConvertSalesQuoteToOrder@7();
+    VAR
+      Contact@1001 : Record 5050;
+      CustomerTemplate@1000 : Record 5105;
+      SalesHeader@1002 : Record 36;
+      CustomerNo@1004 : Code[20];
+    BEGIN
+      // Covers document number TC0012 - refer to TFS ID 21733.
+      // [SCENARIO 21733] Test creation of a Sales Quote for a Contact registered as a Customer directly from the Sales Quote window and conversion to Sales Order.
+
+      // [GIVEN] Create a new Customer Template, Contact, Sales Quote - Sales Header and Sales Line.
+      Initialize;
+      CreateCustomerTemplate(CustomerTemplate);
+      CreateContactWithCustomerRelation(Contact);
+      CreateSalesQuoteWOCustomer(SalesHeader,Contact."No.",CustomerTemplate.Code);
+
+      // [WHEN] Convert the Sales Quote to Order by Make Order.
+      CODEUNIT.RUN(CODEUNIT::"Sales-Quote to Order (Yes/No)",SalesHeader);
+
+      // [THEN] Check that the Sales Quote has been deleted.
+      CustomerNo := VerifySalesOrderFromQuote(SalesHeader);
+      VerifyCustomerCreatedFromQuote(CustomerNo,CustomerTemplate);
+      Assert.IsFalse(
+        SalesHeader.GET(SalesHeader."Document Type",SalesHeader."No."),
+        STRSUBSTNO(
+          SalesQuoteMustNotExistError,SalesHeader.TABLECAPTION,SalesHeader.FIELDCAPTION("Document Type"),SalesHeader."Document Type",
+          SalesHeader.FIELDCAPTION("No."),SalesHeader."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler)]
+    PROCEDURE AssignQuoteToOpportunityError@6();
+    VAR
+      Contact@1003 : Record 5050;
+      Opportunity@1002 : Record 5092;
+      CustomerTemplate@1000 : Record 5105;
+    BEGIN
+      // Covers document number TC0013 - refer to TFS ID 21733.
+      // [SCENARIO 21733] Test that the application generates an error on assigning a Sales Quote to an Opportunity that has already been assigned a Sales Quote.
+
+      // [GIVEN] Create a new Customer Template, Contact, Sales Cycle, Opportunity. Create and assign a Sales Quote to Opportunity.
+      Initialize;
+      CreateCustomerTemplate(CustomerTemplate);
+      CreateContactWithCustomerRelation(Contact);
+
+      CreateAndAssignQuoteToOpportunity(Opportunity,Contact."No.");
+
+      // [WHEN] Try assigning another Sales Quote to the Opportunity created earlier.
+      ASSERTERROR Opportunity.AssignQuote;
+
+      // [THEN] Check that the application generates an error on assigning a Sales Quote to an Opportunity that has already been assigned a Sales Quote.
+      Assert.AreEqual(STRSUBSTNO(SalesQuoteAlreadyAssignedError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler)]
+    PROCEDURE ChangeSalesQuoteOnOpportunity@10();
+    VAR
+      SalesHeader@1006 : Record 36;
+      SalesHeader2@1001 : Record 36;
+      Contact@1003 : Record 5050;
+      Opportunity@1002 : Record 5092;
+      CustomerTemplate@1000 : Record 5105;
+    BEGIN
+      // Covers document number TC0013 - refer to TFS ID 21733.
+      // [SCENARIO 21733] Test that the application allows changing Sales Quote assigned to an Opportunity that has already been assigned a Sales Quote.
+
+      // [GIVEN] Create a new Customer Template, Contact, Sales Cycle, Opportunity. Create and assign a Sales Quote to Opportunity.
+      // [GIVEN] Create a new Sales Quote - Sales Header and Sales Line.
+      Initialize;
+      CreateCustomerTemplate(CustomerTemplate);
+      CreateContactWithCustomerRelation(Contact);
+
+      CreateAndAssignQuoteToOpportunity(Opportunity,Contact."No.");
+      FindSalesDocument(SalesHeader,CustomerTemplate.Code,Contact."No.",SalesHeader."Document Type"::Quote);
+      CreateSalesQuoteWOCustomer(SalesHeader2,SalesHeader."Sell-to Contact No.",SalesHeader."Sell-to Customer Template Code");
+
+      // [WHEN] Try changing the Sales Quote on the Opportunity created earlier.
+      Opportunity.VALIDATE("Sales Document No.",SalesHeader2."No.");
+      Opportunity.MODIFY(TRUE);
+
+      // [THEN] Check that the application allows changing Sales Quote assigned to an Opportunity that has already been assigned a Sales Quote.
+      SalesHeader2.GET(SalesHeader2."Document Type",SalesHeader2."No.");
+      SalesHeader2.TESTFIELD("Opportunity No.",Opportunity."No.");
+      SalesHeader.GET(SalesHeader."Document Type",SalesHeader."No.");
+      SalesHeader.TESTFIELD("Opportunity No.",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler)]
+    PROCEDURE AssignOpportunityOnSalesQuote@12();
+    VAR
+      SalesHeader@1006 : Record 36;
+      Contact@1004 : Record 5050;
+      Opportunity@1003 : Record 5092;
+      CustomerTemplate@1001 : Record 5105;
+      TempOpportunity@1000 : TEMPORARY Record 5092;
+    BEGIN
+      // [SCENARIO] Test that the application allows Assigning a Sales Quote to an Opportunity from the Sales Quote window.
+
+      // [GIVEN] Create a new Customer Template, Contact, Sales Quote - Sales Header and Sales Line, Sales Cycle, Opportunity.
+      Initialize;
+      CreateCustomerTemplate(CustomerTemplate);
+      CreateContactWithCustomerRelation(Contact);
+      CreateSalesQuoteWOCustomer(SalesHeader,Contact."No.",CustomerTemplate.Code);
+
+      Opportunity.SETRANGE("Contact No.",Contact."No.");
+      TempOpportunity.CreateOppFromOpp(Opportunity);
+      Opportunity.SETRANGE("Contact No.",Contact."No.");
+      Opportunity.FINDFIRST;
+
+      // [WHEN] Update Opportunity No. On Sales Quote.
+      SalesHeader.VALIDATE("Opportunity No.",Opportunity."No.");
+      SalesHeader.MODIFY(TRUE);
+
+      // [THEN] Verify Sales Document No. , Sales Document Type On Opportunity.
+      Opportunity.GET(SalesHeader."Opportunity No.");
+      Opportunity.TESTFIELD("Sales Document No.",SalesHeader."No.");
+      Opportunity.TESTFIELD("Sales Document Type",Opportunity."Sales Document Type"::Quote);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,ConfirmHandlerTrue,MessageHandler)]
+    PROCEDURE RestoreSalesQuoteWithOpportunityNo@13();
+    VAR
+      SalesHeader@1006 : Record 36;
+      Opportunity@1000 : Record 5092;
+      ArchiveManagement@1001 : Codeunit 5063;
+    BEGIN
+      // [SCENARIO] Verify Sales Document Type and No. on Opportunity card after restoring from Sales Quote Archive with Opportunity No.
+
+      // [GIVEN] Create a new Customer Template,Contact,Sales Cycle,Opportunity and Assign Quote.
+      Initialize;
+      CreateSetupForOpportunity(SalesHeader,SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Archive Sales Header.
+      ArchiveManagement.ArchiveSalesDocument(SalesHeader);
+
+      // [WHEN] Restore Sales Header Archive.
+      RestoreSalesHeaderArchive(SalesHeader."No.",SalesHeader."Document Type");
+
+      // [THEN] Verifing Sales Document Type and No. on Opportunity card.
+      VerifyDocumentTypeAndNoOnOpportunity(SalesHeader."Sell-to Contact No.",
+        SalesHeader."No.",Opportunity."Sales Document Type"::Quote);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,MessageHandler,ConfirmHandlerTrue)]
+    PROCEDURE RestoreSalesQuoteWithoutOpportunityNo@14();
+    VAR
+      SalesHeader@1006 : Record 36;
+      Opportunity@1000 : Record 5092;
+      ArchiveManagement@1001 : Codeunit 5063;
+    BEGIN
+      // [SCENARIO] Verify Sales Document Type and No. on Opportunity card after restoring from Sales Quote Archive without Opportunity No.
+
+      // [GIVEN] Create a new Customer Template,Contact,Sales Cycle,Opportunity and Assign Quote.
+      Initialize;
+      CreateSetupForOpportunity(SalesHeader,SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Update Opportunity No. as blank before Archive Sales Header.
+      UpdateOpportunityNoAsBlank(SalesHeader);
+      ArchiveManagement.ArchiveSalesDocument(SalesHeader);
+
+      // [WHEN] Restore Sales Header Archive.
+      RestoreSalesHeaderArchive(SalesHeader."No.",SalesHeader."Document Type");
+
+      // [THEN] Verifing Sales Document Type and No. on Opportunity card.
+      VerifyDocumentTypeAndNoOnOpportunity(SalesHeader."Sell-to Contact No.",'',Opportunity."Sales Document Type"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,CloseOpportModalPageHandler,MessageHandler,ConfirmHandlerTrue)]
+    PROCEDURE RestoreSalesOrderWithOpportunityNo@17();
+    VAR
+      SalesHeader@1006 : Record 36;
+      SalesHeader1@1004 : Record 36;
+      Opportunity@1002 : Record 5092;
+      ArchiveManagement@1001 : Codeunit 5063;
+      CustomerTemplateCode@1000 : Code[10];
+    BEGIN
+      // [SCENARIO] Verify Sales Document Type and No. on Opportunity card after restoring from Sales order Archive with Opportunity No.
+
+      // [GIVEN] Create a new Customer Template,Contact,Sales Cycle,Opportunity and Assign Quote.
+      Initialize;
+      CustomerTemplateCode := CreateSetupForOpportunity(SalesHeader,SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Convert Quote to Order.
+      CODEUNIT.RUN(CODEUNIT::"Sales-Quote to Order (Yes/No)",SalesHeader);
+
+      // [GIVEN] Find Sales order and Archive Sales Header.
+      FindSalesDocument(SalesHeader1,CustomerTemplateCode,SalesHeader."Sell-to Contact No.",SalesHeader1."Document Type"::Order);
+      ArchiveManagement.ArchiveSalesDocument(SalesHeader1);
+
+      // [WHEN] Restore Sales Header Archive.
+      RestoreSalesHeaderArchive(SalesHeader1."No.",SalesHeader1."Document Type"::Order);
+
+      // [THEN] Verifing Sales Document Type and No. on Opportunity card.
+      VerifyDocumentTypeAndNoOnOpportunity(SalesHeader1."Sell-to Contact No.",
+        SalesHeader1."No.",Opportunity."Sales Document Type"::Order);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,CloseOpportModalPageHandler,MessageHandler,ConfirmHandlerTrue)]
+    PROCEDURE RestoreSalesOrderWithoutOpportunityNo@18();
+    VAR
+      SalesHeader@1002 : Record 36;
+      SalesHeader1@1001 : Record 36;
+      Opportunity@1003 : Record 5092;
+      ArchiveManagement@1000 : Codeunit 5063;
+      CustomerTemplateCode@1004 : Code[10];
+    BEGIN
+      // [SCENARIO] Verify Sales Document Type and No. on Opportunity card after restoring from Sales order Archive without Opportunity No.
+
+      // [GIVEN] Create a new Customer Template,Contact,Sales Cycle,Opportunity and Assign quote.
+      Initialize;
+      CustomerTemplateCode := CreateSetupForOpportunity(SalesHeader,SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Convert Quote to Order.
+      CODEUNIT.RUN(CODEUNIT::"Sales-Quote to Order (Yes/No)",SalesHeader);
+
+      // [GIVEN] Find Sales Order and Update Opportunity No. as blank before Archive Sales Header.
+      FindSalesDocument(SalesHeader1,CustomerTemplateCode,SalesHeader."Sell-to Contact No.",SalesHeader1."Document Type"::Order);
+      UpdateOpportunityNoAsBlank(SalesHeader1);
+      ArchiveManagement.ArchiveSalesDocument(SalesHeader1);
+
+      // [WHEN] Restore Sales Header Archive.
+      RestoreSalesHeaderArchive(SalesHeader1."No.",SalesHeader1."Document Type"::Order);
+
+      // [THEN] Verifing Sales Document Type and No. on Opportunity card.
+      VerifyDocumentTypeAndNoOnOpportunity(SalesHeader1."Sell-to Contact No.",'',Opportunity."Sales Document Type"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,ConfirmHandlerTrue,MessageHandler)]
+    PROCEDURE RestoreSalesQuoteWhenOppLinkedToAnotherQuote@19();
+    VAR
+      SalesHeader@1006 : Record 36;
+      SalesHeader2@1002 : Record 36;
+      Opportunity@1000 : Record 5092;
+      OpportunityNo@1005 : Code[20];
+    BEGIN
+      // [SCENARIO] Verify the Oppotunity Link after assigning the same opportunity to second sales quote and then restoring the first quote.
+
+      // [GIVEN] Create a new Customer Template,Contact,Sales Cycle,Opportunity and Assign Quote.
+      Initialize;
+      CreateSetupForOpportunity(SalesHeader,SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Archive Sales Header and create another sales quote by linking the same opportunity no.
+      OpportunityNo := ArchiveSalesDocument(SalesHeader);
+      CreateSalesQuoteWOCustomerWithOpportunity(SalesHeader2,SalesHeader);
+
+      // [WHEN] Restore Sales Header Archive.
+      RestoreSalesHeaderArchive(SalesHeader."No.",SalesHeader."Document Type");
+
+      // [THEN] Verifing Sales Document Type and No. on Opportunity and also checking the opportunity link on the Sales Quotes.
+      VerifyDocumentTypeAndNoOnOpportunity(
+        SalesHeader."Sell-to Contact No.",SalesHeader."No.",Opportunity."Sales Document Type"::Quote);
+      VerifyOpportunityLinkingOnSalesQuotes(SalesHeader."No.",SalesHeader2."No.",OpportunityNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,MessageHandler,ConfirmHandlerTrue)]
+    PROCEDURE RestoreSalesQuoteAfterRemovingOppFromQuote@22();
+    VAR
+      SalesHeader@1006 : Record 36;
+      Opportunity@1000 : Record 5092;
+      ArchiveManagement@1001 : Codeunit 5063;
+    BEGIN
+      // [SCENARIO] Verify Sales Document Type and No. on Opportunity card by removing the opportunity link before restoring the Sales Quote.
+
+      // [GIVEN] Create a new Customer Template,Contact,Sales Cycle,Opportunity and Assign Quote.
+      Initialize;
+      CreateSetupForOpportunity(SalesHeader,SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Update Opportunity No. as blank after Archive Sales Header.
+      ArchiveManagement.ArchiveSalesDocument(SalesHeader);
+      UpdateOpportunityNoAsBlank(SalesHeader);
+
+      // [WHEN] Restore Sales Header Archive.
+      RestoreSalesHeaderArchive(SalesHeader."No.",SalesHeader."Document Type");
+
+      // [THEN] Verifing Sales Document Type and No. on Opportunity card.
+      VerifyDocumentTypeAndNoOnOpportunity(
+        SalesHeader."Sell-to Contact No.",SalesHeader."No.",Opportunity."Sales Document Type"::Quote);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,MessageHandler,ConfirmHandlerTrue)]
+    PROCEDURE RestoreSalesQuoteAfterRemovingOppLinkAndLinkToAnotherQuote@20();
+    VAR
+      SalesHeader@1006 : Record 36;
+      SalesHeader2@1003 : Record 36;
+      Opportunity@1000 : Record 5092;
+      OpportunityNo@1002 : Code[20];
+    BEGIN
+      // [SCENARIO] Verify the Oppotunity Link after removing the opportunity link and assigning the same opportunity to second sales quote and then restoring the first quote.
+
+      // [GIVEN] Create a new Customer Template,Contact,Sales Cycle,Opportunity and Assign Quote.
+      Initialize;
+      CreateSetupForOpportunity(SalesHeader,SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Update Opportunity No. as blank after Archive Sales Header.
+      OpportunityNo := ArchiveSalesDocument(SalesHeader);
+      UpdateOpportunityNoAsBlank(SalesHeader);
+      CreateSalesQuoteWOCustomerWithOpportunity(SalesHeader2,SalesHeader);
+
+      // [WHEN] Restore Sales Header Archive.
+      RestoreSalesHeaderArchive(SalesHeader."No.",SalesHeader."Document Type");
+
+      // [THEN] Verifing Sales Document Type and No. on Opportunity and also checking the opportunity link on the Sales Quotes.
+      VerifyDocumentTypeAndNoOnOpportunity(
+        SalesHeader."Sell-to Contact No.",SalesHeader."No.",Opportunity."Sales Document Type"::Quote);
+      VerifyOpportunityLinkingOnSalesQuotes(SalesHeader."No.",SalesHeader2."No.",OpportunityNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,MessageHandler,ConfirmHandlerTrue)]
+    PROCEDURE RestoreSalesQuoteWhereOppStatusEqualToWon@21();
+    VAR
+      SalesHeader@1006 : Record 36;
+      Opportunity@1000 : Record 5092;
+      OpportunityNo@1002 : Code[20];
+    BEGIN
+      // [SCENARIO] Verify that error gets appeared at the time of restore when opportunity status change to won.
+
+      // [GIVEN] Create a new Customer Template,Contact,Sales Cycle,Opportunity and Assign Quote.
+      Initialize;
+      CreateSetupForOpportunity(SalesHeader,SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Update Opportunity No. as blank after Archive Sales Header.Also change the status of the opportunity to won.
+      OpportunityNo := ArchiveSalesDocument(SalesHeader);
+      UpdateOpportunityNoAsBlank(SalesHeader);
+      UpdateOpportunityStatus(OpportunityNo);
+      Opportunity.GET(OpportunityNo);
+
+      // [WHEN] Restore Sales Header Archive.
+      ASSERTERROR RestoreSalesHeaderArchive(SalesHeader."No.",SalesHeader."Document Type");
+
+      // [THEN] Verify that the expected error is coming at the time of restoring.
+      Assert.ExpectedError(STRSUBSTNO(SalesQuoteMustBeInProgressErr,Opportunity.FIELDCAPTION(Status),
+          Opportunity.Status::"In Progress",Opportunity."No.",Opportunity.Status));
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,CloseOpportModalPageHandler,ConfirmHandlerTrue,MessageHandler)]
+    PROCEDURE DeleteSalesOrderRelatedToOpportunity@25();
+    VAR
+      Contact@1001 : Record 5050;
+      CustomerTemplate@1000 : Record 5105;
+      Opportunity@1005 : Record 5092;
+      OpportunityEntry@1004 : Record 5093;
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      // [FEATURE] [Opportunity]
+      // [SCENARIO 378651] User successfully deletes Sales Order related to won Opportunity
+
+      // [GIVEN] New Customer Template, Contact, Sales Cycle
+      Initialize;
+
+      CreateCustomerTemplate(CustomerTemplate);
+      CreateContactWithCustomerRelation(Contact);
+
+      // [GIVEN] Sales Quote assigned to the Opportunity created earlier
+      CreateAndAssignQuoteToOpportunity(Opportunity,Contact."No.");
+      OpportunityEntry.SETRANGE("Opportunity No.",Opportunity."No.");
+      OpportunityEntry.DELETEALL;
+      FindSalesDocument(SalesHeader,CustomerTemplate.Code,Contact."No.",SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Sales Order made from Sales Quote
+      CODEUNIT.RUN(CODEUNIT::"Sales-Quote to Order (Yes/No)",SalesHeader);
+      FindSalesDocument(SalesHeader,CustomerTemplate.Code,Contact."No.",SalesHeader."Document Type"::Order);
+
+      // [WHEN] Deleting Sales Order
+      SalesHeader.DELETE(TRUE);
+
+      // [THEN] Sales Order deleted without errors
+      // [THEN] Opportunity "Status" changed to "Lost"
+      Opportunity.FIND;
+      Opportunity.TESTFIELD(Status,Opportunity.Status::Lost);
+
+      // [THEN] Created while closing Opportunity Entry has 0 "Estimated Value"
+      OpportunityEntry.SETRANGE("Action Taken",OpportunityEntry."Action Taken"::Lost);
+      OpportunityEntry.FINDLAST;
+      OpportunityEntry.TESTFIELD("Estimated Value (LCY)",0);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler,SalesQuoteFormHandler,CloseOpportModalPageHandler,ConfirmHandlerTrue,MessageHandler)]
+    PROCEDURE EstimatedValueInClosedOpportunityHavingEstimatedValue@35();
+    VAR
+      Contact@1001 : Record 5050;
+      CustomerTemplate@1000 : Record 5105;
+      Opportunity@1005 : Record 5092;
+      OpportunityEntry@1004 : Record 5093;
+      SalesHeader@1002 : Record 36;
+      EstimatedValueAmount@1006 : Integer;
+    BEGIN
+      // [FEATURE] [Opportunity]
+      // [SCENARIO 378651] User successfully deletes Sales Order related to won Opportunity having Estimated Value and last Entry of Opportunity has the same "Estimated Value" as previous Entry
+
+      // [GIVEN] New Customer Template, Contact, Sales Cycle
+      Initialize;
+
+      CreateCustomerTemplate(CustomerTemplate);
+      CreateContactWithCustomerRelation(Contact);
+
+      // [GIVEN] Opportunity with "Estimated Value (LCY)" = 100
+      // [GIVEN] Sales Quote assigned to the Opportunity created earlier
+      CreateAndAssignQuoteToOpportunity(Opportunity,Contact."No.");
+      OpportunityEntry.SETRANGE("Opportunity No.",Opportunity."No.");
+      OpportunityEntry.FINDLAST;
+      EstimatedValueAmount := LibraryRandom.RandInt(100);
+      OpportunityEntry."Estimated Value (LCY)" := EstimatedValueAmount;
+      OpportunityEntry.MODIFY;
+      FindSalesDocument(SalesHeader,CustomerTemplate.Code,Contact."No.",SalesHeader."Document Type"::Quote);
+
+      // [GIVEN] Sales Order made from Sales Quote
+      CODEUNIT.RUN(CODEUNIT::"Sales-Quote to Order (Yes/No)",SalesHeader);
+      FindSalesDocument(SalesHeader,CustomerTemplate.Code,Contact."No.",SalesHeader."Document Type"::Order);
+
+      // [WHEN] Deleting Sales Order
+      SalesHeader.DELETE(TRUE);
+
+      // [THEN] Created while closing Opportunity Entry has "Estimated Value (LCY)" = 100
+      OpportunityEntry.SETRANGE("Action Taken",OpportunityEntry."Action Taken"::Lost);
+      OpportunityEntry.FINDLAST;
+      OpportunityEntry.TESTFIELD("Estimated Value (LCY)",EstimatedValueAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateOpportModalFormHandler)]
+    PROCEDURE ErrorWhenAssigningQuoteToContactWithNoRelatedCustomer@26();
+    VAR
+      Contact@1001 : Record 5050;
+      Opportunity@1000 : Record 5092;
+    BEGIN
+      // [FEATURE] [Opportunity]
+      // [SCENARIO 378651] User cannot assign a Quote to Contact from Opportunity if there is no Customer related to this Contact
+
+      Initialize;
+
+      // [GIVEN] Contact without relation with Customer
+      LibraryMarketing.CreateContact(Contact);
+
+      // [WHEN] Assign the Sales Quote to the Opportunity created earlier.
+      ASSERTERROR CreateAndAssignQuoteToOpportunity(Opportunity,Contact."No.");
+
+      // [THEN] Error message about no customer relation appears
+      Assert.ExpectedError(STRSUBSTNO(NoCustomerErr,Contact."No."));
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1002 : Codeunit 131305;
+    BEGIN
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE AssignQuoteToOpportunity@11(VAR Opportunity@1000 : Record 5092;ContactNo@1001 : Code[20]);
+    BEGIN
+      Opportunity.SETRANGE("Contact No.",ContactNo);
+      Opportunity.FINDFIRST;
+      Opportunity.AssignQuote;
+    END;
+
+    LOCAL PROCEDURE ArchiveSalesDocument@50(VAR SalesHeader@1000 : Record 36) : Code[20];
+    VAR
+      ArchiveManagement@1001 : Codeunit 5063;
+    BEGIN
+      ArchiveManagement.ArchiveSalesDocument(SalesHeader);
+      EXIT(SalesHeader."Opportunity No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndAssignQuoteToOpportunity@65(VAR Opportunity@1000 : Record 5092;ContactNo@1001 : Code[20]);
+    VAR
+      TempOpportunity@1002 : TEMPORARY Record 5092;
+    BEGIN
+      Opportunity.SETRANGE("Contact No.",ContactNo);
+      TempOpportunity.CreateOppFromOpp(Opportunity);
+      AssignQuoteToOpportunity(Opportunity,ContactNo);
+    END;
+
+    LOCAL PROCEDURE CreateCustomerTemplate@5(VAR CustomerTemplate@1000 : Record 5105);
+    VAR
+      Customer2@1001 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer2);
+      LibrarySales.CreateCustomerTemplate(CustomerTemplate);
+      CustomerTemplate.VALIDATE("Gen. Bus. Posting Group",Customer2."Gen. Bus. Posting Group");
+      CustomerTemplate.VALIDATE("Customer Posting Group",Customer2."Customer Posting Group");
+      CustomerTemplate.VALIDATE("VAT Bus. Posting Group",Customer2."VAT Bus. Posting Group");
+      CustomerTemplate.MODIFY(TRUE);
+
+      CustomerTemplateCode2 := CustomerTemplate.Code;  // Set global variable for Page Handler.
+    END;
+
+    LOCAL PROCEDURE CreateContactWithCustomerRelation@28(VAR Contact@1000 : Record 5050);
+    VAR
+      BusinessRelation@1001 : Record 5053;
+      ContactBusinessRelation@1002 : Record 5054;
+    BEGIN
+      LibraryMarketing.CreateContact(Contact);
+      LibraryMarketing.CreateBusinessRelation(BusinessRelation);
+      LibraryMarketing.CreateContactBusinessRelation(ContactBusinessRelation,Contact."No.",BusinessRelation.Code);
+      ContactBusinessRelation."Link to Table" := ContactBusinessRelation."Link to Table"::Customer;
+      ContactBusinessRelation."No." := LibrarySales.CreateCustomerNo;
+      ContactBusinessRelation.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesQuoteWOCustomer@15(VAR SalesHeader@1004 : Record 36;ContactNo@1000 : Code[20];CustomerTemplateCode@1003 : Code[10]);
+    BEGIN
+      LibrarySales.SetStockoutWarning(FALSE);
+      SalesHeader.INIT;
+      SalesHeader.VALIDATE("Document Type",SalesHeader."Document Type"::Quote);
+      SalesHeader.INSERT(TRUE);
+      SalesHeader.VALIDATE("Sell-to Contact No.",ContactNo);
+      SalesHeader.VALIDATE("Sell-to Customer Template Code",CustomerTemplateCode);
+      SalesHeader.MODIFY(TRUE);
+      CreateSalesLine(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateSalesQuoteWOCustomerWithOpportunity@31(VAR SalesHeader2@1004 : Record 36;SalesHeader@1000 : Record 36);
+    BEGIN
+      CreateSalesQuoteWOCustomer(SalesHeader2,SalesHeader."Sell-to Contact No.",SalesHeader."Sell-to Customer Template Code");
+      SalesHeader2.VALIDATE("Opportunity No.",SalesHeader."Opportunity No.");
+      SalesHeader2.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@3(SalesHeader@1000 : Record 36);
+    VAR
+      Item@1004 : Record 27;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandInt(100));
+    END;
+
+    LOCAL PROCEDURE CreateSetupForOpportunity@24(VAR SalesHeader@1000 : Record 36;DocumentType@1001 : Option) : Code[10];
+    VAR
+      Contact@1005 : Record 5050;
+      CustomerTemplate@1003 : Record 5105;
+      Opportunity@1002 : Record 5092;
+    BEGIN
+      CreateCustomerTemplate(CustomerTemplate);
+      CreateContactWithCustomerRelation(Contact);
+      CreateAndAssignQuoteToOpportunity(Opportunity,Contact."No.");
+      FindSalesDocument(SalesHeader,CustomerTemplate.Code,Contact."No.",DocumentType);
+      EXIT(CustomerTemplate.Code);
+    END;
+
+    LOCAL PROCEDURE FindSalesDocument@23(VAR SalesHeader@1000 : Record 36;CustomerTemplateCode@1001 : Code[10];SellToContactNo@1002 : Code[20];DocumentType@1003 : Option);
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",DocumentType);
+      SalesHeader.SETRANGE("Sell-to Customer Template Code",CustomerTemplateCode);
+      SalesHeader.SETRANGE("Sell-to Contact No.",SellToContactNo);
+      SalesHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE NextStepOpportunityWizard@52(VAR TempOpportunity@1000 : TEMPORARY Record 5092);
+    BEGIN
+      TempOpportunity.MODIFY;
+      TempOpportunity.CheckStatus;
+      TempOpportunity.PerformNextWizardStatus;
+    END;
+
+    LOCAL PROCEDURE RestoreSalesHeaderArchive@44(No@1000 : Code[20];DocumentType@1001 : Option);
+    VAR
+      SalesHeaderArchive@1002 : Record 5107;
+      ArchiveManagement@1003 : Codeunit 5063;
+    BEGIN
+      SalesHeaderArchive.SETRANGE("Document Type",DocumentType);
+      SalesHeaderArchive.SETRANGE("No.",No);
+      SalesHeaderArchive.FINDFIRST;
+      ArchiveManagement.RestoreSalesDocument(SalesHeaderArchive);
+    END;
+
+    LOCAL PROCEDURE UpdateOpportunityNoAsBlank@48(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+      SalesHeader.VALIDATE("Opportunity No.",'');
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateOpportunityStatus@41(OpportunityNo@1000 : Code[20]);
+    VAR
+      Opportunity@1001 : Record 5092;
+    BEGIN
+      WITH Opportunity DO BEGIN
+        GET(OpportunityNo);
+        VALIDATE(Status,Status::Won);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyCustomerCreatedFromQuote@8(CustomerNo@1000 : Code[20];CustomerTemplate@1001 : Record 5105);
+    VAR
+      Customer@1002 : Record 18;
+    BEGIN
+      Customer.GET(CustomerNo);
+      Customer.TESTFIELD("Gen. Bus. Posting Group",CustomerTemplate."Gen. Bus. Posting Group");
+      Customer.TESTFIELD("Customer Posting Group",CustomerTemplate."Customer Posting Group");
+      Customer.TESTFIELD("VAT Bus. Posting Group",CustomerTemplate."VAT Bus. Posting Group");
+    END;
+
+    LOCAL PROCEDURE VerifySalesOrderFromQuote@16(VAR SalesHeader@1000 : Record 36) : Code[20];
+    VAR
+      SalesHeader2@1001 : Record 36;
+    BEGIN
+      SalesHeader2.SETRANGE("Document Type",SalesHeader2."Document Type"::Order);
+      SalesHeader2.SETRANGE("Quote No.",SalesHeader."No.");
+      SalesHeader2.FINDFIRST;
+      SalesHeader2.TESTFIELD("Sell-to Contact No.",SalesHeader."Sell-to Contact No.");
+      SalesHeader2.TESTFIELD("Gen. Bus. Posting Group",SalesHeader."Gen. Bus. Posting Group");
+      SalesHeader2.TESTFIELD("Customer Posting Group",SalesHeader."Customer Posting Group");
+      SalesHeader2.TESTFIELD("VAT Bus. Posting Group",SalesHeader."VAT Bus. Posting Group");
+      EXIT(SalesHeader2."Sell-to Customer No.");
+    END;
+
+    LOCAL PROCEDURE VerifyDocumentTypeAndNoOnOpportunity@29(ContactNo@1000 : Code[20];SalesDocumentNo@1002 : Code[20];SalesDocumentType@1001 : Option);
+    VAR
+      Opportunity@1003 : Record 5092;
+    BEGIN
+      WITH Opportunity DO BEGIN
+        SETRANGE("Contact No.",ContactNo);
+        FINDFIRST;
+        TESTFIELD("Sales Document Type",SalesDocumentType);
+        TESTFIELD("Sales Document No.",SalesDocumentNo);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyOpportunityLinkingOnSalesQuotes@33(FirstSalesQuoteNo@1000 : Code[20];SecondSalesQuoteNo@1001 : Code[20];OpportunityNo@1002 : Code[20]);
+    VAR
+      SalesHeader@1003 : Record 36;
+    BEGIN
+      WITH SalesHeader DO BEGIN
+        GET("Document Type"::Quote,FirstSalesQuoteNo);
+        TESTFIELD("Opportunity No.",OpportunityNo);
+        GET("Document Type"::Quote,SecondSalesQuoteNo);
+        TESTFIELD("Opportunity No.",'');
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE CreateOpportModalFormHandler@45(VAR CreateOpportunity@1000 : Page 5126;VAR Reply@1001 : Action);
+    VAR
+      SalesCycle@1004 : Record 5090;
+      TempOpportunity@1002 : TEMPORARY Record 5092;
+    BEGIN
+      TempOpportunity.INIT;  // Required to initialize the variable.
+      CreateOpportunity.GETRECORD(TempOpportunity);
+      TempOpportunity.INSERT;  // Insert temporary Opportunity to modify fields later.
+      LibraryMarketing.CreateSalesCycle(SalesCycle);
+      TempOpportunity.VALIDATE(Description,SalesCycle.Code);
+      NextStepOpportunityWizard(TempOpportunity);
+
+      TempOpportunity.VALIDATE("Sales Cycle Code",SalesCycle.Code);
+      NextStepOpportunityWizard(TempOpportunity);
+      NextStepOpportunityWizard(TempOpportunity);
+
+      TempOpportunity.VALIDATE("Activate First Stage",TRUE);
+      TempOpportunity.MODIFY;
+      TempOpportunity.FinishWizard;
+    END;
+
+    [PageHandler]
+    PROCEDURE SalesQuoteFormHandler@2(VAR SalesQuote@1000 : Page 41);
+    VAR
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      SalesHeader.INIT;
+      SalesQuote.GETRECORD(SalesHeader);
+      SalesHeader.VALIDATE("Sell-to Customer Template Code",CustomerTemplateCode2);
+      SalesHeader.MODIFY(TRUE);
+      CreateSalesLine(SalesHeader);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerTrue@9(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@42(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE CloseOpportModalPageHandler@30(VAR CloseOpportunity@1000 : Page 5128;VAR Reply@1001 : Action);
+    VAR
+      TempOpportunityEntry@1002 : TEMPORARY Record 5093;
+    BEGIN
+      TempOpportunityEntry.INIT;
+      CloseOpportunity.GETRECORD(TempOpportunityEntry);
+      TempOpportunityEntry.INSERT;
+      TempOpportunityEntry.FinishWizard;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Quote] [Sales] [Marketing]
+      Unsupported version tags:
+      NA: Unable to Compile
+
+      Test for Marketing Quotations to Contacts:
+        1. Test creation of a Sales Quote from the Opportunity for a Contact that is not registered as a Customer.
+        2. Test creation of a Sales Quote for a Contact not registered as a Customer directly from the Sales Quote window.
+        3. Test assigning a sales quote to an opportunity from the Opportunity Card window.
+        4. Test that the application allows Assigning a Sales Quote to an Opportunity from the Sales Quote window.
+        5. Verify Sales Document Type and No. on Opportunity card after restoring from Sales Quote Archive with Opportunity No.
+        6. Verify Sales Document Type and No. on Opportunity card after restoring from Sales Quote Archive without Opportunity No.
+        7. Verify Sales Document Type and No. on Opportunity card after restoring from Sales Order Archive with Opportunity No.
+        8. Verify Sales Document Type and No. on Opportunity card after restoring from Sales order Archive without Opportunity No.
+        9. Verify the Oppotunity Link after assigning the same opportunity to second sales quote and then restoring the first quote.
+       10. Verify Sales Document Type and No. on Opportunity card by removing the opportunity link before restoring the Sales Quote.
+       11. Verify the Oppotunity Link after removing the opportunity link and assigning the same opportunity to second sales quote and then restoring the first quote.
+       12. Verify that error gets appeared at the time of restore when opportunity status change to won.
+
+      TFS_TS_ID = 21733
+      Cover Test cases:
+        TC0011 TFS_TC_ID=123216 and 137575
+        TC0012 TFS_TC_ID=123217 and 137576
+        TC0013 TFS_TC_ID=127995 and 137647
+
+      TFS_TS_ID = 237110
+      --------------------------------------------------------------------------
+      Test Function Name                                             Test TFS ID
+      --------------------------------------------------------------------------
+      AssignOpportunityOnSalesQuote                                       127996
+
+      Covers Test Cases for Bug Id: 50472
+      --------------------------------------------------------------------------
+      Test Function Name
+      --------------------------------------------------------------------------
+      RestoreSalesQuoteWithOpportunityNo,RestoreSalesQuoteWithoutOpportunityNo,
+      RestoreSalesOrderWithOpportunityNo,RestoreSalesOrderWithoutOpportunityNo
+
+      Covers Test Cases for Bug Id: 50472
+      ----------------------------------------------------------------------------------------------------
+      Test Function Name
+      ----------------------------------------------------------------------------------------------------
+      RestoreSalesQuoteWhenOppLinkedToAnotherQuote,RestoreSalesQuoteAfterRemovingOppFromQuote,
+      RestoreSalesQuoteAfterRemovingOppLinkAndLinkToAnotherQuote,RestoreSalesQuoteWhereOppStatusEqualToWon
+    }
+    END.
+  }
+}
+

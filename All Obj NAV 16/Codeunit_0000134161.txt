@@ -1,0 +1,297 @@
+OBJECT Codeunit 134161 Pmt Export Mgt Gen. Jnl Test
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1000 : Codeunit 130000;
+      LibraryERM@1004 : Codeunit 131300;
+      LibraryPaymentExport@1002 : Codeunit 130100;
+      LibraryUtility@1003 : Codeunit 131000;
+      LibraryRandom@1001 : Codeunit 130440;
+      ActualContentLengthErr@1005 : TextConst 'ENU=Only 35 characters should be read from the file.';
+      ActualContentValueErr@1006 : TextConst 'ENU=Unexpected file content.';
+      PmtJnlLineExportFlagErr@1007 : TextConst 'ENU=Payment Journal Line is not marked as exported.';
+      RecordNotFoundErr@1008 : TextConst '@@@="%1=TableCaption";ENU=%1 was not found.';
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE ExportAgainPmtJnlLineAutoApplied@1();
+    VAR
+      GenJournalBatch@1004 : Record 232;
+      InvGenJournalLine@1001 : Record 81;
+      PmtGenJournalLine@1006 : Record 81;
+      DataExchMapping@1002 : Record 1224;
+      Vendor@1000 : Record 23;
+      PmtExportMgtGenJnlLine@1007 : Codeunit 1206;
+      MessageToRecipient@1005 : Text;
+    BEGIN
+      // [SCENARIO 1] Re-Export Payment Journal Line to a File
+      // [GIVEN] Gen. Journal Line of type Payment
+      // [GIVEN] Gen. Journal Line is auto-applied to a Posted Purchase Invoice
+      // [GIVEN] The Exported to Payment File flag is set to true on the Gen. Journal Line
+      // [WHEN] User clicks the Export Payment to File action on the Payment Journal
+      // [THEN] Confirmation message pops up
+      // [THEN] File is created
+
+      // Pre-Setup
+      LibraryPaymentExport.CreateVendorWithBankAccount(Vendor);
+      PostPurchaseInvoice(InvGenJournalLine,Vendor."No.");
+
+      DefinePaymentExportFormat(DataExchMapping);
+      UpdatePaymentMethodLineDef(Vendor."Payment Method Code",DataExchMapping."Data Exch. Line Def Code");
+
+      // Setup
+      LibraryPaymentExport.CreatePaymentExportBatch(GenJournalBatch,DataExchMapping."Data Exch. Def Code");
+      UpdateBankExportImportSetup(GenJournalBatch."Bal. Account No.");
+
+      LibraryPaymentExport.CreateVendorPmtJnlLine(PmtGenJournalLine,GenJournalBatch,Vendor."No.");
+      MessageToRecipient := LibraryUtility.GenerateRandomText(MAXSTRLEN(PmtGenJournalLine."Message to Recipient"));
+      PmtGenJournalLine."Message to Recipient" := COPYSTR(MessageToRecipient,1,MAXSTRLEN(PmtGenJournalLine."Message to Recipient"));
+      PmtGenJournalLine.MODIFY;
+
+      ApplyPaymentToPurchaseInvoice(PmtGenJournalLine,InvGenJournalLine);
+
+      // Exercise
+      PmtGenJournalLine.SETRANGE("Journal Template Name",GenJournalBatch."Journal Template Name");
+      PmtGenJournalLine.SETRANGE("Journal Batch Name",GenJournalBatch.Name);
+
+      PmtExportMgtGenJnlLine.EnableExportToServerTempFile(TRUE,'txt');
+      PmtExportMgtGenJnlLine.ExportJournalPaymentFileYN(PmtGenJournalLine); // Will set exported flag
+      PmtExportMgtGenJnlLine.ExportJournalPaymentFileYN(PmtGenJournalLine); // Will ask for export again
+
+      // Verify
+      ValidatePaymentFile(PmtExportMgtGenJnlLine.GetServerTempFileName,MessageToRecipient);
+      ValidateExportedPmtJnlLine(GenJournalBatch);
+      ValidateCreditTransferRegister(DataExchMapping."Data Exch. Def Code",GenJournalBatch."Bal. Account No.");
+    END;
+
+    LOCAL PROCEDURE UpdatePaymentMethodLineDef@13(PaymentMethodCode@1001 : Code[10];DataExchLineDefCode@1002 : Code[20]);
+    VAR
+      PaymentMethod@1000 : Record 289;
+    BEGIN
+      PaymentMethod.GET(PaymentMethodCode);
+      PaymentMethod.VALIDATE("Pmt. Export Line Definition",DataExchLineDefCode);
+      PaymentMethod.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE PostPurchaseInvoice@5(VAR GenJournalLine@1000 : Record 81;VendorNo@1002 : Code[20]);
+    VAR
+      GenJournalBatch@1001 : Record 232;
+    BEGIN
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      LibraryERM.CreateGeneralJnlLine(GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        GenJournalLine."Document Type"::Invoice,GenJournalLine."Account Type"::Vendor,VendorNo,-LibraryRandom.RandDec(100,2));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE DefinePaymentExportFormat@6(VAR DataExchMapping@1000 : Record 1224);
+    VAR
+      PaymentExportData@1003 : Record 1226;
+      DataExchDef@1001 : Record 1222;
+      DataExchLineDef@1002 : Record 1227;
+    BEGIN
+      LibraryPaymentExport.CreateSimpleDataExchDefWithMapping(DataExchMapping,
+        DATABASE::"Payment Export Data",PaymentExportData.FIELDNO("Message to Recipient 1"));
+
+      DataExchDef.GET(DataExchMapping."Data Exch. Def Code");
+      DataExchDef.VALIDATE("File Type",DataExchDef."File Type"::"Variable Text");
+      DataExchDef.VALIDATE("Reading/Writing XMLport",XMLPORT::"Export Generic CSV");
+      DataExchDef.MODIFY(TRUE);
+
+      DataExchLineDef.GET(DataExchMapping."Data Exch. Def Code",DataExchMapping."Data Exch. Line Def Code");
+      DataExchLineDef.VALIDATE("Column Count",1);
+      DataExchLineDef.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateBankExportImportSetup@7(BankAccountNo@1000 : Code[20]);
+    VAR
+      BankAccount@1001 : Record 270;
+      BankExportImportSetup@1002 : Record 1200;
+    BEGIN
+      BankAccount.GET(BankAccountNo);
+      BankAccount.GetBankExportImportSetup(BankExportImportSetup);
+      BankExportImportSetup."Processing Codeunit ID" := CODEUNIT::"Pmt Export Mgt Gen. Jnl Line";
+      BankExportImportSetup.MODIFY;
+    END;
+
+    LOCAL PROCEDURE ApplyPaymentToPurchaseInvoice@10(VAR PmtGenJournalLine@1001 : Record 81;InvGenJournalLine@1000 : Record 81);
+    VAR
+      VendorLedgerEntry@1002 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,VendorLedgerEntry."Document Type"::Invoice,InvGenJournalLine."Document No.");
+      PmtGenJournalLine.VALIDATE("Applies-to Doc. Type",PmtGenJournalLine."Applies-to Doc. Type"::Invoice);
+      PmtGenJournalLine.VALIDATE("Applies-to Doc. No.",VendorLedgerEntry."Document No.");
+      PmtGenJournalLine.VALIDATE(Amount,-InvGenJournalLine.Amount);
+      PmtGenJournalLine.MODIFY(TRUE);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerYes@15(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    LOCAL PROCEDURE ValidatePaymentFile@9(FileName@1001 : Text;MessageToRecipient@1002 : Text);
+    VAR
+      ActualMessageToRecipient@1000 : Text[37];
+    BEGIN
+      ActualMessageToRecipient := COPYSTR(ReadPaymentFile(FileName),1,37);
+      Assert.AreEqual(35,STRLEN(DELCHR(ActualMessageToRecipient,'=','"')),ActualContentLengthErr);
+      Assert.AreNotEqual(0,STRPOS(MessageToRecipient,DELCHR(ActualMessageToRecipient,'=','"')),ActualContentValueErr);
+    END;
+
+    LOCAL PROCEDURE ReadPaymentFile@16(FileName@1000 : Text) Content : Text;
+    VAR
+      PaymentFile@1001 : File;
+    BEGIN
+      PaymentFile.WRITEMODE := FALSE;
+      PaymentFile.TEXTMODE := TRUE;
+      PaymentFile.OPEN(FileName);
+      PaymentFile.READ(Content);
+      PaymentFile.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ValidateExportedPmtJnlLine@18(GenJournalBatch@1001 : Record 232);
+    VAR
+      GenJournalLine@1000 : Record 81;
+    BEGIN
+      GenJournalLine.SETRANGE("Journal Template Name",GenJournalBatch."Journal Template Name");
+      GenJournalLine.SETRANGE("Journal Batch Name",GenJournalBatch.Name);
+      GenJournalLine.FINDFIRST;
+      Assert.IsTrue(GenJournalLine."Exported to Payment File",PmtJnlLineExportFlagErr);
+    END;
+
+    LOCAL PROCEDURE ValidateCreditTransferRegister@11(Identifier@1001 : Code[20];FromBankAccountNo@1002 : Code[20]);
+    VAR
+      CreditTransferRegister@1000 : Record 1205;
+    BEGIN
+      CreditTransferRegister.SETRANGE(Identifier,Identifier);
+      CreditTransferRegister.SETRANGE(Status,CreditTransferRegister.Status::"File Created");
+      CreditTransferRegister.SETRANGE("From Bank Account No.",FromBankAccountNo);
+      Assert.IsFalse(CreditTransferRegister.ISEMPTY,STRSUBSTNO(RecordNotFoundErr,CreditTransferRegister.TABLECAPTION));
+    END;
+
+    [Test]
+    PROCEDURE ExportPmtJnlLineManuallyApplied@2();
+    VAR
+      GenJournalBatch@1008 : Record 232;
+      InvGenJournalLine@1007 : Record 81;
+      PmtGenJournalLine@1005 : Record 81;
+      DataExchMapping@1004 : Record 1224;
+      Vendor@1003 : Record 23;
+      PmtExportMgtGenJnlLine@1002 : Codeunit 1206;
+      MessageToRecipient@1000 : Text;
+    BEGIN
+      // [SCENARIO 2] Export Payment Journal Line to a File
+      // [GIVEN] Gen. Journal Line of type Payment
+      // [GIVEN] Gen. Journal Line is manually-applied to a Posted Purchase Invoice
+      // [WHEN] User clicks the Export Payment to File action on the Payment Journal
+      // [THEN] File is created
+
+      // Pre-Setup
+      LibraryPaymentExport.CreateVendorWithBankAccount(Vendor);
+      PostPurchaseInvoice(InvGenJournalLine,Vendor."No.");
+
+      DefinePaymentExportFormat(DataExchMapping);
+      UpdatePaymentMethodLineDef(Vendor."Payment Method Code",DataExchMapping."Data Exch. Line Def Code");
+
+      // Setup
+      LibraryPaymentExport.CreatePaymentExportBatch(GenJournalBatch,DataExchMapping."Data Exch. Def Code");
+      UpdateBankExportImportSetup(GenJournalBatch."Bal. Account No.");
+
+      LibraryPaymentExport.CreateVendorPmtJnlLine(PmtGenJournalLine,GenJournalBatch,Vendor."No.");
+      MessageToRecipient := LibraryUtility.GenerateRandomText(MAXSTRLEN(PmtGenJournalLine."Message to Recipient"));
+      PmtGenJournalLine."Message to Recipient" := COPYSTR(MessageToRecipient,1,MAXSTRLEN(PmtGenJournalLine."Message to Recipient"));
+      PmtGenJournalLine.MODIFY;
+
+      ApplyPaymentToPurchaseInvoiceManually(PmtGenJournalLine,InvGenJournalLine);
+
+      // Exercise
+      PmtExportMgtGenJnlLine.EnableExportToServerTempFile(TRUE,'txt');
+      PmtExportMgtGenJnlLine.ExportJournalPaymentFileYN(PmtGenJournalLine);
+
+      // Verify
+      ValidatePaymentFile(PmtExportMgtGenJnlLine.GetServerTempFileName,MessageToRecipient);
+      ValidateExportedPmtJnlLine(GenJournalBatch);
+      ValidateCreditTransferRegister(DataExchMapping."Data Exch. Def Code",GenJournalBatch."Bal. Account No.");
+    END;
+
+    LOCAL PROCEDURE ApplyPaymentToPurchaseInvoiceManually@8(VAR PmtGenJournalLine@1001 : Record 81;InvGenJournalLine@1000 : Record 81);
+    VAR
+      VendorLedgerEntry@1002 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,VendorLedgerEntry."Document Type"::Invoice,InvGenJournalLine."Document No.");
+      VendorLedgerEntry.VALIDATE("Applies-to ID",USERID);
+      CODEUNIT.RUN(CODEUNIT::"Vend. Entry-Edit",VendorLedgerEntry);
+
+      PmtGenJournalLine.VALIDATE("Applies-to Doc. Type",PmtGenJournalLine."Applies-to Doc. Type"::Invoice);
+      PmtGenJournalLine.VALIDATE("Applies-to ID",USERID);
+      PmtGenJournalLine.VALIDATE(Amount,-InvGenJournalLine.Amount);
+      PmtGenJournalLine.MODIFY(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE ExportPmtJnlLineNotApplied@3();
+    VAR
+      GenJournalBatch@1009 : Record 232;
+      InvGenJournalLine@1007 : Record 81;
+      PmtGenJournalLine@1005 : Record 81;
+      DataExchMapping@1004 : Record 1224;
+      Vendor@1003 : Record 23;
+      PmtExportMgtGenJnlLine@1002 : Codeunit 1206;
+      MessageToRecipient@1000 : Text;
+    BEGIN
+      // [SCENARIO 3] Export Payment Journal Line to a File
+      // [GIVEN] Gen. Journal Line of type Payment
+      // [GIVEN] The Gen. Journal Line is not applied to any Posted Purchase Invoices
+      // [WHEN] User clicks the Export Payment to File action on the Payment Journal
+      // [THEN] File is created
+
+      // Pre-Setup
+      LibraryPaymentExport.CreateVendorWithBankAccount(Vendor);
+      PostPurchaseInvoice(InvGenJournalLine,Vendor."No.");
+
+      DefinePaymentExportFormat(DataExchMapping);
+      UpdatePaymentMethodLineDef(Vendor."Payment Method Code",DataExchMapping."Data Exch. Line Def Code");
+
+      // Setup
+      LibraryPaymentExport.CreatePaymentExportBatch(GenJournalBatch,DataExchMapping."Data Exch. Def Code");
+      UpdateBankExportImportSetup(GenJournalBatch."Bal. Account No.");
+
+      LibraryPaymentExport.CreateVendorPmtJnlLine(PmtGenJournalLine,GenJournalBatch,Vendor."No.");
+      MessageToRecipient := LibraryUtility.GenerateRandomText(MAXSTRLEN(PmtGenJournalLine."Message to Recipient"));
+      PmtGenJournalLine."Message to Recipient" := COPYSTR(MessageToRecipient,1,MAXSTRLEN(PmtGenJournalLine."Message to Recipient"));
+      PmtGenJournalLine.MODIFY;
+
+      // Exercise
+      PmtExportMgtGenJnlLine.EnableExportToServerTempFile(TRUE,'txt');
+      PmtExportMgtGenJnlLine.ExportJournalPaymentFileYN(PmtGenJournalLine);
+
+      // Verify
+      ValidatePaymentFile(PmtExportMgtGenJnlLine.GetServerTempFileName,MessageToRecipient);
+      ValidateExportedPmtJnlLine(GenJournalBatch);
+      ValidateCreditTransferRegister(DataExchMapping."Data Exch. Def Code",GenJournalBatch."Bal. Account No.");
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Data Exchange] [Payment Export Management]
+    }
+    END.
+  }
+}
+

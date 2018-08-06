@@ -1,0 +1,526 @@
+OBJECT Codeunit 137165 SCM Lot Nos By Bin
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryUtility@1006 : Codeunit 131000;
+      LibraryPurchase@1013 : Codeunit 130512;
+      LibrarySales@1003 : Codeunit 130509;
+      LibraryWarehouse@1000 : Codeunit 132204;
+      LibraryInventory@1002 : Codeunit 132201;
+      LibraryItemTracking@1008 : Codeunit 130502;
+      Assert@1007 : Codeunit 130000;
+      LibraryRandom@1001 : Codeunit 130440;
+      isInitialized@1005 : Boolean;
+      AssignLotNo@1004 : Boolean;
+
+    LOCAL PROCEDURE LotByBinOnPutAway@30(QtyToHandleDelta@1009 : Integer;Register@1010 : Boolean);
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1004 : Record 38;
+      WhseActivityLine@1005 : Record 5767;
+      Location@1006 : Record 14;
+      WhseActivityHeader@1008 : Record 5766;
+    BEGIN
+      // Setup.
+      Initialize;
+
+      // Create WMS location and tracked item.
+      AssignLotNo := TRUE;  // Used in ItemTrackingLinesHandler.
+      CreateFullWarehouseSetup(Location);
+      CreateItemWithItemTrackingCode(Item);
+
+      // Create Purchase Orders with lot numbers. Create and post whse. receipt.
+      CreateAndReleasePurchaseOrderWithItemTrackingLines(PurchaseHeader,Item."No.",Location.Code,3);
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      PostWarehouseReceipt(PurchaseHeader."No.");
+
+      // Update Qty to Handle.
+      FindWarehouseActivityLines(WhseActivityLine,PurchaseHeader."No.",WhseActivityLine."Activity Type"::"Put-away");
+      WhseActivityHeader.GET(WhseActivityLine."Activity Type",WhseActivityLine."No.");
+
+      REPEAT
+        WhseActivityLine.VALIDATE("Qty. to Handle",WhseActivityLine.Quantity - QtyToHandleDelta);
+        WhseActivityLine.MODIFY(TRUE);
+      UNTIL WhseActivityLine.NEXT = 0;
+
+      // Register put-away.
+      IF Register THEN
+        LibraryWarehouse.RegisterWhseActivity(WhseActivityHeader);
+
+      IF (QtyToHandleDelta > 0) OR (NOT Register) THEN
+        VerifyLotNosOnBinQuery(PurchaseHeader."No.",WhseActivityLine."Activity Type"::"Put-away");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesHandler)]
+    PROCEDURE PartialPutAwayRegister@29();
+    BEGIN
+      LotByBinOnPutAway(1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesHandler)]
+    PROCEDURE NotRegisteredPutAway@38();
+    BEGIN
+      LotByBinOnPutAway(0,FALSE);
+    END;
+
+    LOCAL PROCEDURE LotByBinOnInvtPutAway@23(QtyToHandleDelta@1009 : Integer;Post@1010 : Boolean);
+    VAR
+      WhseRequest@1011 : Record 5765;
+      Item@1000 : Record 27;
+      PurchaseHeader@1004 : Record 38;
+      WhseActivityLine@1005 : Record 5767;
+      Location@1006 : Record 14;
+      WhseActivityHeader@1008 : Record 5766;
+    BEGIN
+      // Setup.
+      Initialize;
+
+      // Create WMS location and tracked item.
+      AssignLotNo := TRUE;  // Used in ItemTrackingLinesHandler.
+      CreateFullWarehouseSetup(Location);
+      Location."Directed Put-away and Pick" := FALSE;
+      Location."Require Receive" := FALSE;
+      Location."Require Shipment" := FALSE;
+      Location.MODIFY(TRUE);
+      CreateItemWithItemTrackingCode(Item);
+
+      // Create Purchase Orders with lot numbers. Create and post whse. receipt.
+      CreateAndReleasePurchaseOrderWithItemTrackingLines(PurchaseHeader,Item."No.",Location.Code,3);
+      LibraryWarehouse.CreateInvtPutPickMovement(
+        WhseRequest."Source Document"::"Purchase Order",PurchaseHeader."No.",TRUE,FALSE,FALSE);
+
+      // Update Qty to Handle.
+      FindWarehouseActivityLines(WhseActivityLine,PurchaseHeader."No.",WhseActivityLine."Activity Type"::"Invt. Put-away");
+      WhseActivityHeader.GET(WhseActivityLine."Activity Type",WhseActivityLine."No.");
+
+      REPEAT
+        WhseActivityLine.VALIDATE("Bin Code",GetBin(Location.Code));
+        WhseActivityLine.VALIDATE("Qty. to Handle",WhseActivityLine.Quantity - QtyToHandleDelta);
+        WhseActivityLine.MODIFY(TRUE);
+      UNTIL WhseActivityLine.NEXT = 0;
+
+      // Post inventory put-away.
+      IF Post THEN
+        LibraryWarehouse.PostInventoryActivity(WhseActivityHeader,FALSE);
+
+      IF (QtyToHandleDelta > 0) OR (NOT Post) THEN
+        VerifyLotNosOnBinQuery(PurchaseHeader."No.",WhseActivityLine."Activity Type"::"Invt. Put-away");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesHandler,MessageHandler)]
+    PROCEDURE PartialInvtPutAwayPost@34();
+    BEGIN
+      LotByBinOnInvtPutAway(1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesHandler,MessageHandler)]
+    PROCEDURE NotPostedInvtPutAway@32();
+    BEGIN
+      LotByBinOnInvtPutAway(0,FALSE);
+    END;
+
+    LOCAL PROCEDURE LotByBinOnPick@66(QtyToHandleDelta@1009 : Integer;Register@1010 : Boolean);
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1004 : Record 38;
+      WhseActivityLine@1005 : Record 5767;
+      Location@1006 : Record 14;
+      WhseActivityHeader@1008 : Record 5766;
+      SalesHeader@1011 : Record 36;
+      WhseShipmentHeader@1012 : Record 7320;
+    BEGIN
+      // Setup.
+      Initialize;
+
+      // Create WMS location and tracked item.
+      AssignLotNo := TRUE;  // Used in ItemTrackingLinesHandler.
+      CreateFullWarehouseSetup(Location);
+      CreateItemWithItemTrackingCode(Item);
+
+      // Create Purchase Orders with lot numbers. Create and post whse. receipt.
+      CreateAndReleasePurchaseOrderWithItemTrackingLines(PurchaseHeader,Item."No.",Location.Code,1);
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      PostWarehouseReceipt(PurchaseHeader."No.");
+
+      // Update Qty to Handle.
+      FindWarehouseActivityLines(WhseActivityLine,PurchaseHeader."No.",WhseActivityLine."Activity Type"::"Put-away");
+      REPEAT
+        WhseActivityLine.VALIDATE("Qty. to Handle",WhseActivityLine.Quantity);
+      UNTIL WhseActivityLine.NEXT = 0;
+      WhseActivityLine.MODIFY(TRUE);
+
+      // Register put-away.
+      WhseActivityHeader.GET(WhseActivityLine."Activity Type",WhseActivityLine."No.");
+      LibraryWarehouse.RegisterWhseActivity(WhseActivityHeader);
+
+      // Create Sales Order. Create Whse Shipment and Pick.
+      Item.CALCFIELDS(Inventory);
+      CreateAndReleaseSalesOrder(SalesHeader,Item."No.",Location.Code,LibraryRandom.RandIntInRange(2,Item.Inventory));
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      WhseShipmentHeader.SETRANGE("Location Code",Location.Code);
+      WhseShipmentHeader.FINDFIRST;
+      LibraryWarehouse.CreatePick(WhseShipmentHeader);
+
+      // Update Qty to Handle on Pick. Assign item tracking on Pick.
+      FindWarehouseActivityLines(WhseActivityLine,SalesHeader."No.",WhseActivityLine."Activity Type"::Pick);
+      WhseActivityHeader.GET(WhseActivityLine."Activity Type",WhseActivityLine."No.");
+      REPEAT
+        WhseActivityLine.VALIDATE("Qty. to Handle",WhseActivityLine.Quantity - QtyToHandleDelta);
+        SelectLotNoOnWhsePick(WhseActivityLine);
+        WhseActivityLine.MODIFY(TRUE);
+      UNTIL WhseActivityLine.NEXT = 0;
+
+      // Register pick.
+      IF Register THEN
+        LibraryWarehouse.RegisterWhseActivity(WhseActivityHeader);
+
+      IF (QtyToHandleDelta > 0) OR (NOT Register) THEN
+        VerifyLotNosOnBinQuery(SalesHeader."No.",WhseActivityLine."Activity Type"::Pick);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE PartialPickRegister@65();
+    BEGIN
+      LotByBinOnPick(1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE NotRegisteredPick@43();
+    BEGIN
+      LotByBinOnPick(0,FALSE);
+    END;
+
+    LOCAL PROCEDURE LotByBinOnInvtPick@20(QtyToHandleDelta@1009 : Integer;Post@1010 : Boolean);
+    VAR
+      WhseRequest@1011 : Record 5765;
+      Item@1000 : Record 27;
+      PurchaseHeader@1004 : Record 38;
+      WhseActivityLine@1005 : Record 5767;
+      Location@1006 : Record 14;
+      WhseActivityHeader@1008 : Record 5766;
+      SalesHeader@1012 : Record 36;
+    BEGIN
+      // Setup.
+      Initialize;
+
+      // Create WMS location and tracked item.
+      AssignLotNo := TRUE;  // Used in ItemTrackingLinesHandler.
+      CreateFullWarehouseSetup(Location);
+      Location."Directed Put-away and Pick" := FALSE;
+      Location."Require Receive" := FALSE;
+      Location."Require Shipment" := FALSE;
+      Location.MODIFY(TRUE);
+      CreateItemWithItemTrackingCode(Item);
+
+      // Create Purchase Orders with lot numbers. Create and post whse. receipt.
+      CreateAndReleasePurchaseOrderWithItemTrackingLines(PurchaseHeader,Item."No.",Location.Code,1);
+      LibraryWarehouse.CreateInvtPutPickMovement(
+        WhseRequest."Source Document"::"Purchase Order",PurchaseHeader."No.",TRUE,FALSE,FALSE);
+
+      // Update Qty to Handle.
+      FindWarehouseActivityLines(WhseActivityLine,PurchaseHeader."No.",WhseActivityLine."Activity Type"::"Invt. Put-away");
+      WhseActivityHeader.GET(WhseActivityLine."Activity Type",WhseActivityLine."No.");
+
+      REPEAT
+        WhseActivityLine.VALIDATE("Bin Code",GetBin(Location.Code));
+        WhseActivityLine.VALIDATE("Qty. to Handle",WhseActivityLine.Quantity);
+        WhseActivityLine.MODIFY(TRUE);
+      UNTIL WhseActivityLine.NEXT = 0;
+
+      // Post inventory put-away.
+      LibraryWarehouse.PostInventoryActivity(WhseActivityHeader,FALSE);
+
+      // Create Sales Order. Create Invt. Pick.
+      Item.CALCFIELDS(Inventory);
+      CreateAndReleaseSalesOrder(SalesHeader,Item."No.",Location.Code,LibraryRandom.RandIntInRange(2,Item.Inventory));
+      LibraryWarehouse.CreateInvtPutPickMovement(WhseRequest."Source Document"::"Sales Order",SalesHeader."No.",FALSE,TRUE,FALSE);
+
+      // Update Qty to Handle on Pick. Assign item tracking on Pick.
+      FindWarehouseActivityLines(WhseActivityLine,SalesHeader."No.",WhseActivityLine."Activity Type"::"Invt. Pick");
+      WhseActivityHeader.GET(WhseActivityLine."Activity Type",WhseActivityLine."No.");
+      REPEAT
+        WhseActivityLine.VALIDATE("Qty. to Handle",WhseActivityLine.Quantity - QtyToHandleDelta);
+        SelectLotNoOnWhsePick(WhseActivityLine);
+        WhseActivityLine.MODIFY(TRUE);
+      UNTIL WhseActivityLine.NEXT = 0;
+
+      // Post inventory put-away.
+      IF Post THEN
+        LibraryWarehouse.PostInventoryActivity(WhseActivityHeader,FALSE);
+
+      IF (QtyToHandleDelta > 0) OR (NOT Post) THEN
+        VerifyLotNosOnBinQuery(SalesHeader."No.",WhseActivityLine."Activity Type"::"Invt. Pick");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesHandler,MessageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE PartialInvtPickPost@19();
+    BEGIN
+      LotByBinOnInvtPick(1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesHandler,MessageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE NotPostedInvtPick@18();
+    BEGIN
+      LotByBinOnInvtPick(0,FALSE);
+    END;
+
+    LOCAL PROCEDURE Initialize@9();
+    VAR
+      LibraryERMCountryData@1059 : Codeunit 131305;
+    BEGIN
+      // Clear global variables.
+      CLEAR(AssignLotNo);
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      NoSeriesSetup;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateAndReleasePurchaseOrderWithItemTrackingLines@256(VAR PurchaseHeader@1171 : Record 38;ItemNo@1001 : Code[20];LocationCode@1003 : Code[10];NoOfLines@1004 : Integer);
+    VAR
+      ItemUnitOfMeasure@1005 : Record 5404;
+      PurchaseLine@1172 : Record 39;
+      Vendor@1000 : Record 23;
+      count@1173 : Integer;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+
+      FOR count := 1 TO NoOfLines DO BEGIN
+        LibraryInventory.CreateItemUnitOfMeasureCode(ItemUnitOfMeasure,ItemNo,LibraryRandom.RandIntInRange(2,10));
+        CreateAndUpdatePurchaseLine(
+          PurchaseLine,PurchaseHeader,ItemNo,LocationCode,'',LibraryRandom.RandIntInRange(2,20),ItemUnitOfMeasure.Code);
+        PurchaseLine.OpenItemTrackingLines;
+      END;
+
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrder@17(VAR SalesHeader@1004 : Record 36;ItemNo@1001 : Code[20];LocationCode@1003 : Code[10];Quantity@1008 : Decimal);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdatePurchaseLine@36(VAR PurchaseLine@1000 : Record 39;PurchaseHeader@1003 : Record 38;ItemNo@1006 : Code[20];LocationCode@1007 : Code[10];BinCode@1008 : Code[20];Quantity@1005 : Decimal;UnitOfMeasureCode@1001 : Code[10]);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.VALIDATE("Bin Code",BinCode);
+      PurchaseLine.VALIDATE("Unit of Measure",UnitOfMeasureCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateFullWarehouseSetup@48(VAR Location@1000 : Record 14);
+    VAR
+      WarehouseEmployee@1001 : Record 7301;
+    BEGIN
+      WarehouseEmployee.DELETEALL(TRUE);
+      LibraryWarehouse.CreateFullWMSLocation(Location,2);  // Value used for number of bins per zone.
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingCode@22(VAR ItemTrackingCode@1003 : Record 6502;Lot@1001 : Boolean;Serial@1002 : Boolean;ManExpirDateEntryReqd@1000 : Boolean);
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,Serial,Lot);
+      ItemTrackingCode.VALIDATE("SN Warehouse Tracking",Serial);
+      ItemTrackingCode.VALIDATE("Lot Warehouse Tracking",Lot);
+      ItemTrackingCode.VALIDATE("Man. Expir. Date Entry Reqd.",ManExpirDateEntryReqd);
+      ItemTrackingCode.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithItemTrackingCode@4(VAR Item@1004 : Record 27);
+    VAR
+      ItemTrackingCode@1002 : Record 6502;
+    BEGIN
+      CreateItemTrackingCode(ItemTrackingCode,TRUE,FALSE,FALSE);
+      LibraryInventory.CreateTrackedItem(Item,LibraryUtility.GetGlobalNoSeriesCode,'',ItemTrackingCode.Code);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetLotQtyFromWhseEntries@1(VAR WarehouseEntry@1005 : Record 7312;ItemNo@1000 : Code[20];LocationCode@1001 : Code[10];BinCode@1002 : Code[20];LotNo@1003 : Code[20]);
+    BEGIN
+      WarehouseEntry.SETRANGE("Item No.",ItemNo);
+      WarehouseEntry.SETRANGE("Location Code",LocationCode);
+      WarehouseEntry.SETRANGE("Bin Code",BinCode);
+      WarehouseEntry.SETRANGE("Lot No.",LotNo);
+      WarehouseEntry.CALCSUMS("Qty. (Base)");
+    END;
+
+    LOCAL PROCEDURE GetBin@40(LocationCode@1000 : Code[10]) : Code[20];
+    VAR
+      Bin@1001 : Record 7354;
+      BinType@1002 : Record 7303;
+    BEGIN
+      BinType.SETRANGE(Pick,TRUE);
+      BinType.SETRANGE("Put Away",TRUE);
+      BinType.FINDFIRST;
+      Bin.SETFILTER("Location Code",LocationCode);
+      Bin.SETFILTER("Bin Type Code",BinType.Code);
+      Bin.FINDFIRST;
+      EXIT(Bin.Code);
+    END;
+
+    LOCAL PROCEDURE FindWarehouseActivityLines@2(VAR WarehouseActivityLine@1000 : Record 5767;SourceNo@1002 : Code[20];ActivityType@1003 : Option);
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Source No.",SourceNo);
+      WarehouseActivityLine.SETRANGE("Activity Type",ActivityType);
+      WarehouseActivityLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseReceiptLine@11(VAR WarehouseReceiptLine@1002 : Record 7317;SourceDocument@1001 : Option;SourceNo@1000 : Code[20]);
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("Source Document",SourceDocument);
+      WarehouseReceiptLine.SETRANGE("Source No.",SourceNo);
+      WarehouseReceiptLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@33();
+    VAR
+      PurchasesPayablesSetup@1003 : Record 312;
+      SalesReceivablesSetup@1002 : Record 311;
+      LibraryUtility@1001 : Codeunit 131000;
+    BEGIN
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.MODIFY(TRUE);
+
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE PostWarehouseReceipt@141(SourceNo@1001 : Code[20]);
+    VAR
+      WarehouseReceiptHeader@1000 : Record 7316;
+      WarehouseReceiptLine@1002 : Record 7317;
+    BEGIN
+      FindWarehouseReceiptLine(WarehouseReceiptLine,WarehouseReceiptLine."Source Document"::"Purchase Order",SourceNo);
+      WarehouseReceiptHeader.GET(WarehouseReceiptLine."No.");
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+    END;
+
+    LOCAL PROCEDURE SelectLotNoOnWhsePick@16(VAR WhseActivityLine@1000 : Record 5767);
+    VAR
+      LookUpBinContent@1001 : Boolean;
+    BEGIN
+      LookUpBinContent :=
+        (WhseActivityLine."Activity Type" <= WhseActivityLine."Activity Type"::Movement) OR
+        (WhseActivityLine."Action Type" <> WhseActivityLine."Action Type"::Place);
+      WhseActivityLine.LookUpTrackingSummary(WhseActivityLine,LookUpBinContent,-1,1);
+    END;
+
+    LOCAL PROCEDURE VerifyLotNosOnBinQuery@15(SourceNo@1003 : Code[20];ActivityType@1004 : Option);
+    VAR
+      WhseEntry@1000 : Record 7312;
+      WhseActivityLine@1002 : Record 5767;
+      LotNosByBin@1001 : Query 7300;
+      Count@1005 : Integer;
+      ExpCount@1006 : Integer;
+    BEGIN
+      // Check Whse Activity Line - Query consistency.
+
+      FindWarehouseActivityLines(WhseActivityLine,SourceNo,ActivityType);
+      IF WhseActivityLine.FINDSET THEN
+        REPEAT
+          Count := 0;
+          ExpCount := 0;
+          GetLotQtyFromWhseEntries(
+            WhseEntry,WhseActivityLine."Item No.",WhseActivityLine."Location Code",WhseActivityLine."Bin Code",
+            WhseActivityLine."Lot No.");
+          IF WhseEntry."Qty. (Base)" <> 0 THEN
+            ExpCount := 1;
+
+          LotNosByBin.SETRANGE(Item_No,WhseActivityLine."Item No.");
+          LotNosByBin.SETRANGE(Variant_Code,WhseActivityLine."Variant Code");
+          LotNosByBin.SETRANGE(Location_Code,WhseActivityLine."Location Code");
+          LotNosByBin.SETRANGE(Bin_Code,WhseActivityLine."Bin Code");
+          LotNosByBin.SETRANGE(Lot_No,WhseActivityLine."Lot No.");
+          LotNosByBin.OPEN;
+
+          WHILE LotNosByBin.READ DO BEGIN
+            Assert.AreEqual(
+              WhseEntry."Qty. (Base)",LotNosByBin.Sum_Qty_Base,WhseActivityLine."Bin Code" + '-' + WhseActivityLine."Lot No.");
+            Count += 1;
+          END;
+
+          Assert.AreEqual(
+            ExpCount,Count,'Query returned wrong no. of rows for ' + WhseActivityLine."Bin Code" + '-' + WhseActivityLine."Lot No.");
+        UNTIL WhseActivityLine.NEXT = 0;
+
+      // Check Query - Whse Activity Line consistency.
+      WhseActivityLine.FINDFIRST;
+      LotNosByBin.SETRANGE(Item_No,WhseActivityLine."Item No.");
+      LotNosByBin.SETRANGE(Variant_Code,WhseActivityLine."Variant Code");
+      LotNosByBin.SETRANGE(Location_Code,WhseActivityLine."Location Code");
+      LotNosByBin.OPEN;
+
+      WHILE LotNosByBin.READ DO BEGIN
+        GetLotQtyFromWhseEntries(WhseEntry,LotNosByBin.Item_No,LotNosByBin.Location_Code,LotNosByBin.Bin_Code,LotNosByBin.Lot_No);
+        Assert.AreEqual(WhseEntry."Qty. (Base)",LotNosByBin.Sum_Qty_Base,LotNosByBin.Bin_Code + '-' + LotNosByBin.Lot_No);
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingLinesHandler@6(VAR ItemTrackingLines@1000 : TestPage 6510);
+    BEGIN
+      IF AssignLotNo THEN
+        ItemTrackingLines."Assign Lot No.".INVOKE;
+
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@8(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingSummaryPageHandler@118(VAR ItemTrackingSummary@1000 : TestPage 6500);
+    BEGIN
+      ItemTrackingSummary.FILTER.SETFILTER("Total Available Quantity",'>0');
+      ItemTrackingSummary.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Warehouse] [Item Tracking] [SCM]
+    }
+    END.
+  }
+}
+

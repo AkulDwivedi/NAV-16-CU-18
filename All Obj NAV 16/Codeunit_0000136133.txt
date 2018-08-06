@@ -1,0 +1,742 @@
+OBJECT Codeunit 136133 Service Stockout
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryService@1007 : Codeunit 131902;
+      Assert@1006 : Codeunit 130000;
+      LibraryInventory@1001 : Codeunit 132201;
+      LibraryWarehouse@1004 : Codeunit 132204;
+      LibraryPurchase@1011 : Codeunit 130512;
+      LibraryJob@1017 : Codeunit 131920;
+      ServiceLines@1009 : TestPage 5905;
+      IsInitialized@1003 : Boolean;
+      ZeroQuantity@1002 : Integer;
+      QuantityToSet@1008 : Integer;
+      CheckAvailabilityActionYes@1010 : Boolean;
+      QuantityValidationErrorText@1000 : TextConst 'ENU="Validation error for Field: Quantity,  Message = ''The update has been interrupted to respect the warning.''"';
+      DescriptionText@1012 : TextConst 'ENU=NTF_TEST_NTF_TEST';
+      NoDataForExecutionError@1013 : TextConst 'ENU=No service item has a non-blocked customer and non-blocked item. Execution stops.';
+      ValidateQuantityDocumentError@1014 : TextConst 'ENU=DocNo %1 not found in following objects: Service Header.';
+      ReceiptDateDocumentError@1015 : TextConst 'ENU=No Purchase Line found with sales order no %1.';
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@11();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      // Clear the needed globals
+      ClearGlobals;
+
+      // Lazy Setup.
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryService.SetupServiceMgtNoSeries;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityInfo)]
+    PROCEDURE ServiceAnswerYes@2();
+    VAR
+      Item@1003 : Record 27;
+      ServiceOrderNo@1006 : Code[20];
+      ServiceQuantity@1002 : Integer;
+    BEGIN
+      // Test availability warning for demand from Service .
+
+      // SETUP: Create Service Order for Demand for Item with Zero Quantity on Inventory
+      Initialize;
+      ServiceQuantity := RANDOM(10000);
+      LibraryInventory.CreateItem(Item);
+      ServiceOrderNo := CreateServiceDemand(Item."No.",ZeroQuantity);
+
+      // EXECUTE: Change Demand Quantity on Service Line Through UI.
+      // EXECUTE: (Quantity Change set in EditFirstServiceLinesQuantity).
+      // EXECUTE: Answer Yes to the ignore stock out warning (in HandleCheckAvailabilityInfo method).
+      CheckAvailabilityActionYes := TRUE;
+      EditFirstServiceLinesQuantity(ServiceOrderNo,ServiceQuantity);
+
+      // VERIFY: quantity on Service Order is changed to the new quantity.
+      ValidateQuantity(ServiceOrderNo,ServiceQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityInfo)]
+    PROCEDURE ServiceAnswerNo@38();
+    VAR
+      Item@1003 : Record 27;
+      ServiceOrderNo@1006 : Code[20];
+      ServiceQuantity@1002 : Integer;
+    BEGIN
+      // Test availability warning for demand from Service. Answer No to Warning.
+
+      // SETUP: Create Service Order for Demand for Item with Zero Quantity on Inventory.
+      Initialize;
+      ServiceQuantity := RANDOM(10000);
+      LibraryInventory.CreateItem(Item);
+      ServiceOrderNo := CreateServiceDemand(Item."No.",ZeroQuantity);
+
+      // EXECUTE: Change Demand Quantity on Service Line Through UI.
+      // EXECUTE: (Quantity Change set in EditFirstServiceLinesQuantity).
+      // EXECUTE: Answer No to the ignore stock out warning (in HandleCheckAvailabilityInfo method).
+      CheckAvailabilityActionYes := FALSE;
+      ASSERTERROR EditFirstServiceLinesQuantity(ServiceOrderNo,ServiceQuantity);
+      Assert.AreEqual(FORMAT(QuantityValidationErrorText),FORMAT(GETLASTERRORTEXT),
+        'Verify operation was cancelled and right error message is displayed');
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityInfo)]
+    PROCEDURE ServiceDemandHigherThanSupply@39();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseOrderNo@1003 : Code[20];
+      ServiceOrderNo@1006 : Code[20];
+      PurchaseQuantity@1004 : Integer;
+      ServiceQuantity@1005 : Integer;
+    BEGIN
+      // Test availability warning for Service Demand higher than Supply.
+
+      // SETUP: Create Supply with Purchase Order for Item X, Quantity = Y.
+      // SETUP: Create Service Demand for Item X,with zero quantity.
+      Initialize;
+      PurchaseQuantity := RANDOM(10);
+      ServiceQuantity := PurchaseQuantity + 1;
+      LibraryInventory.CreateItem(Item);
+      PurchaseOrderNo := CreatePurchaseSupply(Item."No.",PurchaseQuantity);
+      ServiceOrderNo := CreateServiceDemandAfter(Item."No.",ZeroQuantity,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Change Demand Quantity on Service Line Through UI to Quantity = Y + 1.
+      // EXECUTE: (Quantity Change set in EditFirstServiceLinesQuantity).
+      // EXECUTE: Answer Yes to the ignore stock out warning (in HandleCheckAvailabilityInfo method).
+      CheckAvailabilityActionYes := TRUE;
+      EditFirstServiceLinesQuantity(ServiceOrderNo,ServiceQuantity);
+
+      // VERIFY: Verify Quantity on Service Order after warning is Y + 1.
+      ValidateQuantity(ServiceOrderNo,QuantityToSet);
+    END;
+
+    [Test]
+    PROCEDURE ServiceDemandLowerThanSupply@1();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseOrderNo@1003 : Code[20];
+      ServiceOrderNo@1006 : Code[20];
+      PurchaseQuantity@1004 : Integer;
+      ServiceQuantity@1005 : Integer;
+    BEGIN
+      // Test supply cover demand and therefore no warning.
+
+      // SETUP: Create Supply for Item X.
+      Initialize;
+      PurchaseQuantity := RANDOM(10);
+      ServiceQuantity := PurchaseQuantity - 1;
+      LibraryInventory.CreateItem(Item);
+      PurchaseOrderNo := CreatePurchaseSupply(Item."No.",PurchaseQuantity);
+      ServiceOrderNo := CreateServiceDemandAfter(Item."No.",ZeroQuantity,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Create Service Demand for Item X at a date after Supply is arrived and quantity less than supply.
+      // EXECUTE: (Quantity Change set in EditFirstServiceLinesQuantity).
+      CheckAvailabilityActionYes := TRUE;
+      EditFirstServiceLinesQuantity(ServiceOrderNo,ServiceQuantity);
+
+      // VERIFY: No availability warning is displayed.
+      // VERIFY: Quantity remains same.
+      ValidateQuantity(ServiceOrderNo,QuantityToSet);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityInfo)]
+    PROCEDURE ServiceDemandBeforeSupply@14();
+    VAR
+      Item@1000 : Record 27;
+      ServiceOrderNo@1006 : Code[20];
+      PurchaseQuantity@1004 : Integer;
+      ServiceQuantity@1005 : Integer;
+    BEGIN
+      // Test availability warning if Service Demand is at a date before Supply arrives.
+
+      // SETUP: Create Service Demand for Item X,with zero quantity
+      // SETUP: Create Supply with Purchase Order for Item X, Qantity=Y, at a date after service Demand
+      Initialize;
+      PurchaseQuantity := RANDOM(10) * 2;  // Taking Minimum Value as 2 as the Sale Quantity should not be zero.
+      ServiceQuantity := PurchaseQuantity - 1;
+      LibraryInventory.CreateItem(Item);
+      ServiceOrderNo := CreateServiceDemand(Item."No.",ZeroQuantity);
+      CreatePurchaseSupplyAfter(Item."No.",PurchaseQuantity,GetNeededByDate(ServiceOrderNo));
+
+      // EXECUTE: Change Demand Quantity on Service Order Through UI to Quantity = Y - 1..
+      // EXECUTE:  (Quantity Change set in EditFirstServiceLinesQuantity).
+      // EXECUTE: Answer Yes to the ignore stock out warning (in HandleCheckAvailabilityInfo method).
+      CheckAvailabilityActionYes := TRUE;
+      EditFirstServiceLinesQuantity(ServiceOrderNo,ServiceQuantity);
+
+      // VERIFY: Quantity on Service order after warning is Y - 1.
+      ValidateQuantity(ServiceOrderNo,QuantityToSet);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityInfo)]
+    PROCEDURE ServiceSupplyLocationDifferent@16();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseQuantity@1004 : Integer;
+      ServiceQuantity@1005 : Integer;
+      LocationA@1002 : Code[10];
+      LocationB@1001 : Code[10];
+      PurchaseOrderNo@1006 : Code[20];
+      ServiceOrderNo@1003 : Code[20];
+    BEGIN
+      // Test availability warning if Service Demand is at a different Location than a supply from purchase.
+
+      // SETUP: Create Supply with Purchase Order for Item X, Qantity=Y, Location = Z.
+      // SETUP: Create Service Demand for Item X, Quantity=0, Location = M
+      Initialize;
+      PurchaseQuantity := RANDOM(10) * 2;  // Taking Minimum Value as 2 as the Sale Quantity should not be zero.
+      ServiceQuantity := PurchaseQuantity - 1;
+      LibraryInventory.CreateItem(Item);
+      LocationA := CreateLocation;
+      LocationB := CreateLocation;
+      PurchaseOrderNo := CreatePurchaseSupplyAtLocation(Item."No.",PurchaseQuantity,LocationA);
+      ServiceOrderNo := CreateServiceDemandLocatnAfter(Item."No.",ZeroQuantity,LocationB,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Change Demand Quantity on Service Order Through UI to Quantity = Y - 1.
+      // EXECUTE: (Quantity Change set in EditFirstServiceLinesQuantity).
+      // EXECUTE: Answer Yes to the ignore stock out warning (in HandleCheckAvailabilityInfo method).
+      CheckAvailabilityActionYes := TRUE;
+      EditFirstServiceLinesQuantity(ServiceOrderNo,ServiceQuantity);
+
+      // VERIFY: Verify Quantity on Service order after warning is Y - 1.
+      ValidateQuantity(ServiceOrderNo,QuantityToSet);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityInfo)]
+    PROCEDURE ServiceSupplyVariantDifferent@21();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseOrderNo@1003 : Code[20];
+      ServiceOrderNo@1006 : Code[20];
+      PurchaseQuantity@1004 : Integer;
+      ServiceQuantity@1005 : Integer;
+    BEGIN
+      // Test availability warning if Service Demand is for a different Variant than Supply from purchase.
+
+      // SETUP: Create Supply with Purchase Order for Item X, Qantity=Y, Location = Z, Variant = V1.
+      // SETUP: Create Service Demand for Item X, Quantity=0, Location = Z, Variant=V2
+      Initialize;
+      PurchaseQuantity := RANDOM(10) * 2;  // Taking Minimum Value as 2 as the Sale Quantity should not be zero.
+      ServiceQuantity := PurchaseQuantity - 1;
+      CreateItemWithVariants(Item);
+      PurchaseOrderNo := CreatePurchaseSupplyForVariant(Item."No.",PurchaseQuantity,1);
+      ServiceOrderNo :=
+        CreateServiceDemandVarintAfter(Item."No.",ZeroQuantity,GetVariant(Item."No.",2),GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Change Demand Quantity on Service Order Through UI to Quantity = Y - 1.
+      // EXECUTE: (Quantity Change set in EditFirstServiceLinesQuantity).
+      // EXECUTE: Answer Yes to the ignore stock out warning (in HandleCheckAvailabilityInfo method).
+      CheckAvailabilityActionYes := TRUE;
+      EditFirstServiceLinesQuantity(ServiceOrderNo,ServiceQuantity);
+
+      // VERIFY: Quantity on Service order after warning is Y - 1.
+      ValidateQuantity(ServiceOrderNo,QuantityToSet);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityInfo)]
+    PROCEDURE ServiceChangeLocation@24();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseQuantity@1004 : Integer;
+      ServiceQuantity@1005 : Integer;
+      LocationA@1002 : Code[10];
+      LocationB@1001 : Code[10];
+      PurchaseOrderNo@1006 : Code[20];
+      ServiceOrderNo@1003 : Code[20];
+    BEGIN
+      // Test availability warning if the location for Service Demand modified to a location where demand cannot be met
+
+      // SETUP: Create Supply with Purchase Order for Item X, Qantity=Y, Location = Z.
+      // SETUP: Create Service Demand for Item X, Quantity=Y, Location = Z
+      Initialize;
+      PurchaseQuantity := RANDOM(10);
+      ServiceQuantity := PurchaseQuantity;
+      LibraryInventory.CreateItem(Item);
+      LocationA := CreateLocation;
+      LocationB := CreateLocation;
+      PurchaseOrderNo := CreatePurchaseSupplyAtLocation(Item."No.",PurchaseQuantity,LocationA);
+      ServiceOrderNo := CreateServiceDemandLocatnAfter(Item."No.",ServiceQuantity,LocationA,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Change Location on Service Order Through UI to location M.
+      // EXECUTE: (Location Change set in EditServiceLinesLocation).
+      // EXECUTE: Answer Yes to the ignore stock out warning (in HandleCheckAvailabilityInfo method).
+      CheckAvailabilityActionYes := TRUE;
+      QuantityToSet := ServiceQuantity;
+      EditFirstServiceLinesLocation(ServiceOrderNo,LocationB);
+
+      // VERIFY: Verify Quantity on service order after warning is Y and location M.
+      ValidateQuantity(ServiceOrderNo,QuantityToSet);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityInfo)]
+    PROCEDURE ServiceChangeDate@29();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseOrderNo@1003 : Code[20];
+      ServiceOrderNo@1006 : Code[20];
+      PurchaseQuantity@1004 : Integer;
+      ServiceQuantity@1005 : Integer;
+    BEGIN
+      // Test availability warning if the date of Service Demand is modified to a date where demand cannot be met
+
+      // SETUP: Create Supply with Purchase Order for Item X, Qantity=Y, Date = Workdate.
+      // SETUP: Create Service Demand for Item X, Quantity=Y, Date = Workdate + 1
+      Initialize;
+      PurchaseQuantity := RANDOM(10);
+      ServiceQuantity := PurchaseQuantity;
+      LibraryInventory.CreateItem(Item);
+      ServiceOrderNo := CreateServiceDemand(Item."No.",ServiceQuantity);
+      PurchaseOrderNo := CreatePurchaseSupplyAfter(Item."No.",PurchaseQuantity,GetNeededByDate(ServiceOrderNo));
+      ServiceOrderNo := CreateServiceDemandAfter(Item."No.",ServiceQuantity,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Change Date on Service Order Through UI to Date = Workdate - 1.
+      // EXECUTE: (Date Change set in EditServiceLinesNeededByDate).
+      // EXECUTE: Answer Yes to the ignore stock out warning (in HandleCheckAvailabilityInfo method).
+      CheckAvailabilityActionYes := TRUE;
+      QuantityToSet := ServiceQuantity;
+      EditFirstServiceLinesNeedDate(ServiceOrderNo);
+
+      // VERIFY: Quantity on service order after warning is Y and Date is Workdate - 1.
+      ValidateQuantity(ServiceOrderNo,QuantityToSet);
+    END;
+
+    [Test]
+    PROCEDURE ServiceMultipleSupplyForDemand@34();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseOrderNo@1003 : Code[20];
+      ServiceOrderNo@1006 : Code[20];
+      PurchaseQuantity@1004 : Integer;
+      ServiceQuantity@1005 : Integer;
+    BEGIN
+      // Test that multible supplies can cover Demand from Service.
+
+      // SETUP: Create Supply with Purchase Order for Item X, Quantity = Y1
+      // SETUP: Create Supply with Purchase Order for Item X, Quantity = Y2
+      // SETUP: Create Service Order Demand for Item X, Quantity=0
+      Initialize;
+      PurchaseQuantity := RANDOM(10);
+      ServiceQuantity := PurchaseQuantity * 2;
+      LibraryInventory.CreateItem(Item);
+      PurchaseOrderNo := CreatePurchaseSupply(Item."No.",PurchaseQuantity);
+      PurchaseOrderNo := CreatePurchaseSupplyAfter(Item."No.",PurchaseQuantity,GetReceiptDate(PurchaseOrderNo));
+      ServiceOrderNo := CreateServiceDemandAfter(Item."No.",ZeroQuantity,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Change Quantity on Service Order Through UI to Y1+Y2-1.
+      // EXECUTE: (Quantity Change set in EditFirstServiceLinesQuantity).
+      CheckAvailabilityActionYes := TRUE;
+      EditFirstServiceLinesQuantity(ServiceOrderNo,ServiceQuantity);
+
+      // VERIFY: No Availability Warning occur.
+      // VERIFY: Quantity on Service Order after warning is Y1+Y2-1.
+      ValidateQuantity(ServiceOrderNo,QuantityToSet);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityInfo)]
+    PROCEDURE MixedDemandForSupply@10();
+    VAR
+      Item@1000 : Record 27;
+      JobNo@1002 : Code[20];
+      PurchaseOrderNo@1003 : Code[20];
+      ServiceOrderNo@1006 : Code[20];
+      PurchaseQuantity@1004 : Integer;
+      ServiceQuantity@1005 : Integer;
+      JobQuantity@1007 : Integer;
+    BEGIN
+      // Test availability warning for multiple Demands from Service, Jobs, and service for one Supply.
+
+      // SETUP: Create Demand From service for Item X, Qantity = Y1
+      // SETUP: Create Job Planning Line Demand for Item X, Quantity=Y2
+      // SETUP: Create Service Order Demand for Item X, Quantity=0
+      // SETUP: Create Supply with Purchase Order for Item X, Quantity = Y1+Y2+Y3 - 1.
+      Initialize;
+      PurchaseQuantity := 10;
+      JobQuantity := PurchaseQuantity / 2;
+      ServiceQuantity := PurchaseQuantity - JobQuantity + 1;
+      LibraryInventory.CreateItem(Item);
+      PurchaseOrderNo := CreatePurchaseSupply(Item."No.",PurchaseQuantity);
+      JobNo := CreateJobDemandAfter(Item."No.",JobQuantity,GetReceiptDate(PurchaseOrderNo));
+      ServiceOrderNo := CreateServiceDemandAfter(Item."No.",ZeroQuantity,GetPlanningDate(JobNo));
+
+      // EXECUTE: Change Quantity on Service Order Through UI to Y3.
+      // EXECUTE: (Quantity Change set in EditFirstServiceLinesQuantity).
+      // EXECUTE: Answer Yes to the ignore stock out warning (in HandleCheckAvailabilityInfo method).
+      CheckAvailabilityActionYes := TRUE;
+      EditFirstServiceLinesQuantity(ServiceOrderNo,ServiceQuantity);
+
+      // VERIFY: Verify Quantity on Service Order after warning is Y3.
+      ValidateQuantity(ServiceOrderNo,QuantityToSet);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ClearGlobals@7();
+    BEGIN
+      // Clear all global variables
+      ZeroQuantity := 0;
+      CLEAR(ServiceLines);
+      QuantityToSet := 0;
+      CheckAvailabilityActionYes := TRUE;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateLocation@15() : Code[10];
+    VAR
+      Location@1001 : Record 14;
+    BEGIN
+      // Creates a new Location. Wrapper for the library method.
+      LibraryWarehouse.CreateLocation(Location);
+      EXIT(Location.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyBasis@36(ItemNo@1008 : Code[20];Quantity@1000 : Integer;LocationCode@1006 : Code[10];VariantCode@1003 : Code[10];ReceiptDate@1001 : Date) : Code[20];
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1005 : Record 39;
+    BEGIN
+      // Creates a Purchase order for the given item.
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE(Quantity,Quantity);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.VALIDATE("Variant Code",VariantCode);
+      PurchaseLine.VALIDATE("Expected Receipt Date",ReceiptDate);
+      PurchaseLine.MODIFY;
+      EXIT(PurchaseHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupply@25(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,ItemQuantity,'','',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyAtLocation@13(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer;LocationCode@1000 : Code[10]) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item at the specified location.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,ItemQuantity,LocationCode,'',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyForVariant@45(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer;VariantNo@1000 : Integer) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,ItemQuantity,'',GetVariant(ItemNo,VariantNo),WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyAfter@26(ItemNo@1004 : Code[20];Quantity@1000 : Integer;ReceiptDate@1001 : Date) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item After a source document date.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,Quantity,'','',CALCDATE('<+1D>',ReceiptDate)));
+    END;
+
+    LOCAL PROCEDURE CreateServiceDemandBasis@4(ItemNo@1001 : Code[20];ItemQty@1000 : Integer;LocationCode@1009 : Code[10];VariantCode@1010 : Code[10];NeededBy@1008 : Date) : Code[20];
+    VAR
+      ServiceItem@1007 : Record 5940;
+      ServiceHeader@1004 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      FindServiceItem(ServiceItem);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      ServiceHeader.VALIDATE("Bill-to Name",DescriptionText);
+      ServiceHeader.MODIFY;
+
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      ServiceItemLine.VALIDATE("Line No.",10000);
+      ServiceItemLine.MODIFY;
+
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ItemNo);
+      ServiceLine.SetHideReplacementDialog(TRUE);
+      ServiceLine.VALIDATE(Quantity,ItemQty);
+      ServiceLine.VALIDATE("Location Code",LocationCode);
+      ServiceLine.VALIDATE("Variant Code",VariantCode);
+      ServiceLine.VALIDATE("Needed by Date",NeededBy);
+      ServiceLine.VALIDATE("Variant Code",VariantCode);
+      ServiceLine.MODIFY;
+
+      EXIT(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateServiceDemand@40(ItemNo@1003 : Code[20];Quantity@1000 : Integer) : Code[20];
+    BEGIN
+      EXIT(CreateServiceDemandBasis(ItemNo,Quantity,'','',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateServiceDemandAfter@22(ItemNo@1004 : Code[20];Quantity@1000 : Integer;NeededByDate@1001 : Date) : Code[20];
+    BEGIN
+      EXIT(CreateServiceDemandBasis(ItemNo,Quantity,'','',CALCDATE('<+1D>',NeededByDate)));
+    END;
+
+    LOCAL PROCEDURE CreateServiceDemandVarintAfter@71(ItemNo@1004 : Code[20];Quantity@1000 : Integer;VariantCode@1002 : Code[10];NeededByDate@1001 : Date) : Code[20];
+    BEGIN
+      EXIT(CreateServiceDemandBasis(ItemNo,Quantity,'',VariantCode,CALCDATE('<+1D>',NeededByDate)));
+    END;
+
+    LOCAL PROCEDURE CreateServiceDemandLocatnAfter@70(ItemNo@1004 : Code[20];Quantity@1000 : Integer;LocationCode@1002 : Code[10];NeededByDate@1001 : Date) : Code[20];
+    BEGIN
+      EXIT(CreateServiceDemandBasis(ItemNo,Quantity,LocationCode,'',CALCDATE('<+1D>',NeededByDate)));
+    END;
+
+    LOCAL PROCEDURE CreateJobDemandAfter@31(ItemNo@1002 : Code[20];ItemQuantity@1001 : Integer;PlanDate@1010 : Date) : Code[20];
+    VAR
+      Job@1000 : Record 167;
+      JobTaskLine@1004 : Record 1001;
+      JobPlanningLine@1005 : Record 1003;
+      DocumentNo@1007 : Code[20];
+    BEGIN
+      LibraryJob.CreateJob(Job);
+      Job.VALIDATE("Apply Usage Link",TRUE);
+      Job.VALIDATE("Description 2",DescriptionText);
+      Job.MODIFY;
+
+      // Job Task Line:
+      LibraryJob.CreateJobTask(Job,JobTaskLine);
+      JobTaskLine.MODIFY;
+
+      // Job Planning Line:
+      LibraryJob.CreateJobPlanningLine(JobPlanningLine."Line Type"::Schedule,
+        JobPlanningLine.Type::Item,JobTaskLine,JobPlanningLine);
+
+      JobPlanningLine.VALIDATE("Planning Date",PlanDate);
+      JobPlanningLine.VALIDATE("Usage Link",TRUE);
+
+      DocumentNo := DELCHR(FORMAT(TODAY),'=','-/') + '_' + DELCHR(FORMAT(TIME),'=',':');
+      JobPlanningLine.VALIDATE("Document No.",DocumentNo);
+      JobPlanningLine.VALIDATE("No.",ItemNo);
+      JobPlanningLine.VALIDATE(Quantity,ItemQuantity);
+      JobPlanningLine.MODIFY;
+
+      EXIT(Job."No.");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateItemWithVariants@35(VAR Item@1000 : Record 27);
+    VAR
+      ItemVariantA@1001 : Record 5401;
+      ItemVariantB@1002 : Record 5401;
+    BEGIN
+      // Creates a new item with a variant.
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItemVariant(ItemVariantA,Item."No.");
+      ItemVariantA.VALIDATE(Description,Item.Description);
+      ItemVariantA.MODIFY;
+      LibraryInventory.CreateItemVariant(ItemVariantB,Item."No.");
+      ItemVariantB.VALIDATE(Description,Item.Description);
+      ItemVariantB.MODIFY;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE EditFirstServiceLinesQuantity@28(ServiceOrderNo@1001 : Code[20];ServiceLineQuantity@1002 : Integer);
+    VAR
+      ServiceLinesToReturn@1003 : TestPage 5905;
+    BEGIN
+      OpenFirstServiceLines(ServiceLinesToReturn,ServiceOrderNo);
+      QuantityToSet := ServiceLineQuantity;
+      ServiceLines := ServiceLinesToReturn;
+      ServiceLinesToReturn.Quantity.VALUE(FORMAT(QuantityToSet));
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE EditFirstServiceLinesLocation@58(ServiceOrderNo@1001 : Code[20];LocationB@1002 : Code[10]);
+    VAR
+      ServiceLinesToReturn@1000 : TestPage 5905;
+    BEGIN
+      OpenFirstServiceLines(ServiceLinesToReturn,ServiceOrderNo);
+      ServiceLines := ServiceLinesToReturn;
+      ServiceLinesToReturn."Location Code".VALUE(LocationB);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE EditFirstServiceLinesNeedDate@59(ServiceOrderNo@1001 : Code[20]);
+    VAR
+      ServiceLinesToReturn@1000 : TestPage 5905;
+    BEGIN
+      OpenFirstServiceLines(ServiceLinesToReturn,ServiceOrderNo);
+      ServiceLines := ServiceLinesToReturn;
+      ServiceLinesToReturn."Needed by Date".VALUE(FORMAT(WORKDATE));
+    END;
+
+    LOCAL PROCEDURE FindServiceItem@23(VAR ServiceItem@1000 : Record 5940);
+    VAR
+      Item@1001 : Record 27;
+      Customer@1002 : Record 18;
+    BEGIN
+      CLEAR(ServiceItem);
+      IF ServiceItem.FINDFIRST THEN
+        REPEAT
+          Customer.GET(ServiceItem."Customer No.");
+          Item.GET(ServiceItem."Item No.");
+          IF (Customer.Blocked = Customer.Blocked::" ") AND NOT Item.Blocked THEN
+            EXIT;
+        UNTIL ServiceItem.NEXT = 0;
+      ERROR(NoDataForExecutionError);
+    END;
+
+    LOCAL PROCEDURE GetReceiptDate@20(PurchaseHeaderNo@1000 : Code[20]) : Date;
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      // Method returns the expected receipt date from a purchase order.
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeaderNo);
+      PurchaseLine.FINDFIRST;
+      IF PurchaseLine.COUNT > 0 THEN
+        EXIT(PurchaseLine."Expected Receipt Date");
+      ERROR(ReceiptDateDocumentError,PurchaseHeaderNo);
+    END;
+
+    LOCAL PROCEDURE GetNeededByDate@17(ServiceHeaderNo@1000 : Code[20]) : Date;
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",ServiceHeaderNo);
+      ServiceLine.FINDFIRST;
+      EXIT(ServiceLine."Needed by Date");
+    END;
+
+    LOCAL PROCEDURE GetPlanningDate@18(JobNo@1000 : Code[20]) : Date;
+    VAR
+      JobPlanningLine@1001 : Record 1003;
+    BEGIN
+      JobPlanningLine.SETRANGE("Job No.",JobNo);
+      JobPlanningLine.FINDFIRST;
+      EXIT(JobPlanningLine."Planning Date");
+    END;
+
+    LOCAL PROCEDURE GetVariant@43(ItemNo@1003 : Code[20];VarNo@1000 : Integer) : Code[10];
+    VAR
+      ItemVariant@1001 : Record 5401;
+    BEGIN
+      ItemVariant.SETRANGE("Item No.",ItemNo);
+      ItemVariant.FIND('-');
+      IF VarNo > 1 THEN
+        ItemVariant.NEXT(VarNo - 1);
+      EXIT(ItemVariant.Code);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE OpenFirstServiceLines@6(ServiceLinesToReturn@1005 : TestPage 5905;ServiceOrderNo@1001 : Code[20]);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLineToSelect@1003 : Record 5902;
+    BEGIN
+      ServiceHeader.GET(ServiceHeader."Document Type"::Order,ServiceOrderNo);
+      ServiceLinesToReturn.OPENEDIT;
+
+      ServiceLineToSelect.SETRANGE("Document Type",ServiceLineToSelect."Document Type"::Order);
+      ServiceLineToSelect.SETRANGE("Document No.",ServiceOrderNo);
+      ServiceLineToSelect.FINDFIRST;
+
+      ServiceLinesToReturn.FIRST;
+      ServiceLinesToReturn.FILTER.SETFILTER("Document Type",'Order');
+      ServiceLinesToReturn.FILTER.SETFILTER("Document No.",ServiceOrderNo);
+      ServiceLinesToReturn.FILTER.SETFILTER("Line No.",FORMAT(ServiceLineToSelect."Line No."));
+      ServiceLinesToReturn.FIRST;
+    END;
+
+    LOCAL PROCEDURE ValidateQuantity@32(DocumentNo@1000 : Code[20];Quantity@1001 : Integer);
+    VAR
+      ServiceHeader@1005 : Record 5900;
+      ServiceLine@1004 : Record 5902;
+    BEGIN
+      // Method verifies the quantity on a service order.
+      IF ServiceHeader.GET(ServiceHeader."Document Type"::Order,DocumentNo) THEN BEGIN
+        ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+        ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+        ServiceLine.FINDFIRST;
+        Assert.AreEqual(Quantity,ServiceLine.Quantity,'Verify Sales Line Quantity matches expected');
+        EXIT;
+      END;
+
+      ERROR(ValidateQuantityDocumentError,DocumentNo);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AssertCheckAvailabilityInfo@68(CheckAvailability@1000 : TestPage 342;SourceServiceLines@1001 : TestPage 5905;EditedQuantity@1002 : Text[30]);
+    BEGIN
+      // Perform validations on the check availability form
+      Assert.AreEqual(
+        SourceServiceLines."No.".VALUE,CheckAvailability."No.".VALUE,'Verify No. match');
+      Assert.AreEqual(
+        SourceServiceLines.Description.VALUE,CheckAvailability.Description.VALUE,'Verify Description match');
+      Assert.AreEqual(
+        EditedQuantity,FORMAT(CheckAvailability.CurrentQuantity.ASINTEGER),
+        'Verify Current Quantity matches edited quantity');
+      // Formula: (Inventory+ ScheduledReceipt) - (GrossRequirement+Current quantity) = total quantity
+      Assert.AreEqual(
+        SourceServiceLines."Unit of Measure Code".VALUE,CheckAvailability.UnitOfMeasureCode.VALUE,
+        'Verify Unit of measure match');
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE HandleCheckAvailabilityInfo@67(VAR CheckAvailability@1000 : TestPage 342);
+    BEGIN
+      // Handler for Check Availability Warning Page.
+      // VERIFY: Quantities ont he availability warning.
+      AssertCheckAvailabilityInfo(CheckAvailability,ServiceLines,FORMAT(QuantityToSet));
+
+      // EXECUTE: Answer Yes or No to the warning.
+      IF CheckAvailabilityActionYes THEN BEGIN
+        CheckAvailability.Yes.INVOKE;
+        EXIT;
+      END;
+      CheckAvailability.No.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Item Availability] [Service]
+      Tests Availability warning for Service Order.
+
+      Covered Test cases:
+      --------------------------------------------------
+      Test Function Name                  TFS ID
+      --------------------------------------------------
+      ServiceAnswerYes                    174086
+      ServiceAnswerNo                     174087
+      ServiceDemandHigherThanSupply       174088
+      ServiceDemandLowerThanSupply        174089
+      ServiceDemandBeforeSupply           174090
+      ServiceSupplyLocationDifferent      174091
+      ServiceSupplyVariantDifferent       174092
+      ServiceChangeLocation               174093
+      ServiceChangeDate                   174094
+      ServiceMultipleSupplyForDemand      174095
+      MixedDemandForSupply                174104
+    }
+    END.
+  }
+}
+

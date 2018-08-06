@@ -1,0 +1,1143 @@
+OBJECT Codeunit 134806 RED Test Unit for SalesPurDoc2
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryERM@1016 : Codeunit 131300;
+      LibraryRandom@1014 : Codeunit 130440;
+      LibraryInventory@1013 : Codeunit 132201;
+      LibrarySales@1012 : Codeunit 130509;
+      DeferralUtilities@1011 : Codeunit 1720;
+      LibraryVariableStorage@1010 : Codeunit 131004;
+      LibrarySetupStorage@1009 : Codeunit 131009;
+      LibraryPurchase@1023 : Codeunit 130512;
+      LibraryUtility@1017 : Codeunit 131000;
+      Assert@1002 : Codeunit 130000;
+      CalcMethod@1008 : 'Straight-Line,Equal per Period,Days per Period,User-Defined';
+      StartDate@1007 : 'Posting Date,Beginning of Period,End of Period,Beginning of Next Period';
+      SalesDocType@1006 : 'Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order,Shipment,Posted Invoice,Posted Credit Memo,Posted Return Receipt';
+      PurchDocType@1027 : 'Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order,Shipment,Posted Invoice,Posted Credit Memo,Posted Return Receipt';
+      isInitialized@1000 : Boolean;
+      DialogTok@1001 : TextConst 'ENU=Dialog';
+      DateOutOfBoundErr@1003 : TextConst 'ENU=The deferral schedule falls outside the accounting periods that have been set up for the company.';
+      NoOfPeriodsErr@1005 : TextConst '@@@=%1 - No of periods;ENU=No. of Periods must not be %1 in Deferral Header';
+      FieldErrorTok@1004 : TextConst 'ENU=NCLCSRTS:TableErrorStr';
+      FieldErrorErr@1015 : TextConst 'ENU=Calc. Method must not be 4 in Deferral Template Deferral Code';
+
+    [Test]
+    PROCEDURE TestDeleteSalesPostedCreditMemoWithDeferral@76();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      SalesCrMemoHeader@1003 : Record 114;
+      DeferralTemplateCode@1006 : Code[10];
+      DocNo@1005 : Code[20];
+      ItemNo@1004 : Code[20];
+      LineNo@1002 : Integer;
+    BEGIN
+      // [SCENARIO 127736] When a Posted Credit Memo is deleted, the deferrals are also deleted
+      // Setup
+      Initialize;
+
+      // [GIVEN] User has assigned a default deferral code to an Item
+      CreateItemWithDefaultDeferralCode(DeferralTemplateCode,ItemNo,CalcMethod::"Straight-Line",StartDate::"Posting Date",3);
+
+      // [GIVEN] Creating Sales Line for Item should default deferral code
+      CreateSalesDocWithLine(SalesHeader,SalesLine,
+        SalesHeader."Document Type"::"Credit Memo",SalesLine.Type::Item,ItemNo,SetDateDay(15,WORKDATE));
+      LineNo := SalesLine."Line No.";
+
+      // [GIVEN] Document is posted the deferrals are also posted and moved to the Sales Credit Memo tables
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [WHEN] Posted Credit Memo is deleted
+      SalesCrMemoHeader.SETRANGE("Sell-to Customer No.",SalesHeader."Sell-to Customer No.");
+      SalesCrMemoHeader.FINDFIRST;
+      DocNo := SalesCrMemoHeader."No.";
+      SalesCrMemoHeader."No. Printed" := 1;
+      SalesCrMemoHeader.DELETE(TRUE);
+      COMMIT; // Required for the ASSERTERROR to Work
+
+      // [THEN] The deferrals were removed also
+      VerifyPostedDeferralScheduleDoesNotExist(DeferralUtilities.GetSalesDeferralDocType,
+        SalesDocType::"Posted Credit Memo",DocNo,LineNo);
+    END;
+
+    [Test]
+    PROCEDURE TestDeleteSalesPostedInvoiceWithDeferral@46();
+    VAR
+      SalesHeader@1007 : Record 36;
+      SalesLine@1006 : Record 37;
+      SalesInvHeader@1005 : Record 112;
+      SalesInvLine@1004 : Record 113;
+      DeferralTemplateCode@1003 : Code[10];
+      DocNo@1002 : Code[20];
+      ItemNo@1001 : Code[20];
+      LineNo@1000 : Integer;
+    BEGIN
+      // [SCENARIO 127736] When a Posted Invoice is deleted, the deferrals are also deleted
+      // [GIVEN] User has assigned a default deferral code to an Item
+      CreateItemWithDefaultDeferralCode(DeferralTemplateCode,ItemNo,CalcMethod::"Straight-Line",StartDate::"Posting Date",2);
+
+      // [GIVEN] Creating Sales Line for Item should default deferral code
+      CreateSalesDocWithLine(SalesHeader,SalesLine,
+        SalesHeader."Document Type"::Invoice,SalesLine.Type::Item,ItemNo,SetDateDay(1,WORKDATE));
+
+      // [GIVEN] Document is posted the deferrals are also posted and moved to the Sales Invoice tables
+      DocNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      FindSalesInvoiceLine(SalesInvLine,DocNo);
+      LineNo := SalesInvLine."Line No.";
+
+      // [WHEN] Delete the Posted sales invoice
+      SalesInvHeader.GET(DocNo);
+      SalesInvHeader."No. Printed" := 1;
+      SalesInvHeader.DELETE(TRUE);
+      COMMIT; // Required for the ASSERTERROR to Work
+
+      // [THEN] The deferrals are removed along with the posted sales invoice
+      VerifyPostedDeferralScheduleDoesNotExist(DeferralUtilities.GetSalesDeferralDocType,
+        SalesDocType::"Posted Invoice",DocNo,LineNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(DeferralScheduleHandler,ConfirmMessageHandler)]
+    PROCEDURE TestOpenMiniSalesInvoiceDeferralSchedulePos@89();
+    VAR
+      SalesHeader@1009 : Record 36;
+      SalesLine@1008 : Record 37;
+      MiniSalesInvoice@1001 : TestPage 1304;
+      DeferralTemplateCode@1005 : Code[10];
+    BEGIN
+      // [SCENARIO 127732] Entering a Sales Invoice on the Mini Sales Invoice with GL Account allows editing of the deferral code and accessing schedule
+      // Setup
+      Initialize;
+
+      // [GIVEN] User has created a Sales Document with one line item for GL Account
+      CreateSalesDocWithLine(SalesHeader,SalesLine,
+        SalesHeader."Document Type"::Invoice,SalesLine.Type::"G/L Account",
+        LibraryERM.CreateGLAccountWithSalesSetup,SetDateDay(1,WORKDATE));
+      DeferralTemplateCode := LibraryERM.CreateDeferralTemplateCode(CalcMethod::"Straight-Line",StartDate::"Posting Date",2);
+
+      // [WHEN] Open the Sales Invoice as edit with the document
+      MiniSalesInvoice.OPENEDIT;
+      MiniSalesInvoice.FILTER.SETFILTER("No.",SalesHeader."No.");
+      MiniSalesInvoice.SalesLines.FIRST;
+
+      // [THEN] Deferral Code can be entered for GL Account
+      MiniSalesInvoice.SalesLines."Deferral Code".SETVALUE(DeferralTemplateCode);
+      LibraryVariableStorage.Enqueue(SalesLine.GetDeferralAmount);
+
+      // [THEN] Deferral Schedule can be opened for GL Account
+      MiniSalesInvoice.SalesLines.DeferralSchedule.INVOKE;
+
+      MiniSalesInvoice.CLOSE;
+    END;
+
+    [Test]
+    PROCEDURE TestDeletePurchPostedCreditMemoWithDeferral@2();
+    VAR
+      PurchaseHeader@1007 : Record 38;
+      PurchaseLine@1006 : Record 39;
+      PurchCrMemoHdr@1005 : Record 124;
+      DeferralTemplateCode@1003 : Code[10];
+      DocNo@1002 : Code[20];
+      ItemNo@1001 : Code[20];
+      LineNo@1000 : Integer;
+    BEGIN
+      // [SCENARIO 127772] When a Posted Credit Memo is deleted, the deferrals are also deleted
+      // Setup
+      Initialize;
+
+      // [GIVEN] User has assigned a default deferral code to an Item
+      CreateItemWithDefaultDeferralCode(DeferralTemplateCode,ItemNo,CalcMethod::"Straight-Line",StartDate::"Posting Date",3);
+
+      // [GIVEN] Creating Purchase Line for Item should default deferral code
+      CreatePurchDocWithLine(PurchaseHeader,PurchaseLine,
+        PurchaseHeader."Document Type"::"Credit Memo",PurchaseLine.Type::Item,ItemNo,SetDateDay(15,WORKDATE));
+      LineNo := PurchaseLine."Line No.";
+
+      // [GIVEN] Document is posted the deferrals are also posted and moved to the Purchase Credit Memo tables
+      DocNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [WHEN] Posted Credit Memo is deleted
+      PurchCrMemoHdr.GET(DocNo);
+      PurchCrMemoHdr."No. Printed" := 1;
+      PurchCrMemoHdr.DELETE(TRUE);
+      COMMIT; // Required for the ASSERTERROR to Work
+
+      // [THEN] The deferrals were removed also
+      VerifyPostedDeferralScheduleDoesNotExist(DeferralUtilities.GetPurchDeferralDocType,
+        PurchDocType::"Posted Credit Memo",DocNo,LineNo);
+    END;
+
+    [Test]
+    PROCEDURE TestDeletePurchPostedInvoiceWithDeferral@1();
+    VAR
+      PurchaseHeader@1008 : Record 38;
+      PurchaseLine@1007 : Record 39;
+      PurchInvHeader@1000 : Record 122;
+      PurchInvLine@1005 : Record 123;
+      DeferralTemplateCode@1004 : Code[10];
+      DocNo@1003 : Code[20];
+      ItemNo@1002 : Code[20];
+      LineNo@1001 : Integer;
+    BEGIN
+      // [SCENARIO 127772] When a Posted Invoice is deleted, the deferrals are also deleted
+      // [GIVEN] User has assigned a default deferral code to an Item
+      CreateItemWithDefaultDeferralCode(DeferralTemplateCode,ItemNo,CalcMethod::"Straight-Line",StartDate::"Posting Date",2);
+
+      // [GIVEN] Creating Purchase Line for Item should default deferral code
+      CreatePurchDocWithLine(PurchaseHeader,PurchaseLine,
+        PurchaseHeader."Document Type"::Invoice,PurchaseLine.Type::Item,ItemNo,SetDateDay(1,WORKDATE));
+
+      // [GIVEN] Document is posted the deferrals are also posted and moved to the Purchase Invoice tables
+      DocNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      FindPurchInvoiceLine(PurchInvLine,DocNo);
+      LineNo := PurchInvLine."Line No.";
+
+      // [WHEN] Delete the Posted purchase invoice
+      PurchInvHeader.GET(DocNo);
+      PurchInvHeader."No. Printed" := 1;
+      PurchInvHeader.DELETE(TRUE);
+      COMMIT; // Required for the ASSERTERROR to Work
+
+      // [THEN] The deferrals are removed along with the posted purchase invoice
+      VerifyPostedDeferralScheduleDoesNotExist(DeferralUtilities.GetPurchDeferralDocType,
+        PurchDocType::"Posted Invoice",DocNo,LineNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE TestUpdatePostDateOnSalesInvoiceWithDeferralRolldown@11();
+    VAR
+      SalesHeader@1005 : Record 36;
+      SalesLine@1004 : Record 37;
+      DeferralTemplateCode@1003 : Code[10];
+      ItemNo@1002 : Code[20];
+    BEGIN
+      // [FEATURE] [Sales] [Posting Date]
+      // [SCENARIO 145395] When Posting Date is changed on document header, and roll down confirmed, the deferrals are updated
+      // Setup
+      Initialize;
+
+      // [GIVEN] User has assigned a default deferral code to an Item
+      CreateItemWithDefaultDeferralCode(DeferralTemplateCode,ItemNo,CalcMethod::"Straight-Line",StartDate::"Posting Date",3);
+
+      // [GIVEN] Creating Sales Line for Item should default deferral code
+      CreateSalesDocWithLine(SalesHeader,SalesLine,
+        SalesHeader."Document Type"::Invoice,SalesLine.Type::Item,ItemNo,SetDateDay(15,WORKDATE));
+
+      // [GIVEN] Posting date is changed on sales header
+      SalesHeader.VALIDATE("Posting Date",SetDateDay(1,WORKDATE));
+
+      // [WHEN] Answer 'Yes' to the confirmation dialog
+
+      // [THEN] The deferrals were updated using the new date
+      VerifyDeferralSchedule(
+        DeferralUtilities.GetSalesDeferralDocType,
+        SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",
+        DeferralTemplateCode,SetDateDay(1,WORKDATE),SalesLine.GetDeferralAmount,3);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandlerFalse)]
+    PROCEDURE TestUpdatePostDateOnSalesInvoiceWithNoDeferralRolldown@15();
+    VAR
+      SalesHeader@1005 : Record 36;
+      SalesLine@1004 : Record 37;
+      DeferralTemplateCode@1003 : Code[10];
+      ItemNo@1002 : Code[20];
+    BEGIN
+      // [FEATURE] [Sales] [Posting Date]
+      // [SCENARIO 145395] When Posting Date is changed on document header with no rolldown selected, the deferrals are not updated
+      // Setup
+      Initialize;
+
+      // [GIVEN] User has assigned a default deferral code to an Item
+      CreateItemWithDefaultDeferralCode(DeferralTemplateCode,ItemNo,CalcMethod::"Straight-Line",StartDate::"Posting Date",3);
+
+      // [GIVEN] Creating Sales Line for Item should default deferral code
+      CreateSalesDocWithLine(SalesHeader,SalesLine,
+        SalesHeader."Document Type"::Invoice,SalesLine.Type::Item,ItemNo,SetDateDay(25,WORKDATE));
+
+      // [GIVEN] Posting Date is changed on sales header
+      SalesHeader.VALIDATE("Posting Date",SetDateDay(1,WORKDATE));
+
+      // [WHEN] Answer 'No' to the confirmation dialog
+
+      // [THEN] The deferrals are not updated
+      VerifyDeferralSchedule(DeferralUtilities.GetSalesDeferralDocType,
+        SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",
+        DeferralTemplateCode,SetDateDay(25,WORKDATE),SalesLine.GetDeferralAmount,3);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler)]
+    PROCEDURE TestUpdatePostDateOnPurchInvoiceWithDeferralRolldown@12();
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      DeferralTemplateCode@1004 : Code[10];
+      ItemNo@1005 : Code[20];
+    BEGIN
+      // [FEATURE] [Purchase] [Posting Date]
+      // [SCENARIO 145395] When Posting Date is changed on document header, and roll down confirmed, the deferrals are updated
+      Initialize;
+
+      // [GIVEN] User has assigned a default deferral code to an Item
+      CreateItemWithDefaultDeferralCode(DeferralTemplateCode,ItemNo,CalcMethod::"Straight-Line",StartDate::"Posting Date",2);
+
+      // [GIVEN] Creating Purchase Line for Item should default deferral code
+      CreatePurchDocWithLine(PurchaseHeader,PurchaseLine,
+        PurchaseHeader."Document Type"::Invoice,PurchaseLine.Type::Item,ItemNo,SetDateDay(21,WORKDATE));
+
+      // [GIVEN] Posting Date is changed on purchase header
+      PurchaseHeader.VALIDATE("Posting Date",SetDateDay(1,WORKDATE));
+
+      // [WHEN] Answer 'Yes' to the confirmation dialog
+
+      // [THEN] The deferrals are updated using the new date
+      VerifyDeferralSchedule(
+        DeferralUtilities.GetPurchDeferralDocType,
+        PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.",
+        DeferralTemplateCode,SetDateDay(1,WORKDATE),PurchaseLine.GetDeferralAmount,2);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandlerFalse)]
+    PROCEDURE TestUpdatePostDateOnPurchInvoiceNoWithDeferraRolldown@20();
+    VAR
+      PurchaseHeader@1005 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      DeferralTemplateCode@1003 : Code[10];
+      ItemNo@1002 : Code[20];
+    BEGIN
+      // [FEATURE] [Purchase] [Posting Date]
+      // [SCENARIO 145395] When Posting Date is changed on document header and rolldown not selected, the deferrals are not updated
+      Initialize;
+
+      // [GIVEN] User has assigned a default deferral code to an Item
+      CreateItemWithDefaultDeferralCode(DeferralTemplateCode,ItemNo,CalcMethod::"Straight-Line",StartDate::"Posting Date",2);
+
+      // [GIVEN] Creating Purchase Line for Item should default deferral code
+      CreatePurchDocWithLine(PurchaseHeader,PurchaseLine,
+        PurchaseHeader."Document Type"::Invoice,PurchaseLine.Type::Item,ItemNo,SetDateDay(28,WORKDATE));
+
+      // [GIVEN] Posting Date is changed on purchase header
+      PurchaseHeader.VALIDATE("Posting Date",SetDateDay(1,WORKDATE));
+
+      // [WHEN] Answer 'No' to the confirmation dialog
+
+      // [THEN] The deferrals are not updated with the new date
+      VerifyDeferralSchedule(DeferralUtilities.GetPurchDeferralDocType,
+        PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.",
+        DeferralTemplateCode,SetDateDay(28,WORKDATE),PurchaseLine.GetDeferralAmount,2);
+    END;
+
+    [Test]
+    [HandlerFunctions(DefferalScheduleModalPageHandler)]
+    PROCEDURE SalesCalcDeferralScheduleOutOfPeriod@36();
+    VAR
+      SalesHeader@1005 : Record 36;
+      SalesLine@1004 : Record 37;
+      AccountingPeriod@1006 : Record 50;
+    BEGIN
+      // [SCENARIO] System does not allow calculate schedule for Sales Line on date before earliest Accounting Period
+      // [FEATURE] [Sales]
+      Initialize;
+
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,LibrarySales.CreateCustomerNo);
+      LibrarySales.CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::"G/L Account",CreateGLAccountWithDeferralCode,LibraryRandom.RandInt(100));
+      SalesLine.VALIDATE("Unit Price",LibraryRandom.RandInt(100));
+      SalesLine.MODIFY(TRUE);
+
+      AccountingPeriod.FINDFIRST;
+      LibraryVariableStorage.Enqueue(
+        CALCDATE('<-' + FORMAT(LibraryRandom.RandIntInRange(5,10)) + 'Y>',AccountingPeriod."Starting Date"));
+
+      ASSERTERROR OpenSalesDeferralSchedule(SalesLine,SalesHeader);
+
+      Assert.ExpectedErrorCode(DialogTok);
+      Assert.ExpectedError(DateOutOfBoundErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(DefferalScheduleModalPageHandler)]
+    PROCEDURE PurchaseCalcDeferralScheduleOutOfPeriod@37();
+    VAR
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      AccountingPeriod@1006 : Record 50;
+    BEGIN
+      // [SCENARIO] System does not allow calculate schedule for Purchase Line on date before earliest Accounting Period
+      // [FEATURE] [Purchases]
+      Initialize;
+
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Invoice,LibraryPurchase.CreateVendorNo);
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::"G/L Account",CreateGLAccountWithDeferralCode,LibraryRandom.RandInt(100));
+
+      AccountingPeriod.FINDFIRST;
+      LibraryVariableStorage.Enqueue(
+        CALCDATE('<-' + FORMAT(LibraryRandom.RandIntInRange(5,10)) + 'Y>',AccountingPeriod."Starting Date"));
+
+      ASSERTERROR OpenPurchaseDeferralSchedule(PurchaseLine,PurchaseHeader);
+
+      Assert.ExpectedErrorCode(DialogTok);
+      Assert.ExpectedError(DateOutOfBoundErr);
+    END;
+
+    [Test]
+    PROCEDURE PostSalesOrderWithDeferralSetup@5();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      DeferralTemplate@1006 : Record 1700;
+      VATPostingSetup@1002 : Record 325;
+      DeferralTemplateCode@1003 : Code[10];
+      DocNo@1005 : Code[20];
+      ItemNo@1004 : Code[20];
+    BEGIN
+      // [FEATURE] [UI] [Sales]
+      // [SCENARIO 376902] Posted Sales Order creates VAT Entry with non-zero Base and Amount
+      Initialize;
+
+      // [GIVEN] Deferral Template "DT"
+      CreateItemWithDefaultDeferralCode(
+        DeferralTemplateCode,ItemNo,DeferralTemplate."Calc. Method"::"Straight-Line",
+        DeferralTemplate."Start Date"::"Posting Date",LibraryRandom.RandIntInRange(5,10));
+
+      // [GIVEN] Sales Order where "Sales Line"."Deferrral Code" = "DT", "Sales Line".Amount = 100 and "Sales Line"."VAT %" = 10%
+      LibrarySales.CreateSalesDocumentWithItem(
+        SalesHeader,SalesLine,SalesHeader."Document Type"::Order,'',ItemNo,LibraryRandom.RandInt(10),'',0D);
+
+      // [WHEN] Post Sales Order
+      DocNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [THEN] "VAT Entry".Base = -100
+      // [THEN] "VAT Entry".Amount = -10
+      VATPostingSetup.GET(SalesLine."VAT Bus. Posting Group",SalesLine."VAT Prod. Posting Group");
+    END;
+
+    [Test]
+    PROCEDURE PostPurchaseOrderWithDeferralSetup@52();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      DeferralTemplate@1006 : Record 1700;
+      VATPostingSetup@1002 : Record 325;
+      DeferralTemplateCode@1003 : Code[10];
+      DocNo@1005 : Code[20];
+      ItemNo@1004 : Code[20];
+    BEGIN
+      // [FEATURE] [UI] [Purchase]
+      // [SCENARIO 376902] Posted Purchase Order creates VAT Entry with non-zero Base and Amount
+      Initialize;
+
+      // [GIVEN] Deferral Template "DT"
+      CreateItemWithDefaultDeferralCode(
+        DeferralTemplateCode,ItemNo,DeferralTemplate."Calc. Method"::"Straight-Line",
+        DeferralTemplate."Start Date"::"Posting Date",LibraryRandom.RandIntInRange(5,10));
+
+      // [GIVEN] Sales Order where "Sales Line"."Deferral Code" = "DT", "Sales Line".Amount = 100 and "Sales Line"."VAT %" = 10%
+      CreatePurchDocWithLine(
+        PurchaseHeader,PurchaseLine,PurchaseHeader."Document Type"::Order,
+        PurchaseLine.Type::Item,ItemNo,SetDateDay(15,WORKDATE));
+
+      // [WHEN] Post Sales Order
+      DocNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [THEN] "VAT Entry".Base = 100
+      // [THEN] "VAT Entry".Amount = 10
+      VATPostingSetup.GET(PurchaseLine."VAT Bus. Posting Group",PurchaseLine."VAT Prod. Posting Group");
+    END;
+
+    [Test]
+    [HandlerFunctions(DefferalScheduleUpdateNoOfPeriodslModalPageHandler,MessageHandler)]
+    PROCEDURE SalesChangeNoOfPeriodsOnDeferralSchedule@32();
+    VAR
+      SalesLine@1001 : Record 37;
+      SalesHeader@1000 : Record 36;
+      DeferralTemplate@1006 : Record 1700;
+      NoOfPeriods@1007 : Integer;
+      Offset@1002 : Integer;
+    BEGIN
+      // [FEATURE] [UI] [Sales]
+      // [SCENARIO 376902] Do not allow to change "No. of Periods" without deferral reschedule
+      Initialize;
+
+      // [GIVEN] Sales Order with Deferral Code in Sales Line and calculated Deferral Schedule
+      SalesChangeNoOfPeriodsInitScenario(
+        NoOfPeriods,Offset,DeferralTemplate."Calc. Method"::"Equal per Period",SalesLine,SalesHeader);
+
+      // [WHEN] Change "No. Of Periods" in Deferral Schedule without rescheduling
+      OpenSalesDeferralSchedule(SalesLine,SalesHeader);
+
+      // [THEN] Error occured on closing Deferral Schedule
+      Assert.ExpectedMessage(STRSUBSTNO(NoOfPeriodsErr,NoOfPeriods + Offset),LibraryVariableStorage.DequeueText);
+    END;
+
+    [Test]
+    [HandlerFunctions(DefferalScheduleUpdateNoOfPeriodslModalPageHandler,MessageHandler)]
+    PROCEDURE PurchaseChangeNoOfPeriodsOnDeferralSchedule@31();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      DeferralTemplate@1006 : Record 1700;
+      NoOfPeriods@1007 : Integer;
+      Offset@1002 : Integer;
+    BEGIN
+      // [FEATURE] [UI] [Purchase]
+      // [SCENARIO 376902] Do not allow to change "No. of Periods" without deferral reschedule
+      Initialize;
+
+      // [GIVEN] Purchase Order with Deferral Code in Purchase Line and calculated Deferral Schedule
+      PurchaseChangeNoOfPeriodsInitScenario(
+        NoOfPeriods,Offset,DeferralTemplate."Calc. Method"::"Equal per Period",PurchaseLine,PurchaseHeader);
+
+      // [WHEN] Change "No. Of Periods" in Deferral Schedule without rescheduling
+      OpenPurchaseDeferralSchedule(PurchaseLine,PurchaseHeader);
+
+      // [THEN] Error occured on closing Deferral Schedule
+      Assert.ExpectedMessage(STRSUBSTNO(NoOfPeriodsErr,NoOfPeriods + Offset),LibraryVariableStorage.DequeueText);
+    END;
+
+    [Test]
+    PROCEDURE UT_CalcDeferralNoOfPeriodsEqualPerPeriod@26();
+    VAR
+      DeferralTemplate@1000 : Record 1700;
+      DeferralUtilities@1001 : Codeunit 1720;
+      NoOfPeriods@1002 : Integer;
+    BEGIN
+      // [FEATURE] [UT]
+      // [SCENARIO] Calculate Number of Periods to be generated when "Calc. Method" = "Equal per Period"
+      NoOfPeriods := LibraryRandom.RandInt(12);
+
+      Assert.AreEqual(
+        NoOfPeriods,
+        DeferralUtilities.CalcDeferralNoOfPeriods(DeferralTemplate."Calc. Method"::"Equal per Period",NoOfPeriods,WORKDATE),
+        '');
+    END;
+
+    [Test]
+    PROCEDURE UT_CalcDeferralNoOfPeriodsDaysPerPeriodStartDateEqual@29();
+    VAR
+      DeferralTemplate@1002 : Record 1700;
+      AccountingPeriod@1003 : Record 50;
+      DeferralUtilities@1001 : Codeunit 1720;
+      NoOfPeriods@1000 : Integer;
+    BEGIN
+      // [FEATURE] [UT]
+      // [SCENARIO] Calculate Number of Periods to be generated when "Calc. Method" = "Days Per Period" and "Start Date" = "Accounting Period"."Starting Date"
+      NoOfPeriods := LibraryRandom.RandInt(12);
+      AccountingPeriod.FINDFIRST;
+
+      Assert.AreEqual(
+        NoOfPeriods,
+        DeferralUtilities.CalcDeferralNoOfPeriods(
+          DeferralTemplate."Calc. Method"::"Days per Period",NoOfPeriods,AccountingPeriod."Starting Date"),
+        '');
+    END;
+
+    [Test]
+    PROCEDURE UT_CalcDeferralNoOfPeriodsDaysPerPeriodStartDateNotEqual@40();
+    VAR
+      DeferralTemplate@1002 : Record 1700;
+      AccountingPeriod@1003 : Record 50;
+      DeferralUtilities@1001 : Codeunit 1720;
+      NoOfPeriods@1000 : Integer;
+    BEGIN
+      // [FEATURE] [UT]
+      // [SCENARIO] Calculate Number of Periods to be generated when "Calc. Method" = "Days Per Period" and "Start Date" <> "Accounting Period"."Starting Date"
+      NoOfPeriods := LibraryRandom.RandInt(12);
+      AccountingPeriod.FINDFIRST;
+
+      Assert.AreEqual(
+        NoOfPeriods + 1,
+        DeferralUtilities.CalcDeferralNoOfPeriods(
+          DeferralTemplate."Calc. Method"::"Days per Period",NoOfPeriods,AccountingPeriod."Starting Date" - 1),
+        '');
+    END;
+
+    [Test]
+    PROCEDURE UT_CalcDeferralNoOfPeriodsStraightLineStartDateEqual@28();
+    VAR
+      DeferralTemplate@1002 : Record 1700;
+      AccountingPeriod@1003 : Record 50;
+      DeferralUtilities@1001 : Codeunit 1720;
+      NoOfPeriods@1000 : Integer;
+    BEGIN
+      // [FEATURE] [UT]
+      // [SCENARIO] Calculate Number of Periods to be generated when "Calc. Method" = "Straight-Line" and "Start Date" = "Accounting Period"."Starting Date"
+      NoOfPeriods := LibraryRandom.RandInt(12);
+      AccountingPeriod.FINDFIRST;
+
+      Assert.AreEqual(
+        NoOfPeriods,
+        DeferralUtilities.CalcDeferralNoOfPeriods(
+          DeferralTemplate."Calc. Method"::"Straight-Line",NoOfPeriods,AccountingPeriod."Starting Date"),
+        '');
+    END;
+
+    [Test]
+    PROCEDURE UT_CalcDeferralNoOfPeriodsStraightLineStartDateNotEqual@41();
+    VAR
+      DeferralTemplate@1002 : Record 1700;
+      AccountingPeriod@1003 : Record 50;
+      DeferralUtilities@1001 : Codeunit 1720;
+      NoOfPeriods@1000 : Integer;
+    BEGIN
+      // [FEATURE] [UT]
+      // [SCENARIO] Calculate Number of Periods to be generated when "Calc. Method" = "Straight-Line" and "Start Date" <> "Accounting Period"."Starting Date"
+      NoOfPeriods := LibraryRandom.RandInt(12);
+      AccountingPeriod.FINDFIRST;
+
+      Assert.AreEqual(
+        NoOfPeriods + 1,
+        DeferralUtilities.CalcDeferralNoOfPeriods(
+          DeferralTemplate."Calc. Method"::"Straight-Line",NoOfPeriods,AccountingPeriod."Starting Date" - 1),
+        '');
+    END;
+
+    [Test]
+    PROCEDURE UT_CalcDeferralNoOfPeriodsUserDefined@27();
+    VAR
+      DeferralTemplate@1002 : Record 1700;
+      DeferralUtilities@1001 : Codeunit 1720;
+      NoOfPeriods@1000 : Integer;
+    BEGIN
+      // [FEATURE] [UT]
+      // [SCENARIO] Calculate Number of Periods to be generated when "Calc. Method" = "User Defined"
+      NoOfPeriods := LibraryRandom.RandInt(12);
+
+      Assert.AreEqual(
+        NoOfPeriods,
+        DeferralUtilities.CalcDeferralNoOfPeriods(DeferralTemplate."Calc. Method"::"User-Defined",NoOfPeriods,WORKDATE),
+        '');
+    END;
+
+    [Test]
+    PROCEDURE UT_CalcDeferralNoOfPeriodsErrorOnUknownCalcMethod@39();
+    VAR
+      DeferralUtilities@1001 : Codeunit 1720;
+    BEGIN
+      // [FEATURE] [UT]
+      // [SCENARIO] Throw error when unhandled "Calc. Method" passed
+      ASSERTERROR DeferralUtilities.CalcDeferralNoOfPeriods(4,LibraryRandom.RandInt(12),WORKDATE);
+
+      Assert.ExpectedErrorCode(FieldErrorTok);
+      Assert.ExpectedError(FieldErrorErr);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseInvoicingOfDeferralWithLCYAndRounding@49();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      DeferralTemplate@1003 : Record 1700;
+      GLAccount@1006 : Record 15;
+      DeferralTemplateCode@1004 : Code[10];
+      DocNo@1005 : Code[20];
+      CurrencyCode@1007 : Code[10];
+      ExchRate@1002 : Decimal;
+    BEGIN
+      // [FEATURE] [Purchase] [Currency]
+      // [SCENARIO 203345] Posting of Purchase Invoice with Currency when deferral lines generate rounding
+      Initialize;
+
+      // [GIVEN] User-defined Deferral Template for 3 periods
+      DeferralTemplateCode :=
+        LibraryERM.CreateDeferralTemplateCode(
+          DeferralTemplate."Calc. Method"::"User-Defined",DeferralTemplate."Start Date"::"Posting Date",3);
+
+      // [GIVEN] Purchase Invoice with Currency Factor = 57.31123
+      ExchRate := 57.31123;
+      CurrencyCode := LibraryERM.CreateCurrencyWithExchangeRate(WORKDATE,100 / ExchRate,100 / ExchRate);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Invoice,LibraryPurchase.CreateVendorNo);
+      PurchaseHeader.VALIDATE("Posting Date",LibraryRandom.RandDateFromInRange(CALCDATE('<CM>',WORKDATE),5,10));
+      PurchaseHeader.VALIDATE("Currency Code",CurrencyCode);
+      PurchaseHeader.VALIDATE("Posting Description",'0123456789');
+      PurchaseHeader.MODIFY(TRUE);
+
+      // [GIVEN] Purchase Line 1 with Amount = 1000, VAT 19% where Deferral Schedule amounts are 555.55, 333.33, 111.12
+      // [GIVEN] Description of each def.period is matched to Line order/Def.Line order 11,12,13 filled with '0' to the end of the line like '110000000...'
+      CreateGLAccountWithVATPostSetup(GLAccount,PurchaseHeader."VAT Bus. Posting Group",19);
+      CreatePurchLineWithUserDefinedDeferralSchedule(
+        PurchaseLine,PurchaseHeader,GLAccount."No.",DeferralTemplateCode,555.55,333.33,111.12,1);
+      // [GIVEN] Purchase Line 2 with Amount = 2000, VAT 19%, where Deferral Schedule amounts are 666.66, 555.55, 777.79
+      // [GIVEN] Description of each def.period is matched to Line order/Def.Line order 21,22,23 filled with '0' to the end of the line like '210000000...'
+      GLAccount."No." := LibraryUtility.GenerateGUID;
+      GLAccount.INSERT;
+      CreatePurchLineWithUserDefinedDeferralSchedule(
+        PurchaseLine,PurchaseHeader,GLAccount."No.",DeferralTemplateCode,666.66,555.55,777.79,2);
+
+      // [WHEN] Post Purchase Invoice
+      DocNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [THEN] Rounded G/L Entry has Description '0123456789' and Amount 0.01
+      // [THEN] G/L Entry for 1st period of 2nd purchase line has Description '0123456789; 21000000000000000000000000000000000000' and Amount 382.07
+      // [THEN] Compressed deferral G/L Entry for 1st period of 2nd purchase line has Description '0123456789; 21000000000000000000000000000000000000' and Amount 764.15
+      DeferralTemplate.GET(DeferralTemplateCode);
+      VerifyRoundedDeferralGLEntries(
+        DocNo,PurchaseHeader."Posting Date",GLAccount."No.",DeferralTemplate."Deferral Account",
+        PurchaseHeader."Posting Description",'0123456789; 21000000000000000000000000000000000000',
+        ROUND(666.66 * ExchRate / 100),ROUND(2000 * ExchRate / 100),1);
+    END;
+
+    [Test]
+    PROCEDURE SalesInvoicingOfDeferralWithLCYAndRounding@70();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      DeferralTemplate@1003 : Record 1700;
+      GLAccount@1006 : Record 15;
+      DeferralTemplateCode@1004 : Code[10];
+      DocNo@1005 : Code[20];
+      CurrencyCode@1007 : Code[10];
+      ExchRate@1002 : Decimal;
+    BEGIN
+      // [FEATURE] [Sales] [Currency]
+      // [SCENARIO 203345] Posting of Sales Invoice with Currency when deferral lines generate rounding
+      Initialize;
+
+      // [GIVEN] User-defined Deferral Template for 3 periods
+      DeferralTemplateCode :=
+        LibraryERM.CreateDeferralTemplateCode(
+          DeferralTemplate."Calc. Method"::"User-Defined",DeferralTemplate."Start Date"::"Posting Date",3);
+
+      // [GIVEN] Sales Invoice with Currency Factor = 57.31123
+      ExchRate := 57.31123;
+      CurrencyCode := LibraryERM.CreateCurrencyWithExchangeRate(WORKDATE,100 / ExchRate,100 / ExchRate);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,LibrarySales.CreateCustomerNo);
+      SalesHeader.VALIDATE("Posting Date",LibraryRandom.RandDateFromInRange(CALCDATE('<CM>',WORKDATE),5,10));
+      SalesHeader.VALIDATE("Currency Code",CurrencyCode);
+      SalesHeader.VALIDATE("Posting Description",'0123456789');
+      SalesHeader.MODIFY(TRUE);
+
+      // [GIVEN] Sales Line 1 with Amount = 1000, VAT 19%, where Deferral Schedule amounts are 555.55, 333.33, 111.12
+      // [GIVEN] Description of each def.period is matched to Line order/Def.Line order 11,12,13 filled with '0' to the end of the line like '110000000...'
+      CreateGLAccountWithVATPostSetup(GLAccount,SalesHeader."VAT Bus. Posting Group",19);
+      CreateSalesLineWithUserDefinedDeferralSchedule(
+        SalesLine,SalesHeader,GLAccount."No.",DeferralTemplateCode,555.55,333.33,111.12,1);
+      // [GIVEN] Sales Line 2 with Amount = 2000, VAT 19%, where Deferral Schedule amounts are 666.66, 555.55, 777.79
+      // [GIVEN] Description of each def.period is matched to Line order/Def.Line order 21,22,23 filled with '0' to the end of the line like '210000000...'
+      GLAccount."No." := LibraryUtility.GenerateGUID;
+      GLAccount.INSERT;
+      CreateSalesLineWithUserDefinedDeferralSchedule(
+        SalesLine,SalesHeader,GLAccount."No.",DeferralTemplateCode,666.66,555.55,777.79,2);
+
+      // [WHEN] Post Sales Invoice
+      DocNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [THEN] Rounded G/L Entry has Description '0123456789' and Amount -0.01
+      // [THEN] G/L Entry for 1st period of 2nd sales line has Description '0123456789; 21000000000000000000000000000000000000' and Amount -382.07
+      // [THEN] Compressed deferral G/L Entry for 1st period of 2nd sales line has Description '0123456789; 21000000000000000000000000000000000000' and Amount -764.15
+      DeferralTemplate.GET(DeferralTemplateCode);
+      VerifyRoundedDeferralGLEntries(
+        DocNo,SalesHeader."Posting Date",GLAccount."No.",DeferralTemplate."Deferral Account",
+        SalesHeader."Posting Description",'0123456789; 21000000000000000000000000000000000000',
+        ROUND(666.66 * ExchRate / 100),ROUND(2000 * ExchRate / 100),-1);
+    END;
+
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      LibrarySetupStorage.Restore;
+
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibrarySetupStorage.Save(DATABASE::"Sales & Receivables Setup");
+      LibrarySetupStorage.Save(DATABASE::"Purchases & Payables Setup");
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@7() : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+      LibrarySales@1001 : Codeunit 130509;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemWithUnitPrice@17(VAR Item@1001 : Record 27);
+    BEGIN
+      LibraryInventory.CreateItemWithUnitPriceAndUnitCost(Item,
+        LibraryRandom.RandDec(1000,2),
+        LibraryRandom.RandDec(1000,2));
+    END;
+
+    LOCAL PROCEDURE CreateItemWithDefaultDeferralCode@42(VAR DefaultDeferralCode@1000 : Code[10];VAR ItemNo@1001 : Code[20];DefaultCalcMethod@1003 : Option;DefaultStartDate@1005 : Option;DefaultNoOfPeriods@1004 : Integer);
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      DefaultDeferralCode := LibraryERM.CreateDeferralTemplateCode(DefaultCalcMethod,DefaultStartDate,DefaultNoOfPeriods);
+
+      CreateItemWithUnitPrice(Item);
+      Item.VALIDATE("Default Deferral Template Code",DefaultDeferralCode);
+      Item.MODIFY(TRUE);
+      ItemNo := Item."No.";
+    END;
+
+    LOCAL PROCEDURE CreateGLAccountWithDeferralCode@33() : Code[20];
+    VAR
+      DeferralTemplate@1003 : Record 1700;
+      GLAccount@1002 : Record 15;
+      DeferralTemplateCode@1001 : Code[10];
+    BEGIN
+      GLAccount.GET(LibraryERM.CreateGLAccountWithSalesSetup);
+
+      DeferralTemplateCode :=
+        LibraryERM.CreateDeferralTemplateCode(
+          DeferralTemplate."Calc. Method"::"Equal per Period",DeferralTemplate."Start Date"::"Posting Date",12);
+
+      GLAccount.VALIDATE("Default Deferral Template Code",DeferralTemplateCode);
+      GLAccount.MODIFY(TRUE);
+
+      EXIT(GLAccount."No.");
+    END;
+
+    LOCAL PROCEDURE CreateGLAccountWithVATPostSetup@88(VAR GLAccount@1000 : Record 15;VATBusPostGrCode@1001 : Code[10];VATPct@1004 : Decimal);
+    VAR
+      VATProductPostingGroup@1002 : Record 324;
+      VATPostingSetup@1003 : Record 325;
+    BEGIN
+      GLAccount.GET(LibraryERM.CreateGLAccountWithSalesSetup);
+      LibraryERM.CreateVATProductPostingGroup(VATProductPostingGroup);
+      LibraryERM.CreateVATPostingSetup(VATPostingSetup,VATBusPostGrCode,VATProductPostingGroup.Code);
+      VATPostingSetup."VAT Identifier" := VATProductPostingGroup.Code;
+      VATPostingSetup.VALIDATE("VAT %",VATPct);
+      VATPostingSetup.VALIDATE("Purchase VAT Account",LibraryERM.CreateGLAccountNo);
+      VATPostingSetup.VALIDATE("Sales VAT Account",LibraryERM.CreateGLAccountNo);
+      VATPostingSetup.MODIFY(TRUE);
+      GLAccount.VALIDATE("VAT Bus. Posting Group",VATBusPostGrCode);
+      GLAccount.VALIDATE("VAT Prod. Posting Group",VATProductPostingGroup.Code);
+      GLAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocWithLine@9(VAR SalesHeader@1002 : Record 36;VAR SalesLine@1001 : Record 37;DocumentType@1004 : Option;SalesLineType@1005 : ' ,G/L Account,Item,Resource,Fixed Asset,Charge (Item)';No@1003 : Code[20];PostingDate@1007 : Date);
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,CreateCustomer);
+      SalesHeader.VALIDATE("Posting Date",PostingDate);
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLineType,No,2);
+      CASE SalesLine.Type OF
+        SalesLine.Type::"G/L Account",
+        SalesLine.Type::Resource:
+          BEGIN
+            SalesLine.VALIDATE("Unit Price",LibraryRandom.RandDec(1000,2));
+            SalesLine.MODIFY(TRUE);
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePurchDocWithLine@3(VAR PurchaseHeader@1002 : Record 38;VAR PurchaseLine@1001 : Record 39;DocumentType@1004 : Option;PurchLineType@1005 : ' ,G/L Account,Item,,Fixed Asset,Charge (Item)';No@1003 : Code[20];PostingDate@1007 : Date);
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocumentType,LibraryPurchase.CreateVendorNo);
+      PurchaseHeader.VALIDATE("Posting Date",PostingDate);
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchLineType,No,2);
+      CASE PurchaseLine.Type OF
+        PurchaseLine.Type::"G/L Account":
+          BEGIN
+            PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(1000,2));
+            PurchaseLine.MODIFY(TRUE);
+          END;
+        PurchaseLine.Type::Item:
+          IF Item.GET(No) THEN BEGIN
+            PurchaseLine.VALIDATE("Direct Unit Cost",Item."Unit Cost");
+            PurchaseLine.MODIFY(TRUE);
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePurchLineWithUserDefinedDeferralSchedule@80(VAR PurchaseLine@1000 : Record 39;PurchaseHeader@1001 : Record 38;GLAccountNo@1002 : Code[20];DeferralTemplateCode@1003 : Code[10];DefAmount1@1004 : Decimal;DefAmount2@1005 : Decimal;DefAmount3@1006 : Decimal;LineNo@1007 : Integer);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::"G/L Account",GLAccountNo,1);
+      PurchaseLine.VALIDATE("Direct Unit Cost",DefAmount1 + DefAmount2 + DefAmount3);
+      PurchaseLine.VALIDATE("Deferral Code",DeferralTemplateCode);
+      PurchaseLine.MODIFY(TRUE);
+      UpdateDeferralScheduleForLine(
+        DeferralUtilities.GetPurchDeferralDocType,PurchaseHeader."Document Type",PurchaseHeader."No.",
+        PurchaseLine."Line No.",PurchaseHeader."Posting Date",DefAmount1,DefAmount2,DefAmount3,LineNo);
+    END;
+
+    LOCAL PROCEDURE CreateSalesLineWithUserDefinedDeferralSchedule@75(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36;GLAccountNo@1002 : Code[20];DeferralTemplateCode@1003 : Code[10];DefAmount1@1004 : Decimal;DefAmount2@1005 : Decimal;DefAmount3@1006 : Decimal;LineNo@1007 : Integer);
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::"G/L Account",GLAccountNo,1);
+      SalesLine.VALIDATE("Unit Price",DefAmount1 + DefAmount2 + DefAmount3);
+      SalesLine.VALIDATE("Deferral Code",DeferralTemplateCode);
+      SalesLine.MODIFY(TRUE);
+      UpdateDeferralScheduleForLine(
+        DeferralUtilities.GetSalesDeferralDocType,SalesHeader."Document Type",SalesHeader."No.",
+        SalesLine."Line No.",SalesHeader."Posting Date",DefAmount1,DefAmount2,DefAmount3,LineNo);
+    END;
+
+    LOCAL PROCEDURE CalcPeriodDate@60(PostingDate@1000 : Date;Period@1001 : Integer) : Date;
+    BEGIN
+      EXIT(CALCDATE('<' + FORMAT(Period) + 'M>',PostingDate));
+    END;
+
+    LOCAL PROCEDURE SetDateDay@16(Day@1000 : Integer;StartDate@1001 : Date) : Date;
+    BEGIN
+      // Use the workdate but set to a specific day of that month
+      EXIT(DMY2DATE(Day,DATE2DMY(StartDate,2),DATE2DMY(StartDate,3)));
+    END;
+
+    LOCAL PROCEDURE DeferralLineSetRange@18(VAR DeferralLine@1000 : Record 1702;DeferralDocType@1004 : Integer;DocType@1001 : Integer;DocNo@1002 : Code[20];LineNo@1003 : Integer);
+    BEGIN
+      DeferralLine.SETRANGE("Deferral Doc. Type",DeferralDocType);
+      DeferralLine.SETRANGE("Gen. Jnl. Template Name",'');
+      DeferralLine.SETRANGE("Gen. Jnl. Batch Name",'');
+      DeferralLine.SETRANGE("Document Type",DocType);
+      DeferralLine.SETRANGE("Document No.",DocNo);
+      DeferralLine.SETRANGE("Line No.",LineNo);
+    END;
+
+    LOCAL PROCEDURE OpenSalesDeferralSchedule@10(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36);
+    BEGIN
+      SalesLine.ShowDeferrals(SalesHeader."Posting Date",SalesHeader."Currency Code");
+    END;
+
+    LOCAL PROCEDURE OpenPurchaseDeferralSchedule@23(VAR PurchaseLine@1000 : Record 39;PurchaseHeader@1001 : Record 38);
+    BEGIN
+      PurchaseLine.ShowDeferrals(PurchaseHeader."Posting Date",PurchaseHeader."Currency Code");
+    END;
+
+    LOCAL PROCEDURE PostedDeferralLineSetRange@24(VAR PostedDeferralLine@1000 : Record 1705;DeferralDocType@1004 : Integer;DocType@1001 : Integer;DocNo@1002 : Code[20];LineNo@1003 : Integer);
+    BEGIN
+      PostedDeferralLine.SETRANGE("Deferral Doc. Type",DeferralDocType);
+      PostedDeferralLine.SETRANGE("Gen. Jnl. Document No.",'');
+      PostedDeferralLine.SETRANGE("Account No.",'');
+      PostedDeferralLine.SETRANGE("Document Type",DocType);
+      PostedDeferralLine.SETRANGE("Document No.",DocNo);
+      PostedDeferralLine.SETRANGE("Line No.",LineNo);
+    END;
+
+    LOCAL PROCEDURE SalesChangeNoOfPeriodsInitScenario@25(VAR NoOfPeriods@1000 : Integer;VAR Offset@1001 : Integer;CalcMethod@1002 : Option;VAR SalesLine@1004 : Record 37;VAR SalesHeader@1005 : Record 36);
+    VAR
+      DeferralTemplate@1007 : Record 1700;
+      DeferralTemplateCode@1003 : Code[10];
+      ItemNo@1006 : Code[20];
+    BEGIN
+      NoOfPeriods := LibraryRandom.RandIntInRange(5,10);
+      Offset := LibraryRandom.RandInt(5);
+      CreateItemWithDefaultDeferralCode(
+        DeferralTemplateCode,ItemNo,CalcMethod,DeferralTemplate."Start Date"::"Posting Date",NoOfPeriods);
+
+      CreateSalesDocWithLine(SalesHeader,SalesLine,
+        SalesHeader."Document Type"::Invoice,SalesLine.Type::Item,ItemNo,SetDateDay(LibraryRandom.RandInt(5),WORKDATE));
+
+      LibraryVariableStorage.Enqueue(NoOfPeriods + Offset);
+    END;
+
+    LOCAL PROCEDURE PurchaseChangeNoOfPeriodsInitScenario@45(VAR NoOfPeriods@1000 : Integer;VAR Offset@1001 : Integer;CalcMethod@1002 : Option;VAR PurchaseLine@1004 : Record 39;VAR PurchaseHeader@1005 : Record 38);
+    VAR
+      DeferralTemplate@1007 : Record 1700;
+      DeferralTemplateCode@1003 : Code[10];
+      ItemNo@1006 : Code[20];
+    BEGIN
+      NoOfPeriods := LibraryRandom.RandIntInRange(5,10);
+      Offset := LibraryRandom.RandInt(5);
+      CreateItemWithDefaultDeferralCode(
+        DeferralTemplateCode,ItemNo,CalcMethod,DeferralTemplate."Start Date"::"Posting Date",NoOfPeriods);
+
+      CreatePurchDocWithLine(
+        PurchaseHeader,PurchaseLine,PurchaseHeader."Document Type"::Order,
+        PurchaseLine.Type::Item,ItemNo,SetDateDay(LibraryRandom.RandInt(5),WORKDATE));
+
+      LibraryVariableStorage.Enqueue(NoOfPeriods + Offset);
+    END;
+
+    LOCAL PROCEDURE FindSalesInvoiceLine@56(VAR SalesInvLine@1003 : Record 113;No@1001 : Code[20]);
+    BEGIN
+      SalesInvLine.SETRANGE("Document No.",No);
+      SalesInvLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindPurchInvoiceLine@4(VAR PurchInvLine@1003 : Record 123;No@1001 : Code[20]);
+    BEGIN
+      PurchInvLine.SETRANGE("Document No.",No);
+      PurchInvLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdateDeferralScheduleForLine@62(DefDocType@1007 : Option;DocType@1008 : Option;DocNo@1001 : Code[20];DocLineNo@1002 : Integer;StartDate@1003 : Date;DefAmount1@1004 : Decimal;DefAmount2@1005 : Decimal;DefAmount3@1006 : Decimal;LineNo@1009 : Integer);
+    VAR
+      DeferralLine@1000 : Record 1702;
+    BEGIN
+      DeferralLine.SETRANGE("Posting Date",StartDate);
+      LibraryERM.FindDeferralLine(DeferralLine,DefDocType,'','',DocType,DocNo,DocLineNo);
+      UpdateDefScheduleLine(DeferralLine,DefAmount1,FORMAT(LineNo) + '1');
+      DeferralLine.SETRANGE("Posting Date",CALCDATE('<-CM+1M>',StartDate));
+      DeferralLine.FINDFIRST;
+      UpdateDefScheduleLine(DeferralLine,DefAmount2,FORMAT(LineNo) + '2');
+      DeferralLine.SETRANGE("Posting Date",CALCDATE('<-CM+2M>',StartDate));
+      DeferralLine.FINDFIRST;
+      UpdateDefScheduleLine(DeferralLine,DefAmount3,FORMAT(LineNo) + '3');
+    END;
+
+    LOCAL PROCEDURE UpdateDefScheduleLine@50(VAR DeferralLine@1000 : Record 1702;DefAmount@1001 : Decimal;DefLineDescr@1002 : Text[50]);
+    BEGIN
+      WITH DeferralLine DO BEGIN
+        VALIDATE(Description,PADSTR(DefLineDescr,MAXSTRLEN(Description),'0'));
+        VALIDATE(Amount,DefAmount);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE DeferralScheduleHandler@72(VAR DeferralSchedule@1000 : TestPage 1702);
+    BEGIN
+      // Modal Page Handler.
+      DeferralSchedule."Amount to Defer".ASSERTEQUALS(LibraryVariableStorage.DequeueDecimal);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmMessageHandler@121(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@13(ConfirmMessage@1000 : Text[1024];VAR Result@1001 : Boolean);
+    BEGIN
+      Result := TRUE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@14(Message@1000 : Text[1024]);
+    BEGIN
+      LibraryVariableStorage.Enqueue(Message);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerFalse@21(ConfirmMessage@1000 : Text[1024];VAR Result@1001 : Boolean);
+    BEGIN
+      Result := FALSE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE DefferalScheduleModalPageHandler@22(VAR DeferralSchedule@1000 : TestPage 1702);
+    BEGIN
+      DeferralSchedule."Start Date".SETVALUE(LibraryVariableStorage.DequeueDate);
+      DeferralSchedule.CalculateSchedule.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE DefferalScheduleUpdateNoOfPeriodslModalPageHandler@44(VAR DeferralSchedule@1000 : TestPage 1702);
+    BEGIN
+      DeferralSchedule."No. of Periods".SETVALUE(LibraryVariableStorage.DequeueInteger);
+      DeferralSchedule.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE VerifyPostedDeferralScheduleDoesNotExist@63(DeferralDocType@1004 : Integer;DocType@1002 : Integer;DocNo@1001 : Code[20];LineNo@1000 : Integer);
+    VAR
+      PostedDeferralHeader@1003 : Record 1704;
+      PostedDeferralLine@1005 : Record 1705;
+    BEGIN
+      ASSERTERROR PostedDeferralHeader.GET(DeferralDocType,'','',DocType,DocNo,LineNo);
+
+      PostedDeferralLineSetRange(PostedDeferralLine,DeferralDocType,DocType,DocNo,LineNo);
+      Assert.RecordIsEmpty(PostedDeferralLine);
+    END;
+
+    LOCAL PROCEDURE VerifyDeferralSchedule@19(DeferralDocType@1008 : Integer;DocType@1002 : Integer;DocNo@1001 : Code[20];LineNo@1000 : Integer;DeferralTemplateCode@1005 : Code[10];HeaderPostingDate@1006 : Date;HeaderAmountToDefer@1007 : Decimal;NoOfPeriods@1009 : Integer);
+    VAR
+      DeferralHeader@1004 : Record 1701;
+      DeferralLine@1003 : Record 1702;
+      DeferralUtilities@1010 : Codeunit 1720;
+      Period@1011 : Integer;
+      DeferralAmount@1012 : Decimal;
+      PostingDate@1013 : Date;
+    BEGIN
+      DeferralHeader.GET(DeferralDocType,'','',DocType,DocNo,LineNo);
+      DeferralHeader.TESTFIELD("Deferral Code",DeferralTemplateCode);
+      DeferralHeader.TESTFIELD("Start Date",HeaderPostingDate);
+      DeferralHeader.TESTFIELD("Amount to Defer",HeaderAmountToDefer);
+      DeferralHeader.TESTFIELD("No. of Periods",NoOfPeriods);
+
+      DeferralLineSetRange(DeferralLine,DeferralDocType,DocType,DocNo,LineNo);
+      Period := 0;
+      IF DeferralLine.FINDSET THEN
+        REPEAT
+          IF Period = 0 THEN
+            PostingDate := HeaderPostingDate
+          ELSE
+            PostingDate := SetDateDay(1,HeaderPostingDate);
+          PostingDate := CalcPeriodDate(PostingDate,Period);
+          DeferralLine.TESTFIELD("Posting Date",PostingDate);
+          DeferralAmount := DeferralAmount + DeferralLine.Amount;
+          Period += 1;
+        UNTIL DeferralLine.NEXT = 0;
+
+      Assert.RecordCount(
+        DeferralLine,
+        DeferralUtilities.CalcDeferralNoOfPeriods(
+          DeferralHeader."Calc. Method",DeferralHeader."No. of Periods",DeferralHeader."Start Date"));
+    END;
+
+    LOCAL PROCEDURE VerifyVATEntry@6(ExpectedAmount@1000 : Decimal;ExpectedBase@1001 : Decimal;DocNo@1002 : Code[20]);
+    VAR
+      VATEntry@1003 : Record 254;
+    BEGIN
+       VATEntry.SETRANGE("Document No.",DocNo);
+       VATEntry.SETRANGE("Document Type",VATEntry."Document Type"::Invoice);
+       VATEntry.FINDFIRST;
+       VATEntry.TESTFIELD(Base,ExpectedAmount);
+       VATEntry.TESTFIELD(Amount,ExpectedBase);
+    END;
+
+    LOCAL PROCEDURE VerifyRoundedDeferralGLEntries@91(DocumentNo@1009 : Code[20];PostingDate@1001 : Date;LineGLAccountNo@1002 : Code[20];DeferralGLAccountNo@1003 : Code[20];DocDescription@1004 : Text[50];CombDescription@1005 : Text[50];PeriodAmount@1007 : Decimal;LineAmount@1008 : Decimal;Sign@1006 : Integer);
+    VAR
+      GLEntry@1000 : Record 17;
+    BEGIN
+      GLEntry.SETRANGE("Document No.",DocumentNo);
+      GLEntry.SETRANGE("Posting Date",PostingDate);
+      GLEntry.SETRANGE("G/L Account No.",LineGLAccountNo);
+      GLEntry.SETRANGE(Description,DocDescription);
+      GLEntry.FINDFIRST;
+      GLEntry.TESTFIELD(Amount,Sign * 0.01);
+
+      GLEntry.SETRANGE(Description,CombDescription);
+      GLEntry.FINDFIRST;
+      GLEntry.TESTFIELD(Amount,Sign * PeriodAmount);
+
+      GLEntry.SETRANGE("G/L Account No.",DeferralGLAccountNo);
+      GLEntry.FINDFIRST;
+      GLEntry.TESTFIELD(Amount,Sign * (LineAmount - PeriodAmount));
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Revenue Expense Deferral]
+    }
+    END.
+  }
+}
+

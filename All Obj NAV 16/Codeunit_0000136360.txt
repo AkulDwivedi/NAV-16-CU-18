@@ -1,0 +1,199 @@
+OBJECT Codeunit 136360 UT T Service Line Usage Link
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Job@1003 : Record 167;
+      JobTask@1002 : Record 1001;
+      JobPlanningLine@1001 : Record 1003;
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1005 : Record 5902;
+      Customer@1007 : Record 18;
+      LibrarySales@1008 : Codeunit 130509;
+      Assert@1000 : Codeunit 130000;
+      Text001Err@1006 : TextConst 'ENU=Rolling back changes.';
+
+    [Normal]
+    LOCAL PROCEDURE SetUp@1();
+    VAR
+      Item@1004 : Record 27;
+      LibraryJob@1000 : Codeunit 131920;
+      LibraryERMCountryData@1002 : Codeunit 131305;
+      LibraryInventory@1003 : Codeunit 132201;
+    BEGIN
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryJob.CreateJob(Job);
+      Job.VALIDATE("Apply Usage Link",TRUE);
+      Job.MODIFY;
+      LibraryJob.CreateJobTask(Job,JobTask);
+      LibraryJob.CreateJobPlanningLine(JobPlanningLine."Line Type"::Schedule,JobPlanningLine.Type::Item,JobTask,JobPlanningLine);
+      JobPlanningLine.VALIDATE("No.",LibraryInventory.CreateItem(Item));
+      JobPlanningLine.VALIDATE(Quantity,RANDOM(1000));
+      JobPlanningLine.MODIFY;
+
+      LibrarySales.CreateCustomer(Customer);
+
+      ServiceHeader.INIT;
+      ServiceHeader.SetHideValidationDialog(TRUE);
+      ServiceHeader.VALIDATE("Document Type",ServiceHeader."Document Type"::Order);
+      ServiceHeader.VALIDATE("Customer No.",Customer."No.");
+      ServiceHeader.INSERT(TRUE);
+
+      ServiceLine.INIT;
+      ServiceLine.VALIDATE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.VALIDATE("Document No.",ServiceHeader."No.");
+      CASE JobPlanningLine.Type OF
+        JobPlanningLine.Type::Item:
+          ServiceLine.VALIDATE(Type,ServiceLine.Type::Item);
+        JobPlanningLine.Type::Resource:
+          ServiceLine.VALIDATE(Type,ServiceLine.Type::Resource);
+        JobPlanningLine.Type::"G/L Account":
+          ServiceLine.VALIDATE(Type,ServiceLine.Type::"G/L Account");
+      END;
+      ServiceLine.VALIDATE("No.",JobPlanningLine."No.");
+      ServiceLine."Job No." := Job."No.";
+      ServiceLine."Job Task No." := JobTask."Job Task No.";
+      ServiceLine."Job Line Type" := ServiceLine."Job Line Type"::Schedule;
+      ServiceLine.INSERT(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE TearDown@2();
+    BEGIN
+      CLEAR(Job);
+      CLEAR(JobTask);
+      CLEAR(JobPlanningLine);
+      CLEAR(ServiceHeader);
+      CLEAR(ServiceLine);
+      CLEAR(Customer);
+
+      ASSERTERROR ERROR(Text001Err);
+    END;
+
+    [Test]
+    PROCEDURE TestInitialization@3();
+    BEGIN
+      SetUp;
+
+      // Verify that "Job Planning Line No." is initialized correctly.
+      Assert.AreEqual(0,ServiceLine."Job Planning Line No.",'Job Planning Line No. is not 0 by default.');
+
+      // Verify that "Remaining Qty." is initialized correctly.
+      Assert.AreEqual(0,ServiceLine."Job Remaining Qty.",'Remaining Qty. is not 0 by default.');
+
+      // Verify that "Remaining Qty." is initialized correctly.
+      Assert.AreEqual(0,ServiceLine."Job Remaining Qty. (Base)",'Remaining Qty. is not 0 by default.');
+
+      TearDown;
+    END;
+
+    [Test]
+    PROCEDURE TestFieldLineType@10();
+    BEGIN
+      SetUp;
+
+      // Verify that "Line Type" is set to the correct value when a "Job Planning Line No." is set.
+      ServiceLine.VALIDATE("Job Line Type",0);
+      ServiceLine.VALIDATE("Job Planning Line No.",JobPlanningLine."Line No.");
+      Assert.AreEqual(JobPlanningLine."Line Type",ServiceLine."Job Line Type" - 1,
+        'Line type is not set correctly when Job Planning Line No. is defined.');
+
+      // Verify that "Line Type" can't be changed if a "Job Planning Line No." is defined.
+      ASSERTERROR ServiceLine.VALIDATE("Job Line Type",0);
+
+      TearDown;
+    END;
+
+    [Test]
+    PROCEDURE TestFieldRemainingQty@5();
+    VAR
+      QtyDelta@1001 : Decimal;
+      OldRemainingQty@1000 : Decimal;
+    BEGIN
+      SetUp;
+
+      // Verify that "Remaining Qty." can't be set if "Job Planning Line No." isn't set.
+      ASSERTERROR ServiceLine.VALIDATE("Job Remaining Qty.",RANDOM(ROUND(ServiceLine.Quantity,1)));
+
+      TearDown;
+
+      SetUp;
+
+      // Verify that "Remaining Qty." is set correctly when a "Job Planning Line No." is defined.
+      ServiceLine.TESTFIELD("Job Planning Line No.",0);
+      ServiceLine.TESTFIELD("Job Remaining Qty.",0);
+      ServiceLine.TESTFIELD("Job Remaining Qty. (Base)",0);
+      ServiceLine.TESTFIELD(Quantity,0);
+      ServiceLine.VALIDATE("Job Planning Line No.",JobPlanningLine."Line No.");
+      Assert.AreEqual(JobPlanningLine."Remaining Qty.",ServiceLine."Job Remaining Qty.",'Remaining Qty. is not set correctly');
+      Assert.AreEqual(JobPlanningLine."Remaining Qty. (Base)",ServiceLine."Job Remaining Qty. (Base)",
+        'Remaining Qty. (Base) is not set correctly');
+
+      WITH ServiceLine DO BEGIN
+        Assert.AreNearlyEqual("Job Remaining Qty." * "Unit Cost","Job Remaining Total Cost",0.01,
+          'Remaining Total Cost has wrong value after Remaining Qty is set.');
+        Assert.AreNearlyEqual("Job Remaining Qty." * "Unit Cost (LCY)","Job Remaining Total Cost (LCY)",0.01,
+          'Remaining Total Cost (LCY) has wrong value after Remaining Qty is set.');
+        Assert.AreNearlyEqual(HelperCalcLineAmount("Job Remaining Qty."),"Job Remaining Line Amount",0.01,
+          'Remaining Line Amount has wrong value after Remaining Qty is set.');
+      END;
+
+      // Verify that "Remaining Qty." changes correctly when Quantity is changed.
+      OldRemainingQty := ServiceLine."Job Remaining Qty.";
+      QtyDelta := RANDOM(ROUND(ServiceLine."Job Remaining Qty.",1));
+      ServiceLine.VALIDATE(Quantity,ServiceLine.Quantity + QtyDelta);
+      Assert.AreEqual(OldRemainingQty - QtyDelta,ServiceLine."Job Remaining Qty.",
+        'Remaining Qty. is not updated correctly');
+      // Test only valid because no Unit Of Measure Code is defined:
+      ServiceLine.TESTFIELD("Qty. per Unit of Measure",1);
+      Assert.AreEqual(ServiceLine."Job Remaining Qty.",ServiceLine."Job Remaining Qty. (Base)",
+        'Remaining Qty. (Base) is not updated correctly');
+
+      TearDown;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE HelperCalcLineAmount@7(Qty@1000 : Decimal) : Decimal;
+    VAR
+      TotalPrice@1001 : Decimal;
+    BEGIN
+      TotalPrice := ROUND(Qty * ServiceLine."Unit Price",0.01);
+      EXIT(TotalPrice - ROUND(TotalPrice * ServiceLine."Line Discount %" / 100,0.01));
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Service] [Job]
+      This unit test codeunit tests all fields added during implementation of feature 92820 - Planning and Execution Jobs and Service:
+
+      "Job Planning Line No."
+      "Remaining Qty."
+      "Remaining Qty. (Base)"
+      "Remaining Total Cost"
+      "Remaining Total Cost (LCY)"
+      "Remaining Line Amount"
+
+      In order to make the unit test orthogonal (i.e. independent) to other functionalities and tests,
+      data will be purely artificial (i.e. not real data created by other functionalities such as posting routines and the like).
+
+      Code snippets:
+      IF NOT CONFIRM('%1',TRUE,VAR) THEN ERROR('');
+    }
+    END.
+  }
+}
+

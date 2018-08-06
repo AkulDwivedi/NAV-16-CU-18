@@ -1,0 +1,2132 @@
+OBJECT Codeunit 136104 Service Posting - Credit Memo
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1005 : Codeunit 130000;
+      LibraryService@1006 : Codeunit 131902;
+      UseContractTemplateConfirm@1001 : TextConst 'ENU=Do you want to create the contract using a contract template?';
+      UnknownError@1002 : TextConst 'ENU=Unknown error.';
+      NothingToPostError@1000 : TextConst 'ENU=There is nothing to post.';
+      LibraryUtility@1015 : Codeunit 131000;
+      LibraryERM@1031 : Codeunit 131300;
+      LibraryInventory@1017 : Codeunit 132201;
+      LibrarySales@1032 : Codeunit 130509;
+      LibraryResource@1051 : Codeunit 130511;
+      LibraryRandom@1018 : Codeunit 130440;
+      LibraryVariableStorage@1019 : Codeunit 131004;
+      isInitialized@1009 : Boolean;
+      DocumentHeaderNo@1003 : Code[20];
+      DocumentType@1004 : Option;
+      ServiceHeaderExistError@1007 : TextConst 'ENU="The %1 must not exist. Identification fields and value: %2=''%3'',%4=''%5''."';
+      AmountMustMatchError@1008 : TextConst 'ENU=Amount in %1, %2 must match.';
+      ContractNo@1010 : Code[20];
+      FilePath@1011 : Text[1024];
+      CreditMemoError@1013 : TextConst 'ENU=A Service Credit Memo cannot be created because Service %1 %2 has at least one unposted Service Invoice linked to it.';
+      InvoiceError@1012 : TextConst 'ENU=Invoice cannot be created because amount to invoice for this invoice period is zero.';
+      ExpectedConfirm@1014 : TextConst 'ENU=The Credit Memo doesn''t have a Corrected Invoice No. Do you want to continue?';
+      AmountError@1020 : TextConst 'ENU=%1 must be %2 in %3.';
+      CorrectionErr@1016 : TextConst 'ENU=%1 must be negative in ledger entry for G/L Account %2.';
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE TestCrdtMemoCrtnFrmCreateCrdtM@7();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      SignServContractDoc@1004 : Codeunit 5944;
+      CreditMemoNo@1002 : Code[20];
+    BEGIN
+      // [SCENARIO] Post the Invoice and create Credit Memo from Create Credit Memo function.
+      // 1. Create and Sign a Service Contract with any Customer.
+      // 2. Post the Invoice and create Credit Memo from Create Credit Memo function.
+      // 3. Verify that the Service Lines in the Credit Memo correspond to the Service Lines in the Service Contract.
+
+      // [GIVEN] Create and sign Service Contract. Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // [WHEN] Create Service Credit Memo from Create Contract Line Credit Memos.
+      CreditMemoNo := CreateContractLineCreditMemo(ServiceContractLine);
+
+      // [THEN] Match the values in the Service Credit Memo Line with the values in the Service Contract Line.
+      VerifyCrditMemoLnWithContrctLn(ServiceContractLine,CreditMemoNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE TestCrdtMemoCrtnFrmRemCntrctLn@5();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceHeader@1004 : Record 5900;
+      TempServiceContractLine@1003 : TEMPORARY Record 5964;
+      SignServContractDoc@1000 : Codeunit 5944;
+    BEGIN
+      // [SCENARIO] Post the Invoice and create Credit Memo by running Remove Lines from Contract report.
+      // 1. Create and Sign a Service Contract with any Customer having field Automatic Credit Memos as TRUE on Service Contract Header.
+      // 2. Post the Invoice and create Credit Memo by running Remove Lines from Contract report.
+      // 3. Verify that the Service Line in the Credit Memo corresponds to the Service Line in the Service Contract.
+
+      // [GIVEN] Create Service Contract with Automatic Credit Memo as TRUE and sign Service Contract. Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE("Automatic Credit Memos",TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // Get refreshed instance of Service Contract Line and save Service Contract Lines in temporary table.
+      ServiceContractLine.GET(ServiceContractLine."Contract Type",ServiceContractLine."Contract No.",ServiceContractLine."Line No.");
+      SaveServiceContractLinesInTemp(TempServiceContractLine,ServiceContractLine);
+
+      // [WHEN] Create Service Credit Memo by running Remove Lines from Contract report.
+      RemoveLinesFromContract(ServiceContractLine);
+
+      // [THEN] Match the values in the Service Credit Memo Line with the values in the Service Contract Line.
+      FindServiceCreditMemo(ServiceHeader,ServiceContractHeader."Contract No.");
+      VerifyCrditMmLnWthTempCntrctLn(TempServiceContractLine,ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE TestCrdtMemoCrtnFrmDelCntrctLn@6();
+    VAR
+      ServiceContractHeader@1003 : Record 5965;
+      ServiceContractLine@1002 : Record 5964;
+      ServiceHeader@1001 : Record 5900;
+      ServiceContractLine2@1004 : Record 5964;
+      TempServiceContractLine@1006 : TEMPORARY Record 5964;
+      SignServContractDoc@1000 : Codeunit 5944;
+      LockOpenServContract@1005 : Codeunit 5943;
+    BEGIN
+      // [SCENARIO] Post the Invoice and create Credit Memo by deleting Service Contract Lines from Service Contract.
+      // 1. Create and Sign a Service Contract with any Customer having field Automatic Credit Memos as TRUE on Service Contract Header.
+      // 2. Post the Invoice and create Credit Memo by deleting Service Contract Lines from Service Contract.
+      // 3. Verify that the Service Lines in the Credit Memo correspond to the Service Lines in the Service Contract.
+
+      // [GIVEN] Create Service Contract with Automatic Credit Memo as TRUE and sign Service Contract. Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE("Automatic Credit Memos",TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // Get refreshed instance of Service Contract Header and save Service Contract Lines in temporary table.
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      SaveServiceContractLinesInTemp(TempServiceContractLine,ServiceContractLine);
+
+      // [WHEN] Open Service Contract. Create Service Credit Memo by deleting Service Contract Lines from Service Contract.
+      LockOpenServContract.OpenServContract(ServiceContractHeader);
+      ServiceContractLine2.SETRANGE("Contract Type",ServiceContractHeader."Contract Type");
+      ServiceContractLine2.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      ServiceContractLine2.DELETEALL(TRUE);
+
+      // [THEN] Match the values in the Service Credit Memo Line with the values in the Service Contract Line.
+      FindServiceCreditMemo(ServiceHeader,ServiceContractHeader."Contract No.");
+      VerifyCrditMmLnWthTempCntrctLn(TempServiceContractLine,ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse)]
+    PROCEDURE TestCrdtMemoCrtnFrmGtPrpdCntrc@9();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceHeader@1003 : Record 5900;
+      SignServContractDoc@1000 : Codeunit 5944;
+      ServContractManagement@1006 : Codeunit 5940;
+    BEGIN
+      // [SCENARIO] Create and post the Invoice and create Credit Memo using the Get Prepaid Contract Entries.
+      // 1. Create and Sign a Service Contract with any Customer.
+      // 2. Create and post the Invoice and create Credit Memo using the Get Prepaid Contract Entries.
+      // 3. Verify that the Service Lines in the Credit Memo correspond to the Service Lines in the Service Contract.
+
+      // [GIVEN] Create and sign Service Contract. Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE("Starting Date",CALCDATE('<-CM>',WORKDATE));  // Validate first date of month.
+      ServiceContractHeader.VALIDATE(Prepaid,TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      ServContractManagement.InitCodeUnit;
+      ServContractManagement.CreateInvoice(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // [WHEN] Create Service Credit Memo by inserting Credit Memo Header and running Get Prepaid Contract Entries.
+      LibraryService.CreateServiceHeader(
+        ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",ServiceContractHeader."Customer No.");
+      GetPrepaidContractEntry(ServiceHeader,ServiceContractHeader."Contract No.");
+
+      // [THEN] Match the values in the Service Credit Memo Line with the values in the Service Contract Line.
+      VerifyCrdtMmLnWthPrpdCntrctLn(ServiceContractLine,ServiceHeader."No.");
+    END;
+
+    [Test]
+    PROCEDURE TestCreditMemoCreation@15();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      // [SCENARIO] Create a new Credit Memo - Service Header, Service Lines for Item, G/L Account and Resource.
+      // 2. Verify that the application allows creation of Service Credit Memo Lines.
+
+      // Setup.
+      Initialize;
+
+      // [WHEN] Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateServiceCreditMemoLine(ServiceHeader);
+
+      // [THEN] Verify that the Service Credit Memo Lines are created.
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDFIRST;
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE TestPrtCrdtMmCrtnFrmCrteCrdtMm@45();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceContractLine2@1007 : Record 5964;
+      SignServContractDoc@1004 : Codeunit 5944;
+      ServContractManagement@1003 : Codeunit 5940;
+      LockOpenServContract@1005 : Codeunit 5943;
+      CreditMemoNo@1002 : Code[20];
+      ExpirationDate@1006 : Date;
+    BEGIN
+      // [SCENARIO] Create and post the Invoice. Change Contract "Expiration Date" on Service Contract Lines one by one and create Credit Memo from "Create Credit Memo" function for each Service Contract Line.
+      // 1. Create and Sign a Service Contract with any Customer.
+      // 2. Create and post the Invoice. Change Contract Expiration Date on Service Contract Lines one by one and create Credit Memo from
+      // Create Credit Memo function for each Service Contract Line.
+      // 3. Verify that the Service Lines in the Credit Memo correspond to the Service Lines in the Service Contract.
+
+      // [GIVEN] Create and sign Service Contract. Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE("Starting Date",CALCDATE('<-CM>',WORKDATE));  // Validate first date of month.
+      ServiceContractHeader.VALIDATE(Prepaid,TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      ServContractManagement.InitCodeUnit;
+      ServContractManagement.CreateInvoice(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // [WHEN] Change "Expiration Date" on Lines one by one and create Service Credit Memo from Create Contract Line Credit Memo.
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      LockOpenServContract.OpenServContract(ServiceContractHeader);
+      FindServiceContractLines(ServiceContractLine2,ServiceContractHeader);
+      ExpirationDate := CALCDATE('<+1D>',ServiceContractHeader."Starting Date");  // Expiration Date should be set after Starting Date.
+      REPEAT
+        ServiceContractLine2.VALIDATE("Credit Memo Date",ExpirationDate);
+        ServiceContractLine2.VALIDATE("Contract Expiration Date",ExpirationDate);
+        ServiceContractLine2.MODIFY(TRUE);
+        ExpirationDate := CALCDATE('<+1D>',ExpirationDate);  // Take different dates for different lines adding one day each time.
+        CreditMemoNo := ServContractManagement.CreateContractLineCreditMemo(ServiceContractLine2,FALSE);
+      UNTIL ServiceContractLine2.NEXT = 0;
+
+      // [THEN] Match the values in the Service Credit Memo Line with the values in the Service Contract Line.
+      VerifyCrditMemoLnWithContrctLn(ServiceContractLine2,CreditMemoNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE TestPrtCrdtMmCrtnFrmDlCntrctLn@23();
+    VAR
+      ServiceContractHeader@1003 : Record 5965;
+      ServiceContractLine@1002 : Record 5964;
+      ServiceHeader@1001 : Record 5900;
+      ServiceContractLine2@1004 : Record 5964;
+      TempServiceContractLine@1006 : TEMPORARY Record 5964;
+      SignServContractDoc@1000 : Codeunit 5944;
+      LockOpenServContract@1005 : Codeunit 5943;
+    BEGIN
+      // [SCENARIO] Post the Invoice and create Credit Memo by deleting Service Contract Lines from Service Contract one by one.
+      // 1. Create and Sign a Service Contract with any Customer having field Automatic Credit Memos as TRUE on Service Contract Header.
+      // 2. Post the Invoice and create Credit Memo by deleting Service Contract Lines from Service Contract one by one.
+      // 3. Verify that the Service Lines in the Credit Memo correspond to the Service Lines in the Service Contract.
+
+      // [GIVEN] Create Service Contract with Automatic Credit Memo as TRUE and sign Service Contract. Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE("Automatic Credit Memos",TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // Get refreshed instance of Service Contract Header and save Service Contract Lines in temporary table.
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      SaveServiceContractLinesInTemp(TempServiceContractLine,ServiceContractLine);
+
+      // [WHEN] Open Service Contract. Create Service Credit Memo by deleting Service Contract Lines from Service Contract one by one.
+      LockOpenServContract.OpenServContract(ServiceContractHeader);
+      FindServiceContractLines(ServiceContractLine2,ServiceContractHeader);
+      REPEAT
+        ServiceContractLine2.DELETE(TRUE);  // Delete one line at a time.
+      UNTIL ServiceContractLine2.NEXT = 0;
+
+      // [THEN] Match the values in the Service Credit Memo Line with the values in the Service Contract Line.
+      FindServiceCreditMemo(ServiceHeader,ServiceContractHeader."Contract No.");
+      VerifyCrditMmLnWthTempCntrctLn(TempServiceContractLine,ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE TestPrtCrdtMmCrtnFrmRmCntrctLn@24();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceHeader@1004 : Record 5900;
+      TempServiceContractLine@1003 : TEMPORARY Record 5964;
+      SignServContractDoc@1000 : Codeunit 5944;
+      LockOpenServContract@1005 : Codeunit 5943;
+    BEGIN
+      // [SCENARIO] Post the Invoice and create Credit Memo by running Remove Lines from Contract report for one Service Contract Line at a time.
+      // 1. Create and Sign a Service Contract with any Customer having field Automatic Credit Memos as TRUE on Service Contract Header.
+      // 2. Post the Invoice and create Credit Memo by running Remove Lines from Contract report for one Service Contract Line at a time.
+      // 3. Verify that the Service Line in the Credit Memo corresponds to the Service Line in the Service Contract.
+
+      // [GIVEN] Create Service Contract with Automatic Credit Memo as TRUE and sign Service Contract. Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE("Automatic Credit Memos",TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // Get refreshed instance of Service Contract Line and save Service Contract Lines in temporary table.
+      ServiceContractLine.GET(ServiceContractLine."Contract Type",ServiceContractLine."Contract No.",ServiceContractLine."Line No.");
+      SaveServiceContractLinesInTemp(TempServiceContractLine,ServiceContractLine);
+
+      // [WHEN] Create Service Credit Memo by running Remove Lines from Contract report for one Service Contract Line at a time.
+      FindServiceContractLines(ServiceContractLine,ServiceContractHeader);
+      REPEAT
+        LockOpenServContract.OpenServContract(ServiceContractHeader);
+        RemoveLinesFromContractFrOneLn(ServiceContractLine);
+      UNTIL ServiceContractLine.NEXT = 0;
+
+      // [THEN] Match the values in the Service Credit Memo Line with the values in the Service Contract Line.
+      FindServiceCreditMemo(ServiceHeader,ServiceContractHeader."Contract No.");
+      VerifyCrditMmLnWthTempCntrctLn(TempServiceContractLine,ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE TestCrdtMmCrtnAfterDltnCrdtMem@22();
+    VAR
+      ServiceContractHeader@1003 : Record 5965;
+      ServiceContractLine@1002 : Record 5964;
+      ServiceHeader@1001 : Record 5900;
+      ServiceContractLine2@1004 : Record 5964;
+      TempServiceContractLine@1006 : TEMPORARY Record 5964;
+      SignServContractDoc@1000 : Codeunit 5944;
+      LockOpenServContract@1005 : Codeunit 5943;
+    BEGIN
+      // [SCENARIO] Create a new Credit Memo by deleting the remaining Service Contract Lines from Service Contract.
+      // 1. Create and Sign a Service Contract with any Customer having field Automatic Credit Memos as TRUE on Service Contract Header.
+      // 2. Post the Invoice and create a Credit Memo by deleting the first Service Contract Line from Service Contract.
+      // 3. Delete the Credit Memo created in Step 2.
+      // 4. Create a new Credit Memo by deleting the remaining Service Contract Lines from Service Contract.
+      // 5. Verify that the Service Lines in the Credit Memo correspond to the Service Lines in the Service Contract.
+
+      // [GIVEN] Create Service Contract with Automatic Credit Memo as TRUE and sign Service Contract. Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE("Automatic Credit Memos",TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // [GIVEN] Open Service Contract. Create Service Credit Memo by deleting the first Service Contract Line from Service Contract.
+      // [WHEN] Delete the Credit Memo and create a new Credit Memo by deleting remaining lines.
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      LockOpenServContract.OpenServContract(ServiceContractHeader);
+      FindServiceContractLines(ServiceContractLine2,ServiceContractHeader);
+      ServiceContractLine2.DELETE(TRUE);
+
+      FindServiceCreditMemo(ServiceHeader,ServiceContractHeader."Contract No.");
+      ServiceHeader.DELETE(TRUE);
+
+      // Get refreshed instance of Service Contract Header and save Service Contract Lines in temporary table.
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      SaveServiceContractLinesInTemp(TempServiceContractLine,ServiceContractLine);
+
+      LockOpenServContract.OpenServContract(ServiceContractHeader);
+      ServiceContractLine2.DELETEALL(TRUE);
+
+      // [THEN] Match the values in the Service Credit Memo Line with the values in the Service Contract Line.
+      FindServiceCreditMemo(ServiceHeader,ServiceContractHeader."Contract No.");
+      VerifyCrditMmLnWthTempCntrctLn(TempServiceContractLine,ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE TestCrdtMemoDltnFrmCrtCrdtM@27();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceHeader@1003 : Record 5900;
+      SignServContractDoc@1004 : Codeunit 5944;
+    BEGIN
+      // [SCENARIO] Post the Invoice and create Credit Memo from Create Credit Memo function. Delete the Credit Memo.
+      // 1. Create and Sign a Service Contract with any Customer.
+      // 2. Post the Invoice and create Credit Memo from Create Credit Memo function.
+      // 3. Delete the Credit Memo.
+      // 4. Verify that the value of the field No. of Unposted Credit Memos in the Service Contract Header is 0.
+
+      // [GIVEN] Create and sign Service Contract. Post the Service Invoice. Create Service Credit Memo from Create Contract Line
+      // Credit Memo.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+      CreateContractLineCreditMemo(ServiceContractLine);
+
+      // [WHEN] Delete the Credit Memo.
+      FindServiceCreditMemo(ServiceHeader,ServiceContractHeader."Contract No.");
+      ServiceHeader.DELETE(TRUE);
+
+      // [THEN] Check that the value of the field No. of Unposted Credit Memos in the Service Contract Header is 0 .
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      ServiceContractHeader.CALCFIELDS("No. of Unposted Credit Memos");
+      ServiceContractHeader.TESTFIELD("No. of Unposted Credit Memos",0);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse)]
+    PROCEDURE TestCrdtMemoDltnFrmGtPrpdCntrc@32();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceHeader@1003 : Record 5900;
+      SignServContractDoc@1000 : Codeunit 5944;
+      ServContractManagement@1006 : Codeunit 5940;
+      Assert@1004 : Codeunit 130000;
+      CreditMemoNo@1005 : Code[20];
+    BEGIN
+      // [SCENARIO] Create and post the Invoice and create Credit Memo using the Get Prepaid Contract Entries. Delete the Credit Memo.
+      // 1. Create and Sign a Service Contract with any Customer.
+      // 2. Create and post the Invoice and create Credit Memo using the Get Prepaid Contract Entries.
+      // 3. Delete the Credit Memo.
+      // 4. Verify that the Credit Memo has been deleted.
+
+      // [GIVEN] Create and sign Service Contract. Post the Service Invoice. Create Service Credit Memo by inserting Credit Memo Header and running Get Prepaid Contract Entries.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE("Starting Date",CALCDATE('<-CM>',WORKDATE));  // Validate first date of month.
+      ServiceContractHeader.VALIDATE(Prepaid,TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      ServContractManagement.InitCodeUnit;
+      ServContractManagement.CreateInvoice(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      LibraryService.CreateServiceHeader(
+        ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",ServiceContractHeader."Customer No.");
+      GetPrepaidContractEntry(ServiceHeader,ServiceContractHeader."Contract No.");
+
+      // [WHEN] Delete the Credit Memo.
+      CreditMemoNo := ServiceHeader."No.";
+      ServiceHeader.DELETE(TRUE);
+
+      // [THEN] Check that the Credit Memo has been deleted.
+      Assert.IsFalse(
+        ServiceHeader.GET(ServiceHeader."Document Type"::"Credit Memo",CreditMemoNo),
+        STRSUBSTNO(
+          ServiceHeaderExistError,
+          ServiceHeader.TABLECAPTION,ServiceHeader.FIELDCAPTION("Document Type"),
+          ServiceHeader."Document Type",ServiceHeader.FIELDCAPTION("No."),ServiceHeader."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(InvoiceESConfirmHandler)]
+    PROCEDURE TestCreditMemoPostingFrNullQty@33();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      Assert@1003 : Codeunit 130000;
+    BEGIN
+      // [SCENARIO] Create a new Credit Memo - Service Header, Service Lines for Item, G/L Account and Resource with 0 Quantity. Post the Credit Memo.
+      // 1. Create a new Credit Memo - Service Header, Service Lines for Item, G/L Account and Resource with 0 Quantity.
+      // 2. Post the Credit Memo.
+      // 3. Verify that the application generates an error as 'There is nothing to post'.
+
+      // [GIVEN] Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateServiceCreditMemoLine(ServiceHeader);
+
+      // [WHEN] Post the Credit Memo.
+      ExecuteConfirmHandlerInvoiceES;
+      ASSERTERROR LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // [THEN] Verify that the application generates an error as 'There is nothing to post'.
+      Assert.AreEqual(STRSUBSTNO(NothingToPostError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvoiceESConfirmHandler)]
+    PROCEDURE TestCreditMemoPostingFrGLAcct@28();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      TempServiceLine@1004 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO] Create a new Credit Memo - Service Header, Service Lines for G/L Account with random Quantity. Post the Credit Memo.
+      // 1. Create a new Credit Memo - Service Header, Service Lines for G/L Account with random Quantity.
+      // 2. Post the Credit Memo.
+      // 3. Verify that the Service Cr. Memo Line, G/L Entry, Detailed Cust. Ledger Entry and VAT Entry tables correspond to the
+      // relevant Credit Memo Lines.
+
+      // [GIVEN] Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateServCrdtMmLnGLAccWithQty(ServiceHeader);
+
+      // [WHEN] Save Service Credit Memo Lines in temporary table and post the Credit Memo.
+      SaveServCreditMemoLinesInTemp(TempServiceLine,ServiceHeader);
+      ExecuteConfirmHandlerInvoiceES;
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // [THEN] Match the values in the Service Cr. Memo Line, G/L Entry, Detailed Cust. Ledger Entry and VAT Entry tables with the values in the Service Credit Memo Line.
+      VerifyCrdtMmLnWthPstdCrdtMmLn(TempServiceLine);
+      VerifyCreditMemoGLEntries(TempServiceLine);
+      VerifyCreditMemoDetCustLedEnt(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvoiceESConfirmHandler)]
+    PROCEDURE TestCreditMemoPostingForItem@35();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      TempServiceLine@1004 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO] Create a new Credit Memo - Service Header, Service Lines for Item with random Quantity. Post the Credit Memo.
+      // 1. Create a new Credit Memo - Service Header, Service Lines for Item with random Quantity.
+      // 2. Post the Credit Memo.
+      // 3. Verify that the Service Cr. Memo Line, G/L Entry, Detailed Cust. Ledger Entry and VAT Entry tables correspond to the
+      // relevant Credit Memo Lines.
+
+      // [GIVEN] Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateServCrdtMmLneItemWithQty(ServiceHeader);
+
+      // [WHEN] Save Service Credit Memo Lines in temporary table and post the Credit Memo.
+      SaveServCreditMemoLinesInTemp(TempServiceLine,ServiceHeader);
+      ExecuteConfirmHandlerInvoiceES;
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // [THEN] Match the values in the Service Cr. Memo Line, G/L Entry, Detailed Cust. Ledger Entry, VAT Entry and Value Entry tables with the values in the Service Credit Memo Line.
+      VerifyCrdtMmLnWthPstdCrdtMmLn(TempServiceLine);
+      VerifyCreditMemoGLEntries(TempServiceLine);
+      VerifyCreditMemoDetCustLedEnt(TempServiceLine);
+      //VerifyCreditMemoVATEntries(TempServiceLine);ss
+      VerifyCreditMemoValueEntries(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvoiceESConfirmHandler)]
+    PROCEDURE TestCreditMemoPostingFrResourc@40();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      TempServiceLine@1004 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO] Post Service Credit Memo - Service Header, Service Lines for Resource with random Quantity
+      // 1. Create a new Credit Memo - Service Header, Service Lines for Resource with random Quantity.
+      // 2. Post the Credit Memo.
+      // 3. Verify that the Service Cr. Memo Line, G/L Entry, Detailed Cust. Ledger Entry and VAT Entry tables correspond to the
+      // relevant Credit Memo Lines.
+
+      // [GIVEN] Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateServCrdtMmLnRsrceWithQty(ServiceHeader);
+
+      // [WHEN] Save Service Credit Memo Lines in temporary table and post the Credit Memo.
+      SaveServCreditMemoLinesInTemp(TempServiceLine,ServiceHeader);
+      ExecuteConfirmHandlerInvoiceES;
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // [THEN] Match the values in the Service Cr. Memo Line, G/L Entry, Detailed Cust. Ledger Entry and VAT Entry tables with the values in the Service Credit Memo Line.
+      VerifyCrdtMmLnWthPstdCrdtMmLn(TempServiceLine);
+      VerifyCreditMemoGLEntries(TempServiceLine);
+      VerifyCreditMemoDetCustLedEnt(TempServiceLine);
+      //VerifyCreditMemoVATEntries(TempServiceLine);ss
+    END;
+
+    [Test]
+    [HandlerFunctions(InvoiceESConfirmHandler)]
+    PROCEDURE TestCrditMemoPostingFrDiffType@39();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      TempServiceLine@1004 : TEMPORARY Record 5902;
+    BEGIN
+      // [SCENARIO] Post Service Credit Memo - Service Header, Service Lines for all Types with random Quantity.
+      // 1. Create a new Credit Memo - Service Header, Service Lines for all Types with random Quantity.
+      // 2. Post the Credit Memo.
+      // 3. Verify that the Service Cr. Memo Line, G/L Entry, Detailed Cust. Ledger Entry and VAT Entry tables correspond to the
+      // relevant Credit Memo Lines.
+
+      // [GIVEN] Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateServCrdtMmLnGLAccWithQty(ServiceHeader);
+      CreateServCrdtMmLneItemWithQty(ServiceHeader);
+      CreateServCrdtMmLnRsrceWithQty(ServiceHeader);
+
+      // [WHEN] Save Service Credit Memo Lines in temporary table and post the Credit Memo.
+      SaveServCreditMemoLinesInTemp(TempServiceLine,ServiceHeader);
+      ExecuteConfirmHandlerInvoiceES;
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // [THEN] Match the values in the Service Cr. Memo Line, G/L Entry, Detailed Cust. Ledger Entry and VAT Entry tables with the values in the Service Credit Memo Line.
+      VerifyCrdtMmLnWthPstdCrdtMmLn(TempServiceLine);
+      VerifyCreditMemoGLEntries(TempServiceLine);
+      VerifyCreditMemoDetCustLedEnt(TempServiceLine);
+      //VerifyCreditMemoVATEntries(TempServiceLine);ss
+      TempServiceLine.SETRANGE(Type,TempServiceLine.Type::Item);
+      VerifyCreditMemoValueEntries(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(InvoiceESConfirmHandler,ApplyCustEntrsModalFormHandler)]
+    PROCEDURE TestCreditMemoAppToFieldsCrdMm@43();
+    VAR
+      Customer@1001 : Record 18;
+      ServiceHeader@1000 : Record 5900;
+      SalesHeader@1003 : Record 36;
+      CustLedgerEntry@1004 : Record 21;
+      DocumentNo@1005 : Code[20];
+    BEGIN
+      // [FEATURE] [Applies-to]
+      // [SCENARIO]  "Applies-to ID" field on the Service Credit Header is filled in with the number of Service Credit Memo created
+      // 1. Create and post Sales Credit Memo.
+      // 2. Create a new Service Credit Memo - Service Header, Service Lines for all Types with random Quantity.
+      // 3. Apply Customer Entries through Apply Entries function and select the Sales Credit Memo created for application.
+      // 4. Verify that the Applies-to ID field on the Service Credit Memo Header is filled in with the number of the Service Credit Memo
+      // created and the fields Applies-to Doc. Type and Applies-to Doc. No. are blank.
+
+      // [GIVEN] Create and post Sales Credit Memo. Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      CreateSalesCreditMemo(SalesHeader,Customer."No.");
+      ExecuteConfirmHandlerInvoiceES;
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,FALSE,FALSE);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",Customer."No.");
+      CreateServCrdtMmLnGLAccWithQty(ServiceHeader);
+      CreateServCrdtMmLneItemWithQty(ServiceHeader);
+      CreateServCrdtMmLnRsrceWithQty(ServiceHeader);
+
+      // [WHEN] Apply Customer Entries through Apply Entries function and select the Sales Credit Memo created for application.
+      DocumentHeaderNo := DocumentNo;
+      DocumentType := CustLedgerEntry."Document Type"::"Credit Memo";
+      CODEUNIT.RUN(CODEUNIT::"Service Header Apply",ServiceHeader);
+
+      // [THEN] Check that Applies-to ID field on the Service Credit Header is filled in with the number of Service Credit Memo created
+      // [THEN] the fields Applies-to Doc. Type and Applies-to Doc. No. are blank.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.TESTFIELD("Applies-to ID",ServiceHeader."No.");
+      ServiceHeader.TESTFIELD("Applies-to Doc. Type",ServiceHeader."Applies-to Doc. Type"::" ");
+      ServiceHeader.TESTFIELD("Applies-to Doc. No.",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(ApplyCustEntrsModalFormHandler,InvoiceESConfirmHandler)]
+    PROCEDURE TestCreditMemoAppToFieldsInv@48();
+    VAR
+      Customer@1001 : Record 18;
+      ServiceHeader@1000 : Record 5900;
+      SalesHeader@1003 : Record 36;
+      CustLedgerEntry@1004 : Record 21;
+      DocumentNo@1005 : Code[20];
+    BEGIN
+      // [FEATURE] [Applies-to]
+      // [SCENARIO] "Applies-to ..." fields on the Service Credit Header are filled correctly according to Sales Invoice created.
+      // 1. Create and post Sales Invoice.
+      // 2. Create a new Service Credit Memo - Service Header, Service Lines for all Types with random Quantity.
+      // 3. Apply Customer Entries through Applies-to Doc. No. lookup and select the Sales Invoice created for application.
+      // 4. Verify that the Applies-to Doc. No. field on Service Credit Memo Header is filled in with the number of the Invoice created.
+
+      // [GIVEN] Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+
+      CreateSalesInvoice(SalesHeader,Customer."No.");
+      ExecuteConfirmHandlerInvoiceES;
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,FALSE,FALSE);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",Customer."No.");
+      UpdatePaymentMethodCode(ServiceHeader,Customer."Payment Method Code");
+      CreateServCrdtMmLnGLAccWithQty(ServiceHeader);
+      CreateServCrdtMmLneItemWithQty(ServiceHeader);
+      CreateServCrdtMmLnRsrceWithQty(ServiceHeader);
+
+      // [WHEN] Apply Customer Entries through Applies-to Doc No. lookup and select the Sales Credit Memo created for application.
+      DocumentHeaderNo := DocumentNo;
+      DocumentType := CustLedgerEntry."Document Type"::Invoice;
+      ApplyCustLedgerEntries(ServiceHeader,DocumentNo,CustLedgerEntry."Document Type"::Invoice);
+
+      // [THEN] Check that Applies-to fields on the Service Credit Header are filled correctly according to Sales Invoice created.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.TESTFIELD("Applies-to Doc. Type",ServiceHeader."Applies-to Doc. Type"::Invoice);
+      ServiceHeader.TESTFIELD("Applies-to Doc. No.",DocumentNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ApplyCustEntrsModalFormHandler,InvoiceESConfirmHandler)]
+    PROCEDURE TestCreditMemoAppToCrMm@51();
+    VAR
+      Customer@1001 : Record 18;
+      ServiceHeader@1000 : Record 5900;
+      SalesHeader@1003 : Record 36;
+      CustLedgerEntry@1004 : Record 21;
+      DocumentNo@1005 : Code[20];
+    BEGIN
+      // [FEATURE] [Applies-to]
+      // [SCENARIO] "Applies-to ..." fields on the Service Credit Header are filled correctly according to Sales Credit Memo created.
+      // 1. Create and post Sales Credit Memo.
+      // 2. Create a new Service Credit Memo - Service Header, Service Lines for all Types with random Quantity.
+      // 3. Apply Customer Entries through Applies-to Doc. No. lookup and select the Sales Credit Memo created for application.
+      // 4. Verify that the Applies-to Doc. No. field on Service Credit Memo Header is filled in with the number of Credit Memo created.
+
+      // [GIVEN] Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+
+      CreateSalesCreditMemo(SalesHeader,Customer."No.");
+      ExecuteConfirmHandlerInvoiceES;
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,FALSE,FALSE);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",Customer."No.");
+      CreateServCrdtMmLnGLAccWithQty(ServiceHeader);
+      CreateServCrdtMmLneItemWithQty(ServiceHeader);
+      CreateServCrdtMmLnRsrceWithQty(ServiceHeader);
+
+      // [WHEN] Apply Customer Entries through Applies-to Doc. No. lookup and select the Sales Credit Memo created for application.
+      DocumentHeaderNo := DocumentNo;
+      DocumentType := CustLedgerEntry."Document Type"::"Credit Memo";
+      ApplyCustLedgerEntries(ServiceHeader,DocumentNo,CustLedgerEntry."Document Type"::"Credit Memo");
+
+      // [THEN] Check that Applies-to fields on the Service Credit Header are filled correctly according to Sales Credit Memo created.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.TESTFIELD("Applies-to Doc. Type",ServiceHeader."Applies-to Doc. Type"::"Credit Memo");
+      ServiceHeader.TESTFIELD("Applies-to Doc. No.",DocumentNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ApplyCustEntrsModalFormHandler,InvoiceESConfirmHandler)]
+    PROCEDURE TestCustLedgerEntryCorrection@55();
+    VAR
+      Customer@1001 : Record 18;
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      Item@1003 : Record 27;
+      ServiceInvoiceHeader@1004 : Record 5992;
+      CustLedgerEntry@1005 : Record 21;
+      ServiceInvoiceAmount@1006 : Decimal;
+      ServiceInvoiceQuantity@1007 : Decimal;
+      ServiceInvoiceUnitPrice@1008 : Decimal;
+    BEGIN
+      // [SCENARIO] "Remaining Amount" in the Customer Ledger Entry for posted Service Invoice is the difference of "Amount Including VAT" of the Service Invoice and the Amount Including VAT of the Service Credit Memo.
+      // 1. Create and post a Service Invoice - create Service Header, Service Line.
+      // 2. Create a new Service Credit Memo - Service Header, Service Lines for Type Item with Quantity equal to that of Service Invoice
+      // Line and Unit Price less than that of Invoice.
+      // 3. Apply Customer Entries through Apply Entries function and select the Service Invoice created for application. Post the
+      // Service Credit Memo.
+      // 4. Check that the Remaining Amount in the Customer Ledger Entry for posted Service Invoice is the difference of the Amount
+      // Including VAT of the Service Invoice and the Amount Including VAT of the Service Credit Memo.
+
+      // [GIVEN] Create and post a Service Invoice - Create Service Header, Service Line. Create Service Credit Memo - Service Header and
+      // Service Line.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      CreateItemWithPrice(Item);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,Customer."No.");
+      ServiceHeader.VALIDATE("Prices Including VAT",TRUE);
+      ServiceHeader.MODIFY(TRUE);
+
+      CreateServiceLineWithRandomQty(ServiceLine,ServiceHeader,Item."No.");
+      ServiceInvoiceAmount := ServiceLine."Amount Including VAT";
+      ServiceInvoiceUnitPrice := ServiceLine."Unit Price";
+      ServiceInvoiceQuantity := ServiceLine.Quantity;
+      ExecuteConfirmHandlerInvoiceES;
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      ServiceInvoiceHeader.SETRANGE("Pre-Assigned No.",ServiceHeader."No.");
+      ServiceInvoiceHeader.FINDFIRST;
+      DocumentHeaderNo := ServiceInvoiceHeader."No.";
+      DocumentType := CustLedgerEntry."Document Type"::Invoice;
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",Customer."No.");
+      UpdatePaymentMethodCode(ServiceHeader,Customer."Payment Method Code");
+      ServiceHeader.VALIDATE("Prices Including VAT",TRUE);
+      ServiceHeader.MODIFY(TRUE);
+
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,Item."No.");
+      ServiceLine.VALIDATE(Quantity,ServiceInvoiceQuantity);  // Quantity of Credit Memo should be same as that of Invoice.
+      // Validate Unit Price less than that of Invoice.
+      ServiceLine.VALIDATE("Unit Price",ServiceInvoiceUnitPrice - 1);
+      ServiceLine.MODIFY(TRUE);
+
+      // [WHEN] Apply Customer Entries through Apply Entries function and select the Service Invoice created for application. Post the Service Credit Memo.
+      CODEUNIT.RUN(CODEUNIT::"Service Header Apply",ServiceHeader);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");  // Get refreshed instance.
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // [THEN] Check that the Remaining Amount in the Customer Ledger Entry for posted Service Invoice is the difference of
+      // [THEN] the Amount Including VAT of the Service Invoice and the Amount Including VAT of the Service Credit Memo.
+      VerifyCustLedgEntryRemAmount(ServiceInvoiceHeader."No.",ServiceLine."Amount Including VAT",ServiceInvoiceAmount);
+    END;
+
+    [Test]
+    PROCEDURE TestCreditMemoPostWithCorrection@56();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      GLAccount@1001 : Record 15;
+    BEGIN
+      // [FEATURE] [Correction]
+      // [SCENARIO 356056] G/L entries posted as "Correction" by Credit Memo - Service Header, Service Lines for G/L Account.
+      // 1. Create a new Credit Memo - Service Header, Service Lines for G/L Account.
+      // 2. Verify that the application posts negative debit and credit amounts for corrective entries
+
+      // [GIVEN] Set Credit Memo As "Correction"
+      Initialize;
+      SetCreditMemoAsCorrection;
+
+      // [WHEN] Create Service Credit Memo by inserting Credit Memo Header and Service Credit Memo Lines.
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      LibraryERM.FindGLAccount(GLAccount);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::"G/L Account",GLAccount."No.");
+      ServiceLine.VALIDATE(Quantity,1);
+      ServiceLine.VALIDATE("Unit Price",LibraryRandom.RandDec(1000,2));
+      ServiceLine.MODIFY(TRUE);
+
+      // [WHEN] Post the Credit Memo.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // [THEN] Verify that the G/L entries posted as "Correction"
+      VerifyCreditMemoCorrectionGLEntries(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandlerFalse)]
+    PROCEDURE MatchAmountCreditMemoInvoice@53();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceHeader@1003 : Record 5900;
+      SignServContractDoc@1004 : Codeunit 5944;
+      CreditMemoNo@1002 : Code[20];
+    BEGIN
+      // [SCENARIO 158079] Service credit memo provides same amounts as invoiced amounts when created from same service contract.
+
+      // [GIVEN] Create and sign Service Contract.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+
+      // [WHEN] Post the Service Invoice. Create Service Credit Memo from Contract. Post the Credit Memo.
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+      CreditMemoNo := CreateContractLineCreditMemo(ServiceContractLine);
+
+      ServiceHeader.GET(ServiceHeader."Document Type"::"Credit Memo",CreditMemoNo);
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // [THEN] Match the values in the Service Credit Memo Line with the values in the Service Contract Line.
+      // [THEN] Match the Amount in Service Invoice and Credit Memo.
+      VerifyCreditMemoWithContract(ServiceContractHeader."Contract No.");
+      VerifyAmountInvoiceCreditMemo(ServiceContractHeader."Contract No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(CheckCreditLimitFormHandler)]
+    PROCEDURE CreditLimitWarningOnOrder@60();
+    VAR
+      Customer@1000 : Record 18;
+      SalesReceivablesSetup@1001 : Record 311;
+      ServiceHeader@1003 : Record 5900;
+      CreditWarnings@1002 : Option;
+    BEGIN
+      // [SCENARIO 158079] The application creates credit limit warning when creating a service order on the Customer Card.
+
+      // [GIVEN] Setup Credit Warning field on Sales and Receivables Setup. Create Customer, Service Order for the Customer.
+      Initialize;
+      SalesReceivablesSetup.GET;
+      CreditWarnings := SalesReceivablesSetup."Credit Warnings";
+      SalesReceivablesSetup.VALIDATE("Credit Warnings",SalesReceivablesSetup."Credit Warnings"::"Both Warnings");
+      SalesReceivablesSetup.MODIFY(TRUE);
+      LibrarySales.CreateCustomer(Customer);
+      CreateServiceOrder(ServiceHeader,Customer."No.");
+
+      // [WHEN] Post the Service Order as Ship and Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // [THEN] Creating Service Order with same Customer creates credit limit warning handled by Form Handler.
+      CLEAR(ServiceHeader);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+
+      // 4. TearDown: Reset the value of Credit Warning field on Sales and Receivables Setup.
+      SalesReceivablesSetup.VALIDATE("Credit Warnings",CreditWarnings);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler,ReportHandlerContractInvoice)]
+    PROCEDURE ContractInvoiceReport@80();
+    VAR
+      ServiceContractHeader@1007 : Record 5965;
+      ServiceContractLine@1006 : Record 5964;
+      SignServContractDoc@1004 : Codeunit 5944;
+      CreateInvoices@1003 : 'Create Invoices,Print Only';
+    BEGIN
+      // [SCENARIO 160852] Contract Invoice Report run successfully from Create Contract Invoices Report.
+
+      // [GIVEN] Create and Sign Service Contract.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+
+      // set Global Variable for Report Handler.
+      ContractNo := ServiceContractHeader."Contract No.";
+      COMMIT;
+
+      // [WHEN] Run Report Create Service Invoice with Print Only Option and Save Service Invoice Report automatically run from it.
+      CreateServiceInvoiceFromReport(ServiceContractHeader."Contract No.",CreateInvoices::"Print Only");
+
+      // [THEN] Verify that Saved Report have some data.
+      LibraryUtility.CheckFileNotEmpty(FilePath);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE ServiceInvoiceByContract@81();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1004 : TEMPORARY Record 5902;
+      SignServContractDoc@1002 : Codeunit 5944;
+    BEGIN
+      // [SCENARIO 168064] "Customer No." and "Line Amount" in Service Invoice Header and Line after posting Service Invoice with the line copied from Service Contract.
+
+      // [GIVEN] Create and sign Service Contract, get and copy Service Lines.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      GetServiceLinesFromContract(ServiceLine,ServiceContractHeader."Contract No.");
+      CopyServiceLines(ServiceLine,TempServiceLine);
+
+      // [WHEN] Post the Service Invoice.
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // [THEN] Verify the Customer and Line Amount in Service Invocie Header and Service Invoice Line.
+      VerifyServiceInvoiceHeaderLine(TempServiceLine,ServiceContractHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE CreditMemoCreationError@90();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      SignServContractDoc@1004 : Codeunit 5944;
+    BEGIN
+      // [SCENARIO 172908] Error occurs on Creation of Service Credit Memo from Service Contract having Unposted Service Invoices.
+
+      // [GIVEN] Create and sign Service Contract.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+
+      // [WHEN] Create Service Credit Memo from Service Contract.
+      ASSERTERROR CreateContractLineCreditMemo(ServiceContractLine);
+
+      // [THEN] Verify error occurs "Service Credit Memo cannot be created".
+      Assert.AreEqual(
+        STRSUBSTNO(CreditMemoError,ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No."),
+        GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse,MessageHandler)]
+    PROCEDURE InvoiceCreationError@89();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      SignServContractDoc@1004 : Codeunit 5944;
+      ServContractManagement@1003 : Codeunit 5940;
+    BEGIN
+      // [SCENARIO 172908] Error occurs on Creation of Service Invoice from Service Contract having Unposted Service Credit Memo.
+
+      // [GIVEN] Create and sign Service Contract, Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // [WHEN] Create Service Credit Memo from Service Contract and Create Service Invoice.
+      CreateContractLineCreditMemo(ServiceContractLine);
+
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      ServContractManagement.InitCodeUnit;
+      ASSERTERROR ServContractManagement.CreateInvoice(ServiceContractHeader);
+
+      // [THEN] Verify error occurs "Invoice cannot be created".
+      Assert.AreEqual(STRSUBSTNO(InvoiceError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandlerFalse)]
+    PROCEDURE FieldsOnServiceLedgerEntry@88();
+    VAR
+      ServiceHeader@1006 : Record 5900;
+      TempServiceLine@1011 : TEMPORARY Record 5902;
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1004 : Record 5964;
+      SignServContractDoc@1003 : Codeunit 5944;
+    BEGIN
+      // [SCENARIO 235040] Posting a Service Credit Memo with a Service Lines of Type Item and Resource with Contract No.
+
+      // [GIVEN] Create and sign Service Contract. Post the Service Invoice.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      PostServiceInvoice(ServiceContractHeader."Contract No.");
+
+      // [WHEN] Create and Post the Service Credit Memo using the Contract No.
+      LibraryService.CreateServiceHeader(
+        ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",ServiceContractHeader."Customer No.");
+      CreateCreditMemoItemLine(ServiceHeader,ServiceContractHeader."Contract No.");
+      CreateCreditMemoResourceLine(ServiceHeader,ServiceContractHeader."Contract No.");
+      SaveServCreditMemoLinesInTemp(TempServiceLine,ServiceHeader);
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+
+      // [THEN] Verify program populates correct values on Service Ledger Entry after posting service credit memos with Contracts No.
+      // [THEN] Verify that the G/L Entry created correspond with the relevant Service Credit Memo Lines.
+      VerifyCreditMemoServiceLedger(TempServiceLine);
+      VerifyCreditMemoGLEntries(TempServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerTrue,MessageHandler,ServContrctTemplateListHandler)]
+    PROCEDURE ServiceCreditMemoCheckItemLedgerEntry@112();
+    VAR
+      Item@1001 : Record 27;
+      ServiceLine@1000 : Record 5902;
+      ServiceContractHeader@1005 : Record 5965;
+      ServiceContractLine@1006 : Record 5964;
+      SignServContractDoc@1007 : Codeunit 5944;
+      ServiceCreditMemo@1009 : TestPage 5935;
+      No@1004 : Code[20];
+      CustomerNo@1003 : Code[20];
+      Quantity@1008 : Decimal;
+    BEGIN
+      // [SCENARIO 143443] Create Service Credit Memo, post it and verify Item Ledger Entry.
+
+      // [GIVEN] Find Item, create Service Contract, sign it and create Customer without Price Including VAT.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      CustomerNo := CustomerWithPriceIncludingVAT(FALSE);
+
+      // [WHEN] Create Service Credit Memo with Contract No and post it.
+      No := LibraryService.CreateServiceCreditMemoHeaderUsingPage;
+      CreateCreditMemoLine(No,CustomerNo,ServiceLine.Type::Item,Item."No.");
+      InsertContractNoOnServiceLine(No,ServiceContractHeader."Contract No.");
+      ServiceCreditMemoOpenEdit(ServiceCreditMemo,No);
+      Quantity := ServiceCreditMemo.ServLines.Quantity.ASDECIMAL;
+      ServiceCreditMemo.Post.INVOKE;
+
+      // [THEN] Verify the Item Ledger Entry for the posted Service Credit Memo.
+      VerifyServiceCreditMemoItemLedgerEntry(No,Item."No.",Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerTrue)]
+    PROCEDURE ServiceCreditMemoTypeCost@104();
+    VAR
+      ServiceLine@1001 : Record 5902;
+      ServiceCost@1000 : Record 5905;
+      ServiceCreditMemo@1006 : TestPage 5935;
+      No@1005 : Code[20];
+      CustomerNo@1004 : Code[20];
+      Quantity@1002 : Decimal;
+      ServiceLines@1500000 : Record 5902;
+    BEGIN
+      // [SCENARIO 143443] Create Service Credit Memo for Type Cost, post it and verify the Service Ledger Entries.
+
+      // [GIVEN] Find Service Cost, create Customer without Price Including VAT.
+      Initialize;
+      LibraryService.FindServiceCost(ServiceCost);
+      CustomerNo := CustomerWithPriceIncludingVAT(FALSE);
+
+      // [WHEN] Create Service Credit Memo and post it.
+      No := LibraryService.CreateServiceCreditMemoHeaderUsingPage;
+      CreateCreditMemoLine(No,CustomerNo,ServiceLine.Type::Cost,ServiceCost.Code);
+
+      ServiceLines.RESET;
+      ServiceLines.SETCURRENTKEY("Document Type","Document No.","Line No.");
+      ServiceLines.SETRANGE("Document Type",ServiceLines."Document Type"::"Credit Memo");
+      ServiceLines.SETRANGE("Document No.",No);
+      IF ServiceLines.FINDSET THEN REPEAT
+        LibraryERM.CreateGenPostSetup(ServiceLines."Gen. Bus. Posting Group",ServiceLines."Gen. Prod. Posting Group");
+      UNTIL ServiceLines.NEXT = 0;
+
+      ServiceCreditMemoOpenEdit(ServiceCreditMemo,No);
+      Quantity := ServiceCreditMemo.ServLines.Quantity.ASDECIMAL;
+      ServiceCreditMemo.Post.INVOKE;
+
+      // [THEN] Verify the Service Ledger Entries for the posted Service Credit Memo.
+      VerifyCreditMemoServiceLedgerEntry(No,CustomerNo,ServiceCost.Code,Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerTrue)]
+    PROCEDURE ServiceCreditMemoTypeGLAccount@103();
+    VAR
+      GLAccount@1000 : Record 15;
+      ServiceLine@1001 : Record 5902;
+      ServiceCreditMemo@1006 : TestPage 5935;
+      No@1005 : Code[20];
+      CustomerNo@1004 : Code[20];
+      Quantity@1002 : Decimal;
+    BEGIN
+      // [SCENARIO 143443] Create Service Credit Memo for Type GL Account, post it and verify the Service Ledger Entries.
+
+      // [GIVEN] Find GL Account with Direct Posting True, create Customer with Price Including VAT.
+      Initialize;
+      LibraryERM.FindGLAccount(GLAccount);
+      CustomerNo := CustomerWithPriceIncludingVAT(TRUE);
+
+      // [WHEN] Create Service Credit Memo and post it.
+      No := LibraryService.CreateServiceCreditMemoHeaderUsingPage;
+      CreateCreditMemoLine(No,CustomerNo,ServiceLine.Type::"G/L Account",GLAccount."No.");
+      ServiceCreditMemoOpenEdit(ServiceCreditMemo,No);
+      Quantity := ServiceCreditMemo.ServLines.Quantity.ASDECIMAL;
+      ServiceCreditMemo.Post.INVOKE;
+
+      // [THEN] Verify the Service Ledger Entries for the posted Service Credit Memo.
+      VerifyCreditMemoServiceLedgerEntry(No,CustomerNo,GLAccount."No.",Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerTrue)]
+    PROCEDURE ServiceCreditMemoTypeItem@107();
+    VAR
+      Item@1003 : Record 27;
+      ServiceLine@1004 : Record 5902;
+      ServiceCreditMemo@1005 : TestPage 5935;
+      No@1001 : Code[20];
+      CustomerNo@1000 : Code[20];
+      Quantity@1006 : Decimal;
+    BEGIN
+      // [SCENARIO 143443] Create Service Credit Memo for Type Item, post it and verify the Service Ledger Entries.
+
+      // [GIVEN] Find Item, create Customer with Price Including VAT.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      CustomerNo := CustomerWithPriceIncludingVAT(TRUE);
+
+      // [WHEN] Create Service Credit Memo and post it.
+      No := LibraryService.CreateServiceCreditMemoHeaderUsingPage;
+      CreateCreditMemoLine(No,CustomerNo,ServiceLine.Type::Item,Item."No.");
+      ServiceCreditMemoOpenEdit(ServiceCreditMemo,No);
+      Quantity := ServiceCreditMemo.ServLines.Quantity.ASDECIMAL;
+      ServiceCreditMemo.Post.INVOKE;
+
+      // [THEN] Verify the Service Ledger Entries for the posted Service Credit Memo.
+      VerifyCreditMemoServiceLedgerEntry(No,CustomerNo,Item."No.",Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerTrue)]
+    PROCEDURE ServiceCreditMemoTypeResource@101();
+    VAR
+      ServiceLine@1000 : Record 5902;
+      ServiceCreditMemo@1006 : TestPage 5935;
+      No@1003 : Code[20];
+      CustomerNo@1002 : Code[20];
+      ResourceNo@1005 : Code[20];
+      Quantity@1004 : Decimal;
+    BEGIN
+      // [SCENARIO 143443] Create Service Credit Memo for Type Resource, post it and verify the Service Ledger Entries.
+
+      // [GIVEN] Create Resource, create Customer with Price Including VAT.
+      Initialize;
+      ResourceNo := LibraryResource.CreateResourceNo;
+      CustomerNo := CustomerWithPriceIncludingVAT(TRUE);
+
+      // [WHEN] Create Service Credit Memo and post it.
+      No := LibraryService.CreateServiceCreditMemoHeaderUsingPage;
+      CreateCreditMemoLine(No,CustomerNo,ServiceLine.Type::Resource,ResourceNo);
+      ServiceCreditMemoOpenEdit(ServiceCreditMemo,No);
+      Quantity := ServiceCreditMemo.ServLines.Quantity.ASDECIMAL;
+      ServiceCreditMemo.Post.INVOKE;
+
+      // [THEN] Verify the Service Ledger Entries for the posted Service Credit Memo.
+      VerifyCreditMemoServiceLedgerEntry(No,CustomerNo,ResourceNo,Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerTrue)]
+    PROCEDURE ServiceCreditMemoByPage@97();
+    VAR
+      Customer@1000 : Record 18;
+      Item@1007 : Record 27;
+      ServiceLine@1001 : Record 5902;
+      ServiceCreditMemo@1004 : TestPage 5935;
+      No@1005 : Code[20];
+      Quantity@1008 : Decimal;
+    BEGIN
+      // [SCENARIO 143444] Create and Post Service Credit Memo and Validate Posted Service Credit Memo Line.
+
+      // [GIVEN] Create Customer.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryInventory.CreateItem(Item);
+
+      // [WHEN] Create Service Credit Memo and Post.
+      No := LibraryService.CreateServiceCreditMemoHeaderUsingPage;
+      CreateCreditMemoLine(No,Customer."No.",ServiceLine.Type::Item,Item."No.");
+      ServiceCreditMemoOpenEdit(ServiceCreditMemo,No);
+      Quantity := ServiceCreditMemo.ServLines.Quantity.ASDECIMAL;
+      ServiceCreditMemo.Post.INVOKE;
+
+      // [THEN] Check Posted Service Credit Memo Line.
+      VerifyPostedServiceCreditMemoLine(Customer."No.",ServiceLine.Type::Item,Item."No.",Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(PostedServiceCrMemoPH)]
+    PROCEDURE ShowPostedDocumentForPostedServiceCrMemo@66();
+    VAR
+      ServiceCrMemoHeader@1001 : Record 5994;
+      CustLedgerEntry@1002 : Record 21;
+      ServiceHeaderNo@1000 : Code[20];
+    BEGIN
+      // [FEATURE] [Customer]
+      // [SCENARIO 377063] Posted Service Credit Memo is shown after "Show Posted Document" action from customer ledger entry
+
+      // [GIVEN] Posted Service Credit Memo
+      ServiceHeaderNo := CreatePostServiceCrMemo;
+      FindServiceCrMemoHeader(ServiceCrMemoHeader,ServiceHeaderNo);
+
+      // [GIVEN] Customer ledger entry linked to the posted Service Credit Memo
+      FindCustLedgEntry(CustLedgerEntry,ServiceCrMemoHeader."No.",ServiceCrMemoHeader."Customer No.");
+
+      // [WHEN] Perform "Show Posted Document" action
+      // [THEN] Page "Posted Service Credit Memo" is opened for the posted Service Credit Memo
+      // [THEN] CustLedgerEntry.ShowDoc() return TRUE
+      LibraryVariableStorage.Enqueue(ServiceCrMemoHeader."No."); // used in PostedServiceInvoicePH
+      LibraryVariableStorage.Enqueue(ServiceCrMemoHeader."Customer No."); // used in PostedServiceInvoicePH
+      Assert.IsTrue(CustLedgerEntry.ShowDoc,ServiceCrMemoHeader.TABLECAPTION);
+      // Verify values in PostedServiceCrMemoPH
+    END;
+
+    LOCAL PROCEDURE Initialize@61();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryService.SetupServiceMgtNoSeries;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE ApplyCustLedgerEntries@50(VAR ServiceHeader@1003 : Record 5900;SalesInvoiceHeaderNo@1001 : Code[20];DocumentType@1004 : Option);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+      ApplyCustomerEntries@1002 : Page 232;
+    BEGIN
+      CustLedgerEntry.SETRANGE("Document Type",DocumentType);
+      CustLedgerEntry.SETRANGE("Document No.",SalesInvoiceHeaderNo);
+      CustLedgerEntry.FINDFIRST;
+
+      CLEAR(ApplyCustomerEntries);
+      ApplyCustomerEntries.SetService(ServiceHeader,CustLedgerEntry,ServiceHeader.FIELDNO("Applies-to Doc. No."));
+      ApplyCustomerEntries.SETTABLEVIEW(CustLedgerEntry);
+      ApplyCustomerEntries.SETRECORD(CustLedgerEntry);
+      ApplyCustomerEntries.LOOKUPMODE(TRUE);
+      IF ApplyCustomerEntries.RUNMODAL = ACTION::LookupOK THEN BEGIN
+        ApplyCustomerEntries.GetCustLedgEntry(CustLedgerEntry);
+        ServiceHeader."Applies-to Doc. Type" := CustLedgerEntry."Document Type";
+        ServiceHeader."Applies-to Doc. No." := CustLedgerEntry."Document No.";
+        ServiceHeader.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CopyServiceLines@67(VAR FromServiceLine@1000 : Record 5902;VAR ToTempServiceLine@1001 : TEMPORARY Record 5902);
+    BEGIN
+      IF FromServiceLine.FINDSET THEN
+        REPEAT
+          ToTempServiceLine.INIT;
+          ToTempServiceLine := FromServiceLine;
+          ToTempServiceLine.INSERT;
+        UNTIL FromServiceLine.NEXT = 0
+    END;
+
+    LOCAL PROCEDURE CreateContractLineCreditMemo@12(VAR ServiceContractLine@1000 : Record 5964) CreditMemoNo : Code[20];
+    VAR
+      ServContractManagement@1001 : Codeunit 5940;
+    BEGIN
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractLine."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractLine."Contract No.");
+      ServiceContractLine.FINDSET;
+      ServContractManagement.InitCodeUnit;
+      REPEAT
+        CreditMemoNo := LibraryService.CreateContractLineCreditMemo(ServiceContractLine,FALSE);
+      UNTIL ServiceContractLine.NEXT = 0;
+      EXIT(CreditMemoNo);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithPrice@65(VAR Item@1000 : Record 27);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Unit Price",LibraryRandom.RandDec(10,2));
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesCreditMemo@47(VAR SalesHeader@1002 : Record 36;CustomerNo@1004 : Code[20]);
+    VAR
+      SalesLine@1001 : Record 37;
+      Item@1000 : Record 27;
+    BEGIN
+      // Create Sales Header and Sales Line with any random Quantity and Qty. to Ship as 0.
+      CreateItemWithPrice(Item);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Credit Memo",CustomerNo);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandInt(10));
+      SalesLine.VALIDATE("Qty. to Ship",0);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesInvoice@49(VAR SalesHeader@1002 : Record 36;CustomerNo@1004 : Code[20]);
+    VAR
+      SalesLine@1001 : Record 37;
+      Item@1000 : Record 27;
+    BEGIN
+      // Create Sales Header and Sales Line with any random Quantity.
+      CreateItemWithPrice(Item);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,CustomerNo);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandInt(10));
+    END;
+
+    LOCAL PROCEDURE CreateServiceContract@3(VAR ServiceContractHeader@1002 : Record 5965;VAR ServiceContractLine@1001 : Record 5964);
+    VAR
+      Customer@1003 : Record 18;
+    BEGIN
+      // Create Service Contract Header, Service Contract Line and validate Annual Amount and Starting Date in Service Contract Header.
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract,Customer."No.");
+      CreateServiceContractLine(ServiceContractLine,ServiceContractHeader);
+
+      ServiceContractHeader.CALCFIELDS("Calcd. Annual Amount");
+      ServiceContractHeader.VALIDATE("Annual Amount",ServiceContractHeader."Calcd. Annual Amount");
+      ServiceContractHeader.VALIDATE("Starting Date",ServiceContractHeader."Starting Date");
+      ServiceContractHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceContractLine@10(VAR ServiceContractLine@1000 : Record 5964;ServiceContractHeader@1001 : Record 5965);
+    VAR
+      ServiceItem@1002 : Record 5940;
+      Counter@1003 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Contract Lines - Boundary 2 is important.
+      FOR Counter := 1 TO LibraryRandom.RandIntInRange(2,10) DO BEGIN
+        CLEAR(ServiceItem);
+        LibraryService.CreateServiceItem(ServiceItem,ServiceContractHeader."Customer No.");
+        LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+        ServiceContractLine.VALIDATE("Line Value",LibraryRandom.RandDecInRange(3,1000,2));  // Validate any value greater than 3 as minimum value should be 3.
+        ServiceContractLine.VALIDATE("Service Period",ServiceContractHeader."Service Period");
+        ServiceContractLine.VALIDATE("Contract Expiration Date",ServiceContractHeader."Starting Date");
+        ServiceContractLine.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceCreditMemoLine@19(ServiceHeader@1000 : Record 5900);
+    BEGIN
+      CreateServCreditMemoLineItem(ServiceHeader);
+      CreateServCreditMemoLineGLAcc(ServiceHeader);
+      CreateServCreditMemoLineResrce(ServiceHeader);
+    END;
+
+    LOCAL PROCEDURE CreateServiceInvoiceFromReport@84(ContractNo@1000 : Code[20];CreateInvoices@1003 : Option);
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      CreateContractInvoices@1001 : Report 6030;
+    BEGIN
+      ServiceContractHeader.SETRANGE("Contract No.",ContractNo);
+      ServiceContractHeader.FINDFIRST;
+      CreateContractInvoices.SETTABLEVIEW(ServiceContractHeader);
+      CreateContractInvoices.SetOptions(WORKDATE,ServiceContractHeader."Next Invoice Date",CreateInvoices);
+      CreateContractInvoices.USEREQUESTPAGE(FALSE);
+      CreateContractInvoices.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrder@110(VAR ServiceHeader@1005 : Record 5900;CustomerNo@1000 : Code[20]);
+    VAR
+      Item@1002 : Record 27;
+      ServiceItem@1001 : Record 5940;
+      ServiceItemLine@1004 : Record 5901;
+    BEGIN
+      // Create Service Item, Create Service Header, Service Item Line and Service Line of Type Item.
+      LibraryService.CreateServiceItem(ServiceItem,CustomerNo);
+      CreateItemWithPrice(Item);
+      ServiceItem.VALIDATE("Item No.",Item."No.");
+      ServiceItem.MODIFY(TRUE);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CustomerNo);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      CreateServiceLine(ServiceHeader,ServiceItem."Item No.");
+    END;
+
+    LOCAL PROCEDURE CreatePostServiceCrMemo@156() : Code[20];
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateServiceLineWithRandomQty(ServiceLine,ServiceHeader,LibraryInventory.CreateItemNo);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+      EXIT(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE LineWithQuantityAndUnitPrice@98(VAR ServiceLine@1000 : Record 5902);
+    BEGIN
+      // Using the Random function because value is not important.
+      ServiceLine.VALIDATE(Quantity,LibraryRandom.RandDec(10,2));
+      ServiceLine.VALIDATE("Unit Price",LibraryRandom.RandDec(1000,2));
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateCreditMemoResourceLine@95(ServiceHeader@1000 : Record 5900;ContractNo@1002 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,LibraryResource.CreateResourceNo);
+      ServiceLine.VALIDATE("Contract No.",ContractNo);
+      LineWithQuantityAndUnitPrice(ServiceLine);
+    END;
+
+    LOCAL PROCEDURE CreateCreditMemoItemLine@99(ServiceHeader@1001 : Record 5900;ContractNo@1003 : Code[20]);
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItemNo);
+      ServiceLine.VALIDATE("Contract No.",ContractNo);
+      LineWithQuantityAndUnitPrice(ServiceLine);
+    END;
+
+    LOCAL PROCEDURE CreateServCreditMemoLineItem@17(ServiceHeader@1000 : Record 5900);
+    VAR
+      Item@1002 : Record 27;
+      ServiceLine@1003 : Record 5902;
+      Counter@1001 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Lines - Boundary 2 is important.
+      CreateItemWithPrice(Item);
+      FOR Counter := 1 TO LibraryRandom.RandIntInRange(2,10) DO BEGIN
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,Item."No.");
+        ServiceLine.VALIDATE("Unit Price",LibraryRandom.RandDec(1000,2));
+        ServiceLine.MODIFY(TRUE);
+        Item.NEXT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServCrdtMmLneItemWithQty@44(ServiceHeader@1000 : Record 5900);
+    VAR
+      Item@1002 : Record 27;
+      ServiceLine@1003 : Record 5902;
+      Counter@1001 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Lines - Boundary 2 is important.
+      CreateItemWithPrice(Item);
+      FOR Counter := 1 TO LibraryRandom.RandIntInRange(2,10) DO BEGIN
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,Item."No.");
+        LineWithQuantityAndUnitPrice(ServiceLine);
+        Item.NEXT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServCreditMemoLineGLAcc@20(ServiceHeader@1000 : Record 5900);
+    VAR
+      ServiceLine@1003 : Record 5902;
+      GLAccountNo@1002 : Code[20];
+      Counter@1001 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Lines - Boundary 2 is important.
+      GLAccountNo := LibraryERM.CreateGLAccountWithSalesSetup;
+      FOR Counter := 1 TO LibraryRandom.RandIntInRange(2,10) DO BEGIN
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::"G/L Account",GLAccountNo);
+        ServiceLine.VALIDATE("Unit Price",LibraryRandom.RandDec(1000,2));
+        ServiceLine.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServCrdtMmLnGLAccWithQty@38(ServiceHeader@1000 : Record 5900);
+    VAR
+      ServiceLine@1003 : Record 5902;
+      GLAccountNo@1002 : Code[20];
+      Counter@1001 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Lines - Boundary 2 is important.
+      GLAccountNo := LibraryERM.CreateGLAccountWithSalesSetup;
+      FOR Counter := 1 TO LibraryRandom.RandIntInRange(2,10) DO BEGIN
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::"G/L Account",GLAccountNo);
+        LineWithQuantityAndUnitPrice(ServiceLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServCreditMemoLineResrce@18(ServiceHeader@1001 : Record 5900);
+    VAR
+      ServiceLine@1003 : Record 5902;
+      Counter@1002 : Integer;
+      ResourceNo@1000 : Code[20];
+    BEGIN
+      // Create 2 to 10 Service Lines - Boundary 2 is important.
+      ResourceNo := LibraryResource.CreateResourceNo;
+      FOR Counter := 1 TO LibraryRandom.RandIntInRange(2,10) DO BEGIN
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,ResourceNo);
+        ServiceLine.VALIDATE("Unit Price",LibraryRandom.RandDec(1000,2));
+        ServiceLine.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServCrdtMmLnRsrceWithQty@46(ServiceHeader@1001 : Record 5900);
+    VAR
+      ServiceLine@1003 : Record 5902;
+      Counter@1002 : Integer;
+      ResourceNo@1000 : Code[20];
+    BEGIN
+      // Create 2 to 10 Service Lines - Boundary 2 is important.
+      ResourceNo := LibraryResource.CreateResourceNo;
+      FOR Counter := 1 TO LibraryRandom.RandIntInRange(2,10) DO BEGIN
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,ResourceNo);
+        LineWithQuantityAndUnitPrice(ServiceLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLine@78(ServiceHeader@1004 : Record 5900;No@1002 : Code[20]);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDFIRST;
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,No);
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+      LineWithQuantityAndUnitPrice(ServiceLine);
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineWithRandomQty@52(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1001 : Record 5900;ItemNo@1002 : Code[20]);
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ItemNo);
+      ServiceLine.VALIDATE(Quantity,LibraryRandom.RandInt(10));  // Required field - value is not important to test case.
+      ServiceLine.VALIDATE("Unit Price",LibraryRandom.RandDec(1000,2));
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ExecuteConfirmHandlerInvoiceES@87();
+    BEGIN
+      IF CONFIRM(STRSUBSTNO(ExpectedConfirm)) THEN;
+    END;
+
+    LOCAL PROCEDURE FindServiceContractLines@26(VAR ServiceContractLine@1000 : Record 5964;ServiceContractHeader@1001 : Record 5965);
+    BEGIN
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractHeader."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      ServiceContractLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindServiceCreditMemo@25(VAR ServiceHeader@1000 : Record 5900;ServiceContractNo@1001 : Code[20]);
+    BEGIN
+      ServiceHeader.SETRANGE("Document Type",ServiceHeader."Document Type"::"Credit Memo");
+      ServiceHeader.SETRANGE("Contract No.",ServiceContractNo);
+      ServiceHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindServiceCrMemoHeader@74(VAR ServiceCrMemoHeader@1000 : Record 5994;PreAssignedNo@1001 : Code[20]);
+    BEGIN
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceCrMemoHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindCustLedgEntry@143(VAR CustLedgerEntry@1000 : Record 21;DocumentNo@1002 : Code[20];CustomerNo@1001 : Code[20]);
+    BEGIN
+      WITH CustLedgerEntry DO BEGIN
+        SETRANGE("Document No.",DocumentNo);
+        SETRANGE("Customer No.",CustomerNo);
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetPrepaidContractEntry@16(ServiceHeader@1001 : Record 5900;ServiceContractNo@1003 : Code[20]);
+    VAR
+      ServiceLedgerEntry@1002 : Record 5907;
+      GetPrepaidContractEntries@1000 : Report 6033;
+    BEGIN
+      GetPrepaidContractEntries.USEREQUESTPAGE(FALSE);
+      GetPrepaidContractEntries.Initialize(ServiceHeader);
+      ServiceLedgerEntry.SETRANGE("Service Contract No.",ServiceContractNo);
+      GetPrepaidContractEntries.SETTABLEVIEW(ServiceLedgerEntry);
+      GetPrepaidContractEntries.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE GetServiceLinesFromContract@83(VAR ServiceLine@1002 : Record 5902;ContractNo@1000 : Code[20]);
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      ServiceHeader.SETRANGE("Document Type",ServiceHeader."Document Type"::Invoice);
+      ServiceHeader.SETRANGE("Contract No.",ContractNo);
+      ServiceHeader.FINDFIRST;
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE PostServiceInvoice@4(ServiceContractNo@1001 : Code[20]);
+    VAR
+      ServiceDocumentRegister@1000 : Record 5936;
+      ServiceHeader@1002 : Record 5900;
+    BEGIN
+      // Find the Service Invoice by searching in Service Document Register.
+      ServiceDocumentRegister.SETRANGE("Source Document Type",ServiceDocumentRegister."Source Document Type"::Contract);
+      ServiceDocumentRegister.SETRANGE("Source Document No.",ServiceContractNo);
+      ServiceDocumentRegister.SETRANGE("Destination Document Type",ServiceDocumentRegister."Destination Document Type"::Invoice);
+      ServiceDocumentRegister.FINDFIRST;
+      ServiceHeader.GET(ServiceHeader."Document Type"::Invoice,ServiceDocumentRegister."Destination Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,FALSE);
+    END;
+
+    LOCAL PROCEDURE RemoveLinesFromContract@8(VAR ServiceContractLine@1000 : Record 5964);
+    BEGIN
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractLine."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractLine."Contract No.");
+      REPORT.RUNMODAL(REPORT::"Remove Lines from Contract",FALSE,TRUE,ServiceContractLine);
+    END;
+
+    LOCAL PROCEDURE RemoveLinesFromContractFrOneLn@29(ServiceContractLine@1000 : Record 5964);
+    BEGIN
+      ServiceContractLine.SETRANGE("Line No.",ServiceContractLine."Line No.");
+      RemoveLinesFromContract(ServiceContractLine);
+    END;
+
+    LOCAL PROCEDURE SaveServiceContractLinesInTemp@13(VAR TempServiceContractLine@1001 : TEMPORARY Record 5964;ServiceContractLine@1000 : Record 5964);
+    BEGIN
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractLine."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractLine."Contract No.");
+      ServiceContractLine.FINDSET;
+      REPEAT
+        TempServiceContractLine.INIT;
+        TempServiceContractLine := ServiceContractLine;
+        TempServiceContractLine.INSERT;
+      UNTIL ServiceContractLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SaveServCreditMemoLinesInTemp@34(VAR TempServiceLine@1001 : TEMPORARY Record 5902;ServiceHeader@1002 : Record 5900);
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        TempServiceLine.INIT;
+        TempServiceLine := ServiceLine;
+        TempServiceLine.INSERT;
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdatePaymentMethodCode@91(VAR ServiceHeader@1001 : Record 5900;PaymentMethodCode@1002 : Code[10]);
+    BEGIN
+      ServiceHeader.VALIDATE("Payment Method Code",PaymentMethodCode);
+      ServiceHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateCreditMemoLine@122(No@1005 : Code[20];CustomerNo@1000 : Code[20];Type@1007 : Option;No2@1006 : Code[20]);
+    VAR
+      ServiceCreditMemo@1002 : TestPage 5935;
+    BEGIN
+      ServiceCreditMemoOpenEdit(ServiceCreditMemo,No);
+      ServiceCreditMemo."Customer No.".SETVALUE(CustomerNo);
+      ServiceCreditMemo.ServLines.Type.SETVALUE(Type);
+      ServiceCreditMemo.ServLines."No.".SETVALUE(No2);
+      ServiceCreditMemo.ServLines.Quantity.SETVALUE(LibraryRandom.RandDec(100,2));  // Using random value for Quantity.
+      ServiceCreditMemo.ServLines.NEW;
+      ServiceCreditMemo.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE CustomerWithPriceIncludingVAT@94(PricesIncludingVAT@1002 : Boolean) : Code[20];
+    VAR
+      Customer@1001 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Prices Including VAT",PricesIncludingVAT);
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE InsertContractNoOnServiceLine@113(DocumentNo@1002 : Code[20];ContractNo@1001 : Code[20]);
+    VAR
+      ServiceLine@1003 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::"Credit Memo");
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDFIRST;
+      ServiceLine.VALIDATE("Contract No.",ContractNo);
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ServiceCreditMemoOpenEdit@182(VAR ServiceCreditMemo@1000 : TestPage 5935;No@1001 : Code[20]);
+    BEGIN
+      ServiceCreditMemo.OPENEDIT;
+      ServiceCreditMemo.FILTER.SETFILTER("No.",No);
+    END;
+
+    LOCAL PROCEDURE SetCreditMemoAsCorrection@64();
+    VAR
+      GLSetup@1000 : Record 98;
+    BEGIN
+      GLSetup.GET;
+      GLSetup.VALIDATE("Mark Cr. Memos as Corrections",TRUE);
+      GLSetup.MODIFY;
+    END;
+
+    LOCAL PROCEDURE VerifyAmountInvoiceCreditMemo@54(ContractNo@1000 : Code[20]);
+    VAR
+      ServiceInvoiceLine@1002 : Record 5993;
+      ServiceCrMemoLine@1003 : Record 5995;
+      CrMemoAmount@1005 : Decimal;
+      ServiceInvoiceAmount@1001 : Decimal;
+    BEGIN
+      ServiceInvoiceLine.SETRANGE("Contract No.",ContractNo);
+      ServiceInvoiceLine.FINDSET;
+      REPEAT
+        ServiceInvoiceAmount += ServiceInvoiceLine."Line Amount";
+      UNTIL ServiceInvoiceLine.NEXT = 0;
+
+      ServiceCrMemoLine.SETRANGE("Contract No.",ContractNo);
+      ServiceCrMemoLine.FINDSET;
+      REPEAT
+        CrMemoAmount += ServiceCrMemoLine."Line Amount";
+      UNTIL ServiceCrMemoLine.NEXT = 0;
+
+      // AreNearlyEqual is needed because CreateContractLineCreditMemo does create lines
+      // without a rounding adjustment at the document level that is done during Invoice posting
+      Assert.AreNearlyEqual(
+        ServiceInvoiceAmount,CrMemoAmount,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(AmountMustMatchError,ServiceInvoiceLine.TABLECAPTION,ServiceCrMemoLine.TABLECAPTION));
+    END;
+
+    LOCAL PROCEDURE VerifyCrditMemoLnWithContrctLn@11(ServiceContractLine@1001 : Record 5964;CreditMemoNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      // Verify that the Service Line created corresponds with the relevant Service Contract Line.
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractLine."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractLine."Contract No.");
+      ServiceContractLine.FINDSET;
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::"Credit Memo");
+      ServiceLine.SETRANGE("Document No.",CreditMemoNo);
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.NEXT;  // The first line of Credit Memo contains only Description
+        ServiceLine.TESTFIELD("Customer No.",ServiceContractLine."Customer No.");
+        ServiceLine.TESTFIELD("Service Item No.",ServiceContractLine."Service Item No.");
+        ServiceLine.NEXT;
+      UNTIL ServiceContractLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCrditMmLnWthTempCntrctLn@14(VAR TempServiceContractLine@1001 : TEMPORARY Record 5964;CreditMemoNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      // Verify that the Service Line created corresponds with the relevant Service Contract Line saved in temporary table.
+      TempServiceContractLine.FINDSET;
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::"Credit Memo");
+      ServiceLine.SETRANGE("Document No.",CreditMemoNo);
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.NEXT;  // The first line of Credit Memo contains only Description.
+        ServiceLine.TESTFIELD("Customer No.",TempServiceContractLine."Customer No.");
+        ServiceLine.TESTFIELD("Service Item No.",TempServiceContractLine."Service Item No.");
+        ServiceLine.NEXT;
+      UNTIL TempServiceContractLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCrdtMmLnWthPrpdCntrctLn@21(ServiceContractLine@1001 : Record 5964;CreditMemoNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      // Verify that the Service Line created corresponds with the relevant Service Contract Line.
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractLine."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractLine."Contract No.");
+      ServiceContractLine.FINDSET;
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::"Credit Memo");
+      ServiceLine.SETRANGE("Document No.",CreditMemoNo);
+      ServiceLine.FINDSET;
+      ServiceLine.NEXT;  // The first line of Credit Memo contains only Description.
+      REPEAT
+        ServiceLine.TESTFIELD("Customer No.",ServiceContractLine."Customer No.");
+        ServiceLine.TESTFIELD("Service Item No.",ServiceContractLine."Service Item No.");
+        ServiceLine.NEXT;
+      UNTIL ServiceContractLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCrdtMmLnWthPstdCrdtMmLn@41(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      ServiceCrMemoHeader@1001 : Record 5994;
+      ServiceCrMemoLine@1002 : Record 5995;
+    BEGIN
+      // Verify that the Posted Service Credit Memo Lines created corresponds with the relevant Service Credit Memo Lines.
+      TempServiceLine.FINDSET;
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",TempServiceLine."Document No.");
+      ServiceCrMemoHeader.FINDFIRST;
+      REPEAT
+        ServiceCrMemoLine.GET(ServiceCrMemoHeader."No.",TempServiceLine."Line No.");  // Line No in unposted/posted documents are same.
+        ServiceCrMemoLine.TESTFIELD("Customer No.",TempServiceLine."Customer No.");
+        ServiceCrMemoLine.TESTFIELD(Type,TempServiceLine.Type);
+        ServiceCrMemoLine.TESTFIELD("No.",TempServiceLine."No.");
+        ServiceCrMemoLine.TESTFIELD("Location Code",TempServiceLine."Location Code");
+        ServiceCrMemoLine.TESTFIELD(Quantity,TempServiceLine.Quantity);
+        ServiceCrMemoLine.TESTFIELD("Unit Price",TempServiceLine."Unit Price");
+        ServiceCrMemoLine.TESTFIELD("Unit Cost (LCY)",TempServiceLine."Unit Cost (LCY)");
+        ServiceCrMemoLine.TESTFIELD("Line Discount %",TempServiceLine."Line Discount %");
+        ServiceCrMemoLine.TESTFIELD("Line Discount Amount",TempServiceLine."Line Discount Amount");
+        ServiceCrMemoLine.TESTFIELD(Amount,TempServiceLine.Amount);
+        Assert.AreNearlyEqual(
+          ServiceCrMemoLine."Amount Including VAT",TempServiceLine."Amount Including VAT",LibraryERM.GetAmountRoundingPrecision,
+          STRSUBSTNO(AmountError,ServiceCrMemoLine.FIELDCAPTION("Amount Including VAT"),
+            TempServiceLine."Amount Including VAT",ServiceCrMemoLine.TABLECAPTION));
+        ServiceCrMemoLine.TESTFIELD("Allow Invoice Disc.",TempServiceLine."Allow Invoice Disc.");
+        ServiceCrMemoLine.TESTFIELD("Inv. Discount Amount",TempServiceLine."Inv. Discount Amount");
+        ServiceCrMemoLine.TESTFIELD("Line Amount",TempServiceLine."Line Amount");
+        ServiceCrMemoLine.TESTFIELD("Service Item No.",TempServiceLine."Service Item No.");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCreditMemoGLEntries@37(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      GLEntry@1001 : Record 17;
+      ServiceCrMemoHeader@1002 : Record 5994;
+    BEGIN
+      // Verify that the G/L Entry created correspond with the relevant Service Credit Memo Lines.
+      TempServiceLine.FINDFIRST;
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",TempServiceLine."Document No.");
+      ServiceCrMemoHeader.FINDFIRST;
+      GLEntry.SETRANGE("Document Type",GLEntry."Document Type"::"Credit Memo");
+      GLEntry.SETRANGE("Document No.",ServiceCrMemoHeader."No.");
+      GLEntry.SETRANGE("Source Type",GLEntry."Source Type"::Customer);
+      GLEntry.FINDSET;
+      REPEAT
+        GLEntry.TESTFIELD("Posting Date",TempServiceLine."Posting Date");
+        GLEntry.TESTFIELD("Source No.",TempServiceLine."Bill-to Customer No.");
+      UNTIL GLEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCreditMemoDetCustLedEnt@31(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      DetailedCustLedgEntry@1001 : Record 379;
+      ServiceCrMemoHeader@1002 : Record 5994;
+    BEGIN
+      // Verify that the Detailed Customer Ledger Entry created correspond with the relevant Service Credit Memo Lines.
+      TempServiceLine.FINDFIRST;
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",TempServiceLine."Document No.");
+      ServiceCrMemoHeader.FINDFIRST;
+      DetailedCustLedgEntry.SETRANGE("Document Type",DetailedCustLedgEntry."Document Type"::"Credit Memo");
+      DetailedCustLedgEntry.SETRANGE("Document No.",ServiceCrMemoHeader."No.");
+      DetailedCustLedgEntry.FINDSET;
+      REPEAT
+        DetailedCustLedgEntry.TESTFIELD("Posting Date",TempServiceLine."Posting Date");
+        DetailedCustLedgEntry.TESTFIELD("Customer No.",TempServiceLine."Bill-to Customer No.");
+      UNTIL DetailedCustLedgEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCreditMemoVATEntries@30(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      VATEntry@1001 : Record 254;
+      ServiceCrMemoHeader@1002 : Record 5994;
+    BEGIN
+      // Verify that the VAT Entry created correspond with the relevant Service Credit Memo Lines.
+      TempServiceLine.FINDFIRST;
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",TempServiceLine."Document No.");
+      ServiceCrMemoHeader.FINDFIRST;
+      VATEntry.SETRANGE("Document Type",VATEntry."Document Type"::"Credit Memo");
+      VATEntry.SETRANGE("Document No.",ServiceCrMemoHeader."No.");
+      VATEntry.FINDSET;
+      REPEAT
+        VATEntry.TESTFIELD("Posting Date",TempServiceLine."Posting Date");
+        VATEntry.TESTFIELD("Bill-to/Pay-to No.",TempServiceLine."Bill-to Customer No.");
+      UNTIL VATEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCreditMemoValueEntries@42(VAR TempServiceLine@1000 : TEMPORARY Record 5902);
+    VAR
+      ValueEntry@1001 : Record 5802;
+      ServiceCrMemoHeader@1002 : Record 5994;
+    BEGIN
+      // Verify that the Value Entry created correspond with the relevant Service Credit Memo Lines.
+      TempServiceLine.FINDSET;
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",TempServiceLine."Document No.");
+      ServiceCrMemoHeader.FINDFIRST;
+      ValueEntry.SETRANGE("Document Type",ValueEntry."Document Type"::"Service Credit Memo");
+      ValueEntry.SETRANGE("Document No.",ServiceCrMemoHeader."No.");
+      REPEAT
+        ValueEntry.SETRANGE("Order Line No.",TempServiceLine."Line No.");
+        ValueEntry.FINDFIRST;
+        ValueEntry.TESTFIELD("Item No.",TempServiceLine."No.");
+        ValueEntry.TESTFIELD("Posting Date",TempServiceLine."Posting Date");
+        ValueEntry.TESTFIELD("Source No.",TempServiceLine."Customer No.");
+        ValueEntry.TESTFIELD("Location Code",TempServiceLine."Location Code");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCreditMemoWithContract@62(ContractNo@1001 : Code[20]);
+    VAR
+      ServiceContractLine@1002 : Record 5964;
+      ServiceCrMemoLine@1003 : Record 5995;
+    BEGIN
+      ServiceCrMemoLine.SETRANGE("Contract No.",ContractNo);
+      ServiceCrMemoLine.FINDSET;
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractLine."Contract Type"::Contract);
+      ServiceContractLine.SETRANGE("Contract No.",ContractNo);
+      ServiceContractLine.FINDSET;
+      REPEAT
+        ServiceContractLine.TESTFIELD("Service Item No.",ServiceCrMemoLine."Service Item No.");
+        ServiceContractLine.NEXT;
+      UNTIL ServiceCrMemoLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCustLedgEntryRemAmount@57(ServiceInvoiceHeaderNo@1000 : Code[20];ServiceCreditMemoAmtIncVAT@1002 : Decimal;ServiceInvoiceAmtIncVAT@1003 : Decimal);
+    VAR
+      CustLedgerEntry@1001 : Record 21;
+    BEGIN
+      // Verify that the Remaining Amount in the Customer Ledger Entry for Service Invoice applied is the difference of the Amount
+      // Includig VAT of the Service Invoice and the Service Credit Memo.
+      CustLedgerEntry.SETRANGE("Document Type",CustLedgerEntry."Document Type"::Invoice);
+      CustLedgerEntry.SETRANGE("Document No.",ServiceInvoiceHeaderNo);
+      CustLedgerEntry.FINDFIRST;
+      CustLedgerEntry.CALCFIELDS("Remaining Amount");
+      CustLedgerEntry.TESTFIELD("Remaining Amount",ServiceInvoiceAmtIncVAT - ServiceCreditMemoAmtIncVAT);
+    END;
+
+    LOCAL PROCEDURE VerifyPostedServiceCreditMemoLine@131(CustomerNo@1002 : Code[20];Type@1003 : Option;No@1004 : Code[20];Quantity@1005 : Decimal);
+    VAR
+      ServiceCrMemoLine@1000 : Record 5995;
+    BEGIN
+      ServiceCrMemoLine.SETRANGE("Customer No.",CustomerNo);
+      ServiceCrMemoLine.FINDFIRST;
+      ServiceCrMemoLine.TESTFIELD(Type,Type);
+      ServiceCrMemoLine.TESTFIELD("No.",No);
+      ServiceCrMemoLine.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceInvoiceHeaderLine@85(VAR TempServiceLine@1000 : TEMPORARY Record 5902;ServiceContractHeader@1001 : Record 5965);
+    VAR
+      ServiceInvoiceHeader@1002 : Record 5992;
+      ServiceInvoiceLine@1003 : Record 5993;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceInvoiceHeader.TESTFIELD("Customer No.",ServiceContractHeader."Customer No.");
+      TempServiceLine.FINDSET;
+      REPEAT
+        ServiceInvoiceLine.GET(ServiceInvoiceHeader."No.",TempServiceLine."Line No.");
+        TempServiceLine.TESTFIELD("Line Amount",ServiceInvoiceLine."Line Amount");
+        TempServiceLine.TESTFIELD("Customer No.",ServiceInvoiceLine."Customer No.");
+      UNTIL TempServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCreditMemoServiceLedger@96(VAR ServiceLine@1000 : Record 5902);
+    VAR
+      ServiceLedgerEntry@1006 : Record 5907;
+      ServiceCrMemoHeader@1002 : Record 5994;
+      GeneralLedgerSetup@1001 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      ServiceLine.FINDSET;
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",ServiceLine."Document No.");
+      ServiceCrMemoHeader.FINDFIRST;
+      ServiceLedgerEntry.SETRANGE("Document Type",ServiceLedgerEntry."Document Type"::"Credit Memo");
+      ServiceLedgerEntry.SETRANGE("Document No.",ServiceCrMemoHeader."No.");
+      ServiceLedgerEntry.FINDSET;
+      REPEAT
+        ServiceLedgerEntry.TESTFIELD(Quantity,ServiceLine.Quantity);
+        ServiceLedgerEntry.TESTFIELD("Customer No.",ServiceLine."Customer No.");
+        ServiceLedgerEntry.TESTFIELD("Unit Price",ServiceLine."Unit Price");
+        ServiceLedgerEntry.TESTFIELD("Unit Cost",ServiceLine."Unit Cost (LCY)");
+        ServiceLedgerEntry.TESTFIELD(
+          "Cost Amount",ROUND(ServiceLine.Quantity * ServiceLine."Unit Cost (LCY)",GeneralLedgerSetup."Amount Rounding Precision"));
+        ServiceLedgerEntry.NEXT;
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCreditMemoServiceLedgerEntry@144(PreAssignedNo@1001 : Code[20];CustomerNo@1003 : Code[20];No@1002 : Code[20];Quantity@1006 : Decimal);
+    VAR
+      ServiceLedgerEntry@1000 : Record 5907;
+      ServiceCrMemoHeader@1004 : Record 5994;
+    BEGIN
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceCrMemoHeader.FINDFIRST;
+      ServiceLedgerEntry.SETRANGE("Document Type",ServiceLedgerEntry."Document Type"::"Credit Memo");
+      ServiceLedgerEntry.SETRANGE("Document No.",ServiceCrMemoHeader."No.");
+      ServiceLedgerEntry.FINDFIRST;
+      ServiceLedgerEntry.TESTFIELD("Entry Type",ServiceLedgerEntry."Entry Type"::Sale);
+      ServiceLedgerEntry.TESTFIELD("Customer No.",CustomerNo);
+      ServiceLedgerEntry.TESTFIELD("No.",No);
+      ServiceLedgerEntry.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceCreditMemoItemLedgerEntry@126(PreAssignedNo@1001 : Code[20];ItemNo@1002 : Code[20];Quantity@1006 : Decimal);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+      ServiceCrMemoHeader@1004 : Record 5994;
+    BEGIN
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceCrMemoHeader.FINDFIRST;
+      ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Credit Memo");
+      ItemLedgerEntry.SETRANGE("Document No.",ServiceCrMemoHeader."No.");
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.TESTFIELD("Entry Type",ItemLedgerEntry."Entry Type"::Sale);
+      ItemLedgerEntry.TESTFIELD("Item No.",ItemNo);
+      ItemLedgerEntry.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyCreditMemoCorrectionGLEntries@59(DocumentNo@1001 : Code[20]);
+    VAR
+      ServiceCrMemoHeader@1000 : Record 5994;
+      GLEntry@1002 : Record 17;
+    BEGIN
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",DocumentNo);
+      ServiceCrMemoHeader.FINDFIRST;
+      GLEntry.SETRANGE("Document Type",GLEntry."Document Type"::"Credit Memo");
+      GLEntry.SETRANGE("Document No.",ServiceCrMemoHeader."No.");
+      GLEntry.SETRANGE("Source Type",GLEntry."Source Type"::Customer);
+      GLEntry.FINDSET;
+      REPEAT
+        IF GLEntry."Debit Amount" > 0 THEN
+          ERROR(CorrectionErr,GLEntry.FIELDCAPTION("Debit Amount"),GLEntry."G/L Account No.");
+        IF GLEntry."Credit Amount" > 0 THEN
+          ERROR(CorrectionErr,GLEntry.FIELDCAPTION("Credit Amount"),GLEntry."G/L Account No.");
+      UNTIL GLEntry.NEXT = 0;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerFalse@1(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := NOT (Question = UseContractTemplateConfirm);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerTrue@69(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@2(Message@1000 : Text[1024]);
+    BEGIN
+      // Handle Message.
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ApplyCustEntrsModalFormHandler@36(VAR ApplyCustomerEntries@1000 : Page 232;VAR Response@1001 : Action);
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+    BEGIN
+      CustLedgerEntry.SETRANGE("Document Type",DocumentType);
+      CustLedgerEntry.SETRANGE("Document No.",DocumentHeaderNo);
+      CustLedgerEntry.FINDFIRST;
+      ApplyCustomerEntries.SetCustLedgEntry(CustLedgerEntry);
+      ApplyCustomerEntries.SetCustApplId;
+      Response := ACTION::LookupOK;
+    END;
+
+    [ReportHandler]
+    PROCEDURE ReportHandlerContractInvoice@63(VAR ContractInvoicing@1000 : Report 5984);
+    VAR
+      ServiceContractHeader@1001 : Record 5965;
+    BEGIN
+      ServiceContractHeader.SETRANGE("Contract No.",ContractNo);
+      ContractInvoicing.SETTABLEVIEW(ServiceContractHeader);
+      ContractInvoicing.USEREQUESTPAGE(FALSE);
+      FilePath := TEMPORARYPATH + FORMAT(ServiceContractHeader."Contract No.") + '.xlsx';
+      ContractInvoicing.SAVEASEXCEL(FilePath);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ServContrctTemplateListHandler@58(VAR ServiceContractTemplateList@1001 : Page 6056;VAR Response@1000 : Action);
+    BEGIN
+      Response := ACTION::LookupOK;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE CheckCreditLimitFormHandler@79(VAR CheckCreditLimit@1001 : Page 343;VAR Response@1000 : Action);
+    BEGIN
+      Response := ACTION::Yes;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE InvoiceESConfirmHandler@86(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := (Question = ExpectedConfirm);
+    END;
+
+    [PageHandler]
+    PROCEDURE PostedServiceCrMemoPH@146(VAR PostedServiceCreditMemo@1000 : TestPage 5972);
+    BEGIN
+      PostedServiceCreditMemo."No.".ASSERTEQUALS(LibraryVariableStorage.DequeueText);
+      PostedServiceCreditMemo."Customer No.".ASSERTEQUALS(LibraryVariableStorage.DequeueText);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Service] [Credit Memo]
+
+      Unsupported version tags:
+      NA: Unable to Execute
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,600 @@
+OBJECT Codeunit 137109 SCM Kitting - Std Cost Wksheet
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SourceCodeSetup@1012 : Record 242;
+      BOMComponent@1009 : Record 90;
+      Item@1001 : Record 27;
+      LibraryERM@1008 : Codeunit 131300;
+      LibraryInventory@1003 : Codeunit 132201;
+      LibraryAssembly@1021 : Codeunit 132207;
+      LibraryTrees@1006 : Codeunit 132208;
+      Assert@1002 : Codeunit 130000;
+      LibraryRandom@1007 : Codeunit 130440;
+      isInitialized@1000 : Boolean;
+      GLBStandardCostAdj@1005 : Decimal;
+      GLBIndirectCostAdj@1019 : Decimal;
+      GLBOverheadRateAdj@1022 : Decimal;
+      GLBDirectResourceNo@1024 : Code[20];
+      GLBCompItemNo@1025 : Code[20];
+      GLBParentItemNo@1027 : Code[20];
+      GLBRoundingMethod@1013 : Code[10];
+      ERRWrongCost@1004 : TextConst 'ENU=Wrong %1.';
+
+    [Test]
+    [HandlerFunctions(SuggestItemStdCostHandler,SuggestWorkMachCtrResStdCostHandler)]
+    PROCEDURE TopItemProducedSuggest@62();
+    BEGIN
+      MixedTreeStdCostWorksheet(Item."Replenishment System"::"Prod. Order",2,TRUE,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggestItemStdCostHandler,SuggestWorkMachCtrResStdCostHandler)]
+    PROCEDURE TopItemAssembledSuggest@61();
+    BEGIN
+      MixedTreeStdCostWorksheet(Item."Replenishment System"::Assembly,2,TRUE,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggestItemStdCostHandler,SuggestWorkMachCtrResStdCostHandler,RollupStdCostHandler,StdCostMsgHandler)]
+    PROCEDURE TopItemProducedRollup@58();
+    BEGIN
+      MixedTreeStdCostWorksheet(Item."Replenishment System"::"Prod. Order",2,TRUE,TRUE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggestItemStdCostHandler,SuggestWorkMachCtrResStdCostHandler,RollupStdCostHandler,StdCostMsgHandler)]
+    PROCEDURE TopItemAssembledRollup@57();
+    BEGIN
+      MixedTreeStdCostWorksheet(Item."Replenishment System"::Assembly,2,TRUE,TRUE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggestItemStdCostHandler,SuggestWorkMachCtrResStdCostHandler,RollupStdCostHandler,ImplementStdCostHandler,StdCostMsgHandler)]
+    PROCEDURE TopItemProducedImplement@108();
+    BEGIN
+      MixedTreeStdCostWorksheet(Item."Replenishment System"::"Prod. Order",2,TRUE,TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggestItemStdCostHandler,SuggestWorkMachCtrResStdCostHandler,RollupStdCostHandler,ImplementStdCostHandler,StdCostMsgHandler)]
+    PROCEDURE TopItemAssembledImplement@40();
+    BEGIN
+      MixedTreeStdCostWorksheet(Item."Replenishment System"::Assembly,2,TRUE,TRUE,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE UpdateCostShareWithZeroNewStandardCost@3();
+    VAR
+      StandardCostWorksheet@1000 : Record 5841;
+    BEGIN
+      // [FEATURE] [UT]
+      // [SCENARIO 201072] New cost shares in the standard cost worksheet are set to 0 when "New Standard Cost" field is validated with 0 amount
+
+      Initialize;
+
+      StandardCostWorksheet.INIT;
+      StandardCostWorksheet.VALIDATE(Type,StandardCostWorksheet.Type::Item);
+      StandardCostWorksheet.VALIDATE("Standard Cost",LibraryRandom.RandDec(100,2));
+      StandardCostWorksheet.VALIDATE("New Standard Cost",0);
+      StandardCostWorksheet.TESTFIELD("New Single-Lvl Material Cost",0);
+    END;
+
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      SourceCodeSetup.GET;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE MixedTreeStdCostWorksheet@85(TopItemReplSystem@1000 : Option;TreeDepth@1001 : Integer;Suggest@1008 : Boolean;Rollup@1005 : Boolean;Implement@1006 : Boolean);
+    VAR
+      TempItem@1004 : TEMPORARY Record 27;
+      TempResource@1007 : TEMPORARY Record 156;
+      Item@1003 : Record 27;
+      Overhead@1002 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup: Create mixed tree and rollup the cost.
+      LibraryTrees.CreateMixedTree(Item,TopItemReplSystem,Item."Costing Method"::Standard,TreeDepth,2,0);
+      GetTree(TempItem,TempResource,Overhead,Overhead,Overhead,Overhead,Overhead,Overhead,Item);
+
+      // Set report parameters.
+      SetGlobalParameters(TempItem,TempResource,Item."No.");
+
+      // Make sure tree nodes contain indirect costs and overhead.
+      AddOverhead(TempItem,TempResource);
+
+      // Add inventory to allow revaluation journal line generation.
+      AddItemInventory(GLBCompItemNo);
+      AddItemInventory(GLBParentItemNo);
+
+      // Exercise: Suggest new standard costs, rollup and implement cost changes.
+      TestStdCostWksheet(Suggest,Rollup,Implement);
+    END;
+
+    LOCAL PROCEDURE TestStdCostWksheet@14(Suggest@1004 : Boolean;Rollup@1001 : Boolean;Implement@1002 : Boolean);
+    VAR
+      StdCostWorksheet@1003 : Record 5841;
+      StdCostWorksheetPage@1000 : TestPage 5841;
+    BEGIN
+      StdCostWorksheet.DELETEALL(TRUE);
+      COMMIT;
+
+      StdCostWorksheetPage.OPENEDIT;
+      COMMIT;
+
+      IF Suggest THEN BEGIN
+        StdCostWorksheetPage.Action77.INVOKE; // Suggest item standard cost for leaves.
+
+        // Verify: Suggested item cost is correct.
+        VerifyStdCostWksheetLine(StdCostWorksheet.Type::Item,GLBCompItemNo,FALSE,GLBRoundingMethod);
+
+        StdCostWorksheetPage.Action78.INVOKE; // Suggest work center / machine center / resource standard cost.
+
+        // Verify: Suggested resource cost is correct.
+        VerifyStdCostWksheetLine(StdCostWorksheet.Type::Resource,GLBDirectResourceNo,FALSE,GLBRoundingMethod);
+      END;
+
+      IF Rollup THEN BEGIN
+        StdCostWorksheetPage.Action83.INVOKE; // Rollup standard cost for the top item.
+
+        // Verify: Rollup standard cost is correct for top item.
+        VerifyStdCostWksheetLine(StdCostWorksheet.Type::Item,GLBParentItemNo,FALSE,'');
+      END;
+
+      IF Implement THEN BEGIN
+        StdCostWorksheetPage.Action84.INVOKE; // Implement standard cost change for top item.
+
+        // Verify: Changes were implemented in the item/resource cards. Revaluation Jnl Line was generated correctly.
+        VerifyCard(BOMComponent.Type::Item,GLBParentItemNo);
+        VerifyCard(BOMComponent.Type::Item,GLBCompItemNo);
+        VerifyCard(BOMComponent.Type::Resource,GLBDirectResourceNo);
+        VerifyRevalJnlLine(GLBCompItemNo);
+        VerifyRevalJnlLine(GLBParentItemNo);
+      END;
+
+      StdCostWorksheetPage.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE VerifyStdCostWksheetLine@114(Type@1000 : Option;No@1002 : Code[20];Implemented@1005 : Boolean;RndMethodCode@1008 : Code[10]);
+    VAR
+      StdCostWorksheet@1001 : Record 5841;
+      Item@1003 : Record 27;
+      Resource@1004 : Record 156;
+      TempItem@1006 : TEMPORARY Record 27;
+      TempResource@1007 : TEMPORARY Record 156;
+      RolledUpMaterialCost@1009 : Decimal;
+      RolledUpCapacityCost@1010 : Decimal;
+      RolledUpCapOvhd@1011 : Decimal;
+      SglLevelMaterialCost@1013 : Decimal;
+      SglLevelCapCost@1014 : Decimal;
+      SglLevelCapOvhd@1015 : Decimal;
+    BEGIN
+      StdCostWorksheet.SETRANGE(Type,Type);
+      StdCostWorksheet.SETRANGE("No.",No);
+      StdCostWorksheet.FINDFIRST;
+      StdCostWorksheet.TESTFIELD(Implemented,Implemented);
+      CASE StdCostWorksheet.Type OF
+        StdCostWorksheet.Type::Item:
+          BEGIN
+            Item.GET(No);
+            StdCostWorksheet.TESTFIELD("Replenishment System",Item."Replenishment System");
+            StdCostWorksheet.TESTFIELD("Standard Cost",Item."Standard Cost");
+            StdCostWorksheet.TESTFIELD("Indirect Cost %",Item."Indirect Cost %");
+            StdCostWorksheet.TESTFIELD("Overhead Rate",Item."Overhead Rate");
+
+            Assert.AreNearlyEqual(
+              GetRoundedAmount(
+                GetTree(
+                  TempItem,TempResource,RolledUpMaterialCost,RolledUpCapacityCost,RolledUpCapOvhd,SglLevelMaterialCost,
+                  SglLevelCapCost,SglLevelCapOvhd,Item),RndMethodCode),StdCostWorksheet."New Standard Cost",
+              LibraryERM.GetAmountRoundingPrecision,'Std. cost Adj factor:' + FORMAT(GLBStandardCostAdj));
+            Assert.AreNearlyEqual(
+              GetRoundedAmount(StdCostWorksheet."Indirect Cost %" * GLBIndirectCostAdj,RndMethodCode),
+              StdCostWorksheet."New Indirect Cost %",LibraryERM.GetAmountRoundingPrecision,
+              'Ind. cost Adj factor:' + FORMAT(GLBIndirectCostAdj));
+            Assert.AreNearlyEqual(
+              GetRoundedAmount(StdCostWorksheet."Overhead Rate" * GLBOverheadRateAdj,RndMethodCode),
+              StdCostWorksheet."New Overhead Rate",LibraryERM.GetAmountRoundingPrecision,
+              'Ovhd. Rate Adj factor:' + FORMAT(GLBOverheadRateAdj));
+            Assert.AreNearlyEqual(
+              SglLevelMaterialCost,StdCostWorksheet."New Single-Lvl Material Cost",1,'Incorrect sgl. level Material Cost.');
+            Assert.AreNearlyEqual(SglLevelCapCost,StdCostWorksheet."New Single-Lvl Cap. Cost",1,'Incorrect sgl. level Cap. Cost.');
+            Assert.AreNearlyEqual(
+              SglLevelCapOvhd,StdCostWorksheet."New Single-Lvl Cap. Ovhd Cost",1,'Incorrect sgl. level Cap. Ovhd. Cost.');
+            Assert.AreNearlyEqual(
+              RolledUpMaterialCost,StdCostWorksheet."New Rolled-up Material Cost",1,'Incorrect Rolled Up Material Cost.');
+            Assert.AreNearlyEqual(
+              RolledUpCapacityCost,StdCostWorksheet."New Rolled-up Cap. Cost",1,'Incorrect Rolled Up Capacity Cost.');
+            Assert.AreNearlyEqual(
+              RolledUpCapOvhd,StdCostWorksheet."New Rolled-up Cap. Ovhd Cost",1,'Incorrect Rolled Up Cap. Overhead.');
+            Assert.AreNearlyEqual(
+              StdCostWorksheet."New Standard Cost",
+              RolledUpMaterialCost + RolledUpCapacityCost + RolledUpCapOvhd + StdCostWorksheet."New Rolled-up Mfg. Ovhd Cost",1,
+              'Incorrect Mfg. Ovhd.');
+            Assert.AreNearlyEqual(
+              StdCostWorksheet."New Standard Cost",
+              SglLevelMaterialCost + SglLevelCapCost + SglLevelCapOvhd + StdCostWorksheet."New Single-Lvl Mfg. Ovhd Cost",1,
+              'Incorrect sgl. lvl. Mfg. Ovhd.');
+          END;
+        StdCostWorksheet.Type::Resource:
+          BEGIN
+            Resource.GET(StdCostWorksheet."No.");
+            StdCostWorksheet.TESTFIELD("Standard Cost",Resource."Unit Cost");
+            StdCostWorksheet.TESTFIELD("Indirect Cost %",Resource."Indirect Cost %");
+            StdCostWorksheet.TESTFIELD("Overhead Rate",0);
+
+            Assert.AreNearlyEqual(
+              GetRoundedAmount(StdCostWorksheet."Standard Cost" * GLBStandardCostAdj,RndMethodCode),
+              StdCostWorksheet."New Standard Cost",LibraryERM.GetAmountRoundingPrecision,
+              'Unit cost Adj factor:' + FORMAT(GLBStandardCostAdj));
+            Assert.AreNearlyEqual(
+              GetRoundedAmount(StdCostWorksheet."Indirect Cost %" * GLBIndirectCostAdj,RndMethodCode),
+              StdCostWorksheet."New Indirect Cost %",LibraryERM.GetAmountRoundingPrecision,
+              'Ind. cost Adj factor:' + FORMAT(GLBIndirectCostAdj));
+            Assert.AreNearlyEqual(0,StdCostWorksheet."New Overhead Rate",LibraryERM.GetAmountRoundingPrecision,'');
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyRevalJnlLine@2(ItemNo@1003 : Code[20]);
+    VAR
+      StdCostWorksheet@1004 : Record 5841;
+      ItemJournalLine@1000 : Record 83;
+      RevalJnlTemplateName@1001 : Code[20];
+      RevalJnlBatchName@1002 : Code[20];
+    BEGIN
+      StdCostWorksheet.SETRANGE(Type,StdCostWorksheet.Type::Item);
+      StdCostWorksheet.SETRANGE("No.",ItemNo);
+      IF StdCostWorksheet.FINDFIRST THEN BEGIN
+        GetRevalJournalNames(RevalJnlTemplateName,RevalJnlBatchName);
+        ItemJournalLine.SETRANGE("Journal Template Name",RevalJnlTemplateName);
+        ItemJournalLine.SETRANGE("Journal Batch Name",RevalJnlBatchName);
+        ItemJournalLine.SETRANGE("Item No.",ItemNo);
+        ItemJournalLine.SETRANGE("Entry Type",ItemJournalLine."Entry Type"::"Positive Adjmt.");
+        ItemJournalLine.SETRANGE("Source Code",SourceCodeSetup."Revaluation Journal");
+        Assert.AreEqual(1,ItemJournalLine.COUNT,'Filters:' + ItemJournalLine.GETFILTERS);
+        ItemJournalLine.FINDFIRST;
+        Assert.AreNearlyEqual(
+          StdCostWorksheet."Standard Cost",ItemJournalLine."Unit Cost (Calculated)",LibraryERM.GetAmountRoundingPrecision,
+          STRSUBSTNO(ERRWrongCost,ItemJournalLine.FIELDCAPTION("Unit Cost (Calculated)")));
+        Assert.AreNearlyEqual(
+          StdCostWorksheet."New Standard Cost",ItemJournalLine."Unit Cost (Revalued)",LibraryERM.GetAmountRoundingPrecision,
+          STRSUBSTNO(ERRWrongCost,ItemJournalLine.FIELDCAPTION("Unit Cost (Revalued)")));
+        Assert.AreNearlyEqual(
+          StdCostWorksheet."New Standard Cost" * ItemJournalLine."Quantity (Base)",ItemJournalLine."Inventory Value (Revalued)",
+          LibraryERM.GetAmountRoundingPrecision,
+          STRSUBSTNO(ERRWrongCost,ItemJournalLine.FIELDCAPTION("Inventory Value (Revalued)")));
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyCard@1(Type@1000 : Option;No@1001 : Code[20]);
+    VAR
+      StdCostWorksheet@1002 : Record 5841;
+      Item@1003 : Record 27;
+      Resource@1004 : Record 156;
+    BEGIN
+      StdCostWorksheet.SETRANGE("No.",No);
+      CASE Type OF
+        BOMComponent.Type::Item:
+          BEGIN
+            StdCostWorksheet.SETRANGE(Type,StdCostWorksheet.Type::Item);
+            Item.GET(No);
+            IF StdCostWorksheet.FINDFIRST THEN BEGIN
+              Item.TESTFIELD("Standard Cost",StdCostWorksheet."New Standard Cost");
+              Item.TESTFIELD("Indirect Cost %",StdCostWorksheet."New Indirect Cost %");
+              Item.TESTFIELD("Overhead Rate",StdCostWorksheet."New Overhead Rate");
+              Item.TESTFIELD("Single-Level Material Cost",StdCostWorksheet."New Single-Lvl Material Cost");
+              Item.TESTFIELD("Single-Level Capacity Cost",StdCostWorksheet."New Single-Lvl Cap. Cost");
+              Item.TESTFIELD("Single-Level Subcontrd. Cost",StdCostWorksheet."New Single-Lvl Subcontrd Cost");
+              Item.TESTFIELD("Single-Level Cap. Ovhd Cost",StdCostWorksheet."New Single-Lvl Cap. Ovhd Cost");
+              Item.TESTFIELD("Single-Level Mfg. Ovhd Cost",StdCostWorksheet."New Single-Lvl Mfg. Ovhd Cost");
+              Item.TESTFIELD("Rolled-up Material Cost",StdCostWorksheet."New Rolled-up Material Cost");
+              Item.TESTFIELD("Rolled-up Capacity Cost",StdCostWorksheet."New Rolled-up Cap. Cost");
+              Item.TESTFIELD("Rolled-up Subcontracted Cost",StdCostWorksheet."New Rolled-up Subcontrd Cost");
+              Item.TESTFIELD("Rolled-up Mfg. Ovhd Cost",StdCostWorksheet."New Rolled-up Mfg. Ovhd Cost");
+              Item.TESTFIELD("Rolled-up Cap. Overhead Cost",StdCostWorksheet."New Rolled-up Cap. Ovhd Cost");
+            END;
+          END;
+        BOMComponent.Type::Resource:
+          BEGIN
+            StdCostWorksheet.SETRANGE(Type,StdCostWorksheet.Type::Resource);
+            Resource.GET(No);
+            IF StdCostWorksheet.FINDFIRST THEN BEGIN
+              Resource.TESTFIELD("Unit Cost",StdCostWorksheet."New Standard Cost");
+              Resource.TESTFIELD("Indirect Cost %",StdCostWorksheet."New Indirect Cost %");
+            END;
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE AddItemInventory@7(ItemNo@1003 : Code[20]);
+    VAR
+      ItemJournalTemplate@1000 : Record 82;
+      ItemJournalBatch@1001 : Record 233;
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      LibraryAssembly.SetupItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,
+        LibraryRandom.RandInt(25));
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE AddOverhead@38(VAR TempItem@1001 : TEMPORARY Record 27;VAR TempResource@1002 : TEMPORARY Record 156);
+    VAR
+      Resource@1003 : Record 156;
+    BEGIN
+      IF TempItem.FINDSET THEN
+        REPEAT
+          LibraryAssembly.ModifyItem(TempItem."No.",TRUE,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5));
+        UNTIL TempItem.NEXT = 0;
+
+      IF TempResource.FINDSET THEN
+        REPEAT
+          Resource.GET(TempResource."No.");
+          Resource.VALIDATE("Indirect Cost %",LibraryRandom.RandInt(5));
+          Resource.MODIFY(TRUE);
+        UNTIL TempResource.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE GetTree@75(VAR TempItem@1001 : TEMPORARY Record 27;VAR TempResource@1002 : TEMPORARY Record 156;VAR RolledUpMaterialCost@1011 : Decimal;VAR RolledUpCapacityCost@1010 : Decimal;VAR RolledUpCapOvhd@1013 : Decimal;VAR SglLevelMaterialCost@1020 : Decimal;VAR SglLevelCapCost@1021 : Decimal;VAR SglLevelCapOvhd@1022 : Decimal;Item@1000 : Record 27) : Decimal;
+    VAR
+      BOMComponent@1003 : Record 90;
+      ProdBOMLine@1005 : Record 99000772;
+      Item1@1006 : Record 27;
+      Resource@1007 : Record 156;
+      LotSize@1004 : Decimal;
+      Overhead@1015 : Decimal;
+      IndirectCost@1016 : Decimal;
+      TreeCost@1008 : Decimal;
+      UnitCost@1012 : Decimal;
+      LocalRolledUpMaterialCost@1017 : Decimal;
+      LocalRolledUpCapCost@1018 : Decimal;
+      LocalRolledUpCapOvhd@1019 : Decimal;
+      LocalCost@1014 : Decimal;
+      RoundingPrecision@1100 : Decimal;
+    BEGIN
+      CASE Item."Replenishment System" OF
+        Item."Replenishment System"::Assembly:
+          BEGIN
+            BOMComponent.SETRANGE("Parent Item No.",Item."No.");
+            BOMComponent.SETRANGE(Type,BOMComponent.Type::Item);
+            IF BOMComponent.FINDSET THEN
+              REPEAT
+                Item1.GET(BOMComponent."No.");
+                LocalRolledUpMaterialCost := 0;
+                LocalRolledUpCapCost := 0;
+                LocalRolledUpCapOvhd := 0;
+                LocalCost := 0;
+                TreeCost +=
+                  BOMComponent."Quantity per" *
+                  GetTree(
+                    TempItem,TempResource,LocalRolledUpMaterialCost,LocalRolledUpCapCost,LocalRolledUpCapOvhd,LocalCost,LocalCost,
+                    LocalCost,Item1);
+                SglLevelMaterialCost +=
+                  BOMComponent."Quantity per" * (LocalRolledUpMaterialCost + LocalRolledUpCapCost + LocalRolledUpCapOvhd);
+                RolledUpMaterialCost += BOMComponent."Quantity per" * LocalRolledUpMaterialCost;
+                RolledUpCapacityCost += BOMComponent."Quantity per" * LocalRolledUpCapCost;
+                RolledUpCapOvhd += BOMComponent."Quantity per" * LocalRolledUpCapOvhd;
+              UNTIL BOMComponent.NEXT = 0;
+
+            BOMComponent.SETRANGE(Type,BOMComponent.Type::Resource);
+            IF BOMComponent.FINDSET THEN
+              REPEAT
+                Resource.GET(BOMComponent."No.");
+                TempResource := Resource;
+                TempResource.INSERT;
+
+                IF (BOMComponent."Resource Usage Type" = BOMComponent."Resource Usage Type"::Fixed) AND (Item."Lot Size" <> 0) THEN
+                  LotSize := Item."Lot Size"
+                ELSE
+                  LotSize := 1;
+
+                GetCostInformation(BOMComponent.Type::Resource,BOMComponent."No.",UnitCost,Overhead,IndirectCost);
+                TreeCost += BOMComponent."Quantity per" * UnitCost / LotSize;
+                SglLevelCapCost += BOMComponent."Quantity per" * (UnitCost - Overhead) / LotSize;
+                SglLevelCapOvhd += BOMComponent."Quantity per" * Overhead / LotSize;
+                RolledUpCapacityCost += BOMComponent."Quantity per" * (UnitCost - Overhead) / LotSize;
+                RolledUpCapOvhd += BOMComponent."Quantity per" * Overhead / LotSize;
+
+              UNTIL BOMComponent.NEXT = 0;
+          END;
+        Item."Replenishment System"::"Prod. Order":
+          BEGIN
+            ProdBOMLine.SETRANGE("Production BOM No.",Item."Production BOM No.");
+            ProdBOMLine.SETRANGE(Type,ProdBOMLine.Type::Item);
+            IF ProdBOMLine.FINDSET THEN
+              REPEAT
+                Item1.GET(ProdBOMLine."No.");
+                LocalRolledUpMaterialCost := 0;
+                LocalRolledUpCapCost := 0;
+                LocalRolledUpCapOvhd := 0;
+                LocalCost := 0;
+                TreeCost +=
+                  ProdBOMLine."Quantity per" *
+                  GetTree(
+                    TempItem,TempResource,LocalRolledUpMaterialCost,LocalRolledUpCapCost,LocalRolledUpCapOvhd,LocalCost,LocalCost,
+                    LocalCost,Item1);
+                SglLevelMaterialCost +=
+                  ProdBOMLine."Quantity per" * (LocalRolledUpMaterialCost + LocalRolledUpCapCost + LocalRolledUpCapOvhd);
+                RolledUpMaterialCost += ProdBOMLine."Quantity per" * LocalRolledUpMaterialCost;
+                RolledUpCapacityCost += ProdBOMLine."Quantity per" * LocalRolledUpCapCost;
+                RolledUpCapOvhd += ProdBOMLine."Quantity per" * LocalRolledUpCapOvhd;
+              UNTIL ProdBOMLine.NEXT = 0;
+          END;
+        Item."Replenishment System"::Purchase:
+          BEGIN
+            TempItem := Item;
+            TempItem.INSERT;
+            GetCostInformation(BOMComponent.Type::Item,Item."No.",UnitCost,Overhead,IndirectCost);
+            SglLevelMaterialCost := UnitCost;
+            RolledUpMaterialCost := UnitCost;
+            EXIT(UnitCost);
+          END;
+      END;
+
+      RoundingPrecision := LibraryERM.GetUnitAmountRoundingPrecision;
+      RolledUpMaterialCost := ROUND(RolledUpMaterialCost,RoundingPrecision);
+      RolledUpCapacityCost := ROUND(RolledUpCapacityCost,RoundingPrecision);
+      RolledUpCapOvhd := ROUND(RolledUpCapOvhd,RoundingPrecision);
+      SglLevelMaterialCost := ROUND(SglLevelMaterialCost,RoundingPrecision);
+      SglLevelCapCost := ROUND(SglLevelCapCost,RoundingPrecision);
+      SglLevelCapOvhd := ROUND(SglLevelCapOvhd,RoundingPrecision);
+
+      EXIT(ROUND(TreeCost * (1 + Item."Indirect Cost %" / 100) + Item."Overhead Rate",RoundingPrecision));
+    END;
+
+    LOCAL PROCEDURE GetCostInformation@56(Type@1000 : Option;No@1001 : Code[20];VAR UnitCost@1004 : Decimal;VAR Overhead@1007 : Decimal;VAR IndirectCost@1006 : Decimal);
+    BEGIN
+      LibraryAssembly.GetCostInformation(UnitCost,Overhead,IndirectCost,Type,No,'','');
+      IF ((No = GLBDirectResourceNo) AND (Type = BOMComponent.Type::Resource)) OR
+         ((No = GLBCompItemNo) AND (Type = BOMComponent.Type::Item))
+      THEN BEGIN
+        UnitCost := GetRoundedAmount(UnitCost * GLBStandardCostAdj,GLBRoundingMethod);
+        IndirectCost := GetRoundedAmount(IndirectCost * GLBIndirectCostAdj,GLBRoundingMethod);
+
+        IF Type = BOMComponent.Type::Resource THEN
+          Overhead := UnitCost * IndirectCost / (100 + IndirectCost)
+        ELSE
+          Overhead := GetRoundedAmount(Overhead * GLBOverheadRateAdj,GLBRoundingMethod);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetRevalJournalNames@20(VAR RevalJournalTemplateName@1000 : Code[20];VAR RevalJournalBatchName@1001 : Code[20]);
+    VAR
+      ItemJournalTemplate@1002 : Record 82;
+      ItemJournalBatch@1003 : Record 233;
+    BEGIN
+      ItemJournalTemplate.SETRANGE(Type,ItemJournalTemplate.Type::Revaluation);
+      ItemJournalTemplate.SETRANGE(Recurring,FALSE);
+      IF ItemJournalTemplate.FINDFIRST THEN BEGIN
+        ItemJournalBatch.SETRANGE("Journal Template Name",ItemJournalTemplate.Name);
+        IF ItemJournalBatch.FINDFIRST THEN
+          RevalJournalBatchName := ItemJournalBatch.Name;
+        RevalJournalTemplateName := ItemJournalTemplate.Name;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetRoundedAmount@5(Amount@1000 : Decimal;RoundingMethodCode@1002 : Code[10]) : Decimal;
+    VAR
+      RoundingMethod@1001 : Record 42;
+    BEGIN
+      IF RoundingMethod.GET(RoundingMethodCode) THEN
+        Amount := ROUND(ABS(Amount),RoundingMethod.Precision,COPYSTR('=><',RoundingMethod.Type + 1,1));
+      EXIT(Amount);
+    END;
+
+    LOCAL PROCEDURE SetGlobalParameters@96(VAR TempItem@1000 : TEMPORARY Record 27;VAR TempResource@1002 : TEMPORARY Record 156;ParentItemNo@1003 : Code[20]);
+    VAR
+      RoundingMethod@1001 : Record 42;
+    BEGIN
+      GLBStandardCostAdj := LibraryRandom.RandIntInRange(2,5);
+      GLBIndirectCostAdj := LibraryRandom.RandIntInRange(2,5);
+      GLBOverheadRateAdj := LibraryRandom.RandIntInRange(2,5);
+      GLBParentItemNo := ParentItemNo;
+      IF RoundingMethod.FINDFIRST THEN
+        GLBRoundingMethod := RoundingMethod.Code;
+
+      TempItem.NEXT(RANDOM(TempItem.COUNT));
+      GLBCompItemNo := TempItem."No.";
+
+      TempResource.NEXT(RANDOM(TempResource.COUNT));
+      GLBDirectResourceNo := TempResource."No.";
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE SuggestItemStdCostHandler@23(VAR SuggestItemStandardCost@1000 : TestRequestPage 5851);
+    BEGIN
+      SuggestItemStandardCost.Control18.SETVALUE(GLBStandardCostAdj);
+      SuggestItemStandardCost.Control1.SETVALUE(GLBIndirectCostAdj);
+      SuggestItemStandardCost.Control3.SETVALUE(GLBOverheadRateAdj);
+      SuggestItemStandardCost.Control14.SETVALUE(GLBRoundingMethod);
+      SuggestItemStandardCost.Control2.SETVALUE(GLBRoundingMethod);
+      SuggestItemStandardCost.Control4.SETVALUE(GLBRoundingMethod);
+
+      SuggestItemStandardCost.Item.SETFILTER("No.",GLBCompItemNo);
+      SuggestItemStandardCost.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE SuggestWorkMachCtrResStdCostHandler@51(VAR SuggestWorkMachCtrResStdCost@1000 : TestRequestPage 5852);
+    BEGIN
+      SuggestWorkMachCtrResStdCost.Control18.SETVALUE(GLBStandardCostAdj);
+      SuggestWorkMachCtrResStdCost.Control1.SETVALUE(GLBIndirectCostAdj);
+      SuggestWorkMachCtrResStdCost.Control3.SETVALUE(GLBOverheadRateAdj);
+      SuggestWorkMachCtrResStdCost.Control14.SETVALUE(GLBRoundingMethod);
+      SuggestWorkMachCtrResStdCost.Control2.SETVALUE(GLBRoundingMethod);
+      SuggestWorkMachCtrResStdCost.Control4.SETVALUE(GLBRoundingMethod);
+
+      SuggestWorkMachCtrResStdCost."Work Center".SETFILTER("No.",'-');
+      SuggestWorkMachCtrResStdCost."Machine Center".SETFILTER("No.",'-');
+      SuggestWorkMachCtrResStdCost.Resource.SETFILTER("No.",GLBDirectResourceNo);
+      SuggestWorkMachCtrResStdCost.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE RollupStdCostHandler@102(VAR RollUpStandardCost@1000 : TestRequestPage 5854);
+    BEGIN
+      RollUpStandardCost.CalculationDate.SETVALUE(WORKDATE);
+      RollUpStandardCost.Item.SETFILTER("No.",GLBParentItemNo);
+      RollUpStandardCost.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ImplementStdCostHandler@17(VAR ImplementStdCostChange@1000 : TestRequestPage 5855);
+    VAR
+      RevalJnlTemplateName@1001 : Code[20];
+      RevalJnlBatchName@1002 : Code[20];
+    BEGIN
+      ImplementStdCostChange.PostingDate.SETVALUE(WORKDATE);
+      ImplementStdCostChange.DocumentNo.SETVALUE(GLBParentItemNo);
+      GetRevalJournalNames(RevalJnlTemplateName,RevalJnlBatchName);
+      ImplementStdCostChange.ItemJournalTemplate.SETVALUE(RevalJnlTemplateName);
+      ImplementStdCostChange.ItemJournalBatchName.SETVALUE(RevalJnlBatchName);
+      IF FORMAT(ImplementStdCostChange.DocumentNo) = '' THEN
+        ImplementStdCostChange.DocumentNo.SETVALUE(GLBParentItemNo);
+      ImplementStdCostChange."Standard Cost Worksheet".SETFILTER(Type,'');
+      ImplementStdCostChange."Standard Cost Worksheet".SETFILTER(
+        "No.",GLBParentItemNo + '|' + GLBCompItemNo + '|' + GLBDirectResourceNo);
+      ImplementStdCostChange.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE StdCostMsgHandler@16(Message@1000 : Text);
+    BEGIN
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Assembly] [Cost Standard] [Standard Cost Worksheet] [SCM]
+    }
+    END.
+  }
+}
+

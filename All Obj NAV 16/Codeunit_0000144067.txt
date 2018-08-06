@@ -1,0 +1,193 @@
+OBJECT Codeunit 144067 TDS Offline Application
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryRandom@1500008 : Codeunit 130440;
+      LibraryPurchase@1500007 : Codeunit 130512;
+      LibraryTDS@1500006 : Codeunit 143000;
+      LibraryERM@1500004 : Codeunit 131300;
+      LibraryUtility@1500003 : Codeunit 131000;
+      Assert@1500010 : Codeunit 130000;
+      AmountErr@1500013 : TextConst '@@@="%1 and %2 = Amount and Amount";ENU=Expected Amount %1  and Actual Amount %2 must be same.';
+      PostApplicationErr@1500014 : TextConst 'ENU=You cannot apply documents that have TDS or Work Tax specified.';
+      LibraryJournals@1500001 : Codeunit 131306;
+      LibrarySetupStorage@1500002 : Codeunit 131009;
+      ServiceTaxWithTDSHelper@1500017 : Codeunit 143005;
+      isInitialized@1500000 : Boolean;
+
+    [Test]
+    [HandlerFunctions(PostAndApplyVendPageHandler)]
+    PROCEDURE GeneralJournalLineWithTDS@1500025();
+    VAR
+      GenJournalLine@1500002 : Record 81;
+      NodNocHeader@1500005 : Record 13786;
+      TDSSetup@1500004 : Record 13728;
+      IncomeTaxAccountingPeriod@1500003 : Record 13724;
+      IncomeTaxPeriodSetup@1500001 : Record 16501;
+      TdsNatureOfDeduction@1500000 : Record 13726;
+      VendorLedgerEntry@1500020 : Record 25;
+      ExpectedTDSEntry@1500007 : Record 13729;
+      PurchaseHeader@1500010 : Record 38;
+      PurchaseLine@1500009 : Record 39;
+      ExpectedPurchaseTDSEntry@1500017 : Record 13729;
+      PurchInvHeader@1500016 : Record 122;
+      Amount@1500006 : Decimal;
+      PurchDocumentNo@1500013 : Code[20];
+    BEGIN
+      // [SCENARIO 170497] System does not allow application when TDS calculation is involved.
+      // [FEATURE] [TDS] [General Journal] [Purchase Order]
+
+      // [GIVEN] Posted Purchase Payment with TDS setup
+      Initialize;
+      LibraryTDS.CreateIncomeTaxAccPeriod(IncomeTaxAccountingPeriod);
+      LibraryTDS.CreateIncomeTaxPeriod(IncomeTaxPeriodSetup,IncomeTaxAccountingPeriod."No.",1);
+      LibraryTDS.CreateAssesseeandNODNOCSetup(NodNocHeader,TdsNatureOfDeduction,TDSSetup,'',
+        CreateVendor,NodNocHeader.Type::Vendor,IncomeTaxAccountingPeriod."Starting Date");
+      Amount := LibraryRandom.RandDec(10000,2);
+      CreateGeneralJournalLine(
+        GenJournalLine,Amount,NodNocHeader."No.",TdsNatureOfDeduction.Code,IncomeTaxAccountingPeriod."Starting Date");
+      CalcTDSAmountsFromBase(ExpectedPurchaseTDSEntry,TDSSetup,GenJournalLine.Amount);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      ServiceTaxWithTDSHelper.VerifyTDSEntry(
+        ExpectedPurchaseTDSEntry,GenJournalLine."Document No.",GenJournalLine."Document Type",FALSE);
+
+      // [GIVEN] Posted Purchase Invoice with TDS setup
+      CreatePurchaseDocumentWithTDS(PurchaseHeader,PurchaseLine,NodNocHeader."No.",'',Amount,TdsNatureOfDeduction.Code,
+        PurchaseHeader."Document Type"::Order,IncomeTaxAccountingPeriod."Starting Date");
+      PurchaseLine.CalculateTDS(PurchaseHeader);
+      CalcTDSAmountsFromBase(
+        ExpectedTDSEntry,TDSSetup,PurchaseLine."Direct Unit Cost" * PurchaseLine."Qty. to Invoice");
+      PurchDocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      ServiceTaxWithTDSHelper.VerifyTDSEntry(
+        ExpectedTDSEntry,PurchDocumentNo,ExpectedTDSEntry."Document Type"::Invoice,FALSE);
+      PurchInvHeader.SETRANGE("No.",PurchDocumentNo);
+      PurchInvHeader.FINDFIRST;
+      PurchInvHeader.CALCFIELDS("Amount to Vendor");
+      VerifyVendorLedgerEntryWithRemainingAmount(PurchDocumentNo,PurchInvHeader."Amount to Vendor");
+
+      // [WHEN] Apply Payment to Invoice
+      ASSERTERROR ApplyVendLedgerEntry(VendorLedgerEntry."Document Type"::Invoice,VendorLedgerEntry."Vendor No.",PurchDocumentNo);
+
+      // [THEN] System should throw error: "You cannot apply documents that have TDS or Work Tax specified."
+      Assert.ExpectedError(PostApplicationErr);
+    END;
+
+    LOCAL PROCEDURE Initialize@1500325();
+    BEGIN
+      LibrarySetupStorage.Restore;
+      IF isInitialized THEN
+        EXIT;
+      CreateDeductoryCodeAndUpdateOnCompanyInformation;
+      isInitialized := TRUE;
+      COMMIT;
+      LibrarySetupStorage.Save(DATABASE::"Company Information");
+    END;
+
+    LOCAL PROCEDURE CreateVendor@1500225() : Code[20];
+    VAR
+      Vendor@1500003 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("P.A.N. No.",LibraryUtility.GenerateRandomCode(Vendor.FIELDNO("P.A.N. No."),DATABASE::Vendor));
+      Vendor.MODIFY(TRUE);
+      EXIT(Vendor."No.");
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalLine@1500125(VAR GenJournalLine@1033 : Record 81;Amount@1500001 : Decimal;VendorNo@1034 : Code[20];CodeContractor@1036 : Code[10];PostingDate@1500002 : Date);
+    BEGIN
+      LibraryJournals.CreateGenJournalLineWithBatch(
+        GenJournalLine,GenJournalLine."Document Type"::Payment,GenJournalLine."Account Type"::Vendor,VendorNo,Amount);
+      GenJournalLine.VALIDATE("Party Type",GenJournalLine."Party Type"::Vendor);
+      GenJournalLine.VALIDATE("Party Code",VendorNo);
+      GenJournalLine."Posting Date" := PostingDate;
+      GenJournalLine.VALIDATE("TDS Nature of Deduction",CodeContractor);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateDeductoryCodeAndUpdateOnCompanyInformation@1500018();
+    VAR
+      DeductorCategory@1500001 : Record 16498;
+      CompanyInformation@1500000 : Record 79;
+    BEGIN
+      CompanyInformation.GET;
+      LibraryERM.CreateDeductorCategory(DeductorCategory);
+      CompanyInformation.VALIDATE("Deductor Category",DeductorCategory.Code);
+      CompanyInformation.VALIDATE("T.A.N. No.",LibraryTDS.CreateTANNo);
+      CompanyInformation.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CalcTDSAmountsFromBase@1500087(VAR ExpectedTDSEntry@1500001 : Record 13729;TDSSetup@1500002 : Record 13728;TaxBaseAmount@1500003 : Decimal);
+    BEGIN
+      WITH ExpectedTDSEntry DO BEGIN
+        "TDS Base Amount" := TaxBaseAmount;
+        "TDS Amount" := LibraryTDS.RoundTDS(TDSSetup."TDS %" / 100 * "TDS Base Amount");
+        "Surcharge Amount" := LibraryTDS.RoundTDS(TDSSetup."Surcharge %" / 100 * "TDS Amount");
+        "eCESS Amount" := LibraryTDS.RoundTDS(TDSSetup."eCESS %" / 100 * ("TDS Amount" + "Surcharge Amount"));
+        "SHE Cess Amount" := LibraryTDS.RoundTDS(TDSSetup."SHE Cess %" / 100 * ("TDS Amount" + "Surcharge Amount"));
+        "Total TDS Including SHE CESS" := "TDS Amount" + "eCESS Amount" + "SHE Cess Amount" + "Surcharge Amount";
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseDocumentWithTDS@1500000(VAR PurchaseHeader@1500005 : Record 38;VAR PurchaseLine@1500006 : Record 39;VendorNo@1500004 : Code[20];ItemNo@1500003 : Code[20];Amount@1500002 : Decimal;CodeContractor@1500001 : Code[10];DocType@1500000 : 'Quote,Order,Invoice,Credit Memo,Blanket Order,Return Order';PostingDate@1500007 : Date);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocType,VendorNo);
+      PurchaseHeader.VALIDATE("Posting Date",PostingDate);
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,10);
+      PurchaseLine.VALIDATE("Direct Unit Cost",Amount);
+      PurchaseLine.VALIDATE("TDS Nature of Deduction",CodeContractor);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyVendorLedgerEntryWithRemainingAmount@1500072(DocumentNo@1500001 : Code[20];Amount@1500000 : Decimal);
+    VAR
+      VendorLedgerEntry@1500002 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,VendorLedgerEntry."Document Type"::Invoice,DocumentNo);
+      VendorLedgerEntry.CALCFIELDS("Amount (LCY)","Remaining Amount","Original Amount");
+      VendorLedgerEntry.TESTFIELD(Open,TRUE);
+      Assert.AreEqual(
+        Amount,ABS(VendorLedgerEntry."Remaining Amount"),AmountErr);
+      Assert.AreEqual(
+        Amount,ABS(VendorLedgerEntry."Original Amount"),AmountErr);
+      Assert.AreEqual(
+        Amount,ABS(VendorLedgerEntry."Amount (LCY)"),AmountErr);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE PostAndApplyVendPageHandler@1500321(VAR ApplyVendorEntries@1000 : TestPage 233);
+    BEGIN
+      ApplyVendorEntries.ActionSetAppliesToID.INVOKE;
+      ApplyVendorEntries.ActionPostApplication.INVOKE;
+    END;
+
+    LOCAL PROCEDURE ApplyVendLedgerEntry@1500425(DocumentType@1000 : Option;VendorNo@1001 : Code[20];DocumentNo@1500000 : Code[20]);
+    VAR
+      VendorLedgerEntries@1002 : TestPage 29;
+    BEGIN
+      VendorLedgerEntries.OPENVIEW;
+      VendorLedgerEntries.FILTER.SETFILTER("Document Type",FORMAT(DocumentType));
+      VendorLedgerEntries.FILTER.SETFILTER("Vendor No.",VendorNo);
+      VendorLedgerEntries.FILTER.SETFILTER("Document No.",DocumentNo);
+      VendorLedgerEntries.ActionApplyEntries.INVOKE;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

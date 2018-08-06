@@ -1,0 +1,2012 @@
+OBJECT Codeunit 136110 Service Management Setup
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+            ServiceOrderAllocation.INIT
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ServiceOrderAllocation@1004 : Record 5950;
+      Resource@1007 : Record 156;
+      FaultResolCodRelationship2@1024 : Record 5920;
+      LibraryService@1006 : Codeunit 131902;
+      UseContractTemplateConfirm@1001 : TextConst 'ENU=Do you want to create the contract using a contract template?';
+      StartingFeeMandErrorServTier@1003 : TextConst 'ENU="Service Order Starting Fee must have a value in Service Mgt. Setup: Primary Key=. It cannot be zero or empty."';
+      ResourceNotQualifiedError@1005 : TextConst 'ENU=%1 %2 %3 is not qualified to carry out the service.';
+      UnknownError@1002 : TextConst 'ENU=Unknown error.';
+      FaultReportingLevelNoneError@1008 : TextConst 'ENU=You cannot use %1, because the %2 in the %3 table is %4.';
+      BaseCalendarCodeBlankErrorServ@1010 : TextConst 'ENU="%1 must have a value in %2: Primary Key=. It cannot be zero or empty."';
+      ResponseTimeMoreThanYearError@1011 : TextConst 'ENU=The %1 for this %2 occurs in more than 1 year. Please verify the setting for service hours and the %3 for the %4.';
+      WarrantyDurationNegativeError@1012 : TextConst 'ENU=Default warranty duration is negative. The warranty cannot be activated.';
+      ContractChangeLogError@1013 : TextConst 'ENU=%1 must be empty for %2 %3.';
+      CancelReasonBlankErrorServTier@1015 : TextConst 'ENU="%1 must have a value in %2: %3=%4, %5=%6. It cannot be zero or empty."';
+      ContractCancellationQuestion@1016 : TextConst 'ENU=Please note that it is not possible to change a service contract to its previous status.\\Do you want to cancel the contract?';
+      DateRangeError@1017 : TextConst 'ENU=The date range you have entered is a longer period than is allowed in the %1 table.';
+      ServiceInvoiceMassage@1018 : TextConst 'ENU="Service Invoice "';
+      ZeroOrderCreated@1019 : TextConst 'ENU=0 service order was created.';
+      UnexpectedMessage@1020 : TextConst 'ENU=Unknown message %1.';
+      ServiceOrderError@1021 : TextConst 'ENU="%1 must not exist for %2 %3=%4."';
+      LibrarySales@1035 : Codeunit 130509;
+      LibraryInventory@1098 : Codeunit 132201;
+      Assert@1000 : Codeunit 130000;
+      isInitialized@1022 : Boolean;
+      Question@1023 : TextConst 'ENU=Force confirm ?';
+      FieldLengthErr@1009 : TextConst 'ENU=The length of the Field ''%1'' must be more or equal to %2';
+
+    LOCAL PROCEDURE Initialize@49();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      CLEAR(FaultResolCodRelationship2);
+      CLEAR(LibraryService);
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryService.SetupServiceMgtNoSeries;
+      LibraryERMCountryData.UpdateAccountInCustomerPostingGroup;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE TestPlannedNextServCalcMethod@7();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceHeader@1002 : Record 5900;
+      SignServContractDoc@1004 : Codeunit 5944;
+      SetupModified@1003 : Boolean;
+    BEGIN
+      // Covers document number TC0108 - refer to TFS ID 21727.
+      // 1. Setup Next Service Calc. Method in Service Management Setup as Planned.
+      // 2. Create and Sign a Prepaid Service Contract with any Customer.
+      // 3. Create and post a Service Order - Service Header with Contract No. as No. of Service Contract Header, Service Item Lines and
+      // Service Lines.
+      // 4. Verify that the Next Planned Date in Service Line is obtained by adding Service Period of the Service Contract Header to the
+      // Starting Date of the Service Contract Header.
+      // 5. Cleanup if Setup was changed.
+
+      // Setup: Setup Next Service Calc. Method in Service Management Setup as Planned. Create and sign Service Contract.
+      Initialize;
+      SetupModified := SetupServiceMgtSetupPlanned;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE(Prepaid,TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+
+      // Exercise: Create and Post Service Order as Ship and Invoice with Contract No. as No. of Service Contract Header.
+      CreateAndPostServiceOrderForResource(
+        ServiceHeader,ServiceContractLine,ServiceContractHeader."Customer No.",ServiceContractHeader."Contract No.",TRUE);
+
+      // Verify: Check that the Next Planned Date in Service Line is obtained by adding Service Period of the Service Contract Header to
+      // the Starting Date of the Service Contract Header.
+      VerifyPlannedNextServCalcMthod(ServiceContractHeader);
+
+      // Cleanup: If the Next Service Calc. Method in Service Management Setup was changed then cleanup.
+      IF SetupModified THEN
+        SetupServiceMgtSetupActual;
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE TestActualNextServCalcMethod@20();
+    VAR
+      ServiceContractHeader@1006 : Record 5965;
+      ServiceContractLine@1005 : Record 5964;
+      ServiceHeader@1004 : Record 5900;
+      SignServContractDoc@1001 : Codeunit 5944;
+      SetupModified@1000 : Boolean;
+    BEGIN
+      // Covers document number TC0108 - refer to TFS ID 21727.
+      // 1. Setup Next Service Calc. Method in Service Management Setup as Actual.
+      // 2. Create and Sign a Prepaid Service Contract with any Customer.
+      // 3. Create and post a Service Order - Service Header with Contract No. as No. of Service Contract Header, Service Item Lines and
+      // Service Lines.
+      // 4. Verify that the Next Planned Date in Service Line is obtained by adding Service Period of the Service Contract Header to the
+      // Last Service Date of the Service Contract Line.
+      // 5. Cleanup if Setup was changed.
+
+      // Setup: Setup Next Service Calc. Method in Service Management Setup as Actual. Create and sign Service Contract.
+      Initialize;
+      SetupModified := SetupServiceMgtSetupActual;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      ServiceContractHeader.VALIDATE(Prepaid,TRUE);
+      ServiceContractHeader.MODIFY(TRUE);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+
+      // Exercise: Create and Post Service Order with Contract No. as No. of Service Contract Header.
+      CreateAndPostServiceOrderForResource(
+        ServiceHeader,ServiceContractLine,ServiceContractHeader."Customer No.",ServiceContractHeader."Contract No.",TRUE);
+
+      // Verify: Check that the Next Planned Date in Service Line is obtained by adding Service Period of the Service Contract Header to
+      // the Last Service Date of the Service Contract Line.
+      VerifyActualNextServCalcMthod(ServiceContractLine,ServiceContractHeader."Service Period");
+
+      // Cleanup: If the Next Service Calc. Method in Service Management Setup was changed then cleanup.
+      IF SetupModified THEN
+        SetupServiceMgtSetupPlanned;
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE TestServiceLineStartFee@9();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1004 : Record 5902;
+      ServiceCost@1005 : Record 5905;
+      ServOrderManagement@1003 : Codeunit 5900;
+    BEGIN
+      // Covers document number TC0109 - refer to TFS ID 21727.
+      // 1. If Service Order Starting Fee of Service Management Setup is blank then create a new Service Cost and input in the field.
+      // 2. Create a new Service Order - Service Header and Service Line.
+      // 3. Add starting fee to the Service Line by Insert Starting Fee function.
+      // 4. Verify that the values on the Service Line correspond to the values of the Service Cost entered in the Service Mgt. Setup.
+
+      // Setup: Setup Service Order Starting Fee of Service Management Setup. Create a new Service Order - Service Header, Service Line.
+      Initialize;
+      ExecuteConfirm;
+      SetupServiceMgtStartingFee(ServiceCost);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+
+      // Exercise: Add starting fee to the Service Line by Insert Starting Fee function.
+      ServiceLine.VALIDATE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.VALIDATE("Document No.",ServiceHeader."No.");
+      ServiceLine.INIT;
+      ServOrderManagement.InsertServCost(ServiceLine,1,FALSE);
+
+      // Verify: Check that values on the Service Line correspond to the values of the Service Cost entered in the Service Mgt. Setup.
+      VerifyServiceLineStartingFee(ServiceHeader,ServiceCost);
+    END;
+
+    [Test]
+    PROCEDURE TestServiceLineStartFeeBlank@12();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1004 : Record 5902;
+      ServOrderManagement@1003 : Codeunit 5900;
+      Assert@1000 : Codeunit 130000;
+    BEGIN
+      // Covers document number TC0109 - refer to TFS ID 21727.
+      // 1. Input Service Order Starting Fee of Service Management Setup as blank.
+      // 2. Create a new Service Order - Service Header and Service Line.
+      // 3. Add starting fee to the Service Line by Insert Starting Fee function.
+      // 4. Verify that the application generates an error if Starting Fee has not been specified in Service Management Setup.
+
+      // Setup: Setup Service Order Starting Fee of Service Management Setup. Create a new Service Order - Service Header, Service Line.
+      Initialize;
+      SetupServiceMgtStartngFeeBlank;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+
+      // Exercise: Add starting fee to the Service Line by Insert Starting Fee function.
+      ServiceLine.VALIDATE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.VALIDATE("Document No.",ServiceHeader."No.");
+      ServiceLine.INIT;
+      ASSERTERROR ServOrderManagement.InsertServCost(ServiceLine,1,FALSE);
+
+      // Verify: Check that the application generates an error if Starting Fee has not been specified in Service Management Setup.
+      Assert.AreEqual(STRSUBSTNO(StartingFeeMandErrorServTier),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderSubformFormHandler,ResourceAllocationsFormHandler,ResAvailabilityModlFormHandler)]
+    PROCEDURE TestResSkillWrngDisplayedError@18();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      SkillCode@1006 : Record 5955;
+      ResourceSkill@1003 : Record 5956;
+      ServiceItem@1004 : Record 5940;
+      ServiceItemLine@1005 : Record 5901;
+      ServiceMgtSetup@1009 : Record 5911;
+      ServiceOrderSubform@1007 : Page 5902;
+      LibraryResource@1002 : Codeunit 130511;
+      Assert@1008 : Codeunit 130000;
+    BEGIN
+      // Covers document number TC0110 - refer to TFS ID 21727.
+      // 1. Input Resource Skills Option as Warning Displayed in Service Management Setup and Service Zones Option as Code Shown.
+      // 2. Create a new Service Order - Service Item with new Resource Skill assigned, Service Header and Service Item Line.
+      // 3. Allocate Resource to the Service Line by calling Resource Allocations from the Service Item Line.
+      // 4. Verify that the application generates an error if the Resource is not qualified to carry the Service.
+
+      // Setup: Input Resource Skills Option as Warning Displayed in Service Management Setup. Create a new Service Order - Service
+      // Header, Service Item Line, Service Line having Service Item with Resource Skill assigned.
+      Initialize;
+      SetupServiceMgtResSkillServZon(
+        ServiceMgtSetup."Resource Skills Option"::"Warning Displayed",ServiceMgtSetup."Service Zones Option"::"Code Shown");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryResource.CreateSkillCode(SkillCode);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::"Service Item",ServiceItem."No.",SkillCode.Code);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      LibraryResource.FindResource(Resource);
+      COMMIT;
+
+      // Exercise: Allocate Resource to the Service Line.
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.SETRANGE("Line No.",ServiceItemLine."Line No.");
+      ServiceOrderSubform.SETTABLEVIEW(ServiceItemLine);
+      ServiceOrderSubform.SETRECORD(ServiceItemLine);
+      ASSERTERROR ServiceOrderSubform.RUN;
+
+      // Verify: Check that the application generates an error if the Resource is not qualified to carry the Service.
+      Assert.AreEqual(
+        STRSUBSTNO(ResourceNotQualifiedError,Resource.TABLECAPTION,Resource.FIELDCAPTION("No."),Resource."No."),
+        GETLASTERRORTEXT,UnknownError);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.CALCFIELDS("No. of Allocations");
+      ServiceHeader.TESTFIELD("No. of Allocations",0);
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderSubformFormHandler,ResourceAllocationsFormHandler,ResAvailabilityModlFormHandler)]
+    PROCEDURE TestResSkillWrngDisplayedAlloc@21();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      SkillCode@1006 : Record 5955;
+      ResourceSkill@1003 : Record 5956;
+      ServiceItem@1004 : Record 5940;
+      ServiceItemLine@1005 : Record 5901;
+      ServiceMgtSetup@1008 : Record 5911;
+      ServiceOrderSubform@1007 : Page 5902;
+      LibraryResource@1002 : Codeunit 130511;
+    BEGIN
+      // Covers document number TC0110 - refer to TFS ID 21727.
+      // 1. Input Resource Skills Option as Warning Displayed in Service Management Setup and Service Zones Option as Code Shown.
+      // 2. Create a new Service Order - Service Item with new Resource Skill assigned, Service Header and Service Item Line.
+      // 3. Allocate Resource to the Service Line by calling Resource Allocations from the Service Item Line.
+      // 4. Verify that the application allows Resource allocation if Resource is qualified to carry the Service.
+
+      // Setup: Input Resource Skills Option as Warning Displayed in Service Management Setup. Create a new Service Order - Service
+      // Header, Service Item Line, Service Line having Service Item with Resource Skill assigned. Assign the Skill Code to Resource.
+      Initialize;
+      SetupServiceMgtResSkillServZon(
+        ServiceMgtSetup."Resource Skills Option"::"Warning Displayed",ServiceMgtSetup."Service Zones Option"::"Code Shown");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryResource.CreateSkillCode(SkillCode);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::"Service Item",ServiceItem."No.",SkillCode.Code);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      LibraryResource.FindResource(Resource);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::Resource,Resource."No.",SkillCode.Code);
+
+      // Exercise: Allocate Resource to the Service Line.
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.SETRANGE("Line No.",ServiceItemLine."Line No.");
+      ServiceOrderSubform.SETTABLEVIEW(ServiceItemLine);
+      ServiceOrderSubform.SETRECORD(ServiceItemLine);
+      ServiceOrderSubform.RUN;
+
+      // Verify: Check that the application allows Resource allocation if Resource is qualified to carry the Service.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.CALCFIELDS("No. of Allocations");
+      ServiceHeader.TESTFIELD("No. of Allocations",1);  // One Resource should be allocated.
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderSubformFormHandler,ResourceAllocationsFormHandler,ResAvailabilityModlFormHandler,ConfirmHandler)]
+    PROCEDURE TestCodeShownConfirmAlloc@22();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      SkillCode@1006 : Record 5955;
+      ResourceSkill@1003 : Record 5956;
+      ServiceItem@1004 : Record 5940;
+      ServiceItemLine@1005 : Record 5901;
+      ServiceMgtSetup@1008 : Record 5911;
+      ServiceOrderSubform@1007 : Page 5902;
+      LibraryResource@1002 : Codeunit 130511;
+    BEGIN
+      // Covers document number TC0110 - refer to TFS ID 21727.
+      // 1. Input Resource Skills Option as Code Shown in Service Management Setup and Service Zones Option as Warning Displayed.
+      // 2. Create a new Service Order - Service Item with new Resource Skill assigned, Service Header and Service Item Line.
+      // 3. Allocate Resource to the Service Line by calling Resource Allocations from the Service Item Line.
+      // 4. Verify that the application generates a confirmation message and allows resource to be allocated if the Resource is not
+      // qualified to carry the Service.
+
+      // Setup: Input Resource Skills Option as Code Shown in Service Management Setup. Create a new Service Order - Service
+      // Header, Service Item Line, Service Line having Service Item with Resource Skill assigned.
+      Initialize;
+      SetupServiceMgtResSkillServZon(
+        ServiceMgtSetup."Resource Skills Option"::"Code Shown",ServiceMgtSetup."Service Zones Option"::"Warning Displayed");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryResource.CreateSkillCode(SkillCode);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::"Service Item",ServiceItem."No.",SkillCode.Code);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      LibraryResource.FindResource(Resource);
+
+      // Exercise: Allocate Resource to the Service Line.
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.SETRANGE("Line No.",ServiceItemLine."Line No.");
+      ServiceOrderSubform.SETTABLEVIEW(ServiceItemLine);
+      ServiceOrderSubform.SETRECORD(ServiceItemLine);
+      ServiceOrderSubform.RUN;
+      ExecuteConfirm;
+
+      // Verify: Check that the application allows the Resource to be allocated if the Resource is not qualified to carry the Service.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.CALCFIELDS("No. of Allocations");
+      ServiceHeader.TESTFIELD("No. of Allocations",1);  // One Resource should be allocated.
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderSubformFormHandler,ResourceAllocationsFormHandler,ResAvailabilityModlFormHandler)]
+    PROCEDURE TestBothCodeShownConfirmAlloc@19();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      SkillCode@1006 : Record 5955;
+      ResourceSkill@1003 : Record 5956;
+      ServiceItem@1004 : Record 5940;
+      ServiceItemLine@1005 : Record 5901;
+      ServiceMgtSetup@1008 : Record 5911;
+      ServiceOrderSubform@1007 : Page 5902;
+      LibraryResource@1002 : Codeunit 130511;
+    BEGIN
+      // Covers document number TC0110 - refer to TFS ID 21727.
+      // 1. Input Resource Skills Option as Code Shown in Service Management Setup and Service Zones Option as Code Shown.
+      // 2. Create a new Service Order - Service Item with new Resource Skill assigned, Service Header and Service Item Line.
+      // 3. Allocate Resource to the Service Line by calling Resource Allocations from the Service Item Line.
+      // 4. Verify that the application generates a confirmation message and allows resource to be allocated if the Resource is not
+      // qualified to carry the Service.
+
+      // Setup: Input Resource Skills Option as Code Shown in Service Management Setup. Create a new Service Order - Service
+      // Header, Service Item Line, Service Line having Service Item with Resource Skill assigned.
+      Initialize;
+      SetupServiceMgtResSkillServZon(
+        ServiceMgtSetup."Resource Skills Option"::"Code Shown",ServiceMgtSetup."Service Zones Option"::"Code Shown");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryResource.CreateSkillCode(SkillCode);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::"Service Item",ServiceItem."No.",SkillCode.Code);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      LibraryResource.FindResource(Resource);
+
+      // Exercise: Allocate Resource to the Service Line.
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.SETRANGE("Line No.",ServiceItemLine."Line No.");
+      ServiceOrderSubform.SETTABLEVIEW(ServiceItemLine);
+      ServiceOrderSubform.SETRECORD(ServiceItemLine);
+      ServiceOrderSubform.RUN;
+
+      // Verify: Check that the application allows the Resource to be allocated if the Resource is not qualified to carry the Service.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.CALCFIELDS("No. of Allocations");
+      ServiceHeader.TESTFIELD("No. of Allocations",1);  // One Resource should be allocated.
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderSubformFormHandler,ResourceAllocationsFormHandler,ResAvailabilityModlFormHandler)]
+    PROCEDURE TestBothWrngDisplayedError@30();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      SkillCode@1006 : Record 5955;
+      ResourceSkill@1003 : Record 5956;
+      ServiceItem@1004 : Record 5940;
+      ServiceItemLine@1005 : Record 5901;
+      ServiceMgtSetup@1009 : Record 5911;
+      ServiceOrderSubform@1007 : Page 5902;
+      LibraryResource@1002 : Codeunit 130511;
+      Assert@1008 : Codeunit 130000;
+    BEGIN
+      // Covers document number TC0110 - refer to TFS ID 21727.
+      // 1. Input Resource Skills Option and Service Zones Option as Warning Displayed in Service Management Setup.
+      // 2. Create a new Service Order - Service Item with new Resource Skill assigned, Service Header and Service Item Line.
+      // 3. Allocate Resource to the Service Line by calling Resource Allocations from the Service Item Line.
+      // 4. Verify that the application generates an error if the Resource is not qualified to carry the Service.
+
+      // Setup:Input Resource Skills Option as Warning Displayed in Service Management Setup. Create a new Service Order - Service
+      // Header, Service Item Line, Service Line having Service Item with Resource Skill assigned.
+      Initialize;
+      SetupServiceMgtResSkillServZon(
+        ServiceMgtSetup."Resource Skills Option"::"Warning Displayed",ServiceMgtSetup."Service Zones Option"::"Warning Displayed");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryResource.CreateSkillCode(SkillCode);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::"Service Item",ServiceItem."No.",SkillCode.Code);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      LibraryResource.FindResource(Resource);
+      COMMIT;
+
+      // Exercise: Allocate Resource to the Service Line.
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.SETRANGE("Line No.",ServiceItemLine."Line No.");
+      ServiceOrderSubform.SETTABLEVIEW(ServiceItemLine);
+      ServiceOrderSubform.SETRECORD(ServiceItemLine);
+      ASSERTERROR ServiceOrderSubform.RUN;
+
+      // Verify: Check that the application generates an error if the Resource is not qualified to carry the Service.
+      Assert.AreEqual(
+        STRSUBSTNO(ResourceNotQualifiedError,Resource.TABLECAPTION,Resource.FIELDCAPTION("No."),Resource."No."),
+        GETLASTERRORTEXT,UnknownError);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.CALCFIELDS("No. of Allocations");
+      ServiceHeader.TESTFIELD("No. of Allocations",0);
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderSubformFormHandler,ResourceAllocationsFormHandler,ResAvailabilityModlFormHandler,ConfirmHandler)]
+    PROCEDURE TestBothWrngDisplayedAlloc@32();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      SkillCode@1006 : Record 5955;
+      ResourceSkill@1003 : Record 5956;
+      ServiceItem@1004 : Record 5940;
+      ServiceItemLine@1005 : Record 5901;
+      ServiceMgtSetup@1008 : Record 5911;
+      ServiceOrderSubform@1007 : Page 5902;
+      LibraryResource@1002 : Codeunit 130511;
+    BEGIN
+      // Covers document number TC0110 - refer to TFS ID 21727.
+      // 1. Input Resource Skills Option and Service Zones Option as Warning Displayed in Service Management Setup.
+      // 2. Create a new Service Order - Service Item with new Resource Skill assigned, Service Header and Service Item Line.
+      // 3. Allocate Resource to the Service Line by calling Resource Allocations from the Service Item Line.
+      // 4. Verify that the application allows Resource allocation if Resource is qualified to carry the Service.
+
+      // Setup: Input Resource Skills Option as Warning Displayed in Service Management Setup. Create a new Service Order - Service
+      // Header, Service Item Line, Service Line having Service Item with Resource Skill assigned. Assign the Skill Code to Resource.
+      Initialize;
+      ExecuteConfirm;
+      SetupServiceMgtResSkillServZon(
+        ServiceMgtSetup."Resource Skills Option"::"Warning Displayed",ServiceMgtSetup."Service Zones Option"::"Warning Displayed");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryResource.CreateSkillCode(SkillCode);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::"Service Item",ServiceItem."No.",SkillCode.Code);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      LibraryResource.FindResource(Resource);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::Resource,Resource."No.",SkillCode.Code);
+
+      // Exercise: Allocate Resource to the Service Line.
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.SETRANGE("Line No.",ServiceItemLine."Line No.");
+      ServiceOrderSubform.SETTABLEVIEW(ServiceItemLine);
+      ServiceOrderSubform.SETRECORD(ServiceItemLine);
+      ServiceOrderSubform.RUN;
+
+      // Verify: Check that the application allows Resource allocation if Resource is qualified to carry the Service.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.CALCFIELDS("No. of Allocations");
+      ServiceHeader.TESTFIELD("No. of Allocations",1);  // One Resource should be allocated.
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderSubformFormHandler,ResourceAllocationsFormHandler,ResAvailabilityModlFormHandler)]
+    PROCEDURE TestBothNotUsedAlloc@31();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      SkillCode@1006 : Record 5955;
+      ResourceSkill@1003 : Record 5956;
+      ServiceItem@1004 : Record 5940;
+      ServiceItemLine@1005 : Record 5901;
+      ServiceMgtSetup@1008 : Record 5911;
+      ServiceOrderSubform@1007 : Page 5902;
+      LibraryResource@1002 : Codeunit 130511;
+    BEGIN
+      // Covers document number TC0110 - refer to TFS ID 21727.
+      // 1. Input Resource Skills Option and Service Zones Option as Not Used in Service Management Setup.
+      // 2. Create a new Service Order - Service Item with new Resource Skill assigned, Service Header and Service Item Line.
+      // 3. Allocate Resource to the Service Line by calling Resource Allocations from the Service Item Line.
+      // 4. Verify that the application allows Resource allocation if Resource is qualified to carry the Service.
+
+      // Setup: Input both Options as Not Used in Service Management Setup. Create a new Service Order - Service
+      // Header, Service Item Line, Service Line having Service Item with Resource Skill assigned. Assign the Skill Code to Resource.
+      Initialize;
+      SetupServiceMgtResSkillServZon(
+        ServiceMgtSetup."Resource Skills Option"::"Not Used",ServiceMgtSetup."Service Zones Option"::"Not Used");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryResource.CreateSkillCode(SkillCode);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::"Service Item",ServiceItem."No.",SkillCode.Code);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      LibraryResource.FindResource(Resource);
+      LibraryResource.CreateResourceSkill(ResourceSkill,ResourceSkill.Type::Resource,Resource."No.",SkillCode.Code);
+
+      // Exercise: Allocate Resource to the Service Line.
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceItemLine."Document No.");
+      ServiceItemLine.SETRANGE("Line No.",ServiceItemLine."Line No.");
+      ServiceOrderSubform.SETTABLEVIEW(ServiceItemLine);
+      ServiceOrderSubform.SETRECORD(ServiceItemLine);
+      ServiceOrderSubform.RUN;
+
+      // Verify: Check that the application allows Resource allocation if Resource is qualified to carry the Service.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ServiceHeader.CALCFIELDS("No. of Allocations");
+      ServiceHeader.TESTFIELD("No. of Allocations",1);  // One Resource should be allocated.
+    END;
+
+    [Test]
+    PROCEDURE TestFaultReportingNoneError@45();
+    VAR
+      FaultCode@1000 : Record 5918;
+      FaultArea@1002 : Record 5915;
+      SymptomCode@1001 : Record 5916;
+      ServiceMgtSetup@1004 : Record 5911;
+    BEGIN
+      // Covers document number TC0111 - refer to TFS ID 21727.
+      // 1. Input Fault Reporting Level as None in Service Management Setup. Find Fault Area and Symptom Code.
+      // 2. Try to insert a Fault Code record with Fault Code as not blank.
+      // 3. Verify that the application generates an error on insertion of Fault Code record if Fault Reporting Level is set to None.
+
+      // Setup: Input Fault Reporting Level as None in Service Management Setup.
+      SetupServiceFaultReporting(ServiceMgtSetup,ServiceMgtSetup."Fault Reporting Level"::None);
+
+      LibraryService.CreateFaultArea(FaultArea);
+      LibraryService.CreateSymptomCode(SymptomCode);
+
+      // Exercise: Insert Fault Code.
+      ASSERTERROR LibraryService.CreateFaultCode(FaultCode,FaultArea.Code,SymptomCode.Code);
+
+      // Verify: Check that the application generates an error on insertion of Fault Code record if Fault Reporting Level is set to None.
+      Assert.AreEqual(
+        STRSUBSTNO(FaultReportingLevelNoneError,FaultCode.TABLECAPTION,ServiceMgtSetup.FIELDCAPTION("Fault Reporting Level"),
+          ServiceMgtSetup.TABLECAPTION,FORMAT(ServiceMgtSetup."Fault Reporting Level")),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE TestFaultReportingFault@29();
+    VAR
+      FaultCode@1000 : Record 5918;
+      ServiceHeader@1001 : Record 5900;
+      ServiceMgtSetup@1004 : Record 5911;
+      ServiceItemLine@1006 : Record 5901;
+      ServiceLine@1007 : Record 5902;
+      ServiceCost@1008 : Record 5905;
+      FaultResolCodRelationship@1005 : Record 5920;
+      FaultResolRelationCalculate@1011 : Codeunit 5913;
+    BEGIN
+      // Covers document number TC0111 - refer to TFS ID 21727.
+      // 1. Input Fault Reporting Level as Fault in Service Management Setup.
+      // 2. Insert a Fault Code record with Fault Code with Fault Area Code and Symptom Code as blank.
+      // 3. Create a Service order - Service Item with Service Item Group, Service Item Line with Fault and Resolution, Service Line.
+      // 4. Post the Service Order and insert Fault/Resolution relationships.
+      // 5. Verify that the values in the Fault Resolution Codes Relationship correspond to the values in the Fault Code record.
+
+      // Setup: Input Fault Reporting Level as Fault in Service Management Setup. Insert Fault Code, Service Header, Service Item Line,
+      // Service line.
+      SetupServiceFaultReporting(ServiceMgtSetup,ServiceMgtSetup."Fault Reporting Level"::Fault);
+      ExecuteConfirm;
+      LibraryService.CreateFaultCode(FaultCode,'','');
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      CreateServiceItemLineForFault(ServiceItemLine,ServiceHeader,FaultCode);
+
+      ServiceCost.SETFILTER("Unit of Measure Code",'<>''''');
+      LibraryService.FindServiceCost(ServiceCost);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Cost,ServiceCost.Code);
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+      ServiceLine.VALIDATE(Quantity,RANDOM(10));  // Required field - value is not important to test case.
+      ServiceLine.MODIFY(TRUE);
+
+      // Exercise: Post Service Order as Ship and insert Fault/Resolution relationships by calling codeunit FaultResolRelationCalculate.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+      FaultResolRelationCalculate.CopyResolutionRelationToTable(WORKDATE,WORKDATE,TRUE,TRUE);
+
+      // Verify: Check that the values in the Fault Resolution Codes Relationship correspond to the values in the Fault Code record.
+      FaultResolCodRelationship.SETRANGE("Fault Code",FaultCode.Code);
+      FaultResolCodRelationship.SETRANGE("Resolution Code",ServiceItemLine."Resolution Code");
+      FaultResolCodRelationship.FINDFIRST;
+      FaultResolCodRelationship.TESTFIELD("Fault Area Code",'');
+      FaultResolCodRelationship.TESTFIELD("Symptom Code",'');
+      FaultResolCodRelationship.TESTFIELD("Service Item Group Code",ServiceItemLine."Service Item Group Code");
+      FaultResolCodRelationship.TESTFIELD(Occurrences,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE TestFaultReportingFaultSymptom@48();
+    VAR
+      FaultCode@1000 : Record 5918;
+      ServiceHeader@1001 : Record 5900;
+      ServiceMgtSetup@1004 : Record 5911;
+      ServiceItemLine@1006 : Record 5901;
+      ServiceLine@1007 : Record 5902;
+      ServiceCost@1008 : Record 5905;
+      FaultResolCodRelationship@1005 : Record 5920;
+      FaultArea@1009 : Record 5915;
+      SymptomCode@1010 : Record 5916;
+      FaultResolRelationCalculate@1011 : Codeunit 5913;
+    BEGIN
+      // Covers document number TC0111 - refer to TFS ID 21727.
+      // 1. Input Fault Reporting Level as Fault+Symptom+Area (IRIS) in Service Management Setup.
+      // 2. Insert a Fault Code record with Fault Code with Fault Area Code and Symptom Code as blank.
+      // 3. Create a Service order - Service Item with Service Item Group, Service Item Line with Fault and Resolution, Service Line.
+      // 4. Post the Service Order and insert Fault/Resolution relationships.
+      // 5. Verify that the values in the Fault Resolution Codes Relationship correspond to the values in the Fault Code record.
+
+      // Setup: Input Fault Reporting Level as Fault+Symptom+Area (IRIS) in Service Management Setup. Insert Fault Code,
+      // Service Header, Service Item Line, Service Line.
+      LibraryService.CreateFaultArea(FaultArea);
+      LibraryService.CreateSymptomCode(SymptomCode);
+      SetupServiceFaultReporting(ServiceMgtSetup,ServiceMgtSetup."Fault Reporting Level"::"Fault+Symptom+Area (IRIS)");
+      ExecuteConfirm;
+      LibraryService.CreateFaultCode(FaultCode,FaultArea.Code,SymptomCode.Code);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      CreateServiceItemLineForFault(ServiceItemLine,ServiceHeader,FaultCode);
+
+      ServiceCost.SETFILTER("Unit of Measure Code",'<>''''');
+      LibraryService.FindServiceCost(ServiceCost);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Cost,ServiceCost.Code);
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+      ServiceLine.VALIDATE(Quantity,RANDOM(10));  // Required field - value is not important to test case.
+      ServiceLine.MODIFY(TRUE);
+
+      // Exercise: Post Service Order as Ship and insert Fault/Resolution relationships by calling codeunit FaultResolRelationCalculate.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+      FaultResolRelationCalculate.CopyResolutionRelationToTable(WORKDATE,WORKDATE,TRUE,TRUE);
+
+      // Verify: Check that the values in the Fault Resolution Codes Relationship correspond to the values in the Fault Code record.
+      FaultResolCodRelationship.SETRANGE("Fault Code",FaultCode.Code);
+      FaultResolCodRelationship.SETRANGE("Resolution Code",ServiceItemLine."Resolution Code");
+      FaultResolCodRelationship.FINDFIRST;
+      FaultResolCodRelationship.TESTFIELD("Fault Area Code",FaultArea.Code);
+      FaultResolCodRelationship.TESTFIELD("Symptom Code",SymptomCode.Code);
+      FaultResolCodRelationship.TESTFIELD("Service Item Group Code",ServiceItemLine."Service Item Group Code");
+      FaultResolCodRelationship.TESTFIELD(Occurrences,1);
+    END;
+
+    [Test]
+    PROCEDURE TestBaseCalendBlankError@39();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1000 : Record 5901;
+      ServiceItem@1003 : Record 5940;
+      ServiceMgtSetup@1004 : Record 5911;
+      Assert@1005 : Codeunit 130000;
+      BaseCalendarCode@1006 : Code[10];
+    BEGIN
+      // Covers document number TC0112 - refer to TFS ID 21727.
+      // 1. Setup Base Calendar Code as blank in Service Management Setup.
+      // 2. Create Service Order - Service Header, Service Item, Service Item Line.
+      // 3. Verify that the application generates an error on insertion of the Service Item Line if the Base Calendar Code is blank.
+
+      // Setup: Input Base Calendar Code as blank in Service Management Setup. Create Service Order - Service Header, Service Item.
+      BaseCalendarCode := SetupServiceMgtBaseCalndrBlank(ServiceMgtSetup);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+
+      // Exercise: Create Service Item Line.
+      ASSERTERROR LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+
+      // Verify: Check that the application generates an error on Service Item line insertion if Base Calendar Code is blank.
+      Assert.AreEqual(
+        STRSUBSTNO(BaseCalendarCodeBlankErrorServ,ServiceMgtSetup.FIELDCAPTION("Base Calendar Code"),ServiceMgtSetup.TABLECAPTION),
+        GETLASTERRORTEXT,UnknownError);
+
+      // Cleanup: Enter the original Base Calendar Code in Service Management Setup.
+      ServiceMgtSetup.VALIDATE("Base Calendar Code",BaseCalendarCode);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE TestBaseCalendRespDateNonWrkng@37();
+    VAR
+      ServiceItemLine@1003 : Record 5901;
+      ServiceItem@1002 : Record 5940;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC0112 - refer to TFS ID 21727.
+      // 1. Create Service Order for a non working day that is followed by a working day - Service Item, Service Header,
+      // Service Item Line.
+      // 2. Update Response Time (Hours) on Service Item Line as a time falling inside the Service Hours of next working day - 1 hour.
+      // 3. Verify that the Response Date on Service Item Line is the next working day.
+
+      // Setup: Create Service Order for a non working day that is followed by a working day - Service Item, Service Header, Service Item
+      // Line.
+      Initialize;
+      LibraryService.CreateServiceItem(ServiceItem,'');
+      CreateServiceHeader(ServiceHeader,ServiceItem."Customer No.",LibraryService.GetNonWrkngDayFollwdByWrkngDay);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+
+      // Exercise: Input Response Time (Hours) as 1.
+      ServiceItemLine.VALIDATE("Response Time (Hours)",1);  // Value 1 is important to the test case.
+      ServiceItemLine.MODIFY(TRUE);
+
+      // Verify: Verify that the Response Date on Service Item Line is the next working day.
+      ServiceItemLine.TESTFIELD("Response Date",LibraryService.GetNextWorkingDay(ServiceHeader."Order Date"));
+    END;
+
+    [Test]
+    PROCEDURE TestBaseCalendRespDateWrkngDay@40();
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1002 : Record 5940;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC0112 - refer to TFS ID 21727.
+      // 1. Create Service Order for a Working Day - Service Item, Service Header, Service Item Line.
+      // 2. Update Response Time (Hours) on Service Item Line as boundary value - 0.
+      // 3. Verify that the Response Date on Service Item Line is the Service Order Date.
+
+      // Setup: Create Service Order for a Working Day - Service Item, Service Header, Service Item Line.
+      Initialize;
+      LibraryService.CreateServiceItem(ServiceItem,'');
+      CreateServiceHeader(ServiceHeader,ServiceItem."Customer No.",LibraryService.GetFirstWorkingDay(WORKDATE));
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+
+      // Exercise: Input Response Time (Hours) as boundary value 0.
+      ServiceItemLine.VALIDATE("Response Time (Hours)",0);
+      ServiceItemLine.MODIFY(TRUE);
+
+      // Verify: Verify that the Response Date on Service Item Line is the Service Order Date.
+      ServiceItemLine.TESTFIELD("Response Date",ServiceHeader."Order Date");
+    END;
+
+    [Test]
+    PROCEDURE TestDefaultResponsTimeNull@43();
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1002 : Record 5940;
+      ServiceHeader@1001 : Record 5900;
+      ServiceMgtSetup@1005 : Record 5911;
+      DefaultResponseTime@1003 : Decimal;
+    BEGIN
+      // Covers document number TC0113 - refer to TFS ID 21727.
+      // 1. Input Default Response Time (Hours) on Service Management Setup as 0.
+      // 2. Create Service Order for a Working Day - Service Item, Service Header, Service Item Line.
+      // 3. Verify that the Response Time (Hours) on Service Item Line is 0.
+      // 4. Enter the original Default Response Time (Hours) in Service Management Setup.
+
+      // Setup:Input Default Response Time (Hours) on Service Management Setup as 0. Create Service Order.
+      Initialize;
+      DefaultResponseTime := SetupServiceMgtDefaultRespTime(ServiceMgtSetup,0);  // Value 0 is important to test case.
+      LibraryService.CreateServiceItem(ServiceItem,'');
+      CreateServiceHeader(ServiceHeader,ServiceItem."Customer No.",LibraryService.GetFirstWorkingDay(WORKDATE));
+
+      // Exercise: Create Service item Line.
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+
+      // Verify: Verify that the Response Time (Hours) on Service Item Line is 0.
+      ServiceItemLine.TESTFIELD("Response Time (Hours)",0);
+
+      // Cleanup: Enter the original Default Response Time (Hours) in Service Management Setup.
+      ServiceMgtSetup.VALIDATE("Default Response Time (Hours)",DefaultResponseTime);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE TestDefaultResponsTimeRandom@46();
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1002 : Record 5940;
+      ServiceHeader@1001 : Record 5900;
+      ServiceMgtSetup@1005 : Record 5911;
+      DefaultResponseTime@1003 : Decimal;
+    BEGIN
+      // Covers document number TC0113 - refer to TFS ID 21727.
+      // 1. Input Default Response Time (Hours) on Service Management Setup as any random value.
+      // 2. Create Service Order for a Working Day - Service Item, Service Header, Service Item Line.
+      // 3. Verify that the Response Time (Hours) on Service Item Line is equal to the value of the field Default Response Time (Hours)
+      // of Service Management Setup.
+      // 4. Enter the original Default Response Time (Hours) in Service Management Setup.
+
+      // Setup:Input Default Response Time (Hours) on Service Management Setup as any random value. Create Service Order.
+      Initialize;
+      DefaultResponseTime := SetupServiceMgtDefaultRespTime(ServiceMgtSetup,RANDOM(100));
+      LibraryService.CreateServiceItem(ServiceItem,'');
+      CreateServiceHeader(ServiceHeader,ServiceItem."Customer No.",LibraryService.GetFirstWorkingDay(WORKDATE));
+
+      // Exercise: Create Service item Line.
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+
+      // Verify: Verify that the Response Time (Hours) on Service Item Line is equal to the value of the field Default Response Time
+      // (Hours) of Service Management Setup.
+      ServiceItemLine.TESTFIELD("Response Time (Hours)",ServiceMgtSetup."Default Response Time (Hours)");
+
+      // Cleanup: Enter the original Default Response Time (Hours) in Service Management Setup.
+      ServiceMgtSetup.VALIDATE("Default Response Time (Hours)",DefaultResponseTime);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE TestDefaultResponsTimeMoreYear@41();
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1002 : Record 5940;
+      ServiceHeader@1001 : Record 5900;
+      ServiceMgtSetup@1005 : Record 5911;
+      Assert@1006 : Codeunit 130000;
+      DefaultResponseTime@1003 : Decimal;
+    BEGIN
+      // Covers document number TC0113 - refer to TFS ID 21727.
+      // 1. Input Default Response Time (Hours) on Service Management Setup as more than a year.
+      // 2. Create Service Order for a Working Day - Service Item, Service Header, Service Item Line.
+      // 3. Verify that the application generates an error if Default response Time (Hours) is greater than a year.
+      // 4. Enter the original Default Response Time (Hours) in Service Management Setup.
+
+      // Setup:Input Default Response Time (Hours) on Service Management Setup as any more than a year. Create Service Order.
+      Initialize;
+      DefaultResponseTime := SetupServiceMgtDefaultRespTime(ServiceMgtSetup,(365 * 24) + RANDOM(100));
+      LibraryService.CreateServiceItem(ServiceItem,'');
+      CreateServiceHeader(ServiceHeader,ServiceItem."Customer No.",LibraryService.GetFirstWorkingDay(WORKDATE));
+
+      // Exercise: Create Service item Line.
+      ASSERTERROR LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+
+      // Verify: Verify that the application generates an error if Default response Time (Hours) is greater than a year.
+      Assert.AreEqual(
+        STRSUBSTNO(ResponseTimeMoreThanYearError,ServiceItemLine.FIELDCAPTION("Response Date"),ServiceItemLine.TABLECAPTION,
+          ServiceItem.FIELDCAPTION("Response Time (Hours)"),ServiceItem.TABLECAPTION),GETLASTERRORTEXT,UnknownError);
+
+      // Cleanup: Enter the original Default Response Time (Hours) in Service Management Setup.
+      ServiceMgtSetup.VALIDATE("Default Response Time (Hours)",DefaultResponseTime);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE TestWarrantyDiscntServiceLine@44();
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceHeader@1001 : Record 5900;
+      ServiceMgtSetup@1005 : Record 5911;
+      ServiceLine@1002 : Record 5902;
+      Item@1003 : Record 27;
+    BEGIN
+      // Covers document number TC0113 - refer to TFS ID 21727.
+      // 1. Input Warranty Disc. % (Parts) and Warranty Disc. % (Labor) on Service Management Setup as any random value.
+      // 2. Create Service Order - Service Header, Service Item Line without Service Item and Service Line.
+      // 3. Verify that the Warranty % (Parts) and Warranty % (Labor) on Service Item Line is equal to the value of the
+      // field Warranty Disc. % (Parts) and Warranty Disc. % (Labor) of Service Management Setup. Verify that the value of Warranty
+      // Disc. % fields on Service Line is equal to the value of the Warranty Disc. % (Parts) field of Service Management Setup.
+
+      // Setup: Input Warranty Disc. % (Parts) and Warranty Disc. % (Labor) on Service Management Setup as any random value.
+      // Create Service Order.
+      Initialize;
+      SetupServiceMgtWarrantyDisc(ServiceMgtSetup,RANDOM(100),RANDOM(100));
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+
+      // Exercise: Create Service Item Line and Service Line.
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      ServiceItemLine.VALIDATE(Warranty,TRUE);
+      ServiceItemLine.MODIFY(TRUE);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItem(Item));
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+      ServiceLine.VALIDATE(Warranty,TRUE);
+      ServiceLine.MODIFY(TRUE);
+
+      // Verify: Verify that the Warranty % (Parts) and Warranty % (Labor) on Service Item Line is equal to the value of the
+      // field Warranty Disc. % (Parts) and Warranty Disc. % (Labor) of Service Management Setup. Check Warranty Disc % on Service Line.
+      ServiceItemLine.TESTFIELD("Warranty % (Parts)",ServiceMgtSetup."Warranty Disc. % (Parts)");
+      ServiceItemLine.TESTFIELD("Warranty % (Labor)",ServiceMgtSetup."Warranty Disc. % (Labor)");
+      ServiceLine.TESTFIELD("Warranty Disc. %",ServiceMgtSetup."Warranty Disc. % (Parts)");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE TestWarrantyDurServiceLineGrtr@51();
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceHeader@1001 : Record 5900;
+      ServiceMgtSetup@1005 : Record 5911;
+      DefaultWarrantyDuration@1002 : DateFormula;
+    BEGIN
+      // Covers document number TC0113 - refer to TFS ID 21727.
+      // 1. Input Default Warranty Duration on Service Management Setup as one month.
+      // 2. Create Service Order - Service Header, Service Item Line without Service Item.
+      // 3. Verify that the Warranty Ending Date (Parts) and Warranty Ending Date (Labor) on Service Item Line are equal to
+      // the value of the field Default Warranty Duration of Service Management Setup plus Starting Date.
+      // 4. Enter the original Default Warranty Duration in Service Management Setup.
+
+      // Setup: Input Default Warranty Duration on Service Management Setup as one month. Create Service Order.
+      Initialize;
+      EVALUATE(DefaultWarrantyDuration,'<1M>');
+      EVALUATE(DefaultWarrantyDuration,SetupServiceMgtDefaultWarrDur(ServiceMgtSetup,DefaultWarrantyDuration));
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+
+      // Exercise: Create Service item Line.
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      ServiceItemLine.VALIDATE(Warranty,TRUE);
+      ServiceItemLine.MODIFY(TRUE);
+
+      // Verify: Check that the Warranty Ending Date (Parts) and Warranty Ending Date (Labor) on Service Item Line are equal to
+      // the value of the field Default Warranty Duration of Service Management Setup plus Starting Date.
+      ServiceItemLine.TESTFIELD(
+        "Warranty Ending Date (Parts)",CALCDATE(ServiceMgtSetup."Default Warranty Duration",
+          ServiceItemLine."Warranty Starting Date (Parts)"));
+      ServiceItemLine.TESTFIELD("Warranty Ending Date (Labor)",CALCDATE(ServiceMgtSetup."Default Warranty Duration",
+          ServiceItemLine."Warranty Starting Date (Labor)"));
+
+      // Cleanup: Enter the original Default Warranty Duration in Service Management Setup.
+      ServiceMgtSetup.VALIDATE("Default Warranty Duration",DefaultWarrantyDuration);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE TestWarrantyDurServiceLineNull@52();
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceHeader@1001 : Record 5900;
+      ServiceMgtSetup@1005 : Record 5911;
+      DefaultWarrantyDuration@1002 : DateFormula;
+    BEGIN
+      // Covers document number TC0113 - refer to TFS ID 21727.
+      // 1. Input Default Warranty Duration on Service Management Setup as zero month.
+      // 2. Create Service Order - Service Header, Service Item Line without Service Item.
+      // 3. Verify that the Warranty Ending Date (Parts) and Warranty Ending Date (Labor) on Service Item Line are equal to
+      // the value of the field Warranty Starting Date (Parts) and Warranty Starting Date (Labor).
+      // 4. Enter the original Default Warranty Duration in Service Management Setup.
+
+      // Setup: Input Default Warranty Duration on Service Management Setup as zero month. Create Service Order.
+      Initialize;
+      EVALUATE(DefaultWarrantyDuration,'<0M>');
+      EVALUATE(DefaultWarrantyDuration,SetupServiceMgtDefaultWarrDur(ServiceMgtSetup,DefaultWarrantyDuration));
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+
+      // Exercise: Create Service Item Line.
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      ServiceItemLine.VALIDATE(Warranty,TRUE);
+      ServiceItemLine.MODIFY(TRUE);
+
+      // Verify: Check that the Warranty Ending Date (Parts) and Warranty Ending Date (Labor) on Service Item Line are equal to
+      // the value of the field Warranty Starting Date (Parts) and Warranty Starting Date (Labor).
+      ServiceItemLine.TESTFIELD("Warranty Ending Date (Parts)",ServiceItemLine."Warranty Starting Date (Parts)");
+      ServiceItemLine.TESTFIELD("Warranty Ending Date (Labor)",ServiceItemLine."Warranty Starting Date (Labor)");
+
+      // Cleanup: Enter the original Default Warranty Duration in Service Management Setup.
+      ServiceMgtSetup.VALIDATE("Default Warranty Duration",DefaultWarrantyDuration);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE TestWarrantyDurServiceLineSmll@59();
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceHeader@1001 : Record 5900;
+      ServiceMgtSetup@1005 : Record 5911;
+      Assert@1003 : Codeunit 130000;
+      DefaultWarrantyDuration@1002 : DateFormula;
+    BEGIN
+      // Covers document number TC0113 - refer to TFS ID 21727.
+      // 1. Input Default Warranty Duration on Service Management Setup as minus one month.
+      // 2. Create Service Order - Service Header, Service Item Line without Service Item.
+      // 3. Verify that the application generates an error if the Default Warranty Duration is negative.
+      // 4. Enter the original Default Warranty Duration in Service Management Setup.
+
+      // Setup: Input Default Warranty Duration on Service Management Setup as minus one month. Create Service Order.
+      Initialize;
+      EVALUATE(DefaultWarrantyDuration,'<-1M>');
+      EVALUATE(DefaultWarrantyDuration,SetupServiceMgtDefaultWarrDur(ServiceMgtSetup,DefaultWarrantyDuration));
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,'');
+
+      // Exercise: Create Service Item Line.
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      ASSERTERROR ServiceItemLine.VALIDATE(Warranty,TRUE);
+
+      // Verify: Check that the application generates an error if Default Warranty Duration is negative.
+      Assert.AreEqual(STRSUBSTNO(WarrantyDurationNegativeError),GETLASTERRORTEXT,UnknownError);
+
+      // Cleanup: Enter the original Default Warranty Duration in Service Management Setup.
+      ServiceMgtSetup.VALIDATE("Default Warranty Duration",DefaultWarrantyDuration);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse)]
+    PROCEDURE TestRegisterCntrctChangeFalse@62();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1003 : Record 5964;
+      ServiceItem@1004 : Record 5940;
+      ContractChangeLog@1005 : Record 5967;
+      Assert@1006 : Codeunit 130000;
+    BEGIN
+      // Covers document number TC0114 - refer to TFS ID 21727.
+      // 1. Input Register Contract Changes as FALSE on Service Management Setup.
+      // 2. Create Service Contract - Service Contract Header, Service Item, Service Contract Line.
+      // 3. Check that the Contract Change Log for the Service Contract created is empty.
+
+      // Setup: Input Register Contract Changes as FALSE on Service Management Setup.
+      Initialize;
+      SetupServiceMgtRgistrCtrctChng(FALSE);
+
+      // Exercise: Create Service Contract - Service Contract Header, Service Item, Service Contract Line.
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceContractHeader."Customer No.");
+      LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+
+      // Verify: Check that the Contract Change Log for the Service Contract created is empty.
+      ContractChangeLog.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      Assert.AreEqual(
+        ContractChangeLog.COUNT,0,STRSUBSTNO(ContractChangeLogError,ContractChangeLog.TABLECAPTION,
+          ServiceContractHeader.FIELDCAPTION("Contract No."),ServiceContractHeader."Contract No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerFalse)]
+    PROCEDURE TestRegisterCntrctChangeTrue@56();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1003 : Record 5964;
+      ServiceItem@1004 : Record 5940;
+      ContractChangeLog@1005 : Record 5967;
+    BEGIN
+      // Covers document number TC0114 - refer to TFS ID 21727.
+      // 1. Input Register Contract Changes as TRUE on Service Management Setup.
+      // 2. Create Service Contract - Service Contract Header, Service Item, Service Contract Line.
+      // 3. Check that the Contract Change Log for the Service Contract created is generated.
+
+      // Setup: Input Register Contract Changes as TRUE on Service Management Setup.
+      Initialize;
+      SetupServiceMgtRgistrCtrctChng(TRUE);
+
+      // Exercise: Create Service Contract - Service Contract Header, Service Item, Service Contract Line.
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceContractHeader."Customer No.");
+      LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+
+      // Verify: Check that the Contract Change Log for the Service Contract created is generated.
+      ContractChangeLog.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      ContractChangeLog.FINDFIRST;
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmContractCancellation)]
+    PROCEDURE TestCntrctCancelReasonTrue@61();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1003 : Record 5964;
+      ServiceItem@1004 : Record 5940;
+      Assert@1000 : Codeunit 130000;
+    BEGIN
+      // Covers document number TC0115 - refer to TFS ID 21727.
+      // 1. Input Use Contract Cancel Reason as TRUE on Service Management Setup.
+      // 2. Create Service Contract - Service Contract Header, Service Item, Service Contract Line.
+      // 3. Check that the application generates an error if Contract is cancelled without inputting Cancel Reason Code.
+
+      // Setup: Input Use Contract Cancel Reason as TRUE on Service Management Setup. Create Service Contract - Service Contract
+      // Header, Service Item, Service Contract Line.
+      Initialize;
+      SetupServiceMgtCntrctCancelRsn(TRUE);
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceContractHeader."Customer No.");
+      LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+
+      // Exercise: Change the Status to Canceled.
+      ASSERTERROR ServiceContractHeader.VALIDATE(Status,ServiceContractHeader.Status::Canceled);
+
+      // Verify: Check that the application generates an error if Contract is cancelled without inputting Cancel Reason Code.
+      Assert.AreEqual(
+        STRSUBSTNO(CancelReasonBlankErrorServTier,ServiceContractHeader.FIELDCAPTION("Cancel Reason Code"),
+          ServiceContractHeader.TABLECAPTION,ServiceContractHeader.FIELDCAPTION("Contract Type"),ServiceContractHeader."Contract Type",
+          ServiceContractHeader.FIELDCAPTION("Contract No."),ServiceContractHeader."Contract No."),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmContractCancellation)]
+    PROCEDURE TestCntrctCancelReasonNotBlank@68();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1003 : Record 5964;
+      ServiceItem@1004 : Record 5940;
+      ReasonCode@1005 : Record 231;
+    BEGIN
+      // Covers document number TC0115 - refer to TFS ID 21727.
+      // 1. Input Use Contract Cancel Reason as TRUE on Service Management Setup.
+      // 2. Create Service Contract - Service Contract Header with Cancel Reason Code, Service Item, Service Contract Line.
+      // 3. Check that the application allows the Contract to be cancelled if Cancel Reason Code is not blank.
+
+      // Setup: Input Use Contract Cancel Reason as TRUE on Service Management Setup. Create Service Contract - Service Contract
+      // Header, Service Item, Service Contract Line. Create a new Reason Code and enter it in the field Cancel Reason Code.
+      Initialize;
+      SetupServiceMgtCntrctCancelRsn(TRUE);
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceContractHeader."Customer No.");
+      LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+      LibraryService.CreateReasonCode(ReasonCode);
+      ServiceContractHeader.VALIDATE("Cancel Reason Code",ReasonCode.Code);
+
+      // Exercise: Change the Status to Canceled.
+      ServiceContractHeader.VALIDATE(Status,ServiceContractHeader.Status::Canceled);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      // Verify: Check that the application allows the Contract to be cancelled if Cancel Reason Code is not blank.
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      ServiceContractHeader.TESTFIELD("Change Status",ServiceContractHeader."Change Status"::Locked);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmContractCancellation)]
+    PROCEDURE TestCntrctCancelReasonFalse@58();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1003 : Record 5964;
+      ServiceItem@1004 : Record 5940;
+    BEGIN
+      // Covers document number TC0115 - refer to TFS ID 21727.
+      // 1. Input Use Contract Cancel Reason as FALSE on Service Management Setup.
+      // 2. Create Service Contract - Service Contract Header, Service Item, Service Contract Line.
+      // 3. Check that the application allows the Contract to be cancelled if Cancel Reason Code is blank and Use Contract Cancel Reason
+      // is FALSE on Service Management Setup.
+
+      // Setup: Input Use Contract Cancel Reason as FALSE on Service Management Setup. Create Service Contract - Service Contract
+      // Header, Service Item, Service Contract Line.
+      Initialize;
+      SetupServiceMgtCntrctCancelRsn(FALSE);
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceContractHeader."Customer No.");
+      LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+
+      // Exercise: Change the Status to Canceled.
+      ServiceContractHeader.VALIDATE(Status,ServiceContractHeader.Status::Canceled);
+      ServiceContractHeader.MODIFY(TRUE);
+
+      // Verify: Check that the application allows the Contract to be cancelled if Cancel Reason Code is blank and Use Contract Cancel
+      // Reason is FALSE on Service Management Setup.
+      ServiceContractHeader.GET(ServiceContractHeader."Contract Type",ServiceContractHeader."Contract No.");
+      ServiceContractHeader.TESTFIELD("Change Status",ServiceContractHeader."Change Status"::Locked);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE TestCntrctServOrderMaxDaysNull@64();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1003 : Record 5964;
+      ServiceItem@1004 : Record 5940;
+      ServiceMgtSetup@1007 : Record 5911;
+      CreateContractServiceOrders@1001 : Report 6036;
+      Assert@1000 : Codeunit 130000;
+      SignServContractDoc@1006 : Codeunit 5944;
+      ContractServOrdMaxDays@1008 : Integer;
+    BEGIN
+      // Covers document number TC0116 - refer to TFS ID 21727.
+      // 1. Input Contract Serv. Ord.  Max. Days as 0 on Service Management Setup.
+      // 2. Create and Sign Service Contract - Service Contract Header, Service Item, Service Contract Line.
+      // 3. Run Create Service Contract Orders.
+      // 4. Check that the application generates an error if the date range entered is longer than the period allowed in Service Setup.
+      // 5. Enter the original Contract Serv. Ord.  Max. Days in Service Management Setup.
+
+      // Setup: Input Contract Serv. Ord.  Max. Days as 0 on Service Management Setup. Create and Sign Service Contract - Service
+      // Contract Header, Service Item, Service Contract Line.
+      Initialize;
+      ContractServOrdMaxDays := SetupServiceMgtServOrdMaxDays(ServiceMgtSetup,0);
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceContractHeader."Customer No.");
+      LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+      ServiceContractLine.VALIDATE("Line Value",RANDOM(100));
+      ServiceContractLine.MODIFY(TRUE);
+      ModifyServiceContractHeader(ServiceContractHeader);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+
+      // Exercise: Run Create Service Contract Orders report.
+      ServiceContractHeader.SETRANGE("Contract Type",ServiceContractHeader."Contract Type");
+      ServiceContractHeader.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      CreateContractServiceOrders.SETTABLEVIEW(ServiceContractHeader);
+      CreateContractServiceOrders.USEREQUESTPAGE(FALSE);
+      CreateContractServiceOrders.InitializeRequest(WORKDATE,WORKDATE,0);
+      ASSERTERROR CreateContractServiceOrders.RUN;
+
+      // Verify: Check that the application generates an error if the date range entered is longer than the period allowed in Service
+      // Management Setup.
+      Assert.AreEqual(STRSUBSTNO(DateRangeError,ServiceMgtSetup.TABLECAPTION),GETLASTERRORTEXT,UnknownError);
+
+      // Cleanup: Enter the original Contract Serv. Ord.  Max. Days in Service Management Setup.
+      ServiceMgtSetup.VALIDATE("Contract Serv. Ord.  Max. Days",ContractServOrdMaxDays);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandlerServOrdMaxDays)]
+    PROCEDURE TestCntrctServOrderMaxDaysOne@28();
+    VAR
+      ServiceContractHeader@1002 : Record 5965;
+      ServiceContractLine@1003 : Record 5964;
+      ServiceItem@1004 : Record 5940;
+      ServiceMgtSetup@1007 : Record 5911;
+      ServiceHeader@1009 : Record 5900;
+      CreateContractServiceOrders@1001 : Report 6036;
+      Assert@1000 : Codeunit 130000;
+      SignServContractDoc@1006 : Codeunit 5944;
+      ContractServOrdMaxDays@1008 : Integer;
+    BEGIN
+      // Covers document number TC0116 - refer to TFS ID 21727.
+      // 1. Input Contract Serv. Ord.  Max. Days as 1 on Service Management Setup.
+      // 2. Create and Sign Service Contract - Service Contract Header, Service Item, Service Contract Line.
+      // 3. Run Create Service Contract Orders.
+      // 4. Check that the application generates an error if the date range entered is invalid and no Service Order is created.
+      // 5. Enter the original Contract Serv. Ord.  Max. Days in Service Management Setup.
+
+      // Setup: Input Contract Serv. Ord.  Max. Days as 1 on Service Management Setup. Create and Sign Service Contract - Service
+      // Contract Header, Service Item, Service Contract Line.
+      Initialize;
+      ContractServOrdMaxDays := SetupServiceMgtServOrdMaxDays(ServiceMgtSetup,1);
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract,'');
+      LibraryService.CreateServiceItem(ServiceItem,ServiceContractHeader."Customer No.");
+      LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+      ServiceContractLine.VALIDATE("Line Value",RANDOM(100));
+      ServiceContractLine.MODIFY(TRUE);
+      ModifyServiceContractHeader(ServiceContractHeader);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+
+      // Exercise: Run Create Service Contract Orders report.
+      ServiceContractHeader.SETRANGE("Contract Type",ServiceContractHeader."Contract Type");
+      ServiceContractHeader.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      CreateContractServiceOrders.SETTABLEVIEW(ServiceContractHeader);
+      CreateContractServiceOrders.USEREQUESTPAGE(FALSE);
+      CreateContractServiceOrders.InitializeRequest(WORKDATE,WORKDATE,0);
+      CreateContractServiceOrders.RUN;
+
+      // Verify: Check that the application generates an error if the date range entered is invalid and no Service Order is created.
+      ServiceHeader.SETRANGE("Document Type",ServiceHeader."Document Type"::Order);
+      ServiceHeader.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      Assert.AreEqual(
+        0,ServiceHeader.COUNT,STRSUBSTNO(ServiceOrderError,ServiceHeader.TABLECAPTION,ServiceContractHeader.TABLECAPTION,
+          ServiceContractHeader.FIELDCAPTION("Contract No."),ServiceContractHeader."Contract No."));
+
+      // Cleanup: Enter the original Contract Serv. Ord.  Max. Days in Service Management Setup.
+      ServiceMgtSetup.VALIDATE("Contract Serv. Ord.  Max. Days",ContractServOrdMaxDays);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(UpdateQuantityPageHandler,PostAsShipHandler,FaultResolutionRelationHandler)]
+    PROCEDURE FaultResolutionRelationFault@75();
+    VAR
+      FaultCode@1009 : Record 5918;
+      ResolutionCode@1000 : Record 5919;
+      ServiceMgtSetup@1006 : Record 5911;
+      No@1003 : Code[20];
+      DefaultFaultReportingLevel@1007 : Option;
+    BEGIN
+      // Test fault / resolution code relationship in a Service Order using Fault Reporting Level of Fault.
+
+      // 1. Setup: Create Resolution Code, Fault Code, set Fault Reporting Level and create a Service Order.
+      Initialize;
+      ServiceMgtSetup.GET;
+      LibrarySales.SetStockoutWarning(FALSE);
+      LibraryService.CreateResolutionCode(ResolutionCode);
+      DefaultFaultReportingLevel := ServiceMgtSetup."Fault Reporting Level";
+      SetupServiceFaultReporting(ServiceMgtSetup,ServiceMgtSetup."Fault Reporting Level"::Fault);
+      LibraryService.CreateFaultCode(FaultCode,'','');
+
+      No := LibraryService.CreateServiceOrderHeaderUsingPage;
+      CreateServiceItemLine(FaultCode,No,ResolutionCode.Code);
+      InsertFaultReasonCode(No);
+      OpenServiceItemLine(No);
+
+      // 2. Exercise: Insert fault / resolution code relationship.
+      InsertFaultResolutionRelation;
+
+      // 3. Verify: Verify that the Fault Reason Code inserted on Service Item Line matches with value on Service Line.
+      // Verify that the values on the fault / resolution code relationship page matches with values inserted.
+      VerifyFaultReasonCode(No);
+      VerifyFaultResolutionRelation(FaultCode,No);
+
+      // 4. Tear Down: Restore the Fault Reporting Level to it's original value.
+      SetupServiceFaultReporting(ServiceMgtSetup,DefaultFaultReportingLevel);
+    END;
+
+    [Test]
+    [HandlerFunctions(UpdateQuantityPageHandler,PostAsShipHandler,FaultResolutionRelationHandler)]
+    PROCEDURE RelationFaultSymptom@74();
+    VAR
+      FaultCode@1007 : Record 5918;
+      SymptomCode@1005 : Record 5916;
+      ResolutionCode@1000 : Record 5919;
+      ServiceMgtSetup@1004 : Record 5911;
+      No@1001 : Code[20];
+      DefaultFaultReportingLevel@1006 : Option;
+    BEGIN
+      // Test fault / resolution code relationship in a Service Order using Fault Reporting Level of Fault and Symptom.
+
+      // 1. Setup: Create Resolution Code, Fault Code, set Fault Reporting Level and create a Service Order.
+      Initialize;
+      ServiceMgtSetup.GET;
+      LibrarySales.SetStockoutWarning(FALSE);
+      LibraryService.CreateSymptomCode(SymptomCode);
+      LibraryService.CreateResolutionCode(ResolutionCode);
+      DefaultFaultReportingLevel := ServiceMgtSetup."Fault Reporting Level";
+      SetupServiceFaultReporting(ServiceMgtSetup,ServiceMgtSetup."Fault Reporting Level"::"Fault+Symptom");
+      LibraryService.CreateFaultCode(FaultCode,'',SymptomCode.Code);
+
+      No := LibraryService.CreateServiceOrderHeaderUsingPage;
+      CreateServiceItemLine(FaultCode,No,ResolutionCode.Code);
+      InsertFaultReasonCode(No);
+      OpenServiceItemLine(No);
+
+      // 2. Exercise: Insert fault / resolution code relationship.
+      InsertFaultResolutionRelation;
+
+      // 3. Verify: Verify that the Fault Reason Code inserted on Service Item Line matches with value on Service Line.
+      // Verify that the values on the fault / resolution relationship page matches with values inserted.
+      VerifyFaultReasonCode(No);
+      VerifyFaultResolutionRelation(FaultCode,No);
+
+      // 4. Tear Down: Restore the Fault Reporting Level to it's original value.
+      SetupServiceFaultReporting(ServiceMgtSetup,DefaultFaultReportingLevel);
+    END;
+
+    [Test]
+    [HandlerFunctions(UpdateQuantityPageHandler,PostAsShipHandler,FaultResolutionRelationHandler)]
+    PROCEDURE RelationFaultSymptomArea@72();
+    VAR
+      FaultCode@1006 : Record 5918;
+      FaultArea@1004 : Record 5915;
+      ResolutionCode@1001 : Record 5919;
+      SymptomCode@1003 : Record 5916;
+      ServiceMgtSetup@1008 : Record 5911;
+      No@1009 : Code[20];
+      DefaultFaultReportingLevel@1010 : Option;
+    BEGIN
+      // Test fault / resolution code relationship in a Service Order using Fault Reporting Level of Fault, Symptom and Area.
+
+      // 1. Setup: Create Resolution Code, Fault Code, set Fault Reporting Level and create a Service Order.
+      Initialize;
+      ServiceMgtSetup.GET;
+      LibrarySales.SetStockoutWarning(FALSE);
+      LibraryService.CreateFaultArea(FaultArea);
+      LibraryService.CreateSymptomCode(SymptomCode);
+      LibraryService.CreateResolutionCode(ResolutionCode);
+      DefaultFaultReportingLevel := ServiceMgtSetup."Fault Reporting Level";
+      SetupServiceFaultReporting(ServiceMgtSetup,ServiceMgtSetup."Fault Reporting Level"::"Fault+Symptom+Area (IRIS)");
+      LibraryService.CreateFaultCode(FaultCode,FaultArea.Code,SymptomCode.Code);
+
+      No := LibraryService.CreateServiceOrderHeaderUsingPage;
+      CreateServiceItemLine(FaultCode,No,ResolutionCode.Code);
+      InsertFaultReasonCode(No);
+      OpenServiceItemLine(No);
+
+      // 2. Exercise: Insert fault / resolution code relationship.
+      InsertFaultResolutionRelation;
+
+      // 3. Verify: Verify that the Fault Reason Code inserted on Service Item Line matches with value on Service Line.
+      // Verify that the values on the fault / resolution relationship page matches with values inserted.
+      VerifyFaultReasonCode(No);
+      VerifyFaultResolutionRelation(FaultCode,No);
+
+      // 4. Tear Down: Restore the Fault Reporting Level to it's original value.
+      SetupServiceFaultReporting(ServiceMgtSetup,DefaultFaultReportingLevel);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler,InsertTravelFeePageHandler)]
+    PROCEDURE NextPlannedServiceDateAfterInsertTravelFee@67();
+    VAR
+      ServiceContractHeader@1000 : Record 5965;
+      ServiceContractLine@1001 : Record 5964;
+      ServiceHeader@1002 : Record 5900;
+      SignServContractDoc@1003 : Codeunit 5944;
+    BEGIN
+      // Test Next Planned Service Date on Service Contract Header after Insert Travel Fee.
+
+      // Setup: Create and Post Service Order as Ship with Contract No. as No. of Service Contract Header.
+      Initialize;
+      CreateServiceContract(ServiceContractHeader,ServiceContractLine);
+      SignServContractDoc.SignContract(ServiceContractHeader);
+      CreateAndPostServiceOrderForResource(
+        ServiceHeader,ServiceContractLine,ServiceContractHeader."Customer No.",ServiceContractHeader."Contract No.",FALSE);
+      OpenServiceOrderAndInsertTravelFee(ServiceHeader."No.");
+
+      // Exercise: Post Service Order as Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // Verify: Verify Next Planned Service Date on Service Contract header after Inserting Travel Fee.
+      VerifyPlannedNextServCalcMthod(ServiceContractHeader);
+    END;
+
+    [Test]
+    PROCEDURE CheckContractChangeLogOldNewValueFieldLength@26();
+    VAR
+      ContractChangeLog@1000 : Record 5967;
+      ServiceContractHeader@1001 : Record 5965;
+    BEGIN
+      ServiceContractHeader.INIT;
+      Assert.IsTrue(
+        MAXSTRLEN(ServiceContractHeader."E-Mail") <= MAXSTRLEN(ContractChangeLog."Old Value"),
+        STRSUBSTNO(FieldLengthErr,ContractChangeLog.FIELDCAPTION("Old Value"),MAXSTRLEN(ServiceContractHeader."E-Mail")));
+      Assert.IsTrue(
+        MAXSTRLEN(ServiceContractHeader."E-Mail") <= MAXSTRLEN(ContractChangeLog."New Value"),
+        STRSUBSTNO(FieldLengthErr,ContractChangeLog.FIELDCAPTION("New Value"),MAXSTRLEN(ServiceContractHeader."E-Mail")));
+    END;
+
+    LOCAL PROCEDURE CreateAndPostServiceOrderForResource@73(VAR ServiceHeader@1002 : Record 5900;ServiceContractLine@1005 : Record 5964;CustomerNo@1001 : Code[20];ContractNo@1003 : Code[20];Invoice@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CustomerNo);
+      ServiceHeader.VALIDATE("Contract No.",ContractNo);
+      ServiceHeader.MODIFY(TRUE);
+      CreateServiceItemLinesContract(ServiceItemLine,ServiceContractLine,ServiceHeader);
+      CreateServiceLinesForResource(ServiceHeader);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,Invoice);
+    END;
+
+    LOCAL PROCEDURE CreateServiceContract@3(VAR ServiceContractHeader@1002 : Record 5965;VAR ServiceContractLine@1001 : Record 5964);
+    BEGIN
+      // Create Service Contract Header, Service Contract Line and enter Annual Amount and Starting Date in Service Contract Header.
+      LibraryService.CreateServiceContractHeader(ServiceContractHeader,ServiceContractHeader."Contract Type"::Contract,'');
+      CreateServiceContractLine(ServiceContractLine,ServiceContractHeader);
+
+      ServiceContractHeader.CALCFIELDS("Calcd. Annual Amount");
+      ServiceContractHeader.VALIDATE("Annual Amount",ServiceContractHeader."Calcd. Annual Amount");
+      ServiceContractHeader.VALIDATE("Starting Date",ServiceContractHeader."Starting Date");
+      ServiceContractHeader.VALIDATE("Service Zone Code",FindServiceZone);
+      ServiceContractHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceContractLine@10(VAR ServiceContractLine@1000 : Record 5964;ServiceContractHeader@1001 : Record 5965);
+    VAR
+      ServiceItem@1002 : Record 5940;
+      Counter@1003 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Contract Lines - Boundary 2 is important.
+      FOR Counter := 2 TO 2 + RANDOM(8) DO BEGIN
+        CLEAR(ServiceItem);
+        LibraryService.CreateServiceItem(ServiceItem,ServiceContractHeader."Customer No.");
+        LibraryService.CreateServiceContractLine(ServiceContractLine,ServiceContractHeader,ServiceItem."No.");
+        ServiceContractLine.VALIDATE("Line Value",1 + RANDOM(100));  // Enter any value greater than 1 as value is not important.
+        ServiceContractLine.VALIDATE("Service Period",ServiceContractHeader."Service Period");
+        ServiceContractLine.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceCost@38(VAR ServiceCost@1000 : Record 5905);
+    VAR
+      GLAccount@1001 : Record 15;
+      LibraryERM@1002 : Codeunit 131300;
+    BEGIN
+      LibraryERM.FindGLAccount(GLAccount);
+      LibraryService.CreateServiceCost(ServiceCost);
+      ServiceCost.VALIDATE("Cost Type",ServiceCost."Cost Type"::Travel);
+      ServiceCost.VALIDATE("Account No.",GLAccount."No.");
+      ServiceCost.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceHeader@47(VAR ServiceHeader@1000 : Record 5900;CustomerNo@1001 : Code[20];OrderDate@1002 : Date);
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CustomerNo);
+      ServiceHeader.VALIDATE("Order Date",OrderDate);
+      ServiceHeader.VALIDATE("Order Time",000001T);  // Value 000001T is important for test case.
+      ServiceHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceItemLine@128(FaultCode@1004 : Record 5918;No@1005 : Code[20];ResolutionCode@1002 : Code[10]);
+    VAR
+      Customer@1009 : Record 18;
+      ServiceItem@1003 : Record 5940;
+      ServiceOrder@1001 : TestPage 5900;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      ServiceOrderPageOpenEdit(ServiceOrder,No);
+      ServiceOrder."Customer No.".SETVALUE(ServiceItem."Customer No.");
+      ServiceOrder.ServItemLines.ServiceItemNo.SETVALUE(ServiceItem."No.");
+      ServiceOrder.ServItemLines."Fault Area Code".SETVALUE(FaultCode."Fault Area Code");
+      ServiceOrder.ServItemLines."Symptom Code".SETVALUE(FaultCode."Symptom Code");
+      ServiceOrder.ServItemLines."Fault Code".SETVALUE(FaultCode.Code);
+      ServiceOrder.ServItemLines."Resolution Code".SETVALUE(ResolutionCode);
+      ServiceOrder.ServItemLines.NEW;
+      ServiceOrder.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE CreateServiceItemLinesContract@5(VAR ServiceItemLine@1002 : Record 5901;ServiceContractLine@1000 : Record 5964;ServiceHeader@1001 : Record 5900);
+    BEGIN
+      // Create Service Item Line for each Service Contract Line.
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractLine."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractLine."Contract No.");
+      ServiceContractLine.FINDSET;
+      REPEAT
+        LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceContractLine."Service Item No.");
+      UNTIL ServiceContractLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceItemLineForFault@34(VAR ServiceItemLine@1000 : Record 5901;ServiceHeader@1001 : Record 5900;FaultCode@1005 : Record 5918);
+    VAR
+      ServiceItem@1002 : Record 5940;
+      ResolutionCode@1004 : Record 5919;
+      ServiceItemGroup@1003 : Record 5904;
+    BEGIN
+      LibraryService.FindResolutionCode(ResolutionCode);
+      LibraryService.FindServiceItemGroup(ServiceItemGroup);
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      ServiceItem.VALIDATE("Service Item Group Code",ServiceItemGroup.Code);
+      ServiceItem.MODIFY(TRUE);
+
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      ServiceItemLine.VALIDATE("Fault Area Code",FaultCode."Fault Area Code");
+      ServiceItemLine.VALIDATE("Symptom Code",FaultCode."Symptom Code");
+      ServiceItemLine.VALIDATE("Fault Code",FaultCode.Code);
+      ServiceItemLine.VALIDATE("Resolution Code",ResolutionCode.Code);
+      ServiceItemLine.VALIDATE("Service Item Group Code",ServiceItemGroup.Code);
+      ServiceItemLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceLinesForResource@6(ServiceHeader@1003 : Record 5900);
+    VAR
+      ServiceItemLine@1000 : Record 5901;
+      ServiceLine@1001 : Record 5902;
+      LibraryResource@1004 : Codeunit 130511;
+      ResourceNo@1002 : Code[20];
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      ResourceNo := LibraryResource.CreateResourceNo;
+      REPEAT
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,ResourceNo);
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.VALIDATE(Quantity,RANDOM(10));  // Required field - value is not important to test case.
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindServiceItemLineForOrder@101(VAR ServiceItemLine@1000 : Record 5901;DocumentNo@1001 : Code[20]);
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceItemLine."Document Type"::Order);
+      ServiceItemLine.SETRANGE("Document No.",DocumentNo);
+      ServiceItemLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindServiceLineForOrder@114(VAR ServiceLine@1000 : Record 5902;No@1001 : Code[20]);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",No);
+      ServiceLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindServiceZone@76() : Code[10];
+    VAR
+      ServiceCost@1000 : Record 5905;
+    BEGIN
+      ServiceCost.SETRANGE("Cost Type",ServiceCost."Cost Type"::Travel);
+      ServiceCost.SETFILTER("Account No.",'<>''''');
+      ServiceCost.SETFILTER("Service Zone Code",'<>''''');
+      ServiceCost.FINDFIRST;
+      EXIT(ServiceCost."Service Zone Code");
+    END;
+
+    LOCAL PROCEDURE InsertFaultReasonCode@70(No@1001 : Code[20]);
+    VAR
+      FaultReasonCode@1002 : Record 5917;
+      ServiceItemLine@1000 : Record 5901;
+    BEGIN
+      FindServiceItemLineForOrder(ServiceItemLine,No);
+      LibraryService.FindFaultReasonCode(FaultReasonCode);
+      ServiceItemLine.VALIDATE("Fault Reason Code",FaultReasonCode.Code);
+      ServiceItemLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE InsertFaultResolutionRelation@66();
+    VAR
+      InsertFaultResolRelations@1000 : Report 6007;
+    BEGIN
+      InsertFaultResolRelations.USEREQUESTPAGE(FALSE);
+      // Using random values for To Date as value is not important.
+      InsertFaultResolRelations.InitializeRequest(WORKDATE,CALCDATE('<' + FORMAT(RANDOM(5)) + 'M>',WORKDATE),TRUE,TRUE);
+      InsertFaultResolRelations.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE ModifyServiceContractHeader@24(VAR ServiceContractHeader@1000 : Record 5965);
+    BEGIN
+      ServiceContractHeader.CALCFIELDS("Calcd. Annual Amount");
+      ServiceContractHeader.VALIDATE("Annual Amount",ServiceContractHeader."Calcd. Annual Amount");
+      ServiceContractHeader.VALIDATE("Starting Date",WORKDATE);
+      ServiceContractHeader.VALIDATE("Price Update Period",ServiceContractHeader."Service Period");
+      ServiceContractHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE OpenServiceItemLine@139(No@1001 : Code[20]);
+    VAR
+      ServiceOrder@1000 : TestPage 5900;
+    BEGIN
+      ServiceOrderPageOpenView(ServiceOrder,No);
+      ServiceOrder.ServItemLines."Service Lines".INVOKE;
+    END;
+
+    LOCAL PROCEDURE OpenServiceOrderAndInsertTravelFee@77(ServiceHeaderNo@1000 : Code[20]);
+    VAR
+      ServiceOrder@1001 : TestPage 5900;
+    BEGIN
+      ServiceOrderPageOpenEdit(ServiceOrder,ServiceHeaderNo);
+      ServiceOrder.ServItemLines."Service Item Worksheet".INVOKE;
+    END;
+
+    LOCAL PROCEDURE ServiceOrderPageOpenEdit@126(ServiceOrder@1000 : TestPage 5900;No@1001 : Code[20]);
+    VAR
+      ServiceHeader@1002 : Record 5900;
+    BEGIN
+      ServiceOrder.OPENEDIT;
+      ServiceOrder.FILTER.SETFILTER("Document Type",FORMAT(ServiceHeader."Document Type"::Order));
+      ServiceOrder.FILTER.SETFILTER("No.",No);
+    END;
+
+    LOCAL PROCEDURE ServiceOrderPageOpenView@100(ServiceOrder@1000 : TestPage 5900;No@1001 : Code[20]);
+    VAR
+      ServiceHeader@1002 : Record 5900;
+    BEGIN
+      ServiceOrder.OPENVIEW;
+      ServiceOrder.FILTER.SETFILTER("Document Type",FORMAT(ServiceHeader."Document Type"::Order));
+      ServiceOrder.FILTER.SETFILTER("No.",No);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtSetupPlanned@4() : Boolean;
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+    BEGIN
+      ServiceMgtSetup.GET;
+      IF ServiceMgtSetup."Next Service Calc. Method" <> ServiceMgtSetup."Next Service Calc. Method"::Planned THEN BEGIN
+        ServiceMgtSetup.VALIDATE("Next Service Calc. Method",ServiceMgtSetup."Next Service Calc. Method"::Planned);
+        ServiceMgtSetup.MODIFY(TRUE);
+        EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtSetupActual@11() : Boolean;
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+    BEGIN
+      ServiceMgtSetup.GET;
+      IF ServiceMgtSetup."Next Service Calc. Method" <> ServiceMgtSetup."Next Service Calc. Method"::Actual THEN BEGIN
+        ServiceMgtSetup.VALIDATE("Next Service Calc. Method",ServiceMgtSetup."Next Service Calc. Method"::Actual);
+        ServiceMgtSetup.MODIFY(TRUE);
+        EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtStartingFee@14(VAR ServiceCost@1002 : Record 5905);
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+    BEGIN
+      // If Service Order Starting Fee of Service Management Setup is blank or not of Cost Type as Travel then create a new Service Cost
+      // and enter in the field.
+      ServiceMgtSetup.GET;
+      IF ServiceMgtSetup."Service Order Starting Fee" <> '' THEN BEGIN
+        ServiceCost.GET(ServiceMgtSetup."Service Order Starting Fee");
+        IF ServiceCost."Cost Type" = ServiceCost."Cost Type"::Travel THEN
+          EXIT;
+      END;
+
+      CreateServiceCost(ServiceCost);
+      ServiceMgtSetup.VALIDATE("Service Order Starting Fee",ServiceCost.Code);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtStartngFeeBlank@16();
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+    BEGIN
+      // If Service Order Starting Fee of Service Management Setup is blank then create a new Service Cost and enter in the field.
+      ServiceMgtSetup.GET;
+      IF ServiceMgtSetup."Service Order Starting Fee" <> '' THEN BEGIN
+        ServiceMgtSetup.VALIDATE("Service Order Starting Fee",'');
+        ServiceMgtSetup.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtResSkillServZon@25(ResourceSkillsOption@1001 : Option;ServiceZonesOption@1002 : Option);
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+    BEGIN
+      // Setup Resource Skills Option and Service Zones Option of Service Management Setup as Code Shown.
+      ServiceMgtSetup.GET;
+      ServiceMgtSetup.VALIDATE("Resource Skills Option",ResourceSkillsOption);
+      ServiceMgtSetup.VALIDATE("Service Zones Option",ServiceZonesOption);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceFaultReporting@42(VAR ServiceMgtSetup@1000 : Record 5911;FaultReportingLevel@1001 : Option);
+    BEGIN
+      ServiceMgtSetup.GET;
+      ServiceMgtSetup.VALIDATE("Fault Reporting Level",FaultReportingLevel);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtBaseCalndrBlank@36(VAR ServiceMgtSetup@1000 : Record 5911) BaseCalendarCode : Code[10];
+    BEGIN
+      ServiceMgtSetup.GET;
+      BaseCalendarCode := ServiceMgtSetup."Base Calendar Code";
+      ServiceMgtSetup.VALIDATE("Base Calendar Code",'');
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtDefaultRespTime@50(VAR ServiceMgtSetup@1000 : Record 5911;DefaultResponseTime@1001 : Decimal) DefaultResponseTimeOld : Decimal;
+    BEGIN
+      ServiceMgtSetup.GET;
+      DefaultResponseTimeOld := ServiceMgtSetup."Default Response Time (Hours)";
+      ServiceMgtSetup.VALIDATE("Default Response Time (Hours)",DefaultResponseTime);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtWarrantyDisc@57(VAR ServiceMgtSetup@1000 : Record 5911;WarrantyDiscParts@1001 : Decimal;WarrantyDiscLabor@1002 : Decimal);
+    BEGIN
+      ServiceMgtSetup.GET;
+      ServiceMgtSetup.VALIDATE("Warranty Disc. % (Parts)",WarrantyDiscParts);
+      ServiceMgtSetup.VALIDATE("Warranty Disc. % (Labor)",WarrantyDiscLabor);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtDefaultWarrDur@54(VAR ServiceMgtSetup@1000 : Record 5911;DefaultWarrantyDuration@1001 : DateFormula) DefaultWarrantyDurationOld : Text[30];
+    BEGIN
+      ServiceMgtSetup.GET;
+      DefaultWarrantyDurationOld := FORMAT(ServiceMgtSetup."Default Warranty Duration");
+      ServiceMgtSetup.VALIDATE("Default Warranty Duration",DefaultWarrantyDuration);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtRgistrCtrctChng@65(RegisterContractChanges@1001 : Boolean);
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+    BEGIN
+      ServiceMgtSetup.GET;
+      ServiceMgtSetup.VALIDATE("Register Contract Changes",RegisterContractChanges);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtCntrctCancelRsn@55(UseContractCancelReason@1001 : Boolean);
+    VAR
+      ServiceMgtSetup@1000 : Record 5911;
+    BEGIN
+      ServiceMgtSetup.GET;
+      ServiceMgtSetup.VALIDATE("Use Contract Cancel Reason",UseContractCancelReason);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetupServiceMgtServOrdMaxDays@35(VAR ServiceMgtSetup@1000 : Record 5911;ContractServOrdMaxDays@1001 : Integer) ContractServOrdMaxDaysOld : Integer;
+    BEGIN
+      ServiceMgtSetup.GET;
+      ContractServOrdMaxDaysOld := ServiceMgtSetup."Contract Serv. Ord.  Max. Days";
+      ServiceMgtSetup.VALIDATE("Contract Serv. Ord.  Max. Days",ContractServOrdMaxDays);
+      ServiceMgtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyPlannedNextServCalcMthod@8(ServiceContractHeader@1001 : Record 5965);
+    VAR
+      ServiceContractLine@1000 : Record 5964;
+    BEGIN
+      // Check that the Next Planned Date in Service Line is obtained by adding Service Period of the Service Contract Header to
+      // the Starting Date of the Service Contract Header.
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractHeader."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractHeader."Contract No.");
+      ServiceContractLine.FINDSET;
+      REPEAT
+        ServiceContractLine.TESTFIELD(
+          "Next Planned Service Date",CALCDATE(ServiceContractHeader."Service Period",ServiceContractHeader."Starting Date"));
+      UNTIL ServiceContractLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyActualNextServCalcMthod@27(ServiceContractLine@1000 : Record 5964;ContractHeaderServicePeriod@1001 : DateFormula);
+    BEGIN
+      // Check that the Next Planned Date in Service Line is obtained by adding Service Period of the Service Contract Header to
+      // the Last Service Date of the Service Contract Line.
+      ServiceContractLine.SETRANGE("Contract Type",ServiceContractLine."Contract Type");
+      ServiceContractLine.SETRANGE("Contract No.",ServiceContractLine."Contract No.");
+      ServiceContractLine.FINDSET;
+      REPEAT
+        ServiceContractLine.TESTFIELD(
+          "Next Planned Service Date",CALCDATE(ContractHeaderServicePeriod,ServiceContractLine."Last Service Date"));
+      UNTIL ServiceContractLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyFaultReasonCode@71(No@1003 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+      ServiceItemLine@1002 : Record 5901;
+    BEGIN
+      FindServiceItemLineForOrder(ServiceItemLine,No);
+      FindServiceLineForOrder(ServiceLine,No);
+      ServiceItemLine.SETRANGE("Line No.",ServiceLine."Line No.");
+      ServiceItemLine.FINDFIRST;
+      ServiceLine.TESTFIELD("Fault Reason Code",ServiceItemLine."Fault Reason Code");
+    END;
+
+    LOCAL PROCEDURE VerifyFaultResolutionRelation@123(FaultCode@1002 : Record 5918;No@1005 : Code[20]);
+    VAR
+      FaultResolCodRelationship@1001 : TestPage 5930;
+      ServiceOrder@1000 : TestPage 5900;
+    BEGIN
+      ServiceOrderPageOpenView(ServiceOrder,No);
+      FaultResolCodRelationship.OPENVIEW;
+      FaultResolCodRelationship.FILTER.SETFILTER("Fault Code",ServiceOrder.ServItemLines."Fault Code".VALUE);
+      ServiceOrder.ServItemLines."Fault/Resol. Codes Relations".INVOKE;
+      FaultResolCodRelationship2.TESTFIELD("Fault Area Code",FaultCode."Fault Area Code");
+      FaultResolCodRelationship2.TESTFIELD("Symptom Code",FaultCode."Symptom Code");
+    END;
+
+    LOCAL PROCEDURE VerifyServiceLineStartingFee@23(ServiceHeader@1000 : Record 5900;ServiceCost@1001 : Record 5905);
+    VAR
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      // Check that the values populated in the Service Line are equal to the values in the Service Cost selected.
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDFIRST;
+      ServiceLine.TESTFIELD(Type,ServiceLine.Type::Cost);
+      ServiceLine.TESTFIELD("No.",ServiceCost.Code);
+      ServiceLine.TESTFIELD(Quantity,ServiceCost."Default Quantity");
+      ServiceLine.TESTFIELD("Unit of Measure Code",ServiceCost."Unit of Measure Code");
+      ServiceLine.TESTFIELD("Unit Cost (LCY)",ServiceCost."Default Unit Cost");
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@1(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := NOT (Question = UseContractTemplateConfirm);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerFalse@53(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := FALSE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmContractCancellation@63(Question@1001 : Text[1024];VAR Reply@1000 : Boolean);
+    BEGIN
+      Reply := NOT (STRPOS(Question,ContractCancellationQuestion) = 0);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@2(Message@1000 : Text[1024]);
+    BEGIN
+      // Handle Message.
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandlerServOrdMaxDays@33(Message@1000 : Text[1024]);
+    BEGIN
+      // Handle Message.
+      IF (STRPOS(Message,ServiceInvoiceMassage) = 0) AND (STRPOS(Message,ZeroOrderCreated) = 0) THEN
+        ERROR(STRSUBSTNO(UnexpectedMessage,Message));
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ResAvailabilityModlFormHandler@13(VAR ResAvailabilityService@1000 : Page 6004;VAR Response@1001 : Action);
+    VAR
+      ServAllocationManagement@1002 : Codeunit 5930;
+    BEGIN
+      // Call the ServAllocationManagement code unit to allocate Resource.
+      ServAllocationManagement.AllocateDate(
+        ServiceOrderAllocation."Document Type",ServiceOrderAllocation."Document No.",ServiceOrderAllocation."Entry No.",
+        Resource."No.",'',WORKDATE,0);
+    END;
+
+    [PageHandler]
+    PROCEDURE ServiceOrderSubformFormHandler@15(VAR ServiceOrderSubform@1000 : Page 5902);
+    BEGIN
+      // Call the function AllocateResource of the Service Order Subform to allocate Resource.
+      ServiceOrderSubform.AllocateResource;
+    END;
+
+    [PageHandler]
+    PROCEDURE ResourceAllocationsFormHandler@17(VAR ResourceAllocations@1000 : Page 6005);
+    VAR
+      ResAvailabilityService@1002 : Page 6004;
+    BEGIN
+      // Run the Res. Availability (Service) form from Resource Allocations form.
+      ResourceAllocations.GETRECORD(ServiceOrderAllocation);
+      ResAvailabilityService.SetData(
+        ServiceOrderAllocation."Document Type",ServiceOrderAllocation."Document No.",ServiceOrderAllocation."Service Item Line No.",
+        ServiceOrderAllocation."Entry No.");
+      IF ServiceOrderAllocation."Resource No." <> '' THEN
+        ResAvailabilityService.SETRECORD(Resource);
+      ResAvailabilityService.RUNMODAL;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE UpdateQuantityPageHandler@168(VAR ServiceLines@1000 : TestPage 5905);
+    VAR
+      Item@1002 : Record 27;
+      ServiceLine@1001 : Record 5902;
+      LibraryUtility@1003 : Codeunit 131000;
+    BEGIN
+      ServiceLines.Type.SETVALUE(ServiceLine.Type::Item);
+      ServiceLines."No.".SETVALUE(LibraryInventory.CreateItem(Item));
+
+      // Use random value for Quantity as value is not important.
+      ServiceLines.Quantity.SETVALUE(RANDOM(10) + LibraryUtility.GenerateRandomFraction);
+      // Post the service Order as Ship.
+      ServiceLines.Post.INVOKE;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE PostAsShipHandler@275(Options@1000 : Text[1024];VAR Choice@1001 : Integer;Instruction@1002 : Text[1024]);
+    BEGIN
+      Choice := 1;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE FaultResolutionRelationHandler@79(VAR FaultResolCodRelationship@1000 : TestPage 5930);
+    BEGIN
+      FaultResolCodRelationship2.INIT;
+      FaultResolCodRelationship2.VALIDATE("Fault Area Code",FaultResolCodRelationship.FaultArea.VALUE);
+      FaultResolCodRelationship2.VALIDATE("Symptom Code",FaultResolCodRelationship.SymptomCode.VALUE);
+    END;
+
+    LOCAL PROCEDURE ExecuteConfirm@60();
+    VAR
+      Answer@1000 : Boolean;
+    BEGIN
+      CLEAR(Answer);
+      Answer := DIALOG.CONFIRM(Question,TRUE);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE InsertTravelFeePageHandler@69(VAR ServiceItemWorksheet@1000 : TestPage 5906);
+    BEGIN
+      ServiceItemWorksheet.ServInvLines."Insert Travel Fee".INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Service]
+      Unsupported version tags:
+      NA: Unable to Execute
+
+      Test for CRM Service Management Setup:
+        1. Test the Next Service Calculation Methods - Actual and Planned for the Service Items in Service Contracts.
+        2. Test changing the Service Order Starting Fee and verifying the selected Starting Fee is added to the Service Line.
+        3. Test setting up the Code Shown, Warning Displayed and Not Used Resource Skills and Service Zones options and verifying the
+           result when allocating Resources to Service Items.
+        4. Test changing Fault Reporting Level and verifying the result in the Service Management application area.
+        5. Test that it is possible to change Base Calendar Code to another existing one and set up a customized Service Calendar.
+        6. Test changing the Default Response Time, Warranty duration, Warranty percentage in the Service Management Setup and
+           verify corresponding fields when creating/working on the Service Orders.
+        7. Test that Contract Changes are registered in the Contract Change Log if the Register Contract Changes Check Box is selected.
+        8. Test that it is necessary to enter a Reason Code when cancelling a Service Contract, if the Use Contract Cancel Reason field
+           is set to TRUE.
+        9. Test that the maximum number of days used as the date range in the Create Contract Service Orders report depends on the value
+           in the Contract Serv. Ord. Max. Days field.
+       10. Test fault / resolution Code relationship for Fault Reporting Level of Fault, Fault+Symptom and Fault+Symptom+Area (IRIS) on
+           Service Order.
+       11. Test Next Planned Service Date on Service Contract Header after Insert Travel Fee.
+       12. Check length of the "Contract Change Log" record's fields "Old Value", "New Value"
+
+      TFS_TS_ID = 21727
+      Cover Test cases:
+        TC0108  TFS_TC_ID=11980 and 31781
+        TC0109  TFS_TC_ID=11981 and 31782
+        TC0110  TFS_TC_ID=11982 and 31783
+        TC0111  TFS_TC_ID=11983 and 31784
+        TC0112  TFS_TC_ID=11984 and 31785
+        TC0113  TFS_TC_ID=12058 and 31859
+        TC0114  TFS_TC_ID=12059 and 31860
+        TC0115  TFS_TC_ID=12060 and 31861
+        TC0116  TFS_TC_ID=12061 and 31862
+
+       TFS_ID = 245089
+       Covers Test cases:
+       -----------------------------------------------------------------------------------------
+       Test Function Name                                                              TFS ID
+       -----------------------------------------------------------------------------------------
+       FaultResolutionRelationFault, RelationFaultSymptom, RelationFaultSymptomArea    141346
+
+       BUG_ID = 318710
+       Covers Test cases:
+       -----------------------------------------------------------------------------------------
+       Test Function Name                                                              TFS ID
+       -----------------------------------------------------------------------------------------
+       NextPlannedServiceDateAfterInsertTravelFee                                     319304
+
+      CheckContractChangeLogOldNewValueFieldLength                                    90975
+    }
+    END.
+  }
+}
+

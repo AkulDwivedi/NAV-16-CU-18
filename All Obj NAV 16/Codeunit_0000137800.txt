@@ -1,0 +1,837 @@
+OBJECT Codeunit 137800 SCM Work Center Test
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryPatterns@1002 : Codeunit 132212;
+      LibraryManufacturing@1003 : Codeunit 132202;
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryPlanning@1012 : Codeunit 132203;
+      LibrarySales@1017 : Codeunit 130509;
+      Assert@1005 : Codeunit 130000;
+      ProdOrderNeedQtyErr@1006 : TextConst 'ENU=Wrong "Prod. Order Need (Qty.)" value';
+      LibraryRandom@1001 : Codeunit 130440;
+      ProdOrderRtngLineDateErr@1007 : TextConst 'ENU=Wrong "Prod. Order Routing Line" Dates';
+      IsInitialized@1008 : Boolean;
+      ReqLineDatesErr@1013 : TextConst 'ENU=Wrong "Requisition Line" dates';
+      ProdOrderCompDatesErr@1014 : TextConst 'ENU=Wrong "Prod. Order Component" dates';
+      ProdOrderCapNeedRoundErr@1015 : TextConst 'ENU=Wrong "Prod Order Capacity Need" roundings';
+      ProdOrderCapNeedDateInconsitencyErr@1016 : TextConst 'ENU=''Prod. Order Capacity Need" DateTime values inconsistency';
+
+    [Test]
+    PROCEDURE ThirdShiftTimeRounding@11();
+    VAR
+      WorkCenter@1002 : Record 99000754;
+      Item@1000 : Record 27;
+      CapacityUnitOfMeasure@1012 : Record 99000780;
+      RoutingLine@1014 : Record 99000764;
+      MachineCenterNo@1005 : Code[20];
+      WorkCenterNo@1013 : Code[20];
+      SetupTime@1004 : Decimal;
+      RunTime@1006 : Decimal;
+      Quantity@1007 : Decimal;
+      AllocatedTotal@1001 : Decimal;
+      DayCapacity@1008 : Decimal;
+      LastDayAllocated@1011 : Decimal;
+      NumOfDaysNeeded@1003 : Integer;
+      DayNum@1009 : Integer;
+      CurrentDate@1010 : Date;
+    BEGIN
+      // [SCENARIO] Verify Production Order Allocation Qty. on several days
+
+      Initialize;
+      UpdateMfgSetup(080000T,230000T);
+      WorkCenter.INIT;
+      SetupTime := 120.5;
+      RunTime := 0.16123;
+      Quantity := 45236;
+
+      WorkCenterNo := CreateWorkCenter(CapacityUnitOfMeasure.Type::Minutes,CreateThreeShiftsShopCalendar,WORKDATE);
+      MachineCenterNo := CreateMachineCenter(WorkCenterNo,WORKDATE);
+      CreateMachineCenterCCR(MachineCenterNo);
+      CreateItem(Item,CreateSimpleRouting(RoutingLine.Type::"Machine Center",MachineCenterNo,SetupTime,RunTime,0,0));
+      CreateProdOrder(Item,Quantity,WORKDATE);
+
+      // Prepare expected values
+      DayCapacity := 24 * 60;
+      LastDayAllocated := 23 * 60;
+      AllocatedTotal :=
+        ROUND(SetupTime + RunTime * Quantity,WorkCenter."Calendar Rounding Precision");
+      NumOfDaysNeeded := ROUND(AllocatedTotal / DayCapacity,1,'>');
+      CurrentDate := CALCDATE('<-1D>',WORKDATE);
+
+      // Verify Allocation Load per Day starting from Ending Day
+      VerifyDayAllocatedQty(MachineCenterNo,CurrentDate,AllocatedTotal,LastDayAllocated);
+      FOR DayNum := NumOfDaysNeeded - 1 DOWNTO 2 DO
+        VerifyDayAllocatedQty(MachineCenterNo,CurrentDate,AllocatedTotal,DayCapacity);
+      VerifyDayAllocatedQty(MachineCenterNo,CurrentDate,AllocatedTotal,AllocatedTotal);
+    END;
+
+    [Test]
+    PROCEDURE ProdOrderCalcCapBackWaitTime@14();
+    VAR
+      Item@1001 : Record 27;
+      CapacityUnitOfMeasure@1008 : Record 99000780;
+      RoutingLine@1011 : Record 99000764;
+      ProdOrderLine@1012 : Record 5406;
+      MachineCenterNo@1002 : Code[20];
+      WorkCenterNo@1000 : Code[20];
+      ShopCalendarCode@1009 : Code[10];
+      WaitTime@1003 : Decimal;
+      DueDate@1010 : Date;
+      StartingDate@1004 : Date;
+      EndingDate@1005 : Date;
+      MiddleDate@1007 : Date;
+      Time@1006 : Time;
+    BEGIN
+      // [SCENARIO] Verify Prod. Order Routing Line's dates when Wait Time is set
+
+      Initialize;
+      WaitTime := 15; // value is specific for rounding issues
+      DueDate := CALCDATE('<CW+5D>',WORKDATE); // next friday
+
+      ShopCalendarCode := FindShopCalendar;
+      WorkCenterNo := CreateWorkCenter(CapacityUnitOfMeasure.Type::Days,ShopCalendarCode,DueDate);
+      MachineCenterNo := CreateMachineCenter(WorkCenterNo,DueDate);
+      CreateMachineCenterCCR(MachineCenterNo);
+      CreateItem(Item,CreateTwoLinesRouting(RoutingLine.Type::"Machine Center",MachineCenterNo,0,0,WaitTime,0));
+
+      CreateProdOrder(Item,LibraryRandom.RandDec(100,2),DueDate);
+
+      EndingDate := CALCDATE('<-1D>',DueDate);
+      StartingDate := CALCDATE(STRSUBSTNO('<-%1D>',WaitTime * 2),EndingDate);
+      MiddleDate := CALCDATE(STRSUBSTNO('<-%1D>',WaitTime),EndingDate);
+
+      WITH ProdOrderLine DO BEGIN
+        SETRANGE("Item No.",Item."No.");
+        FINDFIRST;
+        Time := "Ending Time";
+      END;
+
+      VerifyFirstProdOrderMachineCenterRtngLineDates(MachineCenterNo,StartingDate,Time,MiddleDate,Time);
+      VerifyLastProdOrderMachineCenterRtngLineDates(MachineCenterNo,MiddleDate,Time,EndingDate,Time);
+    END;
+
+    [Test]
+    PROCEDURE ItemProdBOMSalesOrderAndPlanning@48();
+    VAR
+      WorkCenterNo@1007 : ARRAY [2] OF Code[20];
+      ParentItemNo@1006 : Code[20];
+      ChildItemNo@1005 : ARRAY [2] OF Code[20];
+      CompProdTime@1004 : Decimal;
+      ItemProdDate@1003 : Date;
+      CompProdDate@1002 : Date;
+      WorkDayEndTime@1001 : Time;
+      StartingTime@1000 : Time;
+    BEGIN
+      // [SCENARIO] Verify Routing Dates in case of Item with Prod. BOM after Sales Order and Planning Worksheet Reg. Plan.
+
+      ItemProdBOMScenario(
+        WorkCenterNo,ParentItemNo,ChildItemNo,ItemProdDate,CompProdDate,WorkDayEndTime,CompProdTime,FALSE,FALSE);
+
+      StartingTime := WorkDayEndTime - CompProdTime;
+
+      VerifyReqLineDates(ParentItemNo,ItemProdDate,StartingTime,ItemProdDate,WorkDayEndTime);
+      VerifyReqLineDates(ChildItemNo[1],CompProdDate,StartingTime,CompProdDate,WorkDayEndTime);
+      VerifyReqLineDates(ChildItemNo[2],CompProdDate,StartingTime,CompProdDate,WorkDayEndTime);
+    END;
+
+    [Test]
+    PROCEDURE ItemProdBOMSalesOrderAndPlanningWithCCR@26();
+    VAR
+      WorkCenterNo@1003 : ARRAY [2] OF Code[20];
+      ParentItemNo@1001 : Code[20];
+      ChildItemNo@1000 : ARRAY [2] OF Code[20];
+      CompProdTime@1002 : Decimal;
+      ItemProdDate@1012 : Date;
+      CompProdDate@1011 : Date;
+      WorkDayEndTime@1009 : Time;
+      StartingTime@1010 : ARRAY [2] OF Time;
+    BEGIN
+      // [SCENARIO] Verify Routing Dates in case of Item with Prod. BOM and CCR after Sales Order and Planning Worksheet Reg. Plan.
+
+      ItemProdBOMScenario(
+        WorkCenterNo,ParentItemNo,ChildItemNo,ItemProdDate,CompProdDate,WorkDayEndTime,CompProdTime,FALSE,TRUE);
+
+      StartingTime[1] := WorkDayEndTime - CompProdTime;
+      StartingTime[2] := StartingTime[1] - CompProdTime;
+
+      VerifyReqLineDates(ParentItemNo,ItemProdDate,StartingTime[1],ItemProdDate,WorkDayEndTime);
+      VerifyReqLineDates(ChildItemNo[1],CompProdDate,StartingTime[1],CompProdDate,WorkDayEndTime);
+      VerifyReqLineDates(ChildItemNo[2],CompProdDate,StartingTime[2],CompProdDate,StartingTime[1]);
+    END;
+
+    [Test]
+    PROCEDURE ItemProdBOMProdOrder@32();
+    VAR
+      WorkCenterNo@1007 : ARRAY [2] OF Code[20];
+      ParentItemNo@1006 : Code[20];
+      ChildItemNo@1005 : ARRAY [2] OF Code[20];
+      CompProdTime@1004 : Decimal;
+      ItemProdDate@1003 : Date;
+      CompProdDate@1002 : Date;
+      WorkDayEndTime@1001 : Time;
+      StartingTime@1000 : Time;
+    BEGIN
+      // [SCENARIO] Verify Routing Dates in case of Item with Prod. BOM after Prod. Order
+
+      ItemProdBOMScenario(
+        WorkCenterNo,ParentItemNo,ChildItemNo,ItemProdDate,CompProdDate,WorkDayEndTime,CompProdTime,TRUE,FALSE);
+
+      StartingTime := WorkDayEndTime - CompProdTime;
+
+      VerifyFirstProdOrderWorkCenterRtngLineDates(WorkCenterNo[1],ItemProdDate,StartingTime,ItemProdDate,WorkDayEndTime);
+      VerifyProdOrderComponenDates(ChildItemNo[1],ItemProdDate,StartingTime);
+      VerifyProdOrderComponenDates(ChildItemNo[2],ItemProdDate,StartingTime);
+    END;
+
+    [Test]
+    PROCEDURE ItemProdBOMProdOrderWithCCR@30();
+    VAR
+      WorkCenterNo@1003 : ARRAY [2] OF Code[20];
+      ParentItemNo@1001 : Code[20];
+      ChildItemNo@1000 : ARRAY [2] OF Code[20];
+      CompProdTime@1002 : Decimal;
+      ItemProdDate@1012 : Date;
+      CompProdDate@1011 : Date;
+      WorkDayEndTime@1009 : Time;
+      StartingTime@1010 : Time;
+    BEGIN
+      // [SCENARIO] Verify Routing Dates in case of Item with Prod. BOM and CCR after Prod. Order
+
+      ItemProdBOMScenario(
+        WorkCenterNo,ParentItemNo,ChildItemNo,ItemProdDate,CompProdDate,WorkDayEndTime,CompProdTime,TRUE,TRUE);
+
+      StartingTime := WorkDayEndTime - CompProdTime;
+
+      VerifyFirstProdOrderWorkCenterRtngLineDates(WorkCenterNo[1],ItemProdDate,StartingTime,ItemProdDate,WorkDayEndTime);
+      VerifyProdOrderComponenDates(ChildItemNo[1],ItemProdDate,StartingTime);
+      VerifyProdOrderComponenDates(ChildItemNo[2],ItemProdDate,StartingTime);
+    END;
+
+    [Test]
+    PROCEDURE FourShiftTimeRounding@19();
+    VAR
+      Item@1013 : ARRAY [4] OF Record 27;
+      CapacityUnitOfMeasure@1012 : Record 99000780;
+      RoutingLine@1011 : Record 99000764;
+      MachineCenterNo@1010 : ARRAY [4] OF Code[20];
+      WorkCenterNo@1009 : ARRAY [4] OF Code[20];
+      ShopCalendarCode@1018 : Code[10];
+      RoutingNo@1019 : Code[20];
+      SetupTime@1008 : Decimal;
+      RunTime@1007 : Decimal;
+      WaitTime@1015 : Decimal;
+      MoveTime@1016 : Decimal;
+      Quantity@1006 : Decimal;
+      ItemNoFilter@1000 : Text;
+      MachineCenterNoFilter@1001 : Text;
+      i@1017 : Integer;
+    BEGIN
+      // [FEATURE] [Capacity Constrained Resource] [Planning Worksheet]
+      // [SCENARIO] Planning worksheet creates sequential production orders with consistent starting/ending dates when capacity constrained resource is used in production
+
+      Initialize;
+      UpdateMfgSetup(000000T,235959T);
+      SetupTime := 19;
+      RunTime := 29;
+      WaitTime := 39;
+      MoveTime := 59;
+      Quantity := 17;
+
+      ShopCalendarCode := CreateFourShiftsShopCalendar;
+      FOR i := 1 TO 4 DO BEGIN
+        WorkCenterNo[i] := CreateWorkCenter(CapacityUnitOfMeasure.Type::Minutes,ShopCalendarCode,WORKDATE);
+        MachineCenterNo[i] := CreateMachineCenter(WorkCenterNo[i],WORKDATE);
+      END;
+      CreateMachineCenterCCR(MachineCenterNo[2]);
+
+      RoutingNo := CreateFourLinesRouting(RoutingLine.Type::"Machine Center",MachineCenterNo,SetupTime,RunTime,WaitTime,MoveTime);
+      FOR i := 1 TO 4 DO BEGIN
+        CreateItem(Item[i],RoutingNo);
+        CreateReleaseSalesOrder(Item[i],Quantity,WORKDATE);
+      END;
+
+      ItemNoFilter := STRSUBSTNO('%1|%2|%3|%4',Item[1]."No.",Item[2]."No.",Item[3]."No.",Item[4]."No.");
+      Item[1].SETFILTER("No.",ItemNoFilter);
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item[1],WORKDATE,WORKDATE);
+      CarryOutActionFirmPlannedProdOrder(ItemNoFilter);
+
+      MachineCenterNoFilter :=
+        STRSUBSTNO('%1|%2|%3|%4',MachineCenterNo[1],MachineCenterNo[2],MachineCenterNo[3],MachineCenterNo[4]);
+      VerifyProdOrderCapNeedRoundingAndDateConsistency(MachineCenterNoFilter);
+      VerifyProdOrderCapNeedZeroAllocatedTime(MachineCenterNoFilter);
+    END;
+
+    [Test]
+    PROCEDURE AvailableCapacityRoundedWhenRefreshingProdOrder@8();
+    VAR
+      CapacityUnitOfMeasure@1000 : Record 99000780;
+      RoutingLine@1002 : Record 99000764;
+      Item@1003 : Record 27;
+      ProdOrderCapNeed@1005 : Record 5410;
+      WorkCenterNo@1001 : Code[20];
+      WorkCenterCriticalLoad@1004 : Integer;
+    BEGIN
+      // [FEATURE] [Capacity Constrained Resource]
+      // [SCENARIO] Prodution order can be refreshed when allocated time is rounded due to capacity constrained resource restriction
+
+      // [GIVEN] Create work center "W" with a capacity constraint, critical load = 97%
+      WorkCenterNo := CreateWorkCenter(CapacityUnitOfMeasure.Type::Days,CreateThreeShiftsShopCalendar,WORKDATE);
+      WorkCenterCriticalLoad := 77;
+      CreateWorkCenterCCR(WorkCenterNo,WorkCenterCriticalLoad);
+      // [GIVEN] Create routing with work center "W"
+      CreateItem(Item,CreateSimpleRouting(RoutingLine.Type::"Work Center",WorkCenterNo,0,1,0,0));
+      // [WHEN] Create and refresh production order
+      CreateProdOrder(Item,1,WORKDATE);
+
+      // [THEN] Production order successfully refreshed
+      ProdOrderCapNeed.SETRANGE("Work Center No.",WorkCenterNo);
+      ProdOrderCapNeed.SETRANGE(Date,CALCDATE('<-1D>',WORKDATE));
+      ProdOrderCapNeed.CALCSUMS("Allocated Time");
+      Assert.AreNearlyEqual(WorkCenterCriticalLoad / 100,ProdOrderCapNeed."Allocated Time",0.01,ProdOrderCapNeedRoundErr);
+    END;
+
+    LOCAL PROCEDURE Initialize@9();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      IF IsInitialized THEN
+        EXIT;
+      IsInitialized := TRUE;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE ItemProdBOMScenario@50(VAR WorkCenterNo@1002 : ARRAY [2] OF Code[20];VAR ParentItemNo@1013 : Code[20];VAR ChildItemNo@1014 : ARRAY [2] OF Code[20];VAR ItemProdDate@1019 : Date;VAR CompProdDate@1018 : Date;VAR WorkDayEndTime@1017 : Time;VAR CompProdTime@1016 : Decimal;IsCreateProdOrder@1001 : Boolean;UseCCR@1000 : Boolean);
+    VAR
+      ParentItem@1012 : Record 27;
+      ChildItem@1011 : ARRAY [2] OF Record 27;
+      CapacityUnitOfMeasure@1009 : Record 99000780;
+      RoutingLine@1008 : Record 99000764;
+      ShopCalendarCode@1006 : Code[10];
+      OrderDate@1003 : Date;
+      RunTime@1005 : Decimal;
+      Quantity@1004 : Decimal;
+      i@1015 : Integer;
+    BEGIN
+      Initialize;
+      RunTime := 60; // values are specific
+      Quantity := 3;
+      OrderDate := CALCDATE('<CW+5D>',WORKDATE); // next friday
+
+      ShopCalendarCode := FindShopCalendar;
+      FOR i := 1 TO 2 DO
+        WorkCenterNo[i] := CreateWorkCenter(CapacityUnitOfMeasure.Type::Minutes,ShopCalendarCode,OrderDate);
+
+      IF UseCCR THEN
+        FOR i := 1 TO 2 DO
+          CreateWorkCenterCCR(WorkCenterNo[i],100);
+
+      CreateItem(ParentItem,CreateSimpleRouting(RoutingLine.Type::"Work Center",WorkCenterNo[1],0,RunTime,0,0));
+      CreateItem(ChildItem[1],CreateSimpleRouting(RoutingLine.Type::"Work Center",WorkCenterNo[2],0,RunTime,0,0));
+      CreateItem(ChildItem[2],CreateSimpleRouting(RoutingLine.Type::"Work Center",WorkCenterNo[2],0,RunTime,0,0));
+      CreateProdBOMWithTwoItems(ParentItem,ChildItem[1]."No.",ChildItem[2]."No.");
+
+      IF IsCreateProdOrder THEN
+        CreateProdOrder(ParentItem,Quantity,OrderDate)
+      ELSE BEGIN
+        CreateReleaseSalesOrder(ParentItem,Quantity,OrderDate);
+        ParentItem.SETFILTER("No.",'%1|%2|%3',ParentItem."No.",ChildItem[1]."No.",ChildItem[2]."No.");
+        LibraryPlanning.CalcRegenPlanForPlanWksh(ParentItem,OrderDate,OrderDate);
+      END;
+
+      // Calculate Expected values
+      ItemProdDate := CALCDATE('<-1D>',OrderDate);
+      CompProdDate := CALCDATE('<-1D>',ItemProdDate);
+      WorkDayEndTime := GetShopCalendarEndingTime(ShopCalendarCode);
+
+      ParentItemNo := ParentItem."No.";
+      ChildItemNo[1] := ChildItem[1]."No.";
+      ChildItemNo[2] := ChildItem[2]."No.";
+      CompProdTime := Quantity * RunTime * 60000;
+    END;
+
+    LOCAL PROCEDURE CreateMachineCenter@2(WorkCenterNo@1001 : Code[20];DueDate@1002 : Date) : Code[20];
+    VAR
+      MachineCenter@1000 : Record 99000758;
+    BEGIN
+      LibraryManufacturing.CreateMachineCenter(MachineCenter,WorkCenterNo,1);
+      LibraryManufacturing.CalculateMachCenterCalendar(MachineCenter,CALCDATE('<-2M>',DueDate),DueDate);
+      EXIT(MachineCenter."No.");
+    END;
+
+    LOCAL PROCEDURE CreateWorkCenter@3(UOMType@1003 : Option;ShopCalendarCode@1004 : Code[10];DueDate@1005 : Date) : Code[20];
+    VAR
+      WorkCenter@1000 : Record 99000754;
+      CapacityUnitOfMeasure@1002 : Record 99000780;
+    BEGIN
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateCapacityUnitOfMeasure(CapacityUnitOfMeasure,UOMType);
+      WorkCenter.VALIDATE("Unit of Measure Code",CapacityUnitOfMeasure.Code);
+      WorkCenter.VALIDATE("Shop Calendar Code",ShopCalendarCode);
+      WorkCenter.VALIDATE(Capacity,1);
+      WorkCenter.MODIFY(TRUE);
+
+      LibraryManufacturing.CalculateWorkCenterCalendar(WorkCenter,CALCDATE('<-2M>',DueDate),DueDate);
+      EXIT(WorkCenter."No.");
+    END;
+
+    LOCAL PROCEDURE CreateThreeShiftsShopCalendar@6() : Code[10];
+    VAR
+      ShopCalendar@1001 : Record 99000751;
+      WorkShiftCodes@1000 : ARRAY [3] OF Code[10];
+    BEGIN
+      LibraryManufacturing.CreateShopCalendarCode(ShopCalendar);
+      CreateThreeWorkShifts(WorkShiftCodes);
+      UpdateThreeShiftsShopCalendarWorkingDays(ShopCalendar.Code,WorkShiftCodes);
+      EXIT(ShopCalendar.Code);
+    END;
+
+    LOCAL PROCEDURE CreateThreeShiftsShopCalendarWorkDays@13(ShopCalendarCode@1003 : Code[10];WorkShiftCode@1002 : Code[10];DoW@1001 : Integer;WorkShiftNum@1004 : Integer);
+    VAR
+      ShopCalendarWorkingDays@1000 : Record 99000752;
+      StartingTime@1005 : Time;
+      EndingTime@1006 : Time;
+    BEGIN
+      GetWorkShiftTimeThreeShifts(StartingTime,EndingTime,WorkShiftNum);
+      LibraryManufacturing.CreateShopCalendarWorkingDays(
+        ShopCalendarWorkingDays,ShopCalendarCode,DoW,WorkShiftCode,StartingTime,EndingTime);
+    END;
+
+    LOCAL PROCEDURE CreateThreeWorkShifts@1(VAR WorkShiftCodes@1000 : ARRAY [3] OF Code[10]);
+    VAR
+      WorkShift@1001 : Record 99000750;
+      i@1002 : Integer;
+    BEGIN
+      FOR i := 1 TO ARRAYLEN(WorkShiftCodes) DO BEGIN
+        LibraryManufacturing.CreateWorkShiftCode(WorkShift);
+        WorkShiftCodes[i] := WorkShift.Code;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateFourShiftsShopCalendar@46() : Code[10];
+    VAR
+      ShopCalendar@1001 : Record 99000751;
+      WorkShiftCodes@1000 : ARRAY [4] OF Code[10];
+    BEGIN
+      LibraryManufacturing.CreateShopCalendarCode(ShopCalendar);
+      CreateFourWorkShifts(WorkShiftCodes);
+      UpdateFourShiftsShopCalendarWorkingDays(ShopCalendar.Code,WorkShiftCodes);
+      EXIT(ShopCalendar.Code);
+    END;
+
+    LOCAL PROCEDURE CreateFourShiftsShopCalendarWorkDays@45(ShopCalendarCode@1003 : Code[10];WorkShiftCode@1002 : Code[10];DoW@1001 : Integer;WorkShiftNum@1004 : Integer);
+    VAR
+      ShopCalendarWorkingDays@1000 : Record 99000752;
+      StartingTime@1005 : Time;
+      EndingTime@1006 : Time;
+    BEGIN
+      GetWorkShiftTimeFourShifts(StartingTime,EndingTime,WorkShiftNum);
+      LibraryManufacturing.CreateShopCalendarWorkingDays(
+        ShopCalendarWorkingDays,ShopCalendarCode,DoW,WorkShiftCode,StartingTime,EndingTime);
+    END;
+
+    LOCAL PROCEDURE CreateFourWorkShifts@43(VAR WorkShiftCodes@1000 : ARRAY [4] OF Code[10]);
+    VAR
+      WorkShift@1001 : Record 99000750;
+      i@1002 : Integer;
+    BEGIN
+      FOR i := 1 TO ARRAYLEN(WorkShiftCodes) DO BEGIN
+        LibraryManufacturing.CreateWorkShiftCode(WorkShift);
+        WorkShiftCodes[i] := WorkShift.Code;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateMachineCenterCCR@4(MachineCenterNo@1001 : Code[20]);
+    VAR
+      CapacityConstrainedResource@1000 : Record 99000866;
+    BEGIN
+      WITH CapacityConstrainedResource DO BEGIN
+        LibraryManufacturing.CreateCapacityConstrainedResource(
+          CapacityConstrainedResource,"Capacity Type"::"Machine Center",MachineCenterNo);
+        VALIDATE("Critical Load %",100);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateWorkCenterCCR@39(WorkCenterNo@1001 : Code[20];CriticalLoad@1002 : Decimal);
+    VAR
+      CapacityConstrainedResource@1000 : Record 99000866;
+    BEGIN
+      WITH CapacityConstrainedResource DO BEGIN
+        LibraryManufacturing.CreateCapacityConstrainedResource(
+          CapacityConstrainedResource,"Capacity Type"::"Work Center",WorkCenterNo);
+        VALIDATE("Critical Load %",CriticalLoad);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateSimpleRouting@5(RoutingLineType@1008 : Option;MachineWorkCenterNo@1004 : Code[20];SetupTime@1007 : Decimal;RunTime@1006 : Decimal;WaitTime@1001 : Decimal;MoveTime@1000 : Decimal) : Code[20];
+    VAR
+      RoutingHeader@1003 : Record 99000763;
+    BEGIN
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+      CreateRoutingLine(RoutingHeader,RoutingLineType,MachineWorkCenterNo,SetupTime,RunTime,WaitTime,MoveTime);
+      RoutingHeader.VALIDATE(Status,RoutingHeader.Status::Certified);
+      RoutingHeader.MODIFY(TRUE);
+      EXIT(RoutingHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateTwoLinesRouting@28(RoutingLineType@1008 : Option;MachineWorkCenterNo@1007 : Code[20];SetupTime@1006 : Decimal;RunTime@1004 : Decimal;WaitTime@1001 : Decimal;MoveTime@1000 : Decimal) : Code[20];
+    VAR
+      RoutingHeader@1003 : Record 99000763;
+      i@1002 : Integer;
+    BEGIN
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+
+      FOR i := 1 TO 2 DO
+        CreateRoutingLine(RoutingHeader,RoutingLineType,MachineWorkCenterNo,SetupTime,RunTime,WaitTime,MoveTime);
+
+      RoutingHeader.VALIDATE(Status,RoutingHeader.Status::Certified);
+      RoutingHeader.MODIFY(TRUE);
+      EXIT(RoutingHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateFourLinesRouting@38(RoutingLineType@1008 : Option;MachineWorkCenterNo@1007 : ARRAY [4] OF Code[20];SetupTime@1006 : Decimal;RunTime@1004 : Decimal;WaitTime@1001 : Decimal;MoveTime@1000 : Decimal) : Code[20];
+    VAR
+      RoutingHeader@1003 : Record 99000763;
+      i@1002 : Integer;
+    BEGIN
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+
+      FOR i := 1 TO 3 DO
+        CreateRoutingLine(RoutingHeader,RoutingLineType,MachineWorkCenterNo[i],SetupTime,RunTime,WaitTime,MoveTime);
+      CreateRoutingLine(RoutingHeader,RoutingLineType,MachineWorkCenterNo[4],0,0,0,0);
+
+      RoutingHeader.VALIDATE(Status,RoutingHeader.Status::Certified);
+      RoutingHeader.MODIFY(TRUE);
+      EXIT(RoutingHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateRoutingLine@29(RoutingHeader@1000 : Record 99000763;RoutingLineType@1002 : Option;MachineWorkCenterNo@1003 : Code[20];SetupTime@1007 : Decimal;RunTime@1006 : Decimal;WaitTime@1005 : Decimal;MoveTime@1004 : Decimal);
+    VAR
+      RoutingLine@1001 : Record 99000764;
+    BEGIN
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine,'',
+        LibraryUtility.GenerateRandomCode(RoutingLine.FIELDNO("Operation No."),DATABASE::"Routing Line"),
+        RoutingLineType,MachineWorkCenterNo);
+
+      WITH RoutingLine DO BEGIN
+        VALIDATE("Setup Time",SetupTime);
+        VALIDATE("Run Time",RunTime);
+        VALIDATE("Wait Time",WaitTime);
+        VALIDATE("Move Time",MoveTime);
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateItem@10(VAR Item@1001 : Record 27;RoutingHeaderNo@1000 : Code[20]) : Code[20];
+    BEGIN
+      WITH Item DO BEGIN
+        LibraryPatterns.MAKEItemSimple(Item,"Costing Method"::FIFO,LibraryPatterns.RandCost(Item));
+        VALIDATE("Routing No.",RoutingHeaderNo);
+        VALIDATE("Replenishment System","Replenishment System"::"Prod. Order");
+        VALIDATE("Reordering Policy","Reordering Policy"::Order);
+        MODIFY(TRUE);
+        EXIT("No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateProdOrder@12(Item@1002 : Record 27;Quantity@1001 : Decimal;DueDate@1003 : Date);
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      LibraryPatterns.MAKEProductionOrder(ProductionOrder,ProductionOrder.Status::"Firm Planned",Item,'','',Quantity,DueDate);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,FALSE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateProdBOMWithTwoItems@31(ParentItem@1002 : Record 27;ChildItemNo1@1003 : Code[20];ChildItemNo2@1004 : Code[20]);
+    VAR
+      ProductionBOMHeader@1000 : Record 99000771;
+      ProductionBOMLine@1001 : Record 99000772;
+    BEGIN
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,ParentItem."Base Unit of Measure");
+      LibraryManufacturing.CreateProductionBOMLine(
+        ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,ChildItemNo1,1);
+      LibraryManufacturing.CreateProductionBOMLine(
+        ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,ChildItemNo2,1);
+
+      ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::Certified);
+      ProductionBOMHeader.MODIFY;
+
+      ParentItem.VALIDATE("Production BOM No.",ProductionBOMHeader."No.");
+      ParentItem.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CreateReleaseSalesOrder@33(Item@1002 : Record 27;Quantity@1003 : Decimal;OrderDate@1004 : Date);
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      LibraryPatterns.MAKESalesOrder(SalesHeader,SalesLine,Item,'','',Quantity,OrderDate,LibraryRandom.RandDec(1000,2));
+      SalesHeader.VALIDATE("Shipment Date",OrderDate);
+      SalesHeader.MODIFY;
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE GetWorkShiftTimeThreeShifts@22(VAR StartingTime@1001 : Time;VAR EndingTime@1002 : Time;WorkShiftNum@1000 : Integer);
+    BEGIN
+      CASE WorkShiftNum OF
+        1:
+          BEGIN
+            StartingTime := 000000T;
+            EndingTime := 080000T;
+          END;
+        2:
+          BEGIN
+            StartingTime := 080000T;
+            EndingTime := 160000T;
+          END;
+        3:
+          BEGIN
+            StartingTime := 160000T;
+            EndingTime := 235959T;
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetWorkShiftTimeFourShifts@47(VAR StartingTime@1001 : Time;VAR EndingTime@1002 : Time;WorkShiftNum@1000 : Integer);
+    BEGIN
+      CASE WorkShiftNum OF
+        1:
+          BEGIN
+            StartingTime := 000000T;
+            EndingTime := 060000T;
+          END;
+        2:
+          BEGIN
+            StartingTime := 060000T;
+            EndingTime := 140000T;
+          END;
+        3:
+          BEGIN
+            StartingTime := 140000T;
+            EndingTime := 220000T;
+          END;
+        4:
+          BEGIN
+            StartingTime := 220000T;
+            EndingTime := 235959T;
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetShopCalendarEndingTime@21(ShopCalendarCode@1000 : Code[10]) : Time;
+    VAR
+      ShopCalendarWorkingDays@1001 : Record 99000752;
+    BEGIN
+      WITH ShopCalendarWorkingDays DO BEGIN
+        SETRANGE("Shop Calendar Code",ShopCalendarCode);
+        FINDFIRST;
+        EXIT("Ending Time");
+      END;
+    END;
+
+    LOCAL PROCEDURE FindShopCalendar@18() : Code[10];
+    VAR
+      ShopCalendar@1000 : Record 99000751;
+    BEGIN
+      ShopCalendar.FINDFIRST;
+      EXIT(ShopCalendar.Code);
+    END;
+
+    LOCAL PROCEDURE UpdateMfgSetup@7(StartingTime@1001 : Time;EndingTime@1002 : Time);
+    VAR
+      MfgSetup@1000 : Record 99000765;
+    BEGIN
+      WITH MfgSetup DO BEGIN
+        GET;
+        VALIDATE("Normal Starting Time",StartingTime);
+        VALIDATE("Normal Ending Time",EndingTime);
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateThreeShiftsShopCalendarWorkingDays@15(ShopCalendarCode@1001 : Code[10];WorkShiftCodes@1000 : ARRAY [3] OF Code[10]);
+    VAR
+      ShopCalendarWorkingDays@1002 : Record 99000752;
+      DoW@1003 : Integer;
+      i@1004 : Integer;
+    BEGIN
+      FOR DoW := ShopCalendarWorkingDays.Day::Monday TO ShopCalendarWorkingDays.Day::Sunday DO
+        FOR i := 1 TO ARRAYLEN(WorkShiftCodes) DO
+          CreateThreeShiftsShopCalendarWorkDays(ShopCalendarCode,WorkShiftCodes[i],DoW,i);
+    END;
+
+    LOCAL PROCEDURE UpdateFourShiftsShopCalendarWorkingDays@49(ShopCalendarCode@1001 : Code[10];WorkShiftCodes@1000 : ARRAY [4] OF Code[10]);
+    VAR
+      ShopCalendarWorkingDays@1002 : Record 99000752;
+      DoW@1003 : Integer;
+      i@1004 : Integer;
+    BEGIN
+      FOR DoW := ShopCalendarWorkingDays.Day::Monday TO ShopCalendarWorkingDays.Day::Sunday DO
+        FOR i := 1 TO ARRAYLEN(WorkShiftCodes) DO
+          CreateFourShiftsShopCalendarWorkDays(ShopCalendarCode,WorkShiftCodes[i],DoW,i);
+    END;
+
+    LOCAL PROCEDURE CarryOutActionFirmPlannedProdOrder@59(ItemNoFilter@1001 : Text);
+    VAR
+      RequisitionLine@1000 : Record 246;
+      ProdOrderChoice@1002 : ' ,Planned,Firm Planned,Firm Planned & Print,Copy to Req. Wksh';
+    BEGIN
+      WITH RequisitionLine DO BEGIN
+        SETRANGE(Type,Type::Item);
+        SETFILTER("No.",ItemNoFilter);
+        MODIFYALL("Accept Action Message",TRUE);
+        FINDFIRST;
+        LibraryPlanning.CarryOutPlanWksh(RequisitionLine,ProdOrderChoice::"Firm Planned",0,0,0,'','','','');
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyDayAllocatedQty@17(MachineCenterNo@1000 : Code[20];VAR Date@1001 : Date;VAR AllocatedTotal@1003 : Decimal;ExpectedQty@1002 : Decimal);
+    VAR
+      MachineCenter@1004 : Record 99000758;
+    BEGIN
+      MachineCenter."No." := MachineCenterNo;
+      MachineCenter.SETRANGE("Date Filter",Date);
+      MachineCenter.CALCFIELDS("Prod. Order Need (Qty.)");
+
+      Assert.AreEqual(ExpectedQty,MachineCenter."Prod. Order Need (Qty.)",ProdOrderNeedQtyErr);
+
+      Date := CALCDATE('<-1D>',Date);
+      AllocatedTotal -= ExpectedQty;
+    END;
+
+    LOCAL PROCEDURE VerifyFirstProdOrderMachineCenterRtngLineDates@24(MachineCenterNo@1000 : Code[20];ExpStartDate@1002 : Date;ExpStartTime@1003 : Time;ExpEndDate@1004 : Date;ExpEndTime@1005 : Time);
+    VAR
+      ProdOrderRtngLine@1006 : Record 5409;
+    BEGIN
+      WITH ProdOrderRtngLine DO BEGIN
+        SETRANGE(Type,Type::"Machine Center");
+        SETRANGE("No.",MachineCenterNo);
+        FINDFIRST;
+        VerifyProdOrderRtngLineDates(ProdOrderRtngLine,ExpStartDate,ExpStartTime,ExpEndDate,ExpEndTime);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyLastProdOrderMachineCenterRtngLineDates@23(MachineCenterNo@1000 : Code[20];ExpStartDate@1002 : Date;ExpStartTime@1003 : Time;ExpEndDate@1004 : Date;ExpEndTime@1005 : Time);
+    VAR
+      ProdOrderRtngLine@1006 : Record 5409;
+    BEGIN
+      WITH ProdOrderRtngLine DO BEGIN
+        SETRANGE(Type,Type::"Machine Center");
+        SETRANGE("No.",MachineCenterNo);
+        FINDLAST;
+        VerifyProdOrderRtngLineDates(ProdOrderRtngLine,ExpStartDate,ExpStartTime,ExpEndDate,ExpEndTime);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyFirstProdOrderWorkCenterRtngLineDates@41(WorkCenterNo@1000 : Code[20];ExpStartDate@1002 : Date;ExpStartTime@1003 : Time;ExpEndDate@1004 : Date;ExpEndTime@1005 : Time);
+    VAR
+      ProdOrderRtngLine@1006 : Record 5409;
+    BEGIN
+      WITH ProdOrderRtngLine DO BEGIN
+        SETRANGE(Type,Type::"Work Center");
+        SETRANGE("No.",WorkCenterNo);
+        FINDFIRST;
+        VerifyProdOrderRtngLineDates(ProdOrderRtngLine,ExpStartDate,ExpStartTime,ExpEndDate,ExpEndTime);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyProdOrderRtngLineDates@25(ProdOrderRtngLine@1001 : Record 5409;ExpStartDate@1002 : Date;ExpStartTime@1003 : Time;ExpEndDate@1004 : Date;ExpEndTime@1005 : Time);
+    BEGIN
+      WITH ProdOrderRtngLine DO BEGIN
+        Assert.AreEqual(ExpStartDate,"Starting Date",ProdOrderRtngLineDateErr);
+        Assert.AreEqual(ExpStartTime,"Starting Time",ProdOrderRtngLineDateErr);
+        Assert.AreEqual(ExpEndDate,"Ending Date",ProdOrderRtngLineDateErr);
+        Assert.AreEqual(ExpEndTime,"Ending Time",ProdOrderRtngLineDateErr);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyReqLineDates@27(ItemNo@1001 : Code[20];StaringDate@1002 : Date;StartingTime@1003 : Time;EndingDate@1004 : Date;EndingTime@1005 : Time);
+    VAR
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      WITH RequisitionLine DO BEGIN
+        SETRANGE(Type,Type::Item);
+        SETRANGE("No.",ItemNo);
+        FINDFIRST;
+        Assert.AreEqual(StaringDate,"Starting Date",ReqLineDatesErr);
+        Assert.AreEqual(StartingTime,"Starting Time",ReqLineDatesErr);
+        Assert.AreEqual(EndingDate,"Ending Date",ReqLineDatesErr);
+        Assert.AreEqual(EndingTime,"Ending Time",ReqLineDatesErr);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyProdOrderComponenDates@44(ItemNo@1001 : Code[20];ExpDueDate@1002 : Date;ExpDueTime@1003 : Time);
+    VAR
+      ProdOrderComponent@1000 : Record 5407;
+    BEGIN
+      WITH ProdOrderComponent DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        FINDFIRST;
+        Assert.AreEqual(ExpDueDate,"Due Date",ProdOrderCompDatesErr);
+        Assert.AreEqual(ExpDueTime,"Due Time",ProdOrderCompDatesErr);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyProdOrderCapNeedRoundingAndDateConsistency@65(MachineCenterNoFilter@1001 : Text);
+    VAR
+      ProdOrderCapacityNeed@1000 : Record 5410;
+    BEGIN
+      WITH ProdOrderCapacityNeed DO BEGIN
+        SETRANGE(Type,Type::"Machine Center");
+        SETFILTER("No.",MachineCenterNoFilter);
+        FINDSET;
+        REPEAT
+          Assert.AreEqual(0,("Starting Time" - 000000T) MOD 1000,ProdOrderCapNeedRoundErr);
+          Assert.AreEqual(0,("Ending Time" - 000000T) MOD 1000,ProdOrderCapNeedRoundErr);
+          Assert.AreEqual(0,"Allocated Time" MOD 1,ProdOrderCapNeedRoundErr);
+          Assert.AreEqual(0,"Needed Time" MOD 1,ProdOrderCapNeedRoundErr);
+          Assert.AreEqual("Ending Time",DT2TIME("Ending Date-Time"),ProdOrderCapNeedDateInconsitencyErr);
+          Assert.AreEqual("Starting Time",DT2TIME("Starting Date-Time"),ProdOrderCapNeedDateInconsitencyErr);
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyProdOrderCapNeedZeroAllocatedTime@36(MachineCenterNoFilter@1001 : Text);
+    VAR
+      ProdOrderCapacityNeed@1000 : Record 5410;
+    BEGIN
+      WITH ProdOrderCapacityNeed DO BEGIN
+        SETRANGE(Type,Type::"Machine Center");
+        SETRANGE("Allocated Time",0);
+        SETFILTER("No.",MachineCenterNoFilter);
+        FINDSET;
+        REPEAT
+          Assert.AreEqual(DT2DATE("Ending Date-Time"),DT2DATE("Starting Date-Time"),ProdOrderCapNeedDateInconsitencyErr);
+          Assert.AreEqual("Ending Time","Starting Time",ProdOrderCapNeedDateInconsitencyErr);
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Manufacturing] [SCM]
+    }
+    END.
+  }
+}
+

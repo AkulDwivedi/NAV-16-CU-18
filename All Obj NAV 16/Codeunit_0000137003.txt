@@ -1,0 +1,3088 @@
+OBJECT Codeunit 137003 SCM WIP Costing Production-I
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GeneralLedgerSetup@1013 : Record 98;
+      Assert@1009 : Codeunit 130000;
+      LibraryCosting@1015 : Codeunit 132200;
+      LibraryPurchase@1014 : Codeunit 130512;
+      LibrarySales@1018 : Codeunit 130509;
+      LibraryInventory@1016 : Codeunit 132201;
+      LibraryManufacturing@1010 : Codeunit 132202;
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryERM@1011 : Codeunit 131300;
+      LibraryPlanning@1019 : Codeunit 132203;
+      LibraryVariableStorage@1020 : Codeunit 131004;
+      LibraryRandom@1012 : Codeunit 130440;
+      isInitialized@1000 : Boolean;
+      ErrMessageNotFoundZeroAmt@1001 : TextConst 'ENU=The sum of amounts must be zero.';
+      ErrMessageAmountDoNotMatch@1002 : TextConst 'ENU=The amount totals must be equal.';
+      ErrMessageGLEntryNoRowExist@1003 : TextConst 'ENU=G/L Entry for the particular Document No and Account must not exist.';
+      ExpectedMsg@1007 : TextConst 'ENU=Expected Cost Posting to G/L has been changed.';
+      WrongLastDirectCostErr@1022 : TextConst 'ENU=Last Direct Cost is incorrect.';
+      ExpectedCostPostingConfirm@1008 : TextConst 'ENU=Do you really want to change the Expected Cost Posting to G/L?';
+      FlushingMethod@1006 : 'Manual,Forward,Backward';
+      CostingMethod@1005 : 'FIFO,LIFO,Specific,Average,Standard';
+      ExpectedMaterialCostErr@1017 : TextConst 'ENU=Standart Material Cost should match Item Single-Level Material Cost';
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StandardManProduction@31();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Standard]
+      // [SCENARIO] Standard Costing with Flushing method - Manual and Finish Production Order, verify values in GL entries.
+
+      // Covers TFS_TC_ID = 32227, 32232, 12617 and 12622.
+      StandardProduction(FALSE,FlushingMethod::Manual,CostingMethod::Standard);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StandardBackwardProduction@43();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Standard]
+      // [SCENARIO] Standard Costing with Flushing method - Backward and Finish Production Order, verify values in GL entries.
+
+      // Covers TFS_TC_ID = 32227, 32232, 12617 and 12622.
+      StandardProduction(FALSE,FlushingMethod::Backward,CostingMethod::Standard);
+    END;
+
+    LOCAL PROCEDURE StandardProduction@50(AutoCostPosting@1005 : Boolean;FlushingMethod@1030 : 'Manual,Forward,Backward';CostingMethod@1031 : 'FIFO,LIFO,Specific,Average,Standard');
+    VAR
+      PurchaseHeader@1028 : Record 38;
+      ItemJournalBatch@1026 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1025 : Code[20];
+      ItemNo@1011 : Code[20];
+      ItemNo2@1010 : Code[20];
+    BEGIN
+      // 1. Setup: Required Costing Setups.
+      // Create, Calculate and Post Consumption Journal and Explode Routing and Post Output Journal.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,AutoCostPosting,FlushingMethod,CostingMethod,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      IF FlushingMethod = FlushingMethod::Manual THEN BEGIN
+        LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+        LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+        LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+        LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      END;
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+
+      // 2. Exercise: Change Status of Production Order to Finished.
+      // Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify WIP Account General Ledger Entries for Total amount and Positive amount entries.
+      VerifyWIPAmountGLEntry(ProductionOrder,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StandardFwdAutoInvoiceProd@77();
+    VAR
+      PurchaseHeader@1020 : Record 38;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1001 : Code[20];
+      ItemNo@1005 : Code[20];
+      ItemNo2@1004 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Standard]
+      // [SCENARIO] Standard Costing with Flushing method - Forward and Finish Production Order, verify values in GL entries. Also verify Inventory Account on G/L Entry after Purchase Order has been posted as Receive only.
+
+      // Covers TFS_TC_ID = 32227, 32232, 12617 and 12622.
+      // 1. Setup: Required Costing Setups.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Forward,CostingMethod::Standard,
+        TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+
+      // 2.1 Exercise: Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3.1 Verify: Verify Inventory Account General Ledger Entries do not exist.
+      VerifyInvtAccountNotInGLEntry(ItemNo2,ProductionOrderNo);
+
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+
+      // 2.2 Exercise: Post Purchase Order as Invoice, Update Status of Production Order to Finished.
+      // Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3.2 Verify: Verify WIP Account General Ledger Entries for Total amount and Positive amount entries.
+      VerifyWIPAmountGLEntry(ProductionOrder,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StandardManAutoFullPurchase@47();
+    BEGIN
+      // Covers TFS_TC_ID = 32233 and 12623.
+      // Auto Cost Posting - True, Purchase Posting with Full Qty to Receive.
+      StandardManPurchase(TRUE,FALSE,FlushingMethod::Manual,CostingMethod::Standard);  // Boolean-Auto Cost Posting and Partial Posting.
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StandardManAutoPartPurchase@59();
+    BEGIN
+      // Covers TFS_TC_ID = 32233 and 12623.
+      // Auto Cost Posting - True, Purchase Posting with Partial Qty to Receive.
+      StandardManPurchase(TRUE,TRUE,FlushingMethod::Manual,CostingMethod::Standard);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StandardManFullPurchase@60();
+    BEGIN
+      // Covers TFS_TC_ID = 32233 and 12623.
+      // Auto Cost Posting - False, Purchase Posting with Full Qty to Receive.
+      StandardManPurchase(FALSE,FALSE,FlushingMethod::Manual,CostingMethod::Standard);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StandardManPartPurchase@61();
+    BEGIN
+      // Covers TFS_TC_ID = 32233 and 12623.
+      // Auto Cost Posting - False, Purchase Posting with Partial Qty to Receive.
+      StandardManPurchase(FALSE,TRUE,FlushingMethod::Manual,CostingMethod::Standard);
+    END;
+
+    LOCAL PROCEDURE StandardManPurchase@62(AutoCostPosting@1003 : Boolean;PartialPurchasePosting@1000 : Boolean;FlushingMethod@1031 : Option;CostingMethod@1032 : Option);
+    VAR
+      PurchaseHeader@1029 : Record 38;
+      PurchInvHeader@1027 : Record 122;
+      TempPurchaseLine@1001 : TEMPORARY Record 39;
+      ProductionOrderNo@1026 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // 1. Setup: Required Costing Setups.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,AutoCostPosting,FlushingMethod,CostingMethod,
+        TRUE,FALSE,FALSE,TRUE,PartialPurchasePosting,FALSE,FALSE);
+      CopyPurchaseLinesToTemp(TempPurchaseLine,PurchaseHeader);
+
+      // 2. Exercise: Post Purchase Order with Required Quantity to Invoice and Post Inventory Cost to G/L if required.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+
+      IF NOT AutoCostPosting THEN
+        LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify General Ledger Entries that WIP Account does not exist and Total Inventory amount equals Calculated amount.
+      PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchInvHeader.FINDFIRST;
+      VerifyInvtAmountGLEntry(TempPurchaseLine,PurchInvHeader."No.",ItemNo,'',FALSE);  // Boolean for Additional Currency.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoFxdCostFullPurchase@102();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 32231 and 12621.
+      // Flushing Method - Manual, Auto Cost Posting - True, Direct Unit Cost as expected.
+      // Purchase Posting with Full Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgPurchase(TRUE,FALSE,Qty,Qty,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManFxdCostFullPurchase@104();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 32231 and 12621.
+      // Flushing Method - Manual, Auto Cost Posting - False, Direct Unit Cost as expected.
+      // Purchase Posting with Full Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgPurchase(FALSE,FALSE,Qty,Qty,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoRndCostFullPurchase@105();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 32231 and 12621.
+      // Flushing Method - Manual, Auto Cost Posting - True, Direct Unit Cost different from expected.
+      // Purchase Posting with Full Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgPurchase(TRUE,TRUE,Qty,Qty,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManRndCostFullPurchase@106();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 32231 and 12621.
+      // Flushing Method - Manual, Auto Cost Posting - False, Direct Unit Cost different from expected.
+      // Purchase Posting with Full Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgPurchase(FALSE,TRUE,Qty,Qty,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoFxdCostPartPurchase@108();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 32231 and 12621.
+      // Flushing Method - Manual, Auto Cost Posting - True, Direct Unit Cost as expected.
+      // Purchase Posting with Partial Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgPurchase(TRUE,FALSE,Qty,Qty - 1,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManFxdCostPartPurchase@109();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 32231 and 12621.
+      // Flushing Method - Manual, Auto Cost Posting - False, Direct Unit Cost as expected.
+      // Purchase Posting with Partial Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgPurchase(FALSE,FALSE,Qty,Qty - 1,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoRndCostPartPurchase@110();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 32231 and 12621.
+      // Flushing Method - Manual, Auto Cost Posting - True, Direct Unit Cost different from expected.
+      // Purchase Posting with Partial Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgPurchase(TRUE,TRUE,Qty,Qty - 1,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManRndCostPartPurchase@111();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 32231 and 12621.
+      // Flushing Method - Manual, Auto Cost Posting - False, Direct Unit Cost different from expected.
+      // Purchase Posting with Partial Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgPurchase(FALSE,TRUE,Qty,Qty - 1,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgBackwardRndCostFullPurchase@58();
+    VAR
+      Qty@1001 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 32235 and 12625.
+      // Flushing Method - Backward, Auto Cost Posting - False, Direct Unit Cost different from expected.
+      // Purchase Posting with Full Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgPurchase(FALSE,TRUE,Qty,Qty,FlushingMethod::Backward);
+    END;
+
+    LOCAL PROCEDURE AvgPurchase@113(AutoCostPosting@1013 : Boolean;DirectUnitCost@1014 : Boolean;Qty@1015 : Decimal;QtyToReceive@1016 : Decimal;FlushingMethod@1017 : Option);
+    VAR
+      PurchaseHeader@1011 : Record 38;
+      PurchaseLine@1010 : Record 39;
+      PurchInvHeader@1009 : Record 122;
+      InventorySetup@1008 : Record 313;
+      TempPurchaseLine@1000 : TEMPORARY Record 39;
+      ItemNo@1007 : Code[20];
+      ItemNo2@1006 : Code[20];
+      AutomaticCostAdjustment@1003 : 'Never,Day,Week,Month,Quarter,Year,Always';
+      AverageCostCalcType@1002 : ' ,Item,Item & Location & Variant';
+      AverageCostPeriod@1001 : ' ,Day,Week,Month,Quarter,Year,Accounting Period';
+    BEGIN
+      // 1. Setup: Update Inventory Setup, Create Items with Flushing method - Manual.
+      Initialize;
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,AutoCostPosting,FALSE,AutomaticCostAdjustment::Never,AverageCostCalcType::Item,AverageCostPeriod::Day);
+      CreateComponentItems(ItemNo,ItemNo2,CostingMethod::Average,FlushingMethod,FALSE);
+      CreatePurchaseOrder(PurchaseHeader,PurchaseLine,ItemNo,ItemNo2,Qty,QtyToReceive,DirectUnitCost);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);  // Receive.
+      CopyPurchaseLinesToTemp(TempPurchaseLine,PurchaseHeader);
+
+      // 2. Exercise: Post Purchase Order with required Quantity and Post Inventory Cost to G/L if required.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+
+      IF NOT AutoCostPosting THEN
+        LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify General Ledger Entries that WIP Account does not exist and Total Inventory amount equals Calculated amount.
+      PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchInvHeader.FINDFIRST;
+      VerifyInvtAmountGLEntry(TempPurchaseLine,PurchInvHeader."No.",ItemNo,'',FALSE);  // Boolean for Additional Currency.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManConsumption@16();
+    VAR
+      PurchaseHeader@1024 : Record 38;
+      ItemJournalBatch@1017 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1001 : Code[20];
+      ItemNo@1012 : Code[20];
+      ItemNo2@1011 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Average Costing with Flushing Method Manual, Automatic Cost Posting disabled and Post consumption.
+
+      // Covers TFS_TC_ID = 32235 and 12625.
+      // 1. Setup: Required Costing Setups.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+
+      // 2. Exercise: Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report after Consumption.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify General Ledger Entries that Total WIP Amount equals Calculated amount.
+      VerifyWIPAmountConsumpOutput(ProductionOrder,ItemNo,FALSE);  // False signifies verification for Consumption Amount.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManConsumptionAndOutput@19();
+    VAR
+      PurchaseHeader@1023 : Record 38;
+      ItemJournalBatch@1017 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1001 : Code[20];
+      ItemNo@1012 : Code[20];
+      ItemNo2@1011 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Average Costing with Flushing Method Manual, Automatic Cost Posting disabled and Post consumption and output.
+
+      // Covers TFS_TC_ID = 32235 and 12625.
+      // 1. Setup: Required Costing Setups.
+      // Create and Post Consumption, Run Adjust Cost Item Entries report, Create Output.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+
+      // 2. Exercise: Post Output and Post Inventory Cost to G/L.
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify G/L Entries that WIP Amount equals Calculated amount.
+      VerifyWIPAmountConsumpOutput(ProductionOrder,ItemNo,TRUE);  // True signifies verification for Output Amount.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManProduction@32();
+    VAR
+      PurchaseHeader@1024 : Record 38;
+      ItemJournalBatch@1017 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1001 : Code[20];
+      ItemNo@1012 : Code[20];
+      ItemNo2@1011 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Average Costing with Flushing Method Manual, Automatic Cost Posting disabled and Post consumption and output, finish Production Order.
+
+      // Covers TFS_TC_ID = 32235 and 12625.
+      // 1. Setup: Required Costing Setups.
+      // Create and Post Consumption, Run Adjust Cost Item Entries report, Post Output, and Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // 2. Exercise: Run Adjust Cost Item Entries and Post Inventory Cost to G/L report.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify G/L Entries that WIP Amount equals Calculated amount.
+      VerifyWIPAmountFinishProd(ProductionOrder,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgBackwardProduction@51();
+    VAR
+      PurchaseHeader@1024 : Record 38;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1001 : Code[20];
+      ItemNo@1012 : Code[20];
+      ItemNo2@1011 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Test Average Costing with Flushing Method Backward, Automatic Cost Posting disabled and posting Purchase Order.
+
+      // Covers TFS_TC_ID = 32235 and 12625.
+      // 1. Setup: Required Costing Setups.
+      // Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Backward,CostingMethod::Average,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // 2. Exercise: Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify G/L Entries that WIP Amount equals Calculated amount.
+      VerifyWIPAmountFinishProd(ProductionOrder,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManOutputAndInvoice@1();
+    VAR
+      PurchaseHeader@1024 : Record 38;
+      PurchInvHeader@1022 : Record 122;
+      ItemJournalBatch@1017 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      TempPurchaseLine@1002 : TEMPORARY Record 39;
+      ProductionOrderNo@1001 : Code[20];
+      ItemNo@1012 : Code[20];
+      ItemNo2@1011 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Post Output and Post Purchase Invoice.
+
+      // Covers TFS_TC_ID = 32235 and 12625.
+      // 1. Setup: Required Costing Setups.
+      // Create and Post Consumption & Output.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      CopyPurchaseLinesToTemp(TempPurchaseLine,PurchaseHeader);
+
+      // 2. Exercise: Invoice Purchase Order, Run Adjust Cost Item Entries and Post Inventory Cost to G/L reports.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount.
+      PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchInvHeader.FINDFIRST;
+      VerifyPurchaseAccountGLEntry(TempPurchaseLine,PurchaseHeader."Buy-from Vendor No.",PurchInvHeader."No.",ItemNo);
+      VerifyWIPAmountConsumpOutput(ProductionOrder,ItemNo,TRUE);  // True signifies verification for Output Amount.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManCostRndOutputInvoiceProd@40();
+    VAR
+      PurchaseHeader@1024 : Record 38;
+      ItemJournalBatch@1017 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1001 : Code[20];
+      ItemNo@1012 : Code[20];
+      ItemNo2@1011 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Post Output, Post Purchase Invoice and Finish Production Order.
+
+      // Covers TFS_TC_ID = 32235 and 12625.
+      // 1. Setup: Required Costing Setups.
+      // Create and Post Consumption & Output, Invoice Purchase Order, Run Adjust Cost Item Entries & Post Inventory  Cost to G/L.
+      // Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // 2. Exercise: Run Adjust Cost Item Entries and Post Inventory Cost to G/L reports.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify G/L Entries that WIP Amount equals Calculated amount.
+      VerifyWIPAmountFinishProd(ProductionOrder,ItemNo,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgFwdAutoOutputAndInvoice@49();
+    VAR
+      PurchaseHeader@1024 : Record 38;
+      PurchInvHeader@1022 : Record 122;
+      ProductionOrder@1000 : Record 5405;
+      TempPurchaseLine@1002 : TEMPORARY Record 39;
+      ProductionOrderNo@1001 : Code[20];
+      ItemNo@1012 : Code[20];
+      ItemNo2@1011 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Test Average Costing with Flushing Method Forward, Automatic Cost Posting enabled, Refresh Released Production Order and Post Purchase Invoice.
+
+      // Covers TFS_TC_ID = 32235 and 12625.
+      // 1. Setup: Required Costing Setups.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Forward,CostingMethod::Average,
+        TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      CopyPurchaseLinesToTemp(TempPurchaseLine,PurchaseHeader);
+
+      // 2. Exercise: Invoice Purchase Order, Run Adjust Cost Item Entries and Post Inventory Cost to G/L reports.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount.
+      PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchInvHeader.FINDFIRST;
+      VerifyPurchaseAccountGLEntry(TempPurchaseLine,PurchaseHeader."Buy-from Vendor No.",PurchInvHeader."No.",ItemNo);
+      VerifyWIPAmountConsumpOutput(ProductionOrder,ItemNo,TRUE);  // True signifies verification for Output Amount.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgFwdAutoOutputInvoiceProd@52();
+    VAR
+      PurchaseHeader@1024 : Record 38;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1001 : Code[20];
+      ItemNo@1012 : Code[20];
+      ItemNo2@1011 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Test Average Costing with Flushing Method Forward, Automatic Cost Posting enabled, Refresh Released Production Order and Post Purchase Invoice & Finish Production Order.
+
+      // Covers TFS_TC_ID = 32235 and 12625.
+      // 1. Setup: Required Costing Setups.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Forward,CostingMethod::Average,
+        TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+
+      // 2. Exercise: Invoice Purchase Order, Finish Production Order, Run Adjust Cost Item Entries & Post Inventory Cost to G/L reports.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify G/L Entries that WIP Amount equals Calculated amount.
+      VerifyWIPAmountFinishProd(ProductionOrder,ItemNo,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManProductionInvoiceNoAdj@56();
+    VAR
+      PurchaseHeader@1025 : Record 38;
+      PurchInvHeader@1023 : Record 122;
+      ItemJournalBatch@1018 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      TempPurchaseLine@1001 : TEMPORARY Record 39;
+      ProductionOrderNo@1002 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Post Inventory Cost to G/L]
+      // [SCENARIO] Verify G/L Entries contain correct Amounts without Adjustment when Consumption & Output posted, Production Order finished, Purchase Order for components invoiced.
+
+      // [GIVEN] Required Costing Setups. Create and Post Consumption & Output. Finish Production Order, Invoice Purchase Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        FALSE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      CopyPurchaseLinesToTemp(TempPurchaseLine,PurchaseHeader);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+
+      // [WHEN] Run Post Inventory Cost to G/L report.
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount without Adjust Cost.
+      PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchInvHeader.FINDFIRST;
+      VerifyPurchaseAccountGLEntry(TempPurchaseLine,PurchaseHeader."Buy-from Vendor No.",PurchInvHeader."No.",ItemNo);
+      VerifyWIPAmountExclCostFinish(ProductionOrder,ItemNo,ItemNo2,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManProductionAndInvoice@70();
+    VAR
+      PurchaseHeader@1025 : Record 38;
+      ItemJournalBatch@1018 : Record 233;
+      ProductionOrder@1001 : Record 5405;
+      ProductionOrderNo@1000 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Verify that G/L Entries contain correct Amounts when Consumption & Output posted, Production Order finished, Purchase Order for components invoiced.
+
+      // [GIVEN] Required Costing Setups. Create and Post Consumption & Output. Finish Production Order, Invoice Purchase Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        FALSE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+
+      // [WHEN] Run Adjust Cost Item Entries & Post Inventory Cost to G/L reports.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries - WIP Account Amount equal Calculated amount.
+      VerifyWIPAmountFinishProd(ProductionOrder,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgFwdAutoProductionAndInvoice@83();
+    VAR
+      PurchaseHeader@1023 : Record 38;
+      ProductionOrder@1001 : Record 5405;
+      ProductionOrderNo@1000 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Finished production order with invoiced purchase order for components. Verify correct WIP Amount after running Adjust Cost Item Entries and posting to GL.
+
+      // [GIVEN] Required Costing Setups. Finish Production Order, Invoice Purchase Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Forward,CostingMethod::Average,
+        TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+
+      // [WHEN] Run Adjust Cost Item Entries & Post Inventory Cost to G/L reports.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries that WIP Amount equals Calculated amount.
+      VerifyWIPAmountFinishProd(ProductionOrder,ItemNo,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManLessProdInvoiceNoAdj@79();
+    VAR
+      PurchaseHeader@1025 : Record 38;
+      PurchInvHeader@1023 : Record 122;
+      ItemJournalBatch@1018 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      TempPurchaseLine@1001 : TEMPORARY Record 39;
+      ProductionOrderNo@1002 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Post Inventory Cost to G/L]
+      // [SCENARIO] Verify G/L Entries have correct Amounts without Adjustment when Consumption & Output with Reduced Output Qty. posted, Production Order finished, Purchase Order for components finished.
+
+      // [GIVEN] Required Costing Setups. Create and Post Consumption & Output with Reduced Output Qty. Finish Production Order, Invoice Purchase Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        FALSE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      UpdateLessQtyOutputJournal(ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      CopyPurchaseLinesToTemp(TempPurchaseLine,PurchaseHeader);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+
+      // [WHEN] Run Post Inventory Cost to G/L report.
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount without Adjust Cost.
+      PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchInvHeader.FINDFIRST;
+      VerifyPurchaseAccountGLEntry(TempPurchaseLine,PurchaseHeader."Buy-from Vendor No.",PurchInvHeader."No.",ItemNo);
+      VerifyWIPAmountExclCostFinish(ProductionOrder,ItemNo,ItemNo2,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManLessProdAndInvoice@81();
+    VAR
+      PurchaseHeader@1025 : Record 38;
+      ItemJournalBatch@1018 : Record 233;
+      ProductionOrder@1001 : Record 5405;
+      ProductionOrderNo@1000 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Verify G/L Entries - WIP Account Amount is correct when Consumption & Output with Reduced Output Qty. posted, Production Order finished, Purchase Order for components invoiced.
+
+      // [GIVEN] Required Costing Setups. Create and Post Consumption & Output with Reduced Output Qty. Finish Production Order, Invoice Purchase Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        FALSE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      UpdateLessQtyOutputJournal(ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+
+      // [WHEN] Run Adjust Cost Item Entries & Post Inventory Cost to G/L reports.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries - WIP Account Amount equal Calculated amount.
+      VerifyWIPAmountFinishProd(ProductionOrder,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManFxdCostOutputInvoiceProd@93();
+    VAR
+      PurchaseHeader@1025 : Record 38;
+      ItemJournalBatch@1018 : Record 233;
+      ProductionOrder@1001 : Record 5405;
+      ProductionOrderNo@1000 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Verify G/L Entries have correct Amounts when Consumption & Output posted, Purchase Order for components invoiced, Production Order finished.
+
+      // [GIVEN] Required Costing Setups. Create and Post Consumption & Output. Invoice Purchase Order, Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Manual,CostingMethod::Average,
+        FALSE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Adjust Cost Item Entries & Post Inventory Cost to G/L reports.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries - WIP Account Amount equal Calculated amount.
+      VerifyWIPAmountFinishProd(ProductionOrder,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgFwdInvoiceAndProduction@91();
+    VAR
+      PurchaseHeader@1023 : Record 38;
+      ProductionOrder@1001 : Record 5405;
+      ProductionOrderNo@1000 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Verify that WIP Amount equals Calculated amount with Adjust Cost when purchase order for components invoiced and then production order finished.
+
+      // [GIVEN] Required Costing Setups. Invoice Purchase Order, Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,FALSE,FlushingMethod::Forward,CostingMethod::Average,
+        TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Adjust Cost Item Entries & Post Inventory Cost to G/L reports.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries that WIP Amount equals Calculated amount with Adjust Cost.
+      VerifyWIPAmountExclCostFinish(ProductionOrder,ItemNo,ItemNo2,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgFwdAutoProduction@11();
+    VAR
+      PurchaseHeader@1025 : Record 38;
+      ProductionOrder@1001 : Record 5405;
+      ProductionOrderNo@1000 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Average]
+      // [SCENARIO] Finished produciton order. Verify correct WIP Amount after running Adjust Cost Item Entries and posting to GL.
+
+      // [GIVEN] Required Costing Setups. Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Forward,CostingMethod::Average,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+
+      // [WHEN] Run Adjust Cost Item Entries & Post Inventory Cost to G/L reports.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries that WIP Amount equals Calculated amount.
+      VerifyWIPAmountFinishProd(ProductionOrder,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoProductionNoAdj@6();
+    VAR
+      PurchaseHeader@1026 : Record 38;
+      ItemJournalBatch@1020 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1002 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Post Inventory Cost to G/L]
+      // [SCENARIO] Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount without Adjust Cost when Consumption & Output posted and Production Order finished.
+
+      // [GIVEN] Required Costing Setups. Create and Post Consumption & Output. Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Manual,CostingMethod::Average,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Post Inventory Cost to G/L report.
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount without Adjust Cost.
+      VerifyWIPAmountExclCostFinish(ProductionOrder,ItemNo,ItemNo2,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoLessOutputProduction@8();
+    VAR
+      PurchaseHeader@1026 : Record 38;
+      ItemJournalBatch@1020 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1002 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Post Inventory Cost to G/L]
+      // [SCENARIO] Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount without Adjust Cost, when Consumption & Output posted with Reduced Output Qty and Production Order finished.
+
+      // [GIVEN] Required Costing Setups. Create and Post Consumption & Output with Reduced Output Qty. Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Manual,CostingMethod::Average,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      UpdateLessQtyOutputJournal(ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Post Inventory Cost to G/L report.
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount without Adjust Cost.
+      VerifyWIPAmountExclCostFinish(ProductionOrder,ItemNo,ItemNo2,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoDiffConsmpOutputProd@12();
+    VAR
+      PurchaseHeader@1026 : Record 38;
+      ItemJournalBatch@1020 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1002 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Post Inventory Cost to G/L]
+      // [SCENARIO] Verify Amounts in G/L entries when Consumption & Output with different Quantities posted and then Production Order finished.
+
+      // [GIVEN] Required Costing Setups. Create and Post Consumption & Output with different Consumption and Output Qty. Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Manual,CostingMethod::Average,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      UpdateDiffQtyConsmpJournal(ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      UpdateLessQtyOutputJournal(ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Post Inventory Cost to G/L report.
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount without Adjust Cost.
+      VerifyWIPAmountDiffConsmpNoAdj(ProductionOrder,ItemNo,ItemNo2);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgFwdAutoUseNewComponentProd@17();
+    VAR
+      PurchaseHeader@1025 : Record 38;
+      ProductionOrder@1000 : Record 5405;
+      ProdOrderStatusManagement@1001 : Codeunit 5407;
+      ProductionOrderNo@1019 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Post Inventory Cost to G/L]
+      // [SCENARIO] Verify that WIP Amount equals Calculated amount without Adjust Cost after posting cost to GL for finished production order.
+
+      // [GIVEN] Required Costing Setups.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Forward,CostingMethod::Average,
+        TRUE,TRUE,TRUE,FALSE,FALSE,FALSE,FALSE);
+      ProductionOrder.GET(ProductionOrder.Status::Planned,ProductionOrderNo);
+      ProdOrderStatusManagement.ChangeStatusOnProdOrder(ProductionOrder,ProductionOrder.Status::Released,WORKDATE,FALSE);
+      ProductionOrder.SETRANGE(Status,ProductionOrder.Status::Released);
+      ProductionOrder.SETRANGE("Source No.",ProductionOrder."Source No.");
+      ProductionOrder.FINDFIRST;
+
+      // [WHEN] Finish Production Order & run Post Inventory Cost to G/L report.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries that WIP Amount equals Calculated amount without Adjust Cost.
+      VerifyWIPAmountExclCostFinish(ProductionOrder,ItemNo,ItemNo2,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoUseNewRoutingProd@29();
+    VAR
+      PurchaseHeader@1026 : Record 38;
+      ItemJournalBatch@1020 : Record 233;
+      ProductionOrder@1000 : Record 5405;
+      ProductionOrderNo@1019 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+    BEGIN
+      // [FEATURE] [Post Inventory Cost to G/L]
+      // [SCENARIO] Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount without Adjust Cost when Consumption and Output posted, then Production Order finished.
+
+      // [GIVEN] Required Costing Setups. Post Consumption and Output. Finish Production Order.
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Manual,CostingMethod::Average,
+        TRUE,TRUE,FALSE,FALSE,FALSE,TRUE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Post Inventory Cost to G/L report.
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify G/L Entries - Purchase Account Amount and WIP Account Amount equal Calculated amount without Adjust Cost.
+      VerifyWIPAmountExclCostFinish(ProductionOrder,ItemNo,ItemNo2,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdFwdAutoAddlCurrProduction@86();
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      ProductionOrder@1003 : Record 5405;
+      ProductionOrderNo@1008 : Code[20];
+      ItemNo@1005 : Code[20];
+      ItemNo2@1000 : Code[20];
+      CurrencyCode@1001 : Code[10];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Cost Standard]
+      // [SCENARIO] Verify that Amounts are correct in GL entries when run "Adjust Cost" - "Post to GL", then Production Order finished, then again run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Required Costing Setups. Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report. Update Status of Production Order to Finished.
+      CreateCostingSetupAddnlCurr(
+        PurchaseHeader,CurrencyCode,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Forward,CostingMethod::Standard,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify WIP Account General Ledger Entries that Actual Positive amount equals calculated amount.
+      VerifyWIPAddnlCurrGLEntry(ProductionOrder,CurrencyCode,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdManAutoAddlCurrProduction@107();
+    VAR
+      ItemJournalBatch@1009 : Record 233;
+      PurchaseHeader@1000 : Record 38;
+      ProductionOrder@1001 : Record 5405;
+      CurrencyCode@1006 : Code[10];
+      ProductionOrderNo@1008 : Code[20];
+      ItemNo@1005 : Code[20];
+      ItemNo2@1003 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [ACY] [Production] [Cost Standard]
+      // [SCENARIO] Verify correct Amounts in GL entries when Consumption posted, run "Adjust Cost" - "Post to GL", Output posted, Production Order finished, then again run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Required Costing Setups. Create and Post Consumption Journal and Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      // [GIVEN] Create and Post Output Journal. Change Status of Production Order to Finished.
+      CreateCostingSetupAddnlCurr(
+        PurchaseHeader,CurrencyCode,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Manual,CostingMethod::Standard,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify WIP Account General Ledger Entries that Actual Positive amount equals calculated amount.
+      VerifyWIPAddnlCurrGLEntry(ProductionOrder,CurrencyCode,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdManAutoAddlCurrDiffConsmp@96();
+    VAR
+      ItemJournalBatch@1009 : Record 233;
+      PurchaseHeader@1000 : Record 38;
+      ProductionOrder@1001 : Record 5405;
+      CurrencyCode@1006 : Code[10];
+      ProductionOrderNo@1008 : Code[20];
+      ItemNo@1005 : Code[20];
+      ItemNo2@1004 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [ACY] [Production] [Cost Standard]
+      // [SCENARIO] Verify that GL entries have correct Amounts when Consumption posted with different Quantity, run "Adjust Cost" - "Post to GL", Output posted, Production Order finished, then again run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Required Costing Setups. Create Consumption Journal, Post with Different Qty, Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      // [GIVEN] Create and Post Output Journal. Change Status of Production Order to Finished.
+      CreateCostingSetupAddnlCurr(
+        PurchaseHeader,CurrencyCode,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Manual,CostingMethod::Standard,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      UpdateDiffQtyConsmpJournal(ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify WIP Account General Ledger Entries that Actual Positive amount equals calculated amount.
+      VerifyWIPAddnlCurrGLEntry(ProductionOrder,CurrencyCode,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdManAutoAddlCurrDiffOutput@101();
+    VAR
+      ItemJournalBatch@1023 : Record 233;
+      PurchaseHeader@1001 : Record 38;
+      ProductionOrder@1002 : Record 5405;
+      CurrencyCode@1003 : Code[10];
+      ProductionOrderNo@1000 : Code[20];
+      ItemNo@1007 : Code[20];
+      ItemNo2@1010 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [ACY] [Production] [Cost Standard]
+      // [SCENARIO] Verify that GL entries have correct Amounts when Consumption posted, run "Adjust Cost" - "Post to GL", Output posted with less Quantity, Production Order finished, then again run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Required Costing Setups. Create Consumption Journal, Post with Different Qty, Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      // [GIVEN] Create and Post Output Journal with Less Output Quantity. Change Status of Production Order to Finished.
+      CreateCostingSetupAddnlCurr(
+        PurchaseHeader,CurrencyCode,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Manual,CostingMethod::Standard,
+        TRUE,TRUE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      UpdateDiffQtyConsmpJournal(ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      UpdateLessQtyOutputJournal(ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify WIP Account General Ledger Entries that Actual Positive amount equals calculated amount.
+      VerifyWIPAddnlCurrGLEntry(ProductionOrder,CurrencyCode,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdFwdAutoAddlCurrNewComponent@42();
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      ProductionOrder@1002 : Record 5405;
+      ProdOrderStatusManagement@1005 : Codeunit 5407;
+      CurrencyCode@1003 : Code[10];
+      ProductionOrderNo@1004 : Code[20];
+      ItemNo@1007 : Code[20];
+      ItemNo2@1000 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [ACY] [Production] [Cost Standard]
+      // [SCENARIO] Verify that G/L entries contain correct Amounts when run "Adjust Cost" - "Post to GL", Production Order finished and again run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Required Costing Setups. Run Adjust Cost Item entries and Post Inventory Cost to G/L report. Change Status of Production Order from Planned to Finished.
+      CreateCostingSetupAddnlCurr(
+        PurchaseHeader,CurrencyCode,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Forward,CostingMethod::Standard,
+        TRUE,TRUE,TRUE,FALSE,FALSE,FALSE);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      ProductionOrder.GET(ProductionOrder.Status::Planned,ProductionOrderNo);
+      ProdOrderStatusManagement.ChangeStatusOnProdOrder(ProductionOrder,ProductionOrder.Status::Released,WORKDATE,FALSE);
+      ProductionOrder.SETRANGE(Status,ProductionOrder.Status::Released);
+      ProductionOrder.SETRANGE("Source No.",ProductionOrder."Source No.");
+      ProductionOrder.FINDFIRST;
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+
+      // [WHEN] Run Adjust Cost Item Entries report and Post Inventory Cost to G/L report.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify WIP Account General Ledger Entries that Actual amount equals calculated amount.
+      VerifyWIPAddnlCurrGLEntry(ProductionOrder,CurrencyCode,ItemNo,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdManAutoAddlCurrNewRouting@69();
+    VAR
+      ItemJournalBatch@1020 : Record 233;
+      PurchaseHeader@1001 : Record 38;
+      ProductionOrder@1002 : Record 5405;
+      CurrencyCode@1030 : Code[10];
+      ProductionOrderNo@1000 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1003 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [ACY] [Production] [Cost Standard]
+      // [SCENARIO] Verify correct amounts in GL entries when Consumption posted, run "Adjust Cost" - "Post to GL", then Output posted, then Production Order finished (with routing line), then again run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Required Costing Setups. Finish Production Order.
+      CreateCostingSetupAddnlCurr(
+        PurchaseHeader,CurrencyCode,ProductionOrderNo,ItemNo,ItemNo2,TRUE,FlushingMethod::Manual,CostingMethod::Standard,
+        TRUE,TRUE,FALSE,FALSE,FALSE,TRUE);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ItemNo2,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+
+      // [WHEN] Run Adjust Cost Item Entries and Post Inventory Cost to G/L report.
+      LibraryCosting.AdjustCostItemEntries(ItemNo + '..' + ItemNo2,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // [THEN] Verify WIP Account General Ledger Entries that Actual amount equals calculated amount.
+      VerifyWIPAddnlCurrGLEntry(ProductionOrder,CurrencyCode,ItemNo,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdManAutoAddlCurrFullPurchase@92();
+    BEGIN
+      // Covers TFS_TC_ID = 11734
+      // Auto Cost Posting - True, Purchase Posting with Full Qty to Receive.
+      StdManAddlCurrPurchase(
+        TRUE,FALSE,FlushingMethod::Manual,CostingMethod::Standard);  // Boolean-Auto Cost Posting and Partial Posting.
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdManAutoAddlCurrPartPurchase@90();
+    BEGIN
+      // Covers TFS_TC_ID = 11736
+      // Auto Cost Posting - True, Purchase Posting with Partial Qty to Receive.
+      StdManAddlCurrPurchase(
+        TRUE,TRUE,FlushingMethod::Manual,CostingMethod::Standard);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdManAddlCurrFullPurchase@84();
+    BEGIN
+      // Covers TFS_TC_ID = 11735
+      // Auto Cost Posting - False, Purchase Posting with Full Qty to Receive.
+      StdManAddlCurrPurchase(
+        FALSE,FALSE,FlushingMethod::Manual,CostingMethod::Standard);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE StdManAddlCurrPartPurchase@71();
+    BEGIN
+      // Covers TFS_TC_ID = 11737
+      // Auto Cost Posting - False, Purchase Posting with Partial Qty to Receive.
+      StdManAddlCurrPurchase(
+        FALSE,TRUE,FlushingMethod::Manual,CostingMethod::Standard);
+    END;
+
+    LOCAL PROCEDURE StdManAddlCurrPurchase@63(AutoCostPosting@1003 : Boolean;PartialPurchasePosting@1000 : Boolean;FlushingMethod@1031 : Option;CostingMethod@1032 : Option);
+    VAR
+      PurchaseHeader@1029 : Record 38;
+      PurchInvHeader@1027 : Record 122;
+      TempPurchaseLine@1002 : TEMPORARY Record 39;
+      ProductionOrderNo@1026 : Code[20];
+      ItemNo@1013 : Code[20];
+      ItemNo2@1012 : Code[20];
+      CurrencyCode@1001 : Code[10];
+    BEGIN
+      // 1. Setup: Required Costing Setups.
+      CreateCostingSetupAddnlCurr(
+        PurchaseHeader,CurrencyCode,ProductionOrderNo,ItemNo,ItemNo2,AutoCostPosting,FlushingMethod,CostingMethod,
+        TRUE,FALSE,FALSE,TRUE,PartialPurchasePosting,FALSE);
+      CopyPurchaseLinesToTemp(TempPurchaseLine,PurchaseHeader);
+
+      // 2. Exercise: Post Purchase Order with Required Quantity to Invoice and Post Inventory Cost to G/L if required.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+      IF NOT AutoCostPosting THEN
+        LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify General Ledger Entries that WIP Account does not exist and Total Inventory amount equals Calculated amount.
+      PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchInvHeader.FINDFIRST;
+      VerifyInvtAmountGLEntry(
+        TempPurchaseLine,PurchInvHeader."No.",ItemNo,CurrencyCode,TRUE);  // Booelan - True signifies Additional Currency.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoFxdCostAddlCurrFull@117();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 3651.
+      // Flushing Method - Manual, Auto Cost Posting - True, Direct Unit Cost as expected.
+      // Purchase Posting with Full Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgAddlCurrPurchase(TRUE,FALSE,Qty,Qty,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManFxdCostAddlCurrFull@116();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 3652.
+      // Flushing Method - Manual, Auto Cost Posting - False, Direct Unit Cost as expected.
+      // Purchase Posting with Full Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgAddlCurrPurchase(FALSE,FALSE,Qty,Qty,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoRndCostAddlCurrFull@115();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 3653.
+      // Flushing Method - Manual, Auto Cost Posting - True, Direct Unit Cost different from expected.
+      // Purchase Posting with Full Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgAddlCurrPurchase(TRUE,TRUE,Qty,Qty,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManRndCostAddlCurrFull@114();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 3654.
+      // Flushing Method - Manual, Auto Cost Posting - False, Direct Unit Cost different from expected.
+      // Purchase Posting with Full Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgAddlCurrPurchase(FALSE,TRUE,Qty,Qty,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoFxdCostAddlCurrPart@112();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 3655.
+      // Flushing Method - Manual, Auto Cost Posting - True, Direct Unit Cost as expected.
+      // Purchase Posting with Partial Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgAddlCurrPurchase(TRUE,FALSE,Qty,Qty - 1,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManFxdCostAddlCurrPart@103();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 3656.
+      // Flushing Method - Manual, Auto Cost Posting - False, Direct Unit Cost as expected.
+      // Purchase Posting with Partial Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgAddlCurrPurchase(FALSE,FALSE,Qty,Qty - 1,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManAutoRndCostAddlCurrPart@94();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 3657.
+      // Flushing Method - Manual, Auto Cost Posting - True, Direct Unit Cost different from expected.
+      // Purchase Posting with Partial Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgAddlCurrPurchase(TRUE,TRUE,Qty,Qty - 1,FlushingMethod::Manual);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AvgManRndCostAddlCurrPart@88();
+    VAR
+      Qty@1000 : Decimal;
+    BEGIN
+      // Covers TFS_TC_ID = 3658.
+      // Flushing Method - Manual, Auto Cost Posting - False, Direct Unit Cost different from expected.
+      // Purchase Posting with Partial Qty to Receive.
+      Qty := LibraryRandom.RandInt(10) + 50;
+      AvgAddlCurrPurchase(FALSE,TRUE,Qty,Qty - 1,FlushingMethod::Manual);
+    END;
+
+    LOCAL PROCEDURE AvgAddlCurrPurchase@118(AutoCostPosting@1013 : Boolean;DirectUnitCost@1014 : Boolean;Qty@1015 : Decimal;QtyToReceive@1016 : Decimal;FlushingMethod@1017 : Option);
+    VAR
+      PurchaseHeader@1011 : Record 38;
+      PurchaseLine@1010 : Record 39;
+      PurchInvHeader@1009 : Record 122;
+      InventorySetup@1008 : Record 313;
+      TempPurchaseLine@1004 : TEMPORARY Record 39;
+      ItemNo@1007 : Code[20];
+      ItemNo2@1006 : Code[20];
+      CurrencyCode@1000 : Code[10];
+      AutomaticCostAdjustment@1003 : 'Never,Day,Week,Month,Quarter,Year,Always';
+      AverageCostCalcType@1002 : ' ,Item,Item & Location & Variant';
+      AverageCostPeriod@1001 : ' ,Day,Week,Month,Quarter,Year,Accounting Period';
+    BEGIN
+      // 1. Setup: Update Inventory Setup, Create Items with Flushing method - Manual.
+      Initialize;
+      LibraryERM.SetAddReportingCurrency('');
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,AutoCostPosting,FALSE,AutomaticCostAdjustment::Never,AverageCostCalcType::Item,AverageCostPeriod::Day);
+      CreateComponentItems(ItemNo,ItemNo2,CostingMethod::Average,FlushingMethod,FALSE);
+      CreatePurchaseOrderAddnlCurr(PurchaseHeader,PurchaseLine,CurrencyCode,ItemNo,ItemNo2,Qty,QtyToReceive,DirectUnitCost);
+      CurrencyCode := UpdateAddnlReportingCurrency;
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);  // Receive.
+      CopyPurchaseLinesToTemp(TempPurchaseLine,PurchaseHeader);
+
+      // 2. Exercise: Update Additional Reporting Currency with on GL Setup.
+      // Post Purchase Order with required Quantity and Post Inventory Cost to G/L if required.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);  // Invoice.
+      IF NOT AutoCostPosting THEN
+        LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3. Verify: Verify General Ledger Entries that WIP Account does not exist and Total Inventory amount equals Calculated amount.
+      PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchInvHeader.FINDFIRST;
+      VerifyInvtAmountGLEntry(TempPurchaseLine,PurchInvHeader."No.",ItemNo,CurrencyCode,TRUE);  // Boolean for Additional Currency.
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateStdCostMenuHandler,ConfirmHandler,MessageHandler)]
+    PROCEDURE CheckRoundedMaterialCostAfterAdjustCostItemEntries@131();
+    VAR
+      PurchaseHeader@1025 : Record 38;
+      ProductionOrderNo@1000 : Code[20];
+      CompItemNo@1013 : Code[20];
+      ParentItemNo@1012 : Code[20];
+      MaterialCost@1001 : Decimal;
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Production] [Cost Standard]
+      // [SCENARIO 359997] The Material and Capacity Costs fields of the Standard Cost column, within the Statistics of a Finished Production Order is rounded after Adjust Cost
+
+      // [GIVEN] Create Finished Production Order and post Production Journal Lines with 2 Component Items with Unit Cost Precision equal to to GLSetup."Unit-Amount Rounding Precision"
+      CreateCostingSetup(
+        PurchaseHeader,ProductionOrderNo,CompItemNo,ParentItemNo,TRUE,FlushingMethod::Manual,CostingMethod::Standard,
+        TRUE,FALSE,FALSE,FALSE,FALSE,FALSE,TRUE);
+      MaterialCost := GetMaterialCostFromBOMLine(ParentItemNo);
+      PostProdOrderJournalLinesAndFinishProdOrder(ProductionOrderNo,ParentItemNo);
+
+      // [WHEN] Run Adjust Cost - Item Entries
+      LibraryCosting.AdjustCostItemEntries(STRSUBSTNO('%1..%2',CompItemNo,ParentItemNo),'');
+
+      // [THEN] Verify Material and Capacity Costs
+      VerifyMaterialCost(ProductionOrderNo,MaterialCost);
+    END;
+
+    [Test]
+    [HandlerFunctions(MakeSupplyOrdersPageHandler,ProdJournalPageHandler)]
+    PROCEDURE ComplexProdOrderTopItemLastDirectCostUpdate@121();
+    VAR
+      SalesHeader@1004 : Record 36;
+      ProdOrder@1005 : Record 5405;
+      ReqLine@1000 : Record 246;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      Item@1002 : Record 27;
+      ReleasedProdOrderNo@1006 : Code[20];
+      ItemNo@1007 : ARRAY [5] OF Code[20];
+    BEGIN
+      // [FEATURE] [Manufacturing] [Planning] [Adjust Cost - Item Entries]
+      // [SCENARIO 376035] "Last Direct Cost" is updated for Top Item in complex Production Order after running "Adjust Cost - Item Entries".
+
+      // [GIVEN] Production Item "T", with Production BOM which includes production Items "C1" (Production BOM with component "CC1") and "C2" (Production BOM with component "CC2").
+      Initialize;
+      PrepareItemsOfComplexProdBOM(ItemNo);
+
+      // [GIVEN] Purchase "CC1" and "CC2".
+      CreatePurchaseOrder(PurchaseHeader,PurchaseLine,ItemNo[1],ItemNo[2],1,1,FALSE); // specific values needed for test
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [GIVEN] Create Sales Order for Item "T", run planning calculation, make supply Production Order and release it.
+      CreateSalesOrder(SalesHeader,ItemNo[5],1); // specific value needed for test
+      LibraryPlanning.CalculateOrderPlanSales(ReqLine);
+      MakeSupplyOrdersActiveOrder(SalesHeader."No.");
+      FindProdOrder(ProdOrder,ProdOrder.Status::"Firm Planned",ItemNo[5]);
+      ReleasedProdOrderNo :=
+        LibraryManufacturing.ChangeStatusFirmPlanToReleased(
+          ProdOrder."No.",ProdOrder.Status,ProdOrder.Status::Released);
+
+      // [GIVEN] Post Production Journal for Production Order Lines: "C2", "C1" and "T" in that sequence, then finish Production Order.
+      FindProdOrder(ProdOrder,ProdOrder.Status::Released,ItemNo[5]);
+      PostProdJournal(ProdOrder,ItemNo[3]);
+      PostProdJournal(ProdOrder,ItemNo[4]);
+      PostProdJournal(ProdOrder,ItemNo[5]);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ReleasedProdOrderNo);
+
+      // [GIVEN] Add Item Charge to received components "CC1" and "CC2".
+      AddItemCharge(ItemNo[1],LibraryRandom.RandDecInRange(5,10,2));
+      AddItemCharge(ItemNo[2],LibraryRandom.RandDecInRange(5,10,2));
+
+      // [GIVEN] Cost of components "CC1", "CC2" and production Items "C1", "C2" is adjusted.
+      LibraryCosting.AdjustCostItemEntries(STRSUBSTNO('%1|%2|%3|%4',ItemNo[1],ItemNo[2],ItemNo[3],ItemNo[4]),'');
+
+      // [WHEN] Run "Adjust Cost - Item Entries" for the production Item "T".
+      LibraryCosting.AdjustCostItemEntries(ItemNo[5],'');
+
+      // [THEN] For Item "T": "Last Direct Cost" is updated and equals to "Unit Cost".
+      Item.GET(ItemNo[5]);
+      Item.TESTFIELD("Last Direct Cost",Item."Unit Cost");
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalPageHandler)]
+    PROCEDURE LastDirectCostUpdatedOnOutputInvoiceWhenCompRevldAfterCostAdjmt@123();
+    VAR
+      ProdItem@1003 : Record 27;
+      CompItemNo@1001 : Code[20];
+      Quantity@1005 : Decimal;
+      DirectUnitCost@1007 : Decimal;
+      ItemChargeAmt@1000 : Decimal;
+    BEGIN
+      // [FEATURE] [Manufacturing] [Adjust Cost - Item Entries] [Last Direct Cost]
+      // [SCENARIO 380782] When a BOM Component of a production Item is revalued after the Production Order is finished and the output is invoiced, the revaluation is not included in Direct Unit Cost of the Item.
+      Initialize;
+
+      // [GIVEN] Production Item "I" with a BOM component "C".
+      CreateManufacturingItem(ProdItem,CompItemNo);
+
+      // [GIVEN] The component "C" is purchased with Direct Unit Cost = "X".
+      CreateAndPostPurchaseOrder(Quantity,DirectUnitCost,CompItemNo);
+
+      // [GIVEN] Released Production Order for "I".
+      // [GIVEN] The output of Item "I" and the consumption of "C" are posted.
+      // [GIVEN] The Production Order is finished.
+      PostProductionJournalAndFinishProdOrder(ProdItem."No.",Quantity);
+
+      // [GIVEN] The Output is invoiced.
+      LibraryCosting.AdjustCostItemEntries('','');
+
+      // [GIVEN] Item Charge is assigned to the Purchase of "C" and posted. New cost of the Component = "X + dX".
+      ItemChargeAmt := LibraryRandom.RandDecInRange(5,10,2);
+      AddItemCharge(CompItemNo,ItemChargeAmt);
+
+      // [WHEN] Run "Adjust Cost - Item Entries" batch job.
+      LibraryCosting.AdjustCostItemEntries('','');
+
+      // [THEN] Last Direct Cost of "I" = "X".
+      ProdItem.FIND;
+      ProdItem.TESTFIELD("Last Direct Cost",DirectUnitCost);
+
+      // [THEN] Unit Cost of "I" = "X + dX".
+      ProdItem.TESTFIELD("Unit Cost",DirectUnitCost + ItemChargeAmt / Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalPageHandler)]
+    PROCEDURE LastDirectCostUpdatedOnOutputInvoiceWhenCompRevldBeforeCostAdjmt@151();
+    VAR
+      ProdItem@1004 : Record 27;
+      GLSetup@1005 : Record 98;
+      CompItemNo@1003 : Code[20];
+      Quantity@1002 : Decimal;
+      DirectUnitCost@1001 : Decimal;
+      ItemChargeAmt@1000 : Decimal;
+    BEGIN
+      // [FEATURE] [Manufacturing] [Adjust Cost - Item Entries] [Last Direct Cost]
+      // [SCENARIO 380782] When a BOM Component of a production Item is revalued before the Production Order is finished and the output is invoiced, the revaluation is included in Direct Unit Cost of the Item.
+      Initialize;
+      GLSetup.GET;
+
+      // [GIVEN] Production Item "I" with a BOM component "C".
+      CreateManufacturingItem(ProdItem,CompItemNo);
+
+      // [GIVEN] The component "C" is purchased with Direct Unit Cost = "X".
+      CreateAndPostPurchaseOrder(Quantity,DirectUnitCost,CompItemNo);
+
+      // [GIVEN] Item Charge is assigned to the Purchase of "C" and posted. New cost of the Component = "X + dX".
+      ItemChargeAmt := LibraryRandom.RandDecInRange(5,10,2);
+      AddItemCharge(CompItemNo,ItemChargeAmt);
+      LibraryCosting.AdjustCostItemEntries('','');
+
+      // [GIVEN] Released Production Order for "I".
+      // [GIVEN] The output of Item "I" and the consumption of "C" are posted.
+      // [GIVEN] The Production Order is finished.
+      PostProductionJournalAndFinishProdOrder(ProdItem."No.",Quantity);
+
+      // [WHEN] Run "Adjust Cost - Item Entries" batch job.
+      LibraryCosting.AdjustCostItemEntries('','');
+
+      // [THEN] Last Direct Cost of "I" = "X + dX".
+      ProdItem.FIND;
+      Assert.AreNearlyEqual(
+        ProdItem."Last Direct Cost",DirectUnitCost + ItemChargeAmt / Quantity,GLSetup."Unit-Amount Rounding Precision",
+        WrongLastDirectCostErr);
+
+      // [THEN] Unit Cost of "I" = "X + dX".
+      ProdItem.TESTFIELD("Unit Cost",ProdItem."Last Direct Cost");
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1007 : Codeunit 131305;
+    BEGIN
+      IF isInitialized THEN
+        EXIT;
+
+      GeneralLedgerSetup.GET;
+
+      // Setup Demonstration data.
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateInventoryPostingSetup;
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateCostingSetup@3(VAR PurchaseHeader@1003 : Record 38;VAR ProductionOrderNo@1010 : Code[20];VAR ItemNo@1011 : Code[20];VAR ItemNo3@1002 : Code[20];AutoCostPosting@1000 : Boolean;FlushingMethod@1001 : 'Manual,Forward,Backward';CostingMethod@1007 : 'FIFO,LIFO,Specific,Average,Standard';DirectUnitCost@1028 : Boolean;Invoice@1029 : Boolean;NewProdComponent@1032 : Boolean;PurchaseOnly@1034 : Boolean;PartialPurchasePosting@1038 : Boolean;NewRouting@1035 : Boolean;GetAmtPrecFromGLSetup@1088 : Boolean);
+    VAR
+      Item@1030 : Record 27;
+      InventorySetup@1025 : Record 313;
+      ManufacturingSetup@1022 : Record 99000765;
+      ProductionBOMHeader@1021 : Record 99000771;
+      MachineCenter@1019 : Record 99000758;
+      MachineCenter2@1008 : Record 99000758;
+      PurchaseLine@1027 : Record 39;
+      ProductionOrder@1031 : Record 5405;
+      NoSeriesManagement@1018 : Codeunit 396;
+      CalculateStandardCost@1017 : Codeunit 5812;
+      ItemNo4@1033 : Code[20];
+      WorkCenterNo@1015 : Code[20];
+      RoutingNo@1013 : Code[20];
+      ProductionBOMNo@1009 : Code[20];
+      ItemNo2@1012 : Code[20];
+      ProdOrderRoutingLineType@1037 : 'Work Center,Machine Center';
+      AutomaticCostAdjustment@1006 : 'Never,Day,Week,Month,Quarter,Year,Always';
+      AverageCostCalcType@1005 : ' ,Item,Item & Location & Variant';
+      AverageCostPeriod@1004 : ' ,Day,Week,Month,Quarter,Year,Accounting Period';
+      Qty@1026 : Decimal;
+    BEGIN
+      // Update Manufacturing Setup, Inventory Setup and Update Shop Calendar Working Days based on Work Shift code.
+      Initialize;
+      LibraryManufacturing.UpdateManufacturingSetup(ManufacturingSetup,'','',TRUE,TRUE,TRUE);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,AutoCostPosting,FALSE,AutomaticCostAdjustment::Never,AverageCostCalcType::Item,AverageCostPeriod::Day);
+
+      // Create Work Center and Machine Center with required Flushing method and Create Routing.
+      CreateWorkCenter(WorkCenterNo,FlushingMethod);
+      CreateMachineCenter(
+        MachineCenter,WorkCenterNo,FlushingMethod,1,
+        LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(5,2),
+        LibraryRandom.RandDec(5,2));  // Capacity important for Test.
+      IF NewRouting THEN
+        CreateMachineCenter(
+          MachineCenter2,WorkCenterNo,FlushingMethod::Manual,1,
+          LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(5,2),
+          LibraryRandom.RandDec(5,2));
+      RoutingNo := NoSeriesManagement.GetNextNo(ManufacturingSetup."Routing Nos.",WORKDATE,TRUE);
+      CreateRouting(WorkCenterNo,MachineCenter."No.",RoutingNo);
+
+      // Create Items with the required Flushing method with the main Item containing Routing No. and Production BOM No.
+      CreateComponentItems(ItemNo,ItemNo2,CostingMethod,FlushingMethod,GetAmtPrecFromGLSetup);
+      ProductionBOMNo :=
+        LibraryManufacturing.CreateCertifProdBOMWithTwoComp(
+          ProductionBOMHeader,ItemNo,ItemNo2,1);  // Quantity Per important for Test.
+      CreateItem(
+        Item,CostingMethod,Item."Reordering Policy"::"Lot-for-Lot",FlushingMethod,
+        RoutingNo,ProductionBOMNo,GetAmtPrecFromGLSetup);
+      ItemNo3 := Item."No.";
+      CLEAR(Item);
+      IF NewProdComponent THEN BEGIN
+        CreateItem(
+          Item,CostingMethod,Item."Reordering Policy"::"Lot-for-Lot",FlushingMethod,'','',GetAmtPrecFromGLSetup);
+        ItemNo4 := Item."No.";
+      END;
+
+      // Calculate Standard Cost for the main Item and calculate Calendar for Machine Center and Work Center.
+      IF CostingMethod = CostingMethod::Standard THEN
+        CalculateStandardCost.CalcItem(ItemNo3,FALSE);
+      CalculateMachineCntrCalendar(MachineCenter."No.");
+      IF NewRouting THEN
+        CalculateMachineCntrCalendar(MachineCenter2."No.");
+      CalculateWorkCntrCalendar(WorkCenterNo);
+
+      Qty := LibraryRandom.RandInt(10) + 50;
+      IF NOT PartialPurchasePosting THEN
+        CreatePurchaseOrder(PurchaseHeader,PurchaseLine,ItemNo,ItemNo2,Qty,Qty,DirectUnitCost)
+      ELSE
+        CreatePurchaseOrder(PurchaseHeader,PurchaseLine,ItemNo,ItemNo2,Qty,Qty - 1,DirectUnitCost);
+      IF NewProdComponent THEN
+        CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo4,Qty,Qty,TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,Invoice);
+
+      // If only Purchase Order required then exit this function.
+      IF PurchaseOnly THEN
+        EXIT;
+
+      IF NOT NewProdComponent THEN
+        LibraryManufacturing.CreateProductionOrder(
+          ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo3,
+          LibraryRandom.RandInt(9) + 1)
+      ELSE
+        LibraryManufacturing.CreateProductionOrder(
+          ProductionOrder,ProductionOrder.Status::Planned,ProductionOrder."Source Type"::Item,ItemNo3,
+          LibraryRandom.RandInt(9) + 1);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+      ProductionOrderNo := ProductionOrder."No.";
+      IF NewRouting THEN BEGIN
+        AddProdOrderRoutingLine(ProductionOrder,ProdOrderRoutingLineType::"Machine Center",MachineCenter2."No.");
+        LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,FALSE,FALSE,TRUE,FALSE);  // Calculate Lines & Routings are FALSE
+      END;
+
+      IF NewProdComponent THEN
+        ReplaceProdOrderComponent(ProductionOrderNo,ItemNo2,ItemNo3,ItemNo4);
+    END;
+
+    LOCAL PROCEDURE CreateCostingSetupAddnlCurr@65(VAR PurchaseHeader@1040 : Record 38;VAR CurrencyCode@1002 : Code[10];VAR ProductionOrderNo@1010 : Code[20];VAR ItemNo@1011 : Code[20];VAR ItemNo3@1039 : Code[20];AutoCostPosting@1000 : Boolean;FlushingMethod@1001 : 'Manual,Forward,Backward';CostingMethod@1007 : 'FIFO,LIFO,Specific,Average,Standard';DirectUnitCost@1028 : Boolean;Invoice@1029 : Boolean;NewProdComponent@1034 : Boolean;PurchaseOnly@1026 : Boolean;PartialPurchasePosting@1003 : Boolean;NewRouting@1038 : Boolean);
+    VAR
+      Item@1030 : Record 27;
+      InventorySetup@1025 : Record 313;
+      ManufacturingSetup@1022 : Record 99000765;
+      ProductionBOMHeader@1021 : Record 99000771;
+      MachineCenter@1019 : Record 99000758;
+      MachineCenter2@1008 : Record 99000758;
+      PurchaseLine@1032 : Record 39;
+      ProductionOrder@1033 : Record 5405;
+      NoSeriesManagement@1018 : Codeunit 396;
+      CalculateStandardCost@1017 : Codeunit 5812;
+      WorkCenterNo@1015 : Code[20];
+      RoutingNo@1013 : Code[20];
+      ProductionBOMNo@1009 : Code[20];
+      ItemNo2@1012 : Code[20];
+      ItemNo4@1035 : Code[20];
+      ProdOrderRoutingLineType@1036 : 'Work Center,Machine Center';
+      AutomaticCostAdjustment@1006 : 'Never,Day,Week,Month,Quarter,Year,Always';
+      AverageCostCalcType@1005 : ' ,Item,Item & Location & Variant';
+      AverageCostPeriod@1004 : ' ,Day,Week,Month,Quarter,Year,Accounting Period';
+      Qty@1027 : Decimal;
+    BEGIN
+      // Update Manufacturing Setup, Inventory Setup and Update Shop Calendar Working Days based on Work Shift code.
+      Initialize;
+      LibraryManufacturing.UpdateManufacturingSetup(ManufacturingSetup,'','',TRUE,TRUE,TRUE);
+      LibraryERM.SetAddReportingCurrency('');
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,AutoCostPosting,FALSE,AutomaticCostAdjustment::Never,AverageCostCalcType::Item,AverageCostPeriod::Day);
+
+      // Create Work Center and Machine Center with required Flushing method and Create Routing.
+      CreateWorkCenter(WorkCenterNo,FlushingMethod);
+      CreateMachineCenter(
+        MachineCenter,WorkCenterNo,FlushingMethod,1,
+        LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(5,2),LibraryRandom.RandDec(5,2));
+      IF NewRouting THEN
+        CreateMachineCenter(
+          MachineCenter2,WorkCenterNo,FlushingMethod::Manual,1,
+          LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(5,2),LibraryRandom.RandDec(5,2));
+      RoutingNo := NoSeriesManagement.GetNextNo(ManufacturingSetup."Routing Nos.",WORKDATE,TRUE);
+      CreateRouting(WorkCenterNo,MachineCenter."No.",RoutingNo);
+
+      // Create Items with the required Flushing method with the main Item containing Routing No. and Production BOM No.
+      CreateComponentItems(ItemNo,ItemNo2,CostingMethod,FlushingMethod,FALSE);
+      ProductionBOMNo :=
+        LibraryManufacturing.CreateCertifProdBOMWithTwoComp(
+          ProductionBOMHeader,ItemNo,ItemNo2,1);  // Quantity Per important for Test.
+      CreateItem(
+        Item,CostingMethod,Item."Reordering Policy"::"Lot-for-Lot",FlushingMethod,
+        RoutingNo,ProductionBOMNo,FALSE);
+      ItemNo3 := Item."No.";
+      CLEAR(Item);
+      IF NewProdComponent THEN BEGIN
+        CreateItem(
+          Item,CostingMethod,Item."Reordering Policy"::"Lot-for-Lot",FlushingMethod,'','',FALSE);
+        ItemNo4 := Item."No.";
+      END;
+
+      // Calculate Standard Cost for the main Item and calculate Calendar for Machine Center and Work Center.
+      IF CostingMethod = CostingMethod::Standard THEN
+        CalculateStandardCost.CalcItem(ItemNo3,FALSE);
+      CalculateMachineCntrCalendar(MachineCenter."No.");
+      IF NewRouting THEN
+        CalculateMachineCntrCalendar(MachineCenter2."No.");
+      CalculateWorkCntrCalendar(WorkCenterNo);
+      Qty := LibraryRandom.RandInt(10) + 50;
+      CurrencyCode := UpdateAddnlReportingCurrency;
+      IF NOT PartialPurchasePosting THEN
+        CreatePurchaseOrderAddnlCurr(PurchaseHeader,PurchaseLine,CurrencyCode,ItemNo,ItemNo2,Qty,Qty,DirectUnitCost)
+      ELSE
+        CreatePurchaseOrderAddnlCurr(PurchaseHeader,PurchaseLine,CurrencyCode,ItemNo,ItemNo2,Qty,Qty - 1,DirectUnitCost);
+
+      IF NewProdComponent THEN
+        CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo4,Qty,Qty,TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,Invoice);
+
+      // If only Purchase Order required then exit this function.
+      IF PurchaseOnly THEN
+        EXIT;
+
+      IF NOT NewProdComponent THEN
+        LibraryManufacturing.CreateProductionOrder(
+          ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo3,
+          LibraryRandom.RandInt(9) + 1)
+      ELSE
+        LibraryManufacturing.CreateProductionOrder(
+          ProductionOrder,ProductionOrder.Status::Planned,ProductionOrder."Source Type"::Item,ItemNo3,
+          LibraryRandom.RandInt(9) + 1);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+      ProductionOrderNo := ProductionOrder."No.";
+      IF NewRouting THEN BEGIN
+        AddProdOrderRoutingLine(ProductionOrder,ProdOrderRoutingLineType::"Machine Center",MachineCenter2."No.");
+        LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,FALSE,FALSE,TRUE,FALSE);  // Calculate Lines & Routings are FALSE
+      END;
+
+      IF NewProdComponent THEN
+        ReplaceProdOrderComponent(ProductionOrderNo,ItemNo2,ItemNo3,ItemNo4);
+    END;
+
+    LOCAL PROCEDURE CreateWorkCenter@7(VAR WorkCenterNo@1007 : Code[20];FlushingMethod@1008 : Option);
+    VAR
+      WorkCenter@1001 : Record 99000754;
+    BEGIN
+      // Create Work Center with required fields where random values not important for test; Capacity value important for Test.
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      WorkCenter.VALIDATE("Flushing Method",FlushingMethod);
+      WorkCenter.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(10,2));
+      WorkCenter.VALIDATE("Indirect Cost %",LibraryRandom.RandDec(5,1));
+      WorkCenter.VALIDATE("Overhead Rate",LibraryRandom.RandDec(5,1));
+      WorkCenter.VALIDATE(Capacity,1);
+      WorkCenter.MODIFY(TRUE);
+      WorkCenterNo := WorkCenter."No.";
+    END;
+
+    LOCAL PROCEDURE CreateMachineCenter@119(VAR MachineCenter@1000 : Record 99000758;WorkCenterNo@1002 : Code[20];FlushingMethod@1004 : Option;Capacity@1005 : Decimal;DirectUnitCost@1006 : Decimal;IndirectCostPercentage@1001 : Decimal;OverheadRate@1007 : Decimal);
+    BEGIN
+      // Create Machine Center with required fields.
+      LibraryManufacturing.CreateMachineCenter(MachineCenter,WorkCenterNo,Capacity);
+      MachineCenter.VALIDATE(Name,MachineCenter."No.");
+      MachineCenter.VALIDATE("Direct Unit Cost",DirectUnitCost);
+      MachineCenter.VALIDATE("Indirect Cost %",IndirectCostPercentage);
+      MachineCenter.VALIDATE("Overhead Rate",OverheadRate);
+      MachineCenter.VALIDATE("Flushing Method",FlushingMethod);
+      MachineCenter.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateRouting@9(WorkCenterNo@1004 : Code[20];MachineCenterNo@1005 : Code[20];VAR RoutingNo@1002 : Code[20]);
+    VAR
+      RoutingHeader@1001 : Record 99000763;
+      RoutingLine@1006 : Record 99000764;
+      CapacityUnitOfMeasure@1000 : Record 99000780;
+    BEGIN
+      CapacityUnitOfMeasure.SETRANGE(Type,CapacityUnitOfMeasure.Type::Minutes);
+      CapacityUnitOfMeasure.FINDFIRST;
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+      LibraryManufacturing.CreateRoutingLineSetup(
+        RoutingLine,RoutingHeader,WorkCenterNo,
+        COPYSTR(LibraryUtility.GenerateRandomCode(RoutingLine.FIELDNO("Operation No."),DATABASE::"Routing Line"),1,
+          MAXSTRLEN(RoutingLine."Operation No.")),LibraryRandom.RandDec(5,2),LibraryRandom.RandDec(5,2));
+      RoutingLine.VALIDATE("Run Time Unit of Meas. Code",CapacityUnitOfMeasure.Code);
+      RoutingLine.VALIDATE("Setup Time Unit of Meas. Code",CapacityUnitOfMeasure.Code);
+      RoutingLine.MODIFY(TRUE);
+      RoutingLine.Type := RoutingLine.Type::"Machine Center";
+      LibraryManufacturing.CreateRoutingLineSetup(
+        RoutingLine,RoutingHeader,MachineCenterNo,
+        COPYSTR(LibraryUtility.GenerateRandomCode(RoutingLine.FIELDNO("Operation No."),DATABASE::"Routing Line"),1,
+          MAXSTRLEN(RoutingLine."Operation No.")),LibraryRandom.RandDec(5,2),LibraryRandom.RandDec(5,2));
+      RoutingLine.VALIDATE("Run Time Unit of Meas. Code",CapacityUnitOfMeasure.Code);
+      RoutingLine.VALIDATE("Setup Time Unit of Meas. Code",CapacityUnitOfMeasure.Code);
+      RoutingLine.MODIFY(TRUE);
+
+      // Certify Routing after Routing lines creation.
+      RoutingHeader.VALIDATE(Status,RoutingHeader.Status::Certified);
+      RoutingHeader.MODIFY(TRUE);
+      RoutingNo := RoutingHeader."No.";
+    END;
+
+    LOCAL PROCEDURE CreateComponentItems@82(VAR ItemNo@1001 : Code[20];VAR ItemNo2@1002 : Code[20];ItemCostingMethod@1003 : Option;FlushingMethod@1004 : Option;GetAmtPrecFromGLSetup@1088 : Boolean);
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      CreateItem(Item,ItemCostingMethod,Item."Reordering Policy"::"Lot-for-Lot",FlushingMethod,'','',GetAmtPrecFromGLSetup);
+      ItemNo := Item."No.";
+      CLEAR(Item);
+      CreateItem(Item,ItemCostingMethod,Item."Reordering Policy"::"Lot-for-Lot",FlushingMethod,'','',GetAmtPrecFromGLSetup);
+      ItemNo2 := Item."No.";
+    END;
+
+    LOCAL PROCEDURE GetPrecisionFromGLSetup@148(GetAmtPrecFromGLSetup@1088 : Boolean) Precision : Integer;
+    VAR
+      Accurancy@1001 : Text;
+      DotPosIndex@1002 : Integer;
+    BEGIN
+      IF NOT GetAmtPrecFromGLSetup THEN
+        Accurancy := FORMAT(LibraryERM.GetAmountRoundingPrecision,0,9)
+      ELSE
+        Accurancy := FORMAT(LibraryERM.GetUnitAmountRoundingPrecision,0,9);
+      DotPosIndex := STRPOS(Accurancy,'.');
+      IF DotPosIndex = 0 THEN
+        Precision := 0
+      ELSE
+        Precision := STRLEN(Accurancy) - DotPosIndex;
+    END;
+
+    LOCAL PROCEDURE CreateItem@10(VAR Item@1008 : Record 27;ItemCostingMethod@1001 : Option;ItemReorderPolicy@1002 : Option;FlushingMethod@1003 : Option;RoutingNo@1004 : Code[20];ProductionBOMNo@1005 : Code[20];GetAmtPrecFromGLSetup@1088 : Boolean);
+    BEGIN
+      // Create Item with required fields where random values not important for test.
+      LibraryManufacturing.CreateItemManufacturing(
+        Item,ItemCostingMethod,LibraryRandom.RandDec(10,GetPrecisionFromGLSetup(GetAmtPrecFromGLSetup)),
+        ItemReorderPolicy,FlushingMethod,RoutingNo,ProductionBOMNo);
+      Item.VALIDATE("Overhead Rate",LibraryRandom.RandDec(5,2));
+      Item.VALIDATE("Indirect Cost %",LibraryRandom.RandDec(5,2));
+      Item.MODIFY(TRUE);
+
+      // This is to make sure the handlers are always executed otherwise tests would fail.
+      ExecuteUIHandlers;
+    END;
+
+    LOCAL PROCEDURE CreateManufacturingItem@124(VAR ProdItem@1000 : Record 27;VAR CompItemNo@1001 : Code[20]);
+    VAR
+      ProductionBOMHeader@1003 : Record 99000771;
+    BEGIN
+      CompItemNo := LibraryInventory.CreateItemNo;
+      LibraryInventory.CreateItem(ProdItem);
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,CompItemNo,1);
+      LibraryManufacturing.CreateItemManufacturing(
+        ProdItem,CostingMethod::FIFO,0,ProdItem."Reordering Policy"::" ",FlushingMethod::Manual,'',ProductionBOMHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CalculateMachineCntrCalendar@13(MachineCenterNo@1002 : Code[20]);
+    VAR
+      MachineCenter@1001 : Record 99000758;
+    BEGIN
+      // Calculate Calendar for Machine Center with dates having a difference of 1 Month.
+      MachineCenter.GET(MachineCenterNo);
+      LibraryManufacturing.CalculateMachCenterCalendar(MachineCenter,CALCDATE('<-1M>',WORKDATE),CALCDATE('<1M>',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CalculateWorkCntrCalendar@14(WorkCenterNo@1004 : Code[20]);
+    VAR
+      WorkCenter@1003 : Record 99000754;
+    BEGIN
+      // Calculate Calendar for Work Center with dates having a difference of 1 Month.
+      WorkCenter.GET(WorkCenterNo);
+      LibraryManufacturing.CalculateWorkCenterCalendar(WorkCenter,CALCDATE('<-1M>',WORKDATE),CALCDATE('<1M>',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@26(VAR PurchaseHeader@1002 : Record 38;VAR PurchaseLine@1003 : Record 39;ItemNo@1000 : Code[20];ItemNo2@1001 : Code[20];Qty@1005 : Decimal;QtyToReceive@1004 : Decimal;RandomDirectUnitCost@1006 : Boolean);
+    BEGIN
+      CreatePurchaseHeader(PurchaseHeader);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo,Qty,QtyToReceive,RandomDirectUnitCost);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo2,Qty,QtyToReceive,RandomDirectUnitCost);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeader@18(VAR PurchaseHeader@1000 : Record 38);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      PurchaseHeader.VALIDATE(
+        "Vendor Invoice No.",
+        LibraryUtility.GenerateRandomCode(PurchaseHeader.FIELDNO("Vendor Invoice No."),DATABASE::"Purchase Header"));
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@20(VAR PurchaseLine@1005 : Record 39;PurchaseHeader@1004 : Record 38;ItemNo@1003 : Code[20];Qty@1002 : Decimal;QtyToReceive@1001 : Decimal;RandomDirectUnitCost@1006 : Boolean);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Qty);
+      PurchaseLine.VALIDATE("Qty. to Receive",QtyToReceive);
+      IF RandomDirectUnitCost THEN
+        PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(5,2));
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrder@127(VAR Quantity@1001 : Decimal;VAR DirectUnitCost@1000 : Decimal;ItemNo@1004 : Code[20]);
+    VAR
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      Quantity := LibraryRandom.RandInt(10);
+      CreatePurchaseHeader(PurchaseHeader);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo,Quantity,Quantity,TRUE);
+      DirectUnitCost := PurchaseLine."Direct Unit Cost";
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@162(VAR SalesHeader@1003 : Record 36;ItemNo@1000 : Code[20];Qty@1005 : Decimal);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(
+        SalesHeader,SalesHeader."Document Type"::Order,LibrarySales.CreateCustomerNo);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Qty);
+    END;
+
+    LOCAL PROCEDURE PrepareItemsOfComplexProdBOM@139(VAR ItemNo@1000 : ARRAY [5] OF Code[20]);
+    VAR
+      ManufacturingSetup@1006 : Record 99000765;
+      Item@1005 : Record 27;
+      ProductionBOMHeader@1004 : Record 99000771;
+      ProductionBOMNo@1001 : ARRAY [3] OF Code[20];
+    BEGIN
+      ItemNo[1] := LibraryInventory.CreateItemNo;
+      ItemNo[2] := LibraryInventory.CreateItemNo;
+      ManufacturingSetup.GET;
+      ProductionBOMNo[1] :=
+        LibraryManufacturing.CreateCertifiedProductionBOM(
+          ProductionBOMHeader,ItemNo[1],1); // specific value needed for test
+      LibraryManufacturing.CreateItemManufacturing(
+        Item,CostingMethod::FIFO,0,
+        Item."Reordering Policy"::" ",FlushingMethod::Manual,'',ProductionBOMNo[1]);
+      Item.VALIDATE("Manufacturing Policy",Item."Manufacturing Policy"::"Make-to-Order");
+      Item.MODIFY(TRUE);
+      ItemNo[3] := Item."No.";
+
+      ProductionBOMNo[2] :=
+        LibraryManufacturing.CreateCertifiedProductionBOM(
+          ProductionBOMHeader,ItemNo[2],1); // specific value needed for test
+      CLEAR(Item);
+      LibraryManufacturing.CreateItemManufacturing(
+        Item,CostingMethod::FIFO,0,
+        Item."Reordering Policy"::" ",FlushingMethod::Manual,'',ProductionBOMNo[2]);
+      Item.VALIDATE("Manufacturing Policy",Item."Manufacturing Policy"::"Make-to-Order");
+      Item.MODIFY(TRUE);
+      ItemNo[4] := Item."No.";
+
+      ProductionBOMNo[3] :=
+        LibraryManufacturing.CreateCertifProdBOMWithTwoComp(
+          ProductionBOMHeader,ItemNo[3],ItemNo[4],1); // specific value needed for test
+      CLEAR(Item);
+      LibraryManufacturing.CreateItemManufacturing(
+        Item,CostingMethod::FIFO,0,
+        Item."Reordering Policy"::" ",FlushingMethod::Manual,'',ProductionBOMNo[3]);
+      Item.VALIDATE("Manufacturing Policy",Item."Manufacturing Policy"::"Make-to-Order");
+      Item.MODIFY(TRUE);
+      ItemNo[5] := Item."No.";
+    END;
+
+    LOCAL PROCEDURE MakeSupplyOrdersActiveOrder@229(DemandOrderNo@1000 : Code[20]);
+    VAR
+      ManufacturingUserTemplate@1002 : Record 5525;
+      RequisitionLine@1003 : Record 246;
+    BEGIN
+      RequisitionLine.SETRANGE("Demand Order No.",DemandOrderNo);
+      RequisitionLine.FINDFIRST;
+
+      GetManufacturingUserTemplate(
+        ManufacturingUserTemplate,ManufacturingUserTemplate."Make Orders"::"The Active Order",
+        ManufacturingUserTemplate."Create Production Order"::"Firm Planned");
+
+      LibraryPlanning.MakeSupplyOrders(ManufacturingUserTemplate,RequisitionLine);
+    END;
+
+    LOCAL PROCEDURE GetManufacturingUserTemplate@203(VAR ManufacturingUserTemplate@1000 : Record 5525;MakeOrder@1001 : Option;CreateProductionOrder@1002 : Option);
+    BEGIN
+      IF NOT ManufacturingUserTemplate.GET(USERID) THEN
+        LibraryPlanning.CreateManufUserTemplate(
+          ManufacturingUserTemplate,USERID,MakeOrder,ManufacturingUserTemplate."Create Purchase Order"::"Make Purch. Orders",
+          CreateProductionOrder,ManufacturingUserTemplate."Create Transfer Order"::"Make Trans. Orders");
+    END;
+
+    LOCAL PROCEDURE FindProdOrder@266(VAR ProductionOrder@1002 : Record 5405;Status@1000 : Option;SourceNo@1001 : Code[20]);
+    BEGIN
+      ProductionOrder.SETRANGE(Status,Status);
+      ProductionOrder.SETRANGE("Source No.",SourceNo);
+      ProductionOrder.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindProdOrderLineNo@138(ProductionOrder@1002 : Record 5405;ItemNo@1000 : Code[20]) : Integer;
+    VAR
+      ProdOrderLine@1001 : Record 5406;
+    BEGIN
+      WITH ProdOrderLine DO BEGIN
+        SETRANGE(Status,ProductionOrder.Status);
+        SETRANGE("Prod. Order No.",ProductionOrder."No.");
+        SETRANGE("Item No.",ItemNo);
+        FINDFIRST;
+        EXIT("Line No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE PostProdJournal@133(ProductionOrder@1000 : Record 5405;ItemNo@1001 : Code[20]);
+    BEGIN
+      LibraryVariableStorage.Enqueue(ProductionOrder."No.");
+      LibraryManufacturing.OpenProductionJournal(
+        ProductionOrder,FindProdOrderLineNo(ProductionOrder,ItemNo));
+    END;
+
+    LOCAL PROCEDURE GetMaterialCostFromBOMLine@136(ParentItemNo@1005 : Code[20]) MaterialCost : Decimal;
+    VAR
+      ProdBOMLine@1008 : Record 99000772;
+      Item@1004 : Record 27;
+    BEGIN
+      Item.GET(ParentItemNo);
+      WITH ProdBOMLine DO BEGIN
+        SETRANGE("Production BOM No.",Item."Production BOM No.");
+        SETRANGE(Type,Type::Item);
+        FINDSET;
+        REPEAT
+          Item.GET("No.");
+          MaterialCost += Item."Single-Level Material Cost";
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateDiffQtyConsmpJournal@30(ProductionOrderNo@1001 : Code[20]);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.FINDSET;
+      REPEAT
+        ItemJournalLine.VALIDATE(Quantity,ItemJournalLine.Quantity + 1);
+        ItemJournalLine.MODIFY(TRUE);
+      UNTIL ItemJournalLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateLessQtyOutputJournal@34(ProductionOrderNo@1003 : Code[20]);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+      ProductionOrder@1001 : Record 5405;
+    BEGIN
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.FINDSET;
+      REPEAT
+        ItemJournalLine.VALIDATE("Output Quantity",ProductionOrder.Quantity - 1);
+        ItemJournalLine.MODIFY(TRUE);
+      UNTIL ItemJournalLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ReplaceProdOrderComponent@27(ProductionOrderNo@1000 : Code[20];ItemNo@1002 : Code[20];ItemNo2@1003 : Code[20];NewItemNo@1005 : Code[20]);
+    VAR
+      ProdOrderComponent@1001 : Record 5407;
+      ProdOrderLine@1004 : Record 5406;
+    BEGIN
+      ProdOrderComponent.SETRANGE(Status,ProdOrderComponent.Status::Planned);
+      ProdOrderComponent.SETRANGE("Prod. Order No.",ProductionOrderNo);
+      ProdOrderComponent.SETRANGE("Item No.",ItemNo);
+      ProdOrderComponent.FINDFIRST;
+      ProdOrderComponent.DELETE(TRUE);
+      COMMIT;
+
+      ProdOrderLine.SETRANGE(Status,ProdOrderComponent.Status::Planned);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrderNo);
+      ProdOrderLine.SETRANGE("Item No.",ItemNo2);
+      ProdOrderLine.FINDFIRST;
+      CreateProdOrderComponent(ProdOrderLine,ProdOrderComponent,NewItemNo,1);  // Quantity Per important for Test.
+    END;
+
+    LOCAL PROCEDURE CreateProdOrderComponent@25(VAR ProdOrderLine@1001 : Record 5406;VAR ProdOrderComponent@1000 : Record 5407;ItemNo@1002 : Code[20];QuantityPer@1003 : Decimal);
+    VAR
+      RecRef@1004 : RecordRef;
+    BEGIN
+      ProdOrderComponent.INIT;
+      ProdOrderComponent.VALIDATE(Status,ProdOrderLine.Status);
+      ProdOrderComponent.VALIDATE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+      ProdOrderComponent.VALIDATE("Prod. Order Line No.",ProdOrderLine."Line No.");
+      RecRef.GETTABLE(ProdOrderComponent);
+      ProdOrderComponent.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,ProdOrderComponent.FIELDNO("Line No.")));
+      ProdOrderComponent.INSERT(TRUE);
+      ProdOrderComponent.VALIDATE("Item No.",ItemNo);
+      ProdOrderComponent.VALIDATE("Quantity per",QuantityPer);
+      ProdOrderComponent.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE AddProdOrderRoutingLine@15(ProductionOrder@1000 : Record 5405;ProdOrderRoutingLineType@1001 : Option;MachineCenterNo@1003 : Code[20]);
+    VAR
+      ProdOrderRoutingLine@1002 : Record 5409;
+    BEGIN
+      ProdOrderRoutingLine.INIT;
+      ProdOrderRoutingLine.VALIDATE(Status,ProductionOrder.Status);
+      ProdOrderRoutingLine.VALIDATE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderRoutingLine.VALIDATE("Routing No.",ProductionOrder."Routing No.");
+      ProdOrderRoutingLine.VALIDATE("Routing Reference No.",SelectRoutingRefNo(ProductionOrder."No.",ProductionOrder."Routing No."));
+      ProdOrderRoutingLine.VALIDATE(
+        "Operation No.",
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(ProdOrderRoutingLine.FIELDNO("Operation No."),DATABASE::"Prod. Order Routing Line"),1,
+          MAXSTRLEN(ProdOrderRoutingLine."Operation No.") - 1));
+      ProdOrderRoutingLine.INSERT(TRUE);
+      ProdOrderRoutingLine.VALIDATE(Type,ProdOrderRoutingLineType);
+      ProdOrderRoutingLine.VALIDATE("No.",MachineCenterNo);
+      ProdOrderRoutingLine.VALIDATE("Setup Time",LibraryRandom.RandDec(5,2));
+      ProdOrderRoutingLine.VALIDATE("Run Time",LibraryRandom.RandDec(5,2));
+      ProdOrderRoutingLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectRoutingRefNo@57(ProductionOrderNo@1000 : Code[20];ProdOrderRoutingNo@1001 : Code[20]) : Integer;
+    VAR
+      ProdOrderRoutingLine@1002 : Record 5409;
+    BEGIN
+      ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProductionOrderNo);
+      ProdOrderRoutingLine.SETRANGE("Routing No.",ProdOrderRoutingNo);
+      ProdOrderRoutingLine.FINDFIRST;
+      EXIT(ProdOrderRoutingLine."Routing Reference No.");
+    END;
+
+    LOCAL PROCEDURE UpdateAddnlReportingCurrency@76() CurrencyCode : Code[10];
+    BEGIN
+      // Create new Currency code and set Residual Gains Account and Residual Losses Account for Currency.
+      CurrencyCode := CreateCurrency;
+      COMMIT;
+
+      // Update Additional Reporting Currency on G/L setup.
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup."Additional Reporting Currency" := CurrencyCode;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectGLAccountNo@89() : Code[10];
+    VAR
+      GLAccount@1000 : Record 15;
+    BEGIN
+      // Select Account from General Ledger Account of type Posting.
+      GLAccount.SETRANGE("Account Type",GLAccount."Account Type"::Posting);
+      GLAccount.FINDFIRST;
+      EXIT(GLAccount."No.");
+    END;
+
+    LOCAL PROCEDURE CreateCurrency@64() : Code[10];
+    VAR
+      Currency@1001 : Record 4;
+      CurrencyExchangeRate@1032 : Record 330;
+    BEGIN
+      // Create new currency and validate the required GL Accounts.
+      LibraryERM.CreateCurrency(Currency);
+      Currency.VALIDATE("Residual Gains Account",SelectGLAccountNo);
+      Currency.VALIDATE("Residual Losses Account",SelectGLAccountNo);
+      Currency.VALIDATE("Realized G/L Gains Account",SelectGLAccountNo);
+      Currency.VALIDATE("Realized G/L Losses Account",SelectGLAccountNo);
+      Currency.MODIFY(TRUE);
+      COMMIT;  // Required to run the Test Case on RTC.
+
+      // Create Currency Exchange Rate.
+      LibraryERM.CreateExchRate(CurrencyExchangeRate,Currency.Code,WORKDATE);
+
+      // Using RANDOM Exchange Rate Amount and Adjustment Exchange Rate, between 100 and 400 (Standard Value).
+      CurrencyExchangeRate.VALIDATE("Exchange Rate Amount",100 * LibraryRandom.RandInt(4));
+      CurrencyExchangeRate.VALIDATE("Adjustment Exch. Rate Amount",CurrencyExchangeRate."Exchange Rate Amount");
+
+      // Relational Exch. Rate Amount and Relational Adjmt Exch Rate Amt always greater than Exchange Rate Amount.
+      CurrencyExchangeRate.VALIDATE("Relational Exch. Rate Amount",2 * CurrencyExchangeRate."Exchange Rate Amount");
+      CurrencyExchangeRate.VALIDATE("Relational Adjmt Exch Rate Amt",CurrencyExchangeRate."Relational Exch. Rate Amount");
+      CurrencyExchangeRate.MODIFY(TRUE);
+
+      EXIT(Currency.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderAddnlCurr@99(VAR PurchaseHeader@1002 : Record 38;VAR PurchaseLine@1003 : Record 39;CurrencyCode@1007 : Code[10];ItemNo@1000 : Code[20];ItemNo2@1001 : Code[20];Qty@1005 : Decimal;QtyToReceive@1004 : Decimal;RandomDirectUnitCost@1006 : Boolean);
+    BEGIN
+      CreatePurchaseHeaderAddnlCurr(PurchaseHeader,CurrencyCode);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo,Qty,QtyToReceive,RandomDirectUnitCost);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo2,Qty,QtyToReceive,RandomDirectUnitCost);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeaderAddnlCurr@98(VAR PurchaseHeader@1000 : Record 38;CurrencyCode@1001 : Code[10]);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,SelectAddnlCurrVendor(CurrencyCode));
+    END;
+
+    LOCAL PROCEDURE SelectAddnlCurrVendor@35(CurrencyCode@1001 : Code[10]) : Code[20];
+    VAR
+      Vendor@1000 : Record 23;
+    BEGIN
+      // Select a Vendor and modify if Location Code is not blank.
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("Currency Code",CurrencyCode);
+      Vendor.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CopyPurchaseLinesToTemp@120(VAR TempPurchaseLine@1000 : TEMPORARY Record 39;PurchaseHeader@1001 : Record 38);
+    VAR
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseHeader."Document Type");
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchaseLine.FINDSET;
+      REPEAT
+        TempPurchaseLine := PurchaseLine;
+        TempPurchaseLine.INSERT;
+      UNTIL PurchaseLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE PostProdOrderJournalLinesAndFinishProdOrder@128(ProductionOrderNo@1002 : Code[20];ParentItemNo@1001 : Code[20]);
+    VAR
+      ItemJournalBatch@1000 : Record 233;
+    BEGIN
+      LibraryInventory.CreateItemJournal(
+        ItemJournalBatch,'',ItemJournalBatch."Template Type"::Consumption,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournal(ItemJournalBatch,ParentItemNo,ItemJournalBatch."Template Type"::Output,ProductionOrderNo);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+    END;
+
+    LOCAL PROCEDURE PostProductionJournalAndFinishProdOrder@132(ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo,Quantity);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+      PostProdJournal(ProductionOrder,ItemNo);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+    END;
+
+    LOCAL PROCEDURE VerifyWIPAmountGLEntry@36(ProductionOrder@1001 : Record 5405;ItemNo@1000 : Code[20];Positive@1005 : Boolean);
+    VAR
+      InventoryPostingSetup@1004 : Record 5813;
+      GLEntry@1010 : Record 17;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+      SelectGLEntry(GLEntry,InventoryPostingSetup."WIP Account",ProductionOrder."No.");
+
+      // Verify total amount in G/L Entry for WIP Account is Zero.
+      VerifyZeroWIPAmount(CalculateGLEntryTotalAmount(GLEntry,FALSE));  // Boolean False signifies Additional Currency does not exist.
+
+      // Verify positive WIP Account amount is equal to calculated amount; last parameter True signifies Adjust Cost Item Entries has run.
+      VerifyTotalWIPAmount(ProductionOrder,CalculateGLEntryRequiredAmount(GLEntry,Positive),TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectInventoryPostingSetup@2(VAR InventoryPostingSetup@1002 : Record 5813;ItemNo@1000 : Code[20]);
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.GET(ItemNo);
+      InventoryPostingSetup.SETRANGE("Invt. Posting Group Code",Item."Inventory Posting Group");
+      InventoryPostingSetup.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SelectGLEntry@41(VAR GLEntry@1000 : Record 17;PostingSetupAccount@1002 : Code[20];DocumentNo@1001 : Code[20]);
+    BEGIN
+      // Select set of G/L Entries for the specified Account.
+      GLEntry.SETRANGE("Document No.",DocumentNo);
+      GLEntry.SETRANGE("G/L Account No.",PostingSetupAccount);
+      GLEntry.FINDSET;
+    END;
+
+    LOCAL PROCEDURE CalculateGLEntryTotalAmount@74(VAR GLEntry@1001 : Record 17;AddnlCurrency@1000 : Boolean) : Decimal;
+    VAR
+      TotalAmount@1002 : Decimal;
+    BEGIN
+      IF NOT AddnlCurrency THEN
+        REPEAT
+          TotalAmount += GLEntry.Amount;
+        UNTIL GLEntry.NEXT = 0
+      ELSE
+        REPEAT
+          TotalAmount += GLEntry."Additional-Currency Amount";
+        UNTIL GLEntry.NEXT = 0;
+      EXIT(TotalAmount);
+    END;
+
+    LOCAL PROCEDURE CalculateGLEntryRequiredAmount@68(VAR GLEntry@1000 : Record 17;Positive@1001 : Boolean) : Decimal;
+    VAR
+      TotalAmount@1002 : Decimal;
+      GLCount@1003 : Integer;
+    BEGIN
+      // Calculate the sum for required G/L Entries.
+      IF Positive THEN BEGIN
+        GLEntry.SETFILTER(Amount,'>0');
+        GLEntry.FINDSET;
+        // Total amount for positive WIP entries.
+        REPEAT
+          TotalAmount += GLEntry.Amount;
+        UNTIL GLEntry.NEXT = 0;
+      END ELSE BEGIN
+        GLEntry.FINDSET;
+        // Total amount for WIP Entries except the last G/L entry to exclude the Balancing amount.
+        FOR GLCount := 1 TO GLEntry.COUNT - 1 DO BEGIN
+          TotalAmount += GLEntry.Amount;
+          GLEntry.NEXT;
+        END;
+      END;
+      EXIT(TotalAmount);
+    END;
+
+    LOCAL PROCEDURE VerifyZeroWIPAmount@37(TotalAmount@1000 : Decimal);
+    BEGIN
+      // Verify total WIP Account amount is Zero.
+      Assert.AreEqual(0,TotalAmount,ErrMessageNotFoundZeroAmt);
+    END;
+
+    LOCAL PROCEDURE VerifyTotalWIPAmount@39(ProductionOrder@1003 : Record 5405;ActualAmount@1007 : Decimal;AdjustCost@1000 : Boolean);
+    VAR
+      Item@1006 : Record 27;
+      ProdOrderComponent@1001 : Record 5407;
+      ExpectedWIPAmount@1002 : Decimal;
+      TotalConsumptionValue@1004 : Decimal;
+    BEGIN
+      // Last parameter True signifies Finished Production Order.
+      SelectProductionOrderComponent(ProdOrderComponent,ProductionOrder,TRUE);
+      Item.GET(ProdOrderComponent."Item No.");
+      REPEAT
+        TotalConsumptionValue :=
+          TotalConsumptionValue +
+          ConsumptionValue(ProductionOrder.Quantity,ProdOrderComponent."Quantity per",ProdOrderComponent."Item No.");
+        IF (Item."Costing Method" = Item."Costing Method"::Average) AND AdjustCost THEN
+          TotalConsumptionValue :=
+            TotalConsumptionValue +
+            OverheadIndirectValue(ProductionOrder.Quantity,ProdOrderComponent."Quantity per",ProdOrderComponent."Item No.");
+      UNTIL ProdOrderComponent.NEXT = 0;
+
+      ExpectedWIPAmount :=
+        TotalConsumptionValue + DirectIndirectMachineCntrCost(ProductionOrder."Routing No.",Item."No.",ProductionOrder.Quantity) +
+        DirectIndirectWorkCntrCost(ProductionOrder."Routing No.",Item."No.",ProductionOrder.Quantity);
+
+      // Verify WIP Account amounts and expected WIP amounts are equal.
+      Assert.AreNearlyEqual(
+        ROUND(ExpectedWIPAmount,GeneralLedgerSetup."Amount Rounding Precision"),
+        ActualAmount,GeneralLedgerSetup."Amount Rounding Precision",ErrMessageAmountDoNotMatch);
+    END;
+
+    LOCAL PROCEDURE SelectProductionOrderComponent@85(VAR ProdOrderComponent@1000 : Record 5407;ProductionOrder@1001 : Record 5405;Finished@1003 : Boolean);
+    BEGIN
+      IF Finished THEN
+        ProductionOrder.GET(ProductionOrder.Status::Finished,ProductionOrder."No.")
+      ELSE
+        ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrder."No.");
+      ProdOrderComponent.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderComponent.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderComponent.FINDSET;
+    END;
+
+    LOCAL PROCEDURE ConsumptionValue@38(ProductionOrderQty@1000 : Decimal;ProductionBOMLineQtyPer@1001 : Decimal;ItemNo@1002 : Code[20]) : Decimal;
+    VAR
+      Item@1004 : Record 27;
+    BEGIN
+      Item.GET(ItemNo);
+      IF Item."Costing Method" = Item."Costing Method"::Standard THEN
+        EXIT(ProductionOrderQty * ProductionBOMLineQtyPer * Item."Standard Cost");
+      EXIT(ProductionOrderQty * ProductionBOMLineQtyPer * Item."Last Direct Cost");
+    END;
+
+    LOCAL PROCEDURE DirectIndirectMachineCntrCost@21(RoutingNo@1000 : Code[20];ItemNo@1005 : Code[20];Quantity@1004 : Decimal) : Decimal;
+    VAR
+      ProdOrderRoutingLine@1006 : Record 5409;
+      MachineCenter@1003 : Record 99000758;
+      TimeSubtotal@1002 : Decimal;
+      MachineCenterAmount@1001 : Decimal;
+    BEGIN
+      // Calculate Cost Amount for Machine Center.
+      ProdOrderRoutingLine.SETRANGE("Routing No.",RoutingNo);
+      ProdOrderRoutingLine.SETRANGE(Type,ProdOrderRoutingLine.Type::"Machine Center");
+      IF ProdOrderRoutingLine.FINDSET THEN
+        REPEAT
+          MachineCenter.GET(ProdOrderRoutingLine."No.");
+          TimeSubtotal := CalculateTimeSubTotal(ProdOrderRoutingLine,ItemNo,Quantity);
+          MachineCenterAmount +=
+            (TimeSubtotal * MachineCenter."Direct Unit Cost") +
+            (TimeSubtotal *
+             ((MachineCenter."Indirect Cost %" / 100) * MachineCenter."Direct Unit Cost" + MachineCenter."Overhead Rate"));
+        UNTIL ProdOrderRoutingLine.NEXT = 0;
+      EXIT(MachineCenterAmount);
+    END;
+
+    LOCAL PROCEDURE DirectIndirectWorkCntrCost@28(RoutingNo@1000 : Code[20];ItemNo@1002 : Code[20];Quantity@1001 : Decimal) : Decimal;
+    VAR
+      ProdOrderRoutingLine@1004 : Record 5409;
+      WorkCenter@1007 : Record 99000754;
+      TimeSubtotal@1005 : Decimal;
+      WorkCenterAmount@1003 : Decimal;
+    BEGIN
+      // Calculate Cost Amount for Work Center.
+      ProdOrderRoutingLine.SETRANGE("Routing No.",RoutingNo);
+      ProdOrderRoutingLine.SETRANGE(Type,ProdOrderRoutingLine.Type::"Work Center");
+      IF ProdOrderRoutingLine.FINDSET THEN
+        REPEAT
+          WorkCenter.GET(ProdOrderRoutingLine."No.");
+          TimeSubtotal := CalculateTimeSubTotal(ProdOrderRoutingLine,ItemNo,Quantity);
+          WorkCenterAmount :=
+            (TimeSubtotal * WorkCenter."Direct Unit Cost") +
+            (TimeSubtotal * ((WorkCenter."Indirect Cost %" / 100) * WorkCenter."Direct Unit Cost" + WorkCenter."Overhead Rate"));
+        UNTIL ProdOrderRoutingLine.NEXT = 0;
+      EXIT(WorkCenterAmount);
+    END;
+
+    LOCAL PROCEDURE CalculateTimeSubTotal@33(ProdOrderRoutingLine@1002 : Record 5409;ItemNo@1000 : Code[20];Quantity@1003 : Decimal) : Decimal;
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.GET(ItemNo);
+      IF Item."Flushing Method" = Item."Flushing Method"::Manual THEN
+        EXIT(ProdOrderRoutingLine."Setup Time" + ProdOrderRoutingLine."Run Time");
+      EXIT(ProdOrderRoutingLine."Setup Time" + Quantity * ProdOrderRoutingLine."Run Time");
+    END;
+
+    LOCAL PROCEDURE AddItemCharge@122(ItemNo@1005 : Code[20];Amount@1004 : Decimal);
+    VAR
+      ItemCharge@1002 : Record 5800;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      PurchRcptLine@1006 : Record 121;
+      ItemChargeAssignmentPurch@1003 : Record 5805;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(
+        PurchaseHeader,PurchaseHeader."Document Type"::Invoice,LibraryPurchase.CreateVendorNo);
+      LibraryInventory.CreateItemCharge(ItemCharge);
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::"Charge (Item)",ItemCharge."No.",1);
+      PurchaseLine.VALIDATE("Direct Unit Cost",Amount);
+      PurchaseLine.MODIFY(TRUE);
+
+      PurchRcptLine.SETRANGE(Type,PurchRcptLine.Type::Item);
+      PurchRcptLine.SETRANGE("No.",ItemNo);
+      PurchRcptLine.FINDFIRST;
+
+      WITH ItemChargeAssignmentPurch DO BEGIN
+        INIT;
+        VALIDATE("Document Type",PurchaseHeader."Document Type");
+        VALIDATE("Document No.",PurchaseHeader."No.");
+        VALIDATE("Document Line No.",PurchaseLine."Line No.");
+        VALIDATE("Item Charge No.",PurchaseLine."No.");
+
+        VALIDATE("Applies-to Doc. Type","Applies-to Doc. Type"::Receipt);
+        VALIDATE("Applies-to Doc. No.",PurchRcptLine."Document No.");
+        VALIDATE("Applies-to Doc. Line No.",PurchRcptLine."Line No.");
+
+        VALIDATE("Unit Cost",Amount);
+        VALIDATE("Item No.",ItemNo);
+        VALIDATE("Qty. to Assign",1);
+        INSERT(TRUE);
+      END;
+
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyInvtAccountNotInGLEntry@48(ItemNo@1001 : Code[20];ProductionOrderNo@1000 : Code[20]);
+    VAR
+      InventoryPostingSetup@1003 : Record 5813;
+      GLEntry@1002 : Record 17;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+      GLEntry.SETRANGE("Document No.",ProductionOrderNo);
+      GLEntry.SETRANGE("G/L Account No.",InventoryPostingSetup."Inventory Account");
+
+      // Verify no row exist for Inventory Account in G/L Entry.
+      Assert.IsFalse(GLEntry.FINDFIRST,ErrMessageGLEntryNoRowExist);
+    END;
+
+    LOCAL PROCEDURE VerifyInvtAmountGLEntry@5(VAR TempPurchaseLine@1006 : TEMPORARY Record 39;PurchInvHeaderNo@1000 : Code[20];ItemNo@1001 : Code[20];CurrencyCode@1002 : Code[10];AddnlCurrency@1005 : Boolean);
+    VAR
+      GLEntry@1003 : Record 17;
+      InventoryPostingSetup@1004 : Record 5813;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+
+      // Verify that no row exists for WIP Account.
+      VerifyWIPAccountNotInGLEntry(PurchInvHeaderNo,ItemNo);
+
+      // Verify sum of Inventory Account amounts equal to calculated amount.
+      SelectGLEntry(GLEntry,InventoryPostingSetup."Inventory Account",PurchInvHeaderNo);
+      VerifyTotalInvtAmount(TempPurchaseLine,CalculateGLEntryTotalAmount(GLEntry,AddnlCurrency),CurrencyCode,AddnlCurrency);
+    END;
+
+    LOCAL PROCEDURE VerifyWIPAccountNotInGLEntry@45(PurchInvHeaderNo@1001 : Code[20];ItemNo@1000 : Code[20]);
+    VAR
+      InventoryPostingSetup@1004 : Record 5813;
+      GLEntry@1003 : Record 17;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+      GLEntry.SETRANGE("Document No.",PurchInvHeaderNo);
+      GLEntry.SETRANGE("G/L Account No.",InventoryPostingSetup."WIP Account");
+
+      // Verify no row exist for WIP Account in G/L Entry.
+      Assert.IsFalse(GLEntry.FINDFIRST,ErrMessageGLEntryNoRowExist);
+    END;
+
+    LOCAL PROCEDURE VerifyTotalInvtAmount@23(VAR TempPurchaseLine@1001 : TEMPORARY Record 39;ActualTotalAmount@1000 : Decimal;CurrencyCode@1003 : Code[10];AddnlCurrency@1002 : Boolean);
+    VAR
+      CurrencyExchangeRate@1006 : Record 330;
+      Currency@1005 : Record 4;
+      ExpectedInventoryAmount@1004 : Decimal;
+    BEGIN
+      ExpectedInventoryAmount := ItemTotalCostValue(TempPurchaseLine) + OverheadIndirectInvtCostValue(TempPurchaseLine);
+
+      // Verify Inventory Account amounts and calculated Inventory amounts are equal.
+      IF AddnlCurrency THEN BEGIN
+        Currency.GET(CurrencyCode);
+        CurrencyExchangeRate.SETRANGE("Currency Code",CurrencyCode);
+        CurrencyExchangeRate.FINDFIRST;
+        Assert.AreNearlyEqual(
+          ROUND(
+            CurrencyExchangeRate."Exchange Rate Amount" / CurrencyExchangeRate."Relational Exch. Rate Amount" *
+            ExpectedInventoryAmount,
+            Currency."Amount Rounding Precision"),
+          ActualTotalAmount,GeneralLedgerSetup."Amount Rounding Precision",ErrMessageAmountDoNotMatch);
+      END ELSE
+        Assert.AreNearlyEqual(
+          ExpectedInventoryAmount,ActualTotalAmount,GeneralLedgerSetup."Amount Rounding Precision",ErrMessageAmountDoNotMatch);
+    END;
+
+    LOCAL PROCEDURE VerifyMaterialCost@145(ProductionOrderNo@1000 : Code[20];ExpectedMaterialCost@1013 : Decimal);
+    VAR
+      ProdOrderLine@1002 : Record 5406;
+      CostCalculationMgt@1006 : Codeunit 5836;
+      ActualMaterialCost@1012 : Decimal;
+      StdCost@1003 : ARRAY [6] OF Decimal;
+    BEGIN
+      WITH ProdOrderLine DO BEGIN
+        SETRANGE(Status,Status::Finished);
+        SETRANGE("Prod. Order No.",ProductionOrderNo);
+        FINDSET;
+        REPEAT
+          CostCalculationMgt.CalcProdOrderLineStdCost(
+            ProdOrderLine,1,LibraryERM.GetUnitAmountRoundingPrecision,
+            StdCost[1],StdCost[2],StdCost[3],StdCost[4],StdCost[5]);
+          ActualMaterialCost += StdCost[1] / "Quantity (Base)";
+        UNTIL NEXT = 0;
+      END;
+
+      Assert.AreEqual(ExpectedMaterialCost,ActualMaterialCost,ExpectedMaterialCostErr);
+    END;
+
+    LOCAL PROCEDURE ItemTotalCostValue@53(VAR TempPurchaseLine@1000 : TEMPORARY Record 39) ItemCost : Decimal;
+    BEGIN
+      TempPurchaseLine.FINDSET;
+      REPEAT
+        ItemCost += (TempPurchaseLine."Direct Unit Cost" * TempPurchaseLine."Quantity Received");
+      UNTIL TempPurchaseLine.NEXT = 0;
+      EXIT(ItemCost);
+    END;
+
+    LOCAL PROCEDURE OverheadIndirectInvtCostValue@54(VAR TempPurchaseLine@1001 : TEMPORARY Record 39) OverheadIndirectCost : Decimal;
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      TempPurchaseLine.FINDSET;
+      REPEAT
+        Item.GET(TempPurchaseLine."No.");
+        IF Item."Costing Method" = Item."Costing Method"::Standard THEN
+          OverheadIndirectCost :=
+            OverheadIndirectCost +
+            ((Item."Overhead Rate" + (Item."Indirect Cost %" / 100 * TempPurchaseLine."Direct Unit Cost")) * Item.Inventory) +
+            (((Item."Standard Cost" - TempPurchaseLine."Direct Unit Cost" ) * TempPurchaseLine."Quantity Received") +
+             (Item."Overhead Rate" + (Item."Indirect Cost %" / 100 * TempPurchaseLine."Direct Unit Cost")) * Item.Inventory)
+        ELSE BEGIN
+          // Calculation for Costing Method Average.
+          Item.CALCFIELDS(Inventory);
+          OverheadIndirectCost :=
+            OverheadIndirectCost +
+            ((Item."Overhead Rate" + (Item."Indirect Cost %" / 100 * TempPurchaseLine."Direct Unit Cost")) * Item.Inventory);
+        END;
+      UNTIL TempPurchaseLine.NEXT = 0;
+      EXIT(OverheadIndirectCost);
+    END;
+
+    LOCAL PROCEDURE VerifyWIPAmountConsumpOutput@66(ProductionOrder@1000 : Record 5405;ItemNo@1001 : Code[20];PostOutput@1006 : Boolean);
+    VAR
+      InventoryPostingSetup@1003 : Record 5813;
+      GLEntry@1002 : Record 17;
+      ProdOrderComponent@1010 : Record 5407;
+      ExpectedWIPAmount@1005 : Decimal;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+      SelectGLEntry(GLEntry,InventoryPostingSetup."WIP Account",ProductionOrder."No.");
+      SelectProductionOrderComponent(ProdOrderComponent,ProductionOrder,FALSE);
+      REPEAT
+        ExpectedWIPAmount +=
+          ConsumptionValue(ProductionOrder.Quantity,ProdOrderComponent."Quantity per",ProdOrderComponent."Item No.") +
+          OverheadIndirectValue(ProductionOrder.Quantity,ProdOrderComponent."Quantity per",ProdOrderComponent."Item No.");
+      UNTIL ProdOrderComponent.NEXT = 0;
+
+      IF PostOutput THEN
+        ExpectedWIPAmount +=
+          DirectIndirectMachineCntrCost(ProductionOrder."Routing No.",ItemNo,ProductionOrder.Quantity) +
+          DirectIndirectWorkCntrCost(ProductionOrder."Routing No.",ItemNo,ProductionOrder.Quantity);
+
+      // Verify WIP Account amount after Consumption is equal to calculated amount.
+      Assert.AreNearlyEqual(
+        ExpectedWIPAmount,CalculateGLEntryTotalAmount(GLEntry,FALSE),GeneralLedgerSetup."Amount Rounding Precision",
+        ErrMessageAmountDoNotMatch);
+    END;
+
+    LOCAL PROCEDURE OverheadIndirectValue@72(ProductionOrderQty@1002 : Decimal;ProductionBOMLineQtyPer@1001 : Decimal;ItemNo@1000 : Code[20]) : Decimal;
+    VAR
+      Item@1003 : Record 27;
+      OverheadIndirectCost@1004 : Decimal;
+    BEGIN
+      Item.GET(ItemNo);
+      OverheadIndirectCost :=
+        OverheadIndirectCost +
+        ((Item."Overhead Rate" + (Item."Indirect Cost %" / 100 * Item."Last Direct Cost")) *
+         ProductionOrderQty * ProductionBOMLineQtyPer);
+      EXIT(OverheadIndirectCost);
+    END;
+
+    LOCAL PROCEDURE VerifyWIPAmountFinishProd@67(ProductionOrder@1000 : Record 5405;ItemNo@1001 : Code[20];Positive@1006 : Boolean);
+    VAR
+      InventoryPostingSetup@1003 : Record 5813;
+      GLEntry@1002 : Record 17;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+      SelectGLEntry(GLEntry,InventoryPostingSetup."WIP Account",ProductionOrder."No.");
+
+      // Verify Total Amount in G/L Entry for WIP Account is Zero.
+      VerifyZeroWIPAmount(CalculateGLEntryTotalAmount(GLEntry,FALSE));
+
+      // Verify WIP Account amount is equal to calculated amount; last parameter True signifies Adjust Cost Item Entries has run.
+      VerifyTotalWIPAmount(ProductionOrder,CalculateGLEntryRequiredAmount(GLEntry,Positive),TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseAccountGLEntry@46(VAR TempPurchaseLine@1003 : TEMPORARY Record 39;BuyFromVendorNo@1002 : Code[20];PurchInvHeaderNo@1000 : Code[20];ItemNo@1005 : Code[20]);
+    VAR
+      Item@1007 : Record 27;
+      Vendor@1008 : Record 23;
+      GLEntry@1001 : Record 17;
+      GeneralPostingSetup@1006 : Record 252;
+    BEGIN
+      Vendor.GET(BuyFromVendorNo);
+      Item.GET(ItemNo);
+      GeneralPostingSetup.GET(Vendor."Gen. Bus. Posting Group",Item."Gen. Prod. Posting Group");
+
+      GLEntry.SETRANGE("Document No.",PurchInvHeaderNo);
+      GLEntry.SETRANGE("G/L Account No.",GeneralPostingSetup."Purch. Account");
+      GLEntry.FINDFIRST;
+
+      // Verify WIP Account amounts and calculated WIP amounts are equal.
+      Assert.AreNearlyEqual(
+        ItemTotalCostValue(TempPurchaseLine),GLEntry.Amount,GeneralLedgerSetup."Amount Rounding Precision",ErrMessageAmountDoNotMatch);
+    END;
+
+    LOCAL PROCEDURE VerifyWIPAmountExclCostFinish@73(ProductionOrder@1002 : Record 5405;ItemNo@1001 : Code[20];ItemNo2@1000 : Code[20];AdjustCost@1006 : Boolean);
+    VAR
+      InventoryPostingSetup@1004 : Record 5813;
+      GLEntry@1003 : Record 17;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+      SelectGLEntry(GLEntry,InventoryPostingSetup."WIP Account",ProductionOrder."No.");
+
+      // Verify Total Amount in G/L Entry for WIP Account is Zero only when Adjust Cost Item Entries has run.
+      IF AdjustCost THEN
+        VerifyZeroWIPAmount(CalculateGLEntryTotalAmount(GLEntry,FALSE));
+
+      // Verify WIP Account amount is equal to calculated amount.
+      VerifyTotalWIPAmount(ProductionOrder,CalculateGLEntryAmountExclCost(GLEntry,ProductionOrder."No.",ItemNo2),AdjustCost);
+    END;
+
+    LOCAL PROCEDURE CalculateGLEntryAmountExclCost@75(VAR GLEntry@1000 : Record 17;ProductionOrderNo@1003 : Code[20];ItemNo@1005 : Code[20]) : Decimal;
+    VAR
+      ProductionOrder@1004 : Record 5405;
+      Item@1006 : Record 27;
+      TotalAmount@1001 : Decimal;
+      CalculatedAmount@1002 : Decimal;
+    BEGIN
+      ProductionOrder.GET(ProductionOrder.Status::Finished,ProductionOrderNo);
+      Item.GET(ItemNo);
+      CalculatedAmount := ProductionOrder.Quantity * Item."Last Direct Cost";
+      GLEntry.SETFILTER(Amount,'<>%1',-ROUND(CalculatedAmount,0.01));  // Excluding the balancing cost.
+      GLEntry.FINDSET;
+
+      // Total amount for required WIP entries.
+      REPEAT
+        TotalAmount += GLEntry.Amount;
+      UNTIL GLEntry.NEXT = 0;
+      EXIT(TotalAmount);
+    END;
+
+    LOCAL PROCEDURE VerifyWIPAmountDiffConsmpNoAdj@24(ProductionOrder@1002 : Record 5405;ItemNo@1001 : Code[20];ItemNo2@1000 : Code[20]);
+    VAR
+      InventoryPostingSetup@1004 : Record 5813;
+      GLEntry@1003 : Record 17;
+      Item@1010 : Record 27;
+      ProdOrderComponent@1008 : Record 5407;
+      ExpectedWIPAmount@1006 : Decimal;
+      TotalConsumptionValue@1005 : Decimal;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+      SelectGLEntry(GLEntry,InventoryPostingSetup."WIP Account",ProductionOrder."No.");
+
+      // Last parameter True signifies Finished Production Order.
+      SelectProductionOrderComponent(ProdOrderComponent,ProductionOrder,TRUE);
+      REPEAT
+        ItemNo := ProdOrderComponent."Item No.";
+        Item.GET(ItemNo);
+        ProdOrderComponent.CALCFIELDS("Act. Consumption (Qty)");
+        TotalConsumptionValue :=
+          TotalConsumptionValue + (ProdOrderComponent."Act. Consumption (Qty)" * Item."Last Direct Cost");
+      UNTIL ProdOrderComponent.NEXT = 0;
+
+      ExpectedWIPAmount :=
+        TotalConsumptionValue + DirectIndirectMachineCntrCost(ProductionOrder."Routing No.",ItemNo,ProductionOrder.Quantity) +
+        DirectIndirectWorkCntrCost(ProductionOrder."Routing No.",ItemNo,ProductionOrder.Quantity);
+
+      // Verify WIP Account amounts and calculated WIP amounts are equal.
+      Assert.AreNearlyEqual(
+        ExpectedWIPAmount,CalculateGLEntryAmountExclCost(GLEntry,ProductionOrder."No.",ItemNo2),
+        GeneralLedgerSetup."Amount Rounding Precision",ErrMessageAmountDoNotMatch);
+    END;
+
+    LOCAL PROCEDURE VerifyWIPAddnlCurrGLEntry@87(ProductionOrder@1000 : Record 5405;CurrencyCode@1001 : Code[10];ItemNo@1004 : Code[20];Positive@1002 : Boolean);
+    VAR
+      InventoryPostingSetup@1006 : Record 5813;
+      GLEntry@1005 : Record 17;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+      SelectGLEntry(GLEntry,InventoryPostingSetup."WIP Account",ProductionOrder."No.");
+
+      // Verify WIP amount is equal to calculated amount in Additional Currency.
+      VerifyTotalWIPAddnlCurrAmount(ProductionOrder,CurrencyCode,CalculateGLAddnlCurrAmount(GLEntry,Positive));
+    END;
+
+    LOCAL PROCEDURE CalculateGLAddnlCurrAmount@95(VAR GLEntry@1000 : Record 17;Positive@1001 : Boolean) ActualAddnlCurrencyAmount : Decimal;
+    VAR
+      GLCount@1003 : Integer;
+    BEGIN
+      // Calculate the sum for required G/L Entries.
+      IF Positive THEN BEGIN
+        GLEntry.SETFILTER("Additional-Currency Amount",'>0');
+        GLEntry.FINDSET;
+        // Total Additional Currency amount for positive WIP entries.
+        REPEAT
+          ActualAddnlCurrencyAmount += GLEntry."Additional-Currency Amount";
+        UNTIL GLEntry.NEXT = 0;
+      END ELSE BEGIN
+        GLEntry.FINDSET;
+        // Total Additional currency amount for WIP Entries except the last G/L entry to exclude the Balancing amount.
+        FOR GLCount := 1 TO GLEntry.COUNT - 1 DO BEGIN
+          ActualAddnlCurrencyAmount += GLEntry."Additional-Currency Amount";
+          GLEntry.NEXT;
+        END;
+      END;
+      EXIT(ActualAddnlCurrencyAmount);
+    END;
+
+    LOCAL PROCEDURE VerifyTotalWIPAddnlCurrAmount@100(ProductionOrder@1003 : Record 5405;CurrencyCode@1005 : Code[10];ActualAddnlCurrencyAmount@1007 : Decimal);
+    VAR
+      Item@1006 : Record 27;
+      ProdOrderComponent@1001 : Record 5407;
+      CurrencyExchangeRate@1000 : Record 330;
+      Currency@1008 : Record 4;
+      CalculatedWIPAmount@1002 : Decimal;
+      TotalConsumptionValue@1004 : Decimal;
+    BEGIN
+      Currency.GET(CurrencyCode);
+      CurrencyExchangeRate.SETRANGE("Currency Code",CurrencyCode);
+      CurrencyExchangeRate.FINDFIRST;
+
+      // Last parameter True signifies Finished Production Order.
+      SelectProductionOrderComponent(ProdOrderComponent,ProductionOrder,TRUE);
+      REPEAT
+        Item.GET(ProdOrderComponent."Item No.");
+        ProdOrderComponent.CALCFIELDS("Act. Consumption (Qty)");
+        TotalConsumptionValue += ProdOrderComponent."Act. Consumption (Qty)" * Item."Standard Cost";
+      UNTIL ProdOrderComponent.NEXT = 0;
+
+      CalculatedWIPAmount :=
+        TotalConsumptionValue +
+        DirectIndirectMachineCntrCost(ProductionOrder."Routing No.",ProdOrderComponent."Item No.",ProductionOrder.Quantity) +
+        DirectIndirectWorkCntrCost(ProductionOrder."Routing No.",ProdOrderComponent."Item No.",ProductionOrder.Quantity);
+
+      // Verify WIP Additional Currency amount from GL Entry and Calculated Additional Currency amount are equal.
+      Assert.AreNearlyEqual(
+        ROUND(
+          CurrencyExchangeRate."Exchange Rate Amount" / CurrencyExchangeRate."Relational Exch. Rate Amount" * CalculatedWIPAmount,
+          Currency."Amount Rounding Precision"),
+        ActualAddnlCurrencyAmount,Currency."Amount Rounding Precision" * 4,
+        ErrMessageAmountDoNotMatch);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE MakeSupplyOrdersPageHandler@271(VAR MakeSupplyOrders@1000 : Page 5526;VAR Response@1001 : Action);
+    BEGIN
+      Response := ACTION::LookupOK;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ProdJournalPageHandler@239(VAR ProductionJournal@1000 : Page 5510;VAR Response@1001 : Action);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",LibraryVariableStorage.DequeueText);
+      ItemJournalLine.FINDSET;
+      REPEAT
+        CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post Batch",ItemJournalLine);
+      UNTIL ItemJournalLine.NEXT = 0;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE CalculateStdCostMenuHandler@22(Option@1000 : Text[1024];VAR Choice@1001 : Integer;Instruction@1002 : Text[1024]);
+    BEGIN
+      // Calculate Standard Cost for All Level when Costing Method Standard.
+      Choice := 2;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@55(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@80(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE ExecuteUIHandlers@78();
+    BEGIN
+      // Generate dummy messages.
+      MESSAGE(ExpectedMsg);
+      IF CONFIRM(ExpectedCostPostingConfirm) THEN ;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [SCM]
+      Unsupported version tags:
+      IT: Unable to Execute
+
+      Test for WIP Costing:
+        1. Test Standard Costing with Flushing method - Manual and Finish Production Order.
+        2. Test Standard Costing with Flushing method - Backward and Finish Production Order.
+        3. Test Standard Costing with Flushing method - Forward and Finish Production Order. The test also includes verification
+           for Inventory Account on G/L Entry after Purchase Order has been posted as Receive only.
+        4. Test Standard Costing with Automatic Cost Posting enabled and posting Purchase Order with full Quantity to Receive.
+        5. Test Standard Costing with Automatic Cost Posting enabled and posting Purchase Order with partial Quantity to Receive.
+        6. Test Standard Costing with Automatic Cost Posting disabled and posting Purchase Order with full Quantity to Receive.
+        7. Test Standard Costing with Automatic Cost Posting disabled and posting Purchase Order with partial Quantity to Receive.
+        8. Test Average Costing with Automatic Cost Posting enabled and posting Purchase Order with full Quantity to Receive
+           and Direct Unit Cost as expected.
+        9. Test Average Costing with Automatic Cost Posting disabled and posting Purchase Order with full Quantity to Receive
+           and Direct Unit Cost as expected.
+       10. Test Average Costing with Automatic Cost Posting enabled and posting Purchase Order with full Quantity to Receive
+           and Direct Unit Cost different from expected.
+       11. Test Average Costing with Automatic Cost Posting disabled and posting Purchase Order with full Quantity to Receive
+           and Direct Unit Cost different from expected.
+       12. Test Average Costing with Automatic Cost Posting enabled and posting Purchase Order with partial Quantity to Receive
+           and Direct Unit Cost as expected.
+       13. Test Average Costing with Automatic Cost Posting disabled and posting Purchase Order with partial Quantity to Receive
+           and Direct Unit Cost as expected.
+       14. Test Average Costing with Automatic Cost Posting enabled and posting Purchase Order with partial Quantity to Receive
+           and Direct Unit Cost different from expected.
+       15. Test Average Costing with Automatic Cost Posting disabled and posting Purchase Order with partial Quantity to Receive
+           and Direct Unit Cost different from expected.
+       16. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled and Post consumption.
+       17. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Post Consumption and Output.
+       18. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Post Output and Finish Production Order.
+       19. Test Average Costing with Flushing Method Backward, Automatic Cost Posting disabled and posting Purchase Order.
+       20. Test Average Costing with Flushing Method Backward, Automatic Cost Posting disabled, Post Purchase Order and
+           Finish Production Order.
+       21. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Post Output and Post Purchase Invoice.
+       22. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Post Output, Post Purchase Invoice and
+           Finish Production Order.
+       23. Test Average Costing with Flushing Method Forward, Automatic Cost Posting enabled, Refresh Released Production Order and
+           Post Purchase Invoice.
+       24. Test Average Costing with Flushing Method Forward, Automatic Cost Posting enabled, Refresh Released Production Order and
+           Post Purchase Invoice & Finish Production Order.
+       25. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Direct Unit Cost as Expected,
+           Finish Production Order and Post Purchase Invoice without Adjust Cost Item Entries report.
+       26. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Direct Unit Cost as Expected,
+           Finish Production Order and Post Purchase Invoice.
+       27. Test Average Costing with Flushing Method Forward, Automatic Cost Posting enabled, Finish Production Order
+           and Post Purchase Invoice.
+       28. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Direct Unit Cost as Expected,
+           Output less than Expected, Finish Production Order and Post Purchase Invoice without Adjust Cost Item Entries report.
+       29. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Direct Unit Cost as Expected,
+           Output less than Expected, Finish Production Order and Post Purchase Invoice.
+       30. Test Average Costing with Flushing Method Manual, Automatic Cost Posting disabled, Direct Unit Cost as Expected,
+           Post Output, Post Purchase Invoice and Finish Production Order.
+       31. Test Average Costing with Flushing Method Forward, Automatic Cost Posting disabled, Post Purchase Invoice
+           and Finish Production Order.
+       32. Test Average Costing with Flushing Method Forward, Automatic Cost Posting enabled and Finish Production Order.
+       33. Test Average Costing with Flushing Method Manual, Automatic Cost Posting enabled, Finish Production Order
+           without Adjust Cost Item Entries report.
+       34. Test Average Costing with Flushing Method Manual, Automatic Cost Posting enabled, Output Less than expected
+           and Finish Production Order without Adjust Cost Item Entries report.
+       35. Test Average Costing with Flushing Method Manual, Automatic Cost Posting enabled, Consumption and Output different
+           than expected, Finish Production Order without Adjust Cost Item Entries report.
+       36. Test Average Costing with Flushing Method Forward, Automatic Cost Posting enabled, Replace Production Component
+           and Finish Production Order without Adjust Cost Item Entries report.
+       37. Test Average Costing with Flushing Method Manual, Automatic Cost Posting enabled, Add New Routing and Finish Production Order
+           without Adjust Cost Item Entries report.
+       38. Test Standard Costing for Additional Currency with Flushing method - Forward and Finish Production.
+       39. Test Standard Costing for Additional Currency with Flushing method - Manual and Finish Production.
+       40. Test Standard Costing for Additional Currency with Flushing method - Manual and Finish Production
+           with Different Consumption.
+       41. Test Standard Costing for Additional Currency with Flushing method - Manual and Finish Production
+           with Different Consumption and Output.
+       42. Test Standard Costing for Additional Currency with Flushing method - Forward and Finish Production
+           with new Production Order component.
+       43. Test Standard Costing for Additional Currency with Flushing method - Manual and Finish Production with new Routing.
+       44. Test Standard Costing for Additional Currency with Automatic Cost Posting enabled and posting Purchase Order
+           with full Quantity to Receive.
+       45. Test Standard Costing for Additional Currency with Automatic Cost Posting enabled and posting Purchase Order
+           with partial Quantity to Receive.
+       46. Test Standard Costing for Additional Currency with Automatic Cost Posting disabled and posting Purchase Order
+           with full Quantity to Receive.
+       47. Test Standard Costing for Additional Currency with Automatic Cost Posting disabled and posting Purchase Order
+           with partial Quantity to Receive.
+       48. Test Average Costing for Additional Currency with Automatic Cost Posting enabled
+           and posting Purchase Order with full Quantity to Receive and Direct Unit Cost as expected.
+       49. Test Average Costing for Additional Currency with Automatic Cost Posting disabled
+           and posting Purchase Order with full Quantity to Receive and Direct Unit Cost as expected.
+       50. Test Average Costing for Additional Currency with Automatic Cost Posting enabled
+           and posting Purchase Order with full Quantity to Receive and Direct Unit Cost different from expected.
+       51. Test Average Costing for Additional Currency with Automatic Cost Posting disabled
+           and posting Purchase Order with full Quantity to Receive and Direct Unit Cost different from expected.
+       52. Test Average Costing for Additional Currency with Automatic Cost Posting enabled
+           and posting Purchase Order with partial Quantity to Receive and Direct Unit Cost as expected.
+       53. Test Average Costing for Additional Currency with Automatic Cost Posting disabled
+           and posting Purchase Order with partial Quantity to Receive and Direct Unit Cost as expected.
+       54. Test Average Costing for Additional Currency with Automatic Cost Posting enabled
+           and posting Purchase Order with partial Quantity to Receive and Direct Unit Cost different from expected.
+       55. Test Average Costing for Additional Currency with Automatic Cost Posting disabled
+           and posting Purchase Order with partial Quantity to Receive and Direct Unit Cost different from expected.
+
+      This test code unit replaces Manual Test Suite (19684) from 1 to 43.
+
+      TFS_TS_ID = 19684
+      Covers Test cases:
+        TC0312 TFS_TC_ID = 32227 and 12617
+        TC312A TFS_TC_ID = 32232 and 12622
+        TC0311 TFS_TC_ID = 32233 and 12623
+        TC0321 TFS_TC_ID = 32231 and 12621
+        TC0322 TFS_TC_ID = 32235 and 12625
+        TC0323 TFS_TC_ID = 32229 and 12619
+        TC1313 TFS_TC_ID = 32226 and 12616
+
+      This test code unit replaces Manual Test Suite (20301) from 44 to 47.
+
+      TFS_TS_ID = 20301
+      Covers Test cases:
+        TC1311 TFS_TC_ID = 11734,11735,11736,11737
+
+      This test code unit replaces Manual Test Suite (20303) from 48 to 55.
+
+      TFS_TS_ID = 20303
+      Covers Test cases:
+        TC1321 TFS_TC_ID = 3651,3652,3653,3654,3655,3656,3657,3658
+    }
+    END.
+  }
+}
+

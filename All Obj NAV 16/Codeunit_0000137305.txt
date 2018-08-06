@@ -1,0 +1,2353 @@
+OBJECT Codeunit 137305 SCM Warehouse Reports
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LocationWhite@1033 : Record 14;
+      Assert@1002 : Codeunit 130000;
+      LibraryAssembly@1003 : Codeunit 132207;
+      LibraryCosting@1025 : Codeunit 132200;
+      LibraryWarehouse@1009 : Codeunit 132204;
+      LibraryInventory@1016 : Codeunit 132201;
+      LibraryManufacturing@1017 : Codeunit 132202;
+      LibraryReportDataset@1038 : Codeunit 131007;
+      LibraryVariableStorage@1032 : Codeunit 131004;
+      LibraryPurchase@1039 : Codeunit 130512;
+      LibrarySales@1028 : Codeunit 130509;
+      LibraryUtility@1010 : Codeunit 131000;
+      LibraryRandom@1006 : Codeunit 130440;
+      isInitialized@1000 : Boolean;
+      ValidationErr@1001 : TextConst 'ENU=%1 must be %2 in %3.';
+      CombineShipmentMsg@1024 : TextConst 'ENU=The shipments are now combined';
+      JournalLineRegistered@1027 : TextConst 'ENU=The journal lines were successfully registered.';
+      WantToRegisterConfirm@1034 : TextConst 'ENU=Do you want to register the journal lines?';
+      ErrRecordMissing@1029 : TextConst 'ENU=The record count must match.';
+      SHIP@1030 : TextConst 'ENU=SHIP';
+      BULK@1031 : TextConst 'ENU=BULK';
+      InvtPutAwayCreated@1036 : TextConst 'ENU=Number of Invt. Put-away activities created';
+      CombineShipmentErr@1004 : TextConst 'ENU=Incorrect Sales Invoice Line Type';
+
+    [Test]
+    [HandlerFunctions(PickingListRequestPageHandler)]
+    PROCEDURE PickingList@37();
+    VAR
+      Item@1002 : Record 27;
+      Location@1003 : Record 14;
+      PurchaseHeader@1006 : Record 38;
+      SalesHeader@1004 : Record 36;
+      WarehouseActivityHeader@1005 : Record 5766;
+      WarehouseActivityLine@1000 : Record 5767;
+      WarehouseEmployee@1001 : Record 7301;
+      WarehouseShipmentNo@1007 : Code[20];
+    BEGIN
+      // Setup : Create Setup to generate Pick for a Item.
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      CreateAndPostWarehouseReceiptFromPurchaseOrder(PurchaseHeader,Location.Code,Item."No.",LibraryRandom.RandDec(100,2));
+      RegisterPutAway(Location.Code,PurchaseHeader."No.");
+      CreateAndReleaseSalesOrder(SalesHeader,Location.Code,Item."No.",LibraryRandom.RandDec(10,2) + 5);
+      CreateWhseShipmentAndPick(WarehouseShipmentNo,SalesHeader);
+
+      // Exercise: Generate the Picking List. Value used is important for test.
+      COMMIT;
+      WarehouseActivityHeader.SETRANGE("Location Code",Location.Code);
+      REPORT.RUN(REPORT::"Picking List",TRUE,FALSE,WarehouseActivityHeader);
+
+      // Verify: Source No shown in Picking List Report is equal to the Source No shown in Warehouse Activity Line Table.
+      FindWarehouseActivityLine(WarehouseActivityLine,WarehouseActivityLine."Source Document"::"Sales Order",SalesHeader."No.",
+        WarehouseActivityLine."Activity Type"::Pick);
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.AssertElementWithValueExists('No_WhseActivHeader',WarehouseActivityLine."No.");
+      LibraryReportDataset.SetRange('SourceNo_WhseActLine',SalesHeader."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('ItemNo_WhseActLine',WarehouseActivityLine."Item No.");
+      LibraryReportDataset.AssertCurrentRowValue('QtyBase_WhseActLine',WarehouseActivityLine."Qty. (Base)");
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE GetInboundSourceDocuments@25();
+    VAR
+      WarehouseEmployee@1001 : Record 7301;
+      WhseWorksheetName@1006 : Record 7327;
+      WhseWorksheetLine@1005 : Record 7326;
+      WhsePutAwayRqst@1003 : Record 7324;
+      Location@1000 : Record 14;
+      Item@1002 : Record 27;
+      PurchaseHeader@1012 : Record 38;
+      WhseWorksheetTemplate@1004 : Record 7328;
+    BEGIN
+      // Setup: Create Warehouse Setup, Create and Release Purchase Order, Post Warehouse Receipt.
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,TRUE);
+      CreateItem(Item);
+      CreateAndPostWarehouseReceiptFromPurchaseOrder(PurchaseHeader,Location.Code,Item."No.",LibraryRandom.RandDec(100,2));
+
+      // Exercise: Run Get Inbound Source Documents Batch Report.
+      LibraryWarehouse.SelectWhseWorksheetTemplate(WhseWorksheetTemplate,WhseWorksheetTemplate.Type::"Put-away");
+      LibraryWarehouse.SelectWhseWorksheetName(WhseWorksheetName,WhseWorksheetTemplate.Name,Location.Code);
+      WhsePutAwayRqst.SETRANGE("Completely Put Away",FALSE);
+      WhsePutAwayRqst.SETRANGE("Location Code",Location.Code);
+      LibraryWarehouse.GetInboundSourceDocuments(WhsePutAwayRqst,WhseWorksheetName,Location.Code);
+
+      // Verify: Check Warehouse Work Sheet Line have same Item No.
+      FindWhseWorkSheetLine(WhseWorksheetLine,WhseWorksheetName);
+      Assert.AreEqual(
+        Item."No.",WhseWorksheetLine."Item No.",
+        STRSUBSTNO(ValidationErr,WhseWorksheetLine.FIELDCAPTION("Item No."),Item."No.",WhseWorksheetLine.TABLECAPTION));
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(PutAwayListRequestPageHandler)]
+    PROCEDURE PutAwayList@30();
+    VAR
+      WarehouseEmployee@1001 : Record 7301;
+      Item@1002 : Record 27;
+      PurchaseHeader@1012 : Record 38;
+      Location@1005 : Record 14;
+      WarehouseActivityHeader@1000 : Record 5766;
+      WarehouseActivityLine@1003 : Record 5767;
+    BEGIN
+      // Setup: Create Warehouse Setup, Create and Release Purchase Order, Post Warehouse Receipt.
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      CreateAndPostWarehouseReceiptFromPurchaseOrder(PurchaseHeader,Location.Code,Item."No.",LibraryRandom.RandDec(100,2));
+
+      // Exercise: Run Put-away List report.
+      COMMIT;
+      WarehouseActivityHeader.SETRANGE("Location Code",Location.Code);
+      REPORT.RUN(REPORT::"Put-away List",TRUE,FALSE,WarehouseActivityHeader);
+
+      // Verify.
+      FindWarehouseActivityLine(WarehouseActivityLine,WarehouseActivityLine."Source Document"::"Purchase Order",PurchaseHeader."No.",
+        WarehouseActivityLine."Activity Type"::"Put-away");
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.AssertElementWithValueExists('No_WhseActivHeader',WarehouseActivityLine."No.");
+      LibraryReportDataset.SetRange('ItemNo1_WhseActivLine',WarehouseActivityLine."Item No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('SrcNo_WhseActivLine',PurchaseHeader."No.");
+      LibraryReportDataset.AssertCurrentRowValue('QtyBase_WhseActivLine',WarehouseActivityLine."Qty. (Base)");
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryPutAwayListRequestPageHandler)]
+    PROCEDURE InventoryPutAwayList@16();
+    VAR
+      WarehouseEmployee@1033 : Record 7301;
+      Item@1032 : Record 27;
+      PurchaseHeader@1031 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      Location@1029 : Record 14;
+    BEGIN
+      // Setup:  Create Warehouse Setup, Create and Release Purchase Order.
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      CreateAndReleasePurchaseOrder(PurchaseHeader,Location.Code,Item."No.",LibraryRandom.RandDec(10,2));
+
+      // Exercise: Run Inventory Put-away List report.
+      COMMIT;
+      Item.SETRANGE("No.",Item."No.");
+      REPORT.RUN(REPORT::"Inventory Put-away List",TRUE,FALSE,Item);
+
+      // Verify.
+      PurchaseLine.SETRANGE("Document Type",PurchaseHeader."Document Type");
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchaseLine.FINDFIRST;
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('DocumentNo_PurchLine',PurchaseHeader."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('No_Item',Item."No.");
+      LibraryReportDataset.AssertCurrentRowValue('QtytoReceive_PurchLine',PurchaseLine."Qty. to Receive");
+      LibraryReportDataset.AssertCurrentRowValue('LocationCode_PurchLine',PurchaseLine."Location Code");
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(WhseReceiptListRequestPageHandler)]
+    PROCEDURE WhseReceipt@1();
+    VAR
+      WarehouseEmployee@1004 : Record 7301;
+      Location@1001 : Record 14;
+      Item@1002 : Record 27;
+      PurchaseHeader@1003 : Record 38;
+      WarehouseReceiptHeader@1008 : Record 7316;
+      WarehouseReceiptNo@1000 : Code[20];
+      PurchaseQuantity@1011 : Decimal;
+    BEGIN
+      // Setup: Create Warehouse Setup, Create and Release Purchase Order, Create Warehouse Receipt From Purchase Order.
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      PurchaseQuantity := LibraryRandom.RandDec(10,2);
+      CreateAndReleasePurchaseOrder(PurchaseHeader,Location.Code,Item."No.",PurchaseQuantity);
+      WarehouseReceiptNo := FindWarehouseReceiptNo;
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+
+      // Exercise: Run Whse. - Receipt report.
+      COMMIT;
+      WarehouseReceiptHeader.SETRANGE("No.",WarehouseReceiptNo);
+      REPORT.RUN(REPORT::"Whse. - Receipt",TRUE,FALSE,WarehouseReceiptHeader);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('SourceNo_WhseRcptLine',PurchaseHeader."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('Quantity_WhseRcptLine',PurchaseQuantity);
+      LibraryReportDataset.AssertCurrentRowValue('BinCode_WhseRcptLine',WarehouseReceiptHeader."Bin Code");
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE CalculateBinReplenishment@15();
+    VAR
+      WarehouseEmployee@1033 : Record 7301;
+      Location@1029 : Record 14;
+      Bin@1003 : Record 7354;
+      BinContent@1005 : Record 7302;
+      Item@1000 : Record 27;
+      WhseWorksheetTemplate@1011 : Record 7328;
+      WarehouseJournalBatch@1004 : Record 7310;
+      WhseWorksheetName@1012 : Record 7327;
+      WhseWorksheetLine@1001 : Record 7326;
+      WarehouseJournalLine@1009 : Record 7311;
+      Zone@1002 : Record 7300;
+      Quantity@1007 : Decimal;
+    BEGIN
+      // Setup : Create Warehouse Setup, Zone, Bin, Bin Content And Update Inventory.
+      Initialize;
+      CreateFullWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      UpdateRankingOnAllBins(Location.Code);
+      Quantity := LibraryRandom.RandDec(100,2);
+      Zone.GET(Location.Code,'PICK');
+      CreateBinContentForBin(Zone,Item,Quantity);
+      FindFirstBinRankingForZone(Bin,'BULK',Location.Code);  // BULK Zone.
+      CreateWhseJnlLine(
+        WarehouseJournalLine,
+        Location.Code,Bin."Zone Code",
+        Bin.Code,
+        Item."No.",
+        Quantity,
+        WarehouseJournalBatch."Template Type"::Item);
+      LibraryVariableStorage.Enqueue(WantToRegisterConfirm);  // Enqueue for ConfirmHandler.
+      LibraryVariableStorage.Enqueue(JournalLineRegistered);  // Enqueue for MessageHandler.
+      LibraryWarehouse.RegisterWhseJournalLine(
+        WarehouseJournalLine."Journal Template Name",WarehouseJournalLine."Journal Batch Name",Location.Code,FALSE);
+
+      // Exercise : Run Calculate Bin Replenishment.
+      LibraryWarehouse.SelectWhseWorksheetTemplate(WhseWorksheetTemplate,WhseWorksheetTemplate.Type::Movement);
+      LibraryWarehouse.SelectWhseWorksheetName(WhseWorksheetName,WhseWorksheetTemplate.Name,Location.Code);
+      BinContent.SETRANGE("Location Code",Location.Code);
+      LibraryWarehouse.CalculateBinReplenishment(BinContent,WhseWorksheetName,Location.Code,TRUE,FALSE,FALSE);
+
+      // Verify : Verify From Bin Code And To Bin code with Created Warehouse Worksheet Line.
+      FindWhseWorkSheetLine(WhseWorksheetLine,WhseWorksheetName);
+      FindBinContent(BinContent,Location.Code,Item."No.");
+      Bin.GET(Location.Code,BinContent."Bin Code");
+      Assert.AreEqual(
+        Bin.Code,WhseWorksheetLine."From Bin Code",STRSUBSTNO(ValidationErr,Bin.FIELDCAPTION(Code),Bin.Code,Bin.TABLECAPTION));
+      FindLastRankingBin(Bin,Location.Code,Zone.Code);
+      Assert.AreEqual(
+        Bin.Code,WhseWorksheetLine."To Bin Code",STRSUBSTNO(ValidationErr,Bin.FIELDCAPTION(Code),Bin.Code,Bin.TABLECAPTION));
+      Assert.AreEqual(
+        Quantity,WhseWorksheetLine."Qty. to Handle",STRSUBSTNO(ValidationErr,'Quantity',Quantity,'Movement Worksheet'));
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler,WhseAdjustmentBinRequestPageHandler)]
+    PROCEDURE WhseAdjustmentBin@19();
+    VAR
+      Bin@1003 : Record 7354;
+      WarehouseEmployee@1019 : Record 7301;
+      Item@1018 : Record 27;
+      Location@1016 : Record 14;
+      WarehouseEntry@1020 : Record 7312;
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Setup: Create Warehouse Setup, Zone, Bin, Bin Content And Update Inventory, Random Values Important.
+      Initialize;
+      CreateFullWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(50,2);
+      CreateAndRegisterWhseJnlLine(Location,Item."No.",Quantity);
+
+      // Exercise: Run Whse. Adjustment Bin Report.
+      WarehouseEntry.SETRANGE("Location Code",Location.Code);
+      REPORT.RUN(REPORT::"Whse. Adjustment Bin",TRUE,FALSE,WarehouseEntry);
+
+      // Verify: Check Item No. Exit On the report.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('WarehouseEntryItemNo',Item."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('WarehouseEntryLocCode',Location.Code);
+      Bin.GET(Location.Code,Location."Adjustment Bin Code");
+      LibraryReportDataset.AssertCurrentRowValue('WarehouseEntryBinCode',Bin.Code);
+      LibraryReportDataset.AssertCurrentRowValue('WhseEntryQtyBase',-Quantity);
+      LibraryReportDataset.AssertCurrentRowValue('WhseEntryQuantity',-Quantity);
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(WarehouseBinListReportHandler)]
+    PROCEDURE WarehouseBinList@11();
+    VAR
+      Location@1000 : Record 14;
+      WarehouseEmployee@1001 : Record 7301;
+      Bin@1008 : Record 7354;
+    BEGIN
+      // Setup: Create Warehouse Setup, Zone, Bin.
+      Initialize;
+      CreateFullWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      UpdateRankingOnAllBins(Location.Code);
+
+      // Exercise: Run Warehouse Bin List Report.
+      COMMIT;
+      Bin.SETRANGE("Location Code",Location.Code);
+      Bin.SETRANGE("Adjustment Bin",FALSE);
+      REPORT.RUN(REPORT::"Warehouse Bin List",TRUE,FALSE,Bin);
+
+      // Verify: Check Bin Ranking with generated report.
+      LibraryReportDataset.LoadDataSetFile;
+      Bin.SETRANGE("Location Code",Location.Code);
+      Bin.SETRANGE("Adjustment Bin",FALSE);
+      Bin.FINDSET;
+      REPEAT
+        LibraryReportDataset.Reset;
+        LibraryReportDataset.SetRange('Code_Bin',Bin.Code);
+        LibraryReportDataset.GetNextRow;
+        LibraryReportDataset.AssertCurrentRowValue('LocationCode_Bin',Location.Code);
+        LibraryReportDataset.AssertCurrentRowValue('BinRanking_Bin',Bin."Bin Ranking");
+        LibraryReportDataset.AssertCurrentRowValue('BinTypeCode_Code',Bin."Bin Type Code");
+      UNTIL Bin.NEXT = 0;
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE GetOutboundSourceDocuments@12();
+    VAR
+      WarehouseEmployee@1001 : Record 7301;
+      Location@1009 : Record 14;
+      Item@1002 : Record 27;
+      SalesHeader@1004 : Record 36;
+      WhseWorksheetTemplate@1017 : Record 7328;
+      WhseWorksheetName@1016 : Record 7327;
+      WhseWorksheetLine@1019 : Record 7326;
+      WhsePickRequest@1008 : Record 7325;
+    BEGIN
+      // Setup: Create Warehouse Setup, Create and Release Sales Order, Release Warehouse Shipment.
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      CreateAndReleaseSalesOrder(SalesHeader,Location.Code,Item."No.",LibraryRandom.RandDec(10,2));
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      ReleaseWarehouseShipment(Location.Code);
+
+      // Exercise: Run Get Outbound Source Documents Batch Report.
+      LibraryWarehouse.SelectWhseWorksheetTemplate(WhseWorksheetTemplate,WhseWorksheetTemplate.Type::Pick);
+      LibraryWarehouse.SelectWhseWorksheetName(WhseWorksheetName,WhseWorksheetTemplate.Name,Location.Code);
+      WhsePickRequest.SETRANGE(Status,WhsePickRequest.Status::Released);
+      WhsePickRequest.SETRANGE("Completely Picked",FALSE);
+      WhsePickRequest.SETRANGE("Location Code",Location.Code);
+      LibraryWarehouse.GetOutboundSourceDocuments(WhsePickRequest,WhseWorksheetName,Location.Code);
+
+      // Verify: Check Warehouse Worksheet Line have same Item No.
+      FindWhseWorkSheetLine(WhseWorksheetLine,WhseWorksheetName);
+      Assert.AreEqual(
+        Item."No.",WhseWorksheetLine."Item No.",
+        STRSUBSTNO(ValidationErr,WhseWorksheetLine.FIELDCAPTION("Item No."),Item."No.",WhseWorksheetLine.TABLECAPTION));
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MovementListRequestPageHandler)]
+    PROCEDURE WarehouseMovement@32();
+    VAR
+      WarehouseActivityLine@1001 : Record 5767;
+      WarehouseEmployee@1019 : Record 7301;
+      Location@1016 : Record 14;
+      WarehouseActivityHeader@1020 : Record 5766;
+      PurchaseHeader@1006 : Record 38;
+      Item@1005 : Record 27;
+      Zone@1000 : Record 7300;
+      WhseWorksheetLine@1002 : Record 7326;
+    BEGIN
+      // Setup: Create Warehouse Setup, Zone, Bin, Bin Content And Update Inventory, Calculate Bin Replenishment and Create Movement.
+      Initialize;
+      CreateFullWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      Zone.GET(Location.Code,'PICK');
+      CreateBinContentForBin(Zone,Item,100);
+      UpdateRankingOnAllBins(Location.Code);
+      CreateAndPostWarehouseReceiptFromPurchaseOrder(PurchaseHeader,Location.Code,Item."No.",LibraryRandom.RandDec(100,2));
+      RegisterPutAway(Location.Code,PurchaseHeader."No.");
+
+      // Create Movement Worksheet with Movement.
+      CreateMovementWorksheetLine(WhseWorksheetLine,Location.Code,Item."No.");
+      LibraryWarehouse.WhseSourceCreateDocument(WhseWorksheetLine,0,FALSE,FALSE,FALSE);
+
+      // Exercise: Run Movement List Report.
+      WarehouseActivityHeader.SETRANGE("Location Code",Location.Code);
+      REPORT.RUN(REPORT::"Movement List",TRUE,FALSE,WarehouseActivityHeader);
+
+      // Verify: Check Bin Code with Generated report.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyWarehouseActivityLine(Item."No.",Location.Code,WarehouseActivityLine."Action Type"::Take);
+      VerifyWarehouseActivityLine(Item."No.",Location.Code,WarehouseActivityLine."Action Type"::Place);
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE WhseCalculateInventory@20();
+    VAR
+      Location@1004 : Record 14;
+      WarehouseEmployee@1003 : Record 7301;
+      PurchaseHeader@1002 : Record 38;
+      Item@1001 : Record 27;
+      Quantity@1008 : Decimal;
+    BEGIN
+      // Setup: Create Warehouse Setup, Zone, Bin, Bin Content And Update Inventory.
+      Initialize;
+      CreateFullWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      UpdateRankingOnAllBins(Location.Code);
+      Quantity := LibraryRandom.RandDec(10,2) + 100;  // Value used for quantity more than maximum Bin Content quntity.
+      CreateAndPostWarehouseReceiptFromPurchaseOrder(PurchaseHeader,Location.Code,Item."No.",Quantity);
+      RegisterPutAway(Location.Code,PurchaseHeader."No.");
+
+      // Exercise: Run Whse. Calculate Inventory Report.
+      RunWhseCalculateInventoryReport(Location.Code,Item."No.");
+
+      // Verify: Check Quantity with generated Warehouse Journal Line.
+      FindAndVerifyWhseJnlLine(Location.Code,Quantity);
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(TransferOrderRequestPageHandler)]
+    PROCEDURE TransferOrder@49();
+    VAR
+      FromLocation@1007 : Record 14;
+      ToLocation@1005 : Record 14;
+      IntransitLocation@1003 : Record 14;
+      PurchaseHeader@1002 : Record 38;
+      TransferLine@1010 : Record 5741;
+      Item@1001 : Record 27;
+      TransferHeader@1006 : Record 5740;
+      TransferQuantity@1004 : Decimal;
+    BEGIN
+      // Setup: Create Item, Location and Transfer Order to New Location.
+      Initialize;
+      CreateTransferOrderLocations(FromLocation,ToLocation,IntransitLocation);
+      CreateItem(Item);
+      CreatePurchaseOrder(
+        PurchaseHeader,FromLocation.Code,Item."No.",LibraryRandom.RandDec(10,2) + 100,LibraryRandom.RandDec(10,2));
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      TransferQuantity := LibraryRandom.RandDec(5,2);
+      CreateAndRealeaseTransferOrder(
+        TransferHeader,TransferLine,FromLocation.Code,ToLocation.Code,IntransitLocation.Code,Item."No.",TransferQuantity);
+
+      // Exercise: Run Transfer Order report.
+      COMMIT;
+      TransferHeader.SETRANGE("Transfer-to Code",TransferHeader."Transfer-to Code");
+      REPORT.RUN(REPORT::"Transfer Order",TRUE,FALSE,TransferHeader);
+
+      // Verify: Check Transfer Order Quantity equals Quantity in report.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_TransLine',Item."No.",'Qty_TransLine',TransferQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(TransferShipmentRequestPageHandler)]
+    PROCEDURE TransferShipment@47();
+    VAR
+      Item@1001 : Record 27;
+      TransferHeader@1006 : Record 5740;
+      TransferShipmentHeader@1008 : Record 5744;
+      FromLocation@1007 : Record 14;
+      TransferLine@1011 : Record 5741;
+      ToLocation@1003 : Record 14;
+      IntransitLocation@1002 : Record 14;
+      PurchaseHeader@1000 : Record 38;
+      TransferQuantity@1004 : Decimal;
+    BEGIN
+      // Setup: Create Item, Location and Transfer Order to New Location And Post Transfer Shipment.
+      Initialize;
+      CreateTransferOrderLocations(FromLocation,ToLocation,IntransitLocation);
+      CreateItem(Item);
+      CreatePurchaseOrder(
+        PurchaseHeader,FromLocation.Code,Item."No.",LibraryRandom.RandDec(10,2) + 100,LibraryRandom.RandDec(10,2));
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      TransferQuantity := LibraryRandom.RandDec(5,2);
+      CreateAndRealeaseTransferOrder(
+        TransferHeader,TransferLine,FromLocation.Code,ToLocation.Code,IntransitLocation.Code,Item."No.",TransferQuantity);
+
+      LibraryWarehouse.PostTransferOrder(TransferHeader,TRUE,FALSE);  // Post Transfer Shipment.
+
+      // Exercise: Run Transfer Shipment  report.
+      TransferShipmentHeader.SETRANGE("Transfer-to Code",TransferHeader."Transfer-to Code");
+      REPORT.RUN(REPORT::"Transfer Shipment",TRUE,FALSE,TransferShipmentHeader);
+
+      // Verify: Check Transfer Shipment Quantity equals Quantity in report.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_TransShptLine',Item."No.",'Qty_TransShptLine',TransferQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(TransferReceiptRequestPageHandler)]
+    PROCEDURE TransferReceipt@43();
+    VAR
+      TransferReceiptHeader@1008 : Record 5746;
+      Item@1016 : Record 27;
+      TransferHeader@1015 : Record 5740;
+      TransferLine@1000 : Record 5741;
+      FromLocation@1005 : Record 14;
+      ToLocation@1004 : Record 14;
+      IntransitLocation@1003 : Record 14;
+      PurchaseHeader@1002 : Record 38;
+      TransferQuantity@1011 : Decimal;
+    BEGIN
+      // Setup: Create Item, Location and Transfer Order to New Location And Post Transfer Receipt.
+      Initialize;
+      CreateTransferOrderLocations(FromLocation,ToLocation,IntransitLocation);
+      CreateItem(Item);
+      CreatePurchaseOrder(
+        PurchaseHeader,FromLocation.Code,Item."No.",LibraryRandom.RandDec(10,2) + 100,LibraryRandom.RandDec(10,2));
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      TransferQuantity := LibraryRandom.RandDec(5,2);
+      CreateAndRealeaseTransferOrder(
+        TransferHeader,TransferLine,FromLocation.Code,ToLocation.Code,IntransitLocation.Code,Item."No.",TransferQuantity);
+      LibraryWarehouse.PostTransferOrder(TransferHeader,TRUE,TRUE);  // Post Transfer Shipment And Transfer Receipt.
+
+      // Exercise: Run Transfer Receipt report.
+      TransferReceiptHeader.SETRANGE("Transfer-to Code",TransferHeader."Transfer-to Code");
+      REPORT.RUN(REPORT::"Transfer Receipt",TRUE,FALSE,TransferReceiptHeader);
+
+      // Verify: Check Transfer Receipt Quantity equals Quantity in report.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_TransRcpLine',Item."No.",'Qty_TransRcpLine',TransferQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(WhsePostedReceiptRequestPageHandler)]
+    PROCEDURE PostedWarehouseReceipt@61();
+    VAR
+      Item@1002 : Record 27;
+      Location@1003 : Record 14;
+      PurchaseHeader@1006 : Record 38;
+      WarehouseEmployee@1001 : Record 7301;
+      PostedWhseReceiptHeader@1000 : Record 7318;
+      WarehouseReceiptNo@1008 : Code[20];
+      Quantity@1009 : Decimal;
+    BEGIN
+      // Setup : Create Setup to generate Warehouse receipt;
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndReleasePurchaseOrder(PurchaseHeader,Location.Code,Item."No.",Quantity);
+      WarehouseReceiptNo := FindWarehouseReceiptNo;
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      FindAndUpdateWarehouseReceipt(WarehouseReceiptNo,Item."No.",Quantity / 2);
+      PostWarehouseReceipt(WarehouseReceiptNo);
+      FindPostedWarehouseReceiptHeader(PostedWhseReceiptHeader,WarehouseReceiptNo,Location.Code);
+
+      // Exercise: Run Posted Receipt report.
+      COMMIT;
+      REPORT.RUN(REPORT::"Whse. - Posted Receipt",TRUE,FALSE,PostedWhseReceiptHeader);
+
+      // Verify: Check Quantity To Receive, Item No. Quantity exist in Warehouse Posted Receipt Report.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_PostedWhseRcpLine',Item."No.",'Qty_PostedWhseRcpLine',Quantity / 2);
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryPickingListRequestPageHandler)]
+    PROCEDURE InventoryPickingList@60();
+    VAR
+      Item@1002 : Record 27;
+      Location@1003 : Record 14;
+      PurchaseHeader@1006 : Record 38;
+      SalesHeader@1004 : Record 36;
+      WarehouseEmployee@1001 : Record 7301;
+      WarehouseShipmentNo@1007 : Code[20];
+      Quantity@1009 : Decimal;
+    BEGIN
+      // Setup : Create Setup to generate Pick for a Item.
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndPostWarehouseReceiptFromPurchaseOrder(PurchaseHeader,Location.Code,Item."No.",Quantity);
+      RegisterPutAway(Location.Code,PurchaseHeader."No.");
+      CreateAndReleaseSalesOrder(SalesHeader,Location.Code,Item."No.",Quantity / 2);
+      CreateWhseShipmentAndPick(WarehouseShipmentNo,SalesHeader);
+
+      // Exercise: Generate the Picking List. Value used is important for test.
+      COMMIT;
+      Item.SETRANGE("No.",Item."No.");
+      REPORT.RUN(REPORT::"Inventory Picking List",TRUE,FALSE,Item);
+
+      // Verify: Source No ,ItemNo and Location shown in Inventory Picking List Report is equal to the Sales Order.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('No_Item',Item."No.",'DocumentNo_SalesLine',SalesHeader."No.");
+      LibraryReportDataset.AssertCurrentRowValue('LocationCode_SalesLine',Location.Code);
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(WhseShipmentRequestPageHandler)]
+    PROCEDURE WarehouseShipment@55();
+    VAR
+      Item@1002 : Record 27;
+      Location@1003 : Record 14;
+      SalesHeader@1004 : Record 36;
+      WarehouseShipmentHeader@1007 : Record 7320;
+      WarehouseEmployee@1001 : Record 7301;
+      WarehouseShipmentHeaderNo@1008 : Code[20];
+      Quantity@1009 : Decimal;
+    BEGIN
+      // Setup : Create Setup to generate Pick for a Item.
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(10,2) + 5;
+      CreateAndReleaseSalesOrder(SalesHeader,Location.Code,Item."No.",Quantity);
+      WarehouseShipmentHeaderNo := FindWarehouseShipmentNo;
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+
+      // Exercise: Generate the Picking List. Value used is important for test.
+      COMMIT;
+      WarehouseShipmentHeader.SETRANGE("No.",WarehouseShipmentHeaderNo);
+      REPORT.RUN(REPORT::"Whse. - Shipment",TRUE,FALSE,WarehouseShipmentHeader);
+
+      // Verify: Item No, Quantity and Location shown in Warehouse Shipment Report is equal to the Sales Order.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_WhseShptLine',Item."No.",'Qty_WhseShptLine',Quantity);
+      LibraryReportDataset.AssertCurrentRowValue('LocCode_WhseShptLine',Location.Code);
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(WhseShipmentStatusRequestPageHandler)]
+    PROCEDURE WhseShipmentStatus@50();
+    VAR
+      Item@1002 : Record 27;
+      Location@1003 : Record 14;
+      SalesHeader@1004 : Record 36;
+      WarehouseShipmentHeader@1009 : Record 7320;
+      WarehouseEmployee@1001 : Record 7301;
+      WarehouseShipmentNo@1010 : Code[20];
+      Quantity@1007 : Decimal;
+    BEGIN
+      // Setup : Create Setup to generate Pick for a Item.
+      Initialize;
+      CreateWarehouseSetup(Location,WarehouseEmployee,FALSE);
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(10,2) + 5;
+      CreateAndReleaseSalesOrder(SalesHeader,Location.Code,Item."No.",Quantity);
+      WarehouseShipmentNo := FindWarehouseShipmentNo;
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+
+      // Exercise: Generate the Picking List. Value used is important for test.
+      COMMIT;
+      WarehouseShipmentHeader.SETRANGE("No.",WarehouseShipmentNo);
+      REPORT.RUN(REPORT::"Whse. Shipment Status",TRUE,FALSE,WarehouseShipmentHeader);
+
+      // Verify: Source No, Item No and Location shown in Warehouse Shipment Status Report is equal to the Sales Order.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_WhseShipmentLine',Item."No.",'SourceNo_WhseShipmentLine',SalesHeader."No.");
+      LibraryReportDataset.AssertCurrentRowValue('LocCode_WhseShipmentLine',Location.Code);
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CombineShipment@65();
+    VAR
+      SalesHeader@1013 : Record 36;
+      Customer@1003 : Record 18;
+      Item@1002 : Record 27;
+      SalesLine@1007 : Record 37;
+      Count@1008 : Integer;
+    BEGIN
+      // Setup : Create Customer, Item, Multiple Sales Order and Post Shipment.
+      Initialize;
+      CreateCustomer(Customer);
+      CreateItem(Item);
+      Count := LibraryRandom.RandInt(10);
+      CreateAndPostSalesOrder(Customer."No.",Item."No.",Count,LibraryRandom.RandDec(10,2));
+
+      // Exercise : Run Combine Sales Shipments With Option Post Invoice FALSE.
+      RunCombineShipments(Customer."No.",FALSE,FALSE,FALSE,FALSE);
+
+      // Verify : Check That Sales Invoice Created after Run Batch Report with Option Post Sales FALSE.
+      SalesHeader.SETRANGE("Sell-to Customer No.",Customer."No.");
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Invoice);
+      SalesHeader.FINDFIRST;
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Invoice);
+      Assert.AreEqual(Count,SalesLine.COUNT,ErrRecordMissing);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CombineShipmentPostInvoice@45();
+    VAR
+      Customer@1003 : Record 18;
+      Item@1002 : Record 27;
+      SalesInvoiceHeader@1004 : Record 112;
+      SalesInvoiceLine@1007 : Record 113;
+      Count@1008 : Integer;
+    BEGIN
+      // Setup : Create Customer, Item, Multiple Sales Order and Post Shipment.
+      Initialize;
+      CreateCustomer(Customer);
+      CreateItem(Item);
+      Count := LibraryRandom.RandInt(10);
+      CreateAndPostSalesOrder(Customer."No.",Item."No.",Count,LibraryRandom.RandDec(10,2));
+      // Exercise : Run Combine Sales Shipments With Option Post Invoice TRUE.
+      RunCombineShipments(Customer."No.",FALSE,TRUE,FALSE,FALSE);
+
+      // Verify : Check That Posted Sales Invoice Created after Run Batch Report with Option Post Invoice TRUE.
+      SalesInvoiceHeader.SETRANGE("Sell-to Customer No.",Customer."No.");
+      SalesInvoiceHeader.FINDFIRST;
+      SalesInvoiceLine.SETRANGE("Document No.",SalesInvoiceHeader."No.");
+      SalesInvoiceLine.SETRANGE(Type,SalesInvoiceLine.Type::Item);
+      Assert.AreEqual(Count,SalesInvoiceLine.COUNT,ErrRecordMissing);
+    END;
+
+    [Test]
+    [HandlerFunctions(WhsePhysInventoryListRequestPageHandler)]
+    PROCEDURE WarehousePhysicalInventoryList@39();
+    VAR
+      WarehouseJournalLine@1001 : Record 7311;
+      Item@1007 : Record 27;
+      PurchaseHeader@1005 : Record 38;
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Setup: Create and release Purchase Order. Create and Post Warehouse Receipt. Run Warehouse Calculate Inventory Report.
+      Initialize;
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(10,2);
+      CreateAndPostWarehouseReceiptFromPurchaseOrder(PurchaseHeader,LocationWhite.Code,Item."No.",Quantity);
+      RunWhseCalculateInventoryReport(LocationWhite.Code,Item."No.");
+
+      // Exercise: Run Warehouse Physical Inventory List report.
+      COMMIT;
+      WarehouseJournalLine.SETRANGE("Item No.",Item."No.");
+      LibraryVariableStorage.Enqueue(TRUE);
+      REPORT.RUN(REPORT::"Whse. Phys. Inventory List",TRUE,FALSE,WarehouseJournalLine);
+
+      // Verify: Verify Warehouse Physical Inventory List report.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_WarehouseJournlLin',Item."No.",'QtyCalculated_WhseJnlLine',Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler,WhseRegisterQuantityRequestPageHandler)]
+    PROCEDURE WarehouseRegisterQuantity@59();
+    VAR
+      WarehouseRegister@1000 : Record 7313;
+      Item@1001 : Record 27;
+      Quantity@1003 : Decimal;
+    BEGIN
+      // Setup: Create and Register Warehouse Journal Line.
+      Initialize;
+      Quantity := LibraryRandom.RandDec(100,2);
+      LibraryInventory.CreateItem(Item);
+      CreateAndRegisterWhseJnlLine(LocationWhite,Item."No.",Quantity);
+
+      // Exercise: Run Warehouse Register Quantity report.
+      COMMIT;
+      WarehouseRegister.SETRANGE("From Entry No.",FindWarehouseEntryNo(Item."No."));
+      REPORT.RUN(REPORT::"Warehouse Register - Quantity",TRUE,FALSE,WarehouseRegister);
+
+      // Verify: Verify Warehouse Register Quantity report.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_WarehouseEntry',Item."No.",'Quantity_WarehouseEntry',-Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryPostingTestRequestPageHandler)]
+    PROCEDURE InventoryPostingTest@17();
+    VAR
+      ItemJournalLine@1002 : Record 83;
+      Item@1000 : Record 27;
+      Quantity@1001 : Decimal;
+    BEGIN
+      // Setup: Create and Post Item Journal. Run Calculate Inventory. Update Quantity Physical Inventory on Item Journal line.
+      Initialize;
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateItem(Item);
+      CreateAndPostItemJournalLine(Item."No.",Quantity);
+      RunCalculateInventory(Item."No.",FALSE);
+      UpdateQuantityPhysicalInventoryOnPhysicalInventoryJournal(Item."No.");
+
+      // Exercise: Run Inventory Posting Test report.
+      COMMIT;
+      ItemJournalLine.SETRANGE("Item No.",Item."No.");
+      REPORT.RUN(REPORT::"Inventory Posting - Test",TRUE,FALSE,ItemJournalLine);
+
+      // Verify: Quantity and Invoiced Quantity on Inventory Posting Test report.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('Item_Journal_Line__Item_No__',Item."No.",'Item_Journal_Line_Quantity',Quantity / 2);
+    END;
+
+    [Test]
+    [HandlerFunctions(CustomerOrderDetailRequestPageHandler)]
+    PROCEDURE CustomerOrderDetailReport@5();
+    VAR
+      Item@1002 : Record 27;
+      Item2@1003 : Record 27;
+      Customer@1001 : Record 18;
+      SalesHeader@1004 : Record 36;
+      SalesHeader2@1005 : Record 36;
+      Quantity@1009 : Decimal;
+    BEGIN
+      // Setup: Create two Items. Create two Sales Orders.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      CreateItem(Item);
+      CreateItem(Item2);
+      Quantity := LibraryRandom.RandDec(10,2);
+      CreateSalesOrder(SalesHeader,'',Item."No.",Customer."No.",Quantity);
+      CreateSalesOrder(SalesHeader2,'',Item2."No.",Customer."No.",Quantity);
+
+      // Exercise.
+      COMMIT;
+      Customer.SETRANGE("No.",Customer."No.");
+      LibraryVariableStorage.Enqueue(FALSE);
+      LibraryVariableStorage.Enqueue(FALSE);
+      REPORT.RUN(REPORT::"Customer - Order Detail",TRUE,FALSE,Customer);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('No_SalesLine',Item."No.",'Quantity_SalesLine',Quantity);
+      LibraryReportDataset.AssertCurrentRowValue('SalesHeaderNo',SalesHeader."No.");
+
+      VerifyReportData('No_SalesLine',Item2."No.",'Quantity_SalesLine',Quantity);
+      LibraryReportDataset.AssertCurrentRowValue('SalesHeaderNo',SalesHeader2."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesReturnReceiptRequestPageHandler)]
+    PROCEDURE SalesReturnReceiptReport@64();
+    VAR
+      Item@1003 : Record 27;
+      Customer@1001 : Record 18;
+      ReturnReceiptHeader@1000 : Record 6660;
+      Quantity@1004 : Decimal;
+      PostedDocumentNo@1005 : Code[20];
+    BEGIN
+      // Setup: Create and Post Sales Order. Create and Post Sales Return Order.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(10,2);
+      CreateAndPostSalesOrder(Customer."No.",Item."No.",1,Quantity);  // Value 1 required for one Sales Order.
+      PostedDocumentNo := CreateAndPostSalesReturnOrder(Customer."No.",Item."No.",Quantity,FindItemLedgerEntryNo(Item."No."));
+
+      // Exercise.
+      ReturnReceiptHeader.SETRANGE("No.",PostedDocumentNo);
+      REPORT.RUN(REPORT::"Sales - Return Receipt",TRUE,FALSE,ReturnReceiptHeader);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('No_ReturnReceiptLine',Item."No.",'Qty_ReturnReceiptLine',Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(WorkOrderRequestPageHandler)]
+    PROCEDURE WorkOrderReport@74();
+    VAR
+      Item@1005 : Record 27;
+      Customer@1003 : Record 18;
+      SalesHeader@1001 : Record 36;
+      SalesCommentLine@1004 : Record 44;
+      Quantity@1002 : Decimal;
+    BEGIN
+      // Setup: Create Sales Order. Create and update Sales Comment Line.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(10,2);
+      CreateSalesOrder(SalesHeader,'',Item."No.",Customer."No.",Quantity);
+      LibrarySales.CreateSalesCommentLine(SalesCommentLine,SalesHeader."Document Type",SalesHeader."No.",0);  // Value 0 required for Document Line No.
+      UpdateDateInSalesCommentLine(SalesCommentLine);
+
+      // Exercise.
+      COMMIT;
+      SalesHeader.SETRANGE("No.",SalesHeader."No.");
+      REPORT.RUN(REPORT::"Work Order",TRUE,FALSE,SalesHeader);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('No_SalesLine',Item."No.",'Quantity_SalesLine',Quantity);
+      LibraryReportDataset.Reset;
+      LibraryReportDataset.AssertElementWithValueExists('Comment_SalesCommentLine',SalesCommentLine.Comment);
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryAvailabilityPlanRequestPageHandler)]
+    PROCEDURE InventoryAvailabilityPlanReport@70();
+    VAR
+      Item@1002 : Record 27;
+      ProductionOrder@1000 : Record 5405;
+      PeriodLength@1001 : DateFormula;
+    BEGIN
+      // Setup: Create and refresh Planned Production Order.
+      Initialize;
+      CreateAndRefreshPlannedProductionOrder(ProductionOrder);
+      EVALUATE(PeriodLength,'<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>');
+
+      // Exercise.
+      COMMIT;
+      Item.SETRANGE("No.",ProductionOrder."Source No.");
+      LibraryVariableStorage.Enqueue(WORKDATE);
+      LibraryVariableStorage.Enqueue(PeriodLength);
+      LibraryVariableStorage.Enqueue(FALSE);
+      REPORT.RUN(REPORT::"Inventory - Availability Plan",TRUE,FALSE,Item);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('No_Item',ProductionOrder."Source No.",'ScheduledReceipt',0);
+      // Regardless of the period length, last period always includes the prod. order
+      // in the projected available balance.
+      LibraryReportDataset.AssertCurrentRowValue('ProjAvBalance8',ProductionOrder.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(WarehouseBinListReportHandler)]
+    PROCEDURE WarehouseBinListReport@83();
+    VAR
+      Item@1003 : Record 27;
+      Bin@1002 : Record 7354;
+      Quantity@1001 : Decimal;
+    BEGIN
+      // Setup: Update Inventory using Warehouse Journal.
+      Initialize;
+      Quantity := LibraryRandom.RandDec(10,2);
+      LibraryInventory.CreateItem(Item);
+      FindPickBin(Bin,LocationWhite.Code);
+      UpdateInventoryUsingWarehouseJournal(Bin,Item,Quantity);
+
+      // Exercise.
+      Bin.SETRANGE("Location Code",Bin."Location Code");
+      Bin.SETRANGE(Code,Bin.Code);
+      REPORT.RUN(REPORT::"Warehouse Bin List",TRUE,FALSE,Bin);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_BinContent',Item."No.",'Quantity_BinContent',Quantity);
+      LibraryReportDataset.AssertCurrentRowValue('Code_Bin',Bin.Code);
+      LibraryReportDataset.AssertCurrentRowValue('BinTypeCode_Code',Bin."Bin Type Code");
+    END;
+
+    [Test]
+    [HandlerFunctions(PickingListRequestPageHandler)]
+    PROCEDURE PickingListWithSetBreakBulkAsTrue@84();
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      SalesHeader@1002 : Record 36;
+      WarehouseActivityLine@1000 : Record 5767;
+      WarehouseActivityHeader@1007 : Record 5766;
+      ItemUnitOfMeasure@1008 : Record 5404;
+      Bin@1005 : Record 7354;
+      Quantity@1003 : Decimal;
+      WarehouseShipmentNo@1004 : Code[20];
+    BEGIN
+      // Create and Register Pur away from Purchase Order. Create Pick from Warehouse Shipment.
+      Initialize;
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateItemWithPurchaseUnitOfMesaure(ItemUnitOfMeasure);
+      FindPickBin(Bin,LocationWhite.Code);
+      CreateAndPostWarehouseReceiptFromPurchaseOrder(
+        PurchaseHeader,LocationWhite.Code,ItemUnitOfMeasure."Item No.",Quantity + LibraryRandom.RandDec(10,2));  // Calculated value required for test.
+      RegisterPutAway(LocationWhite.Code,PurchaseHeader."No.");
+      CreateAndReleaseSalesOrder(SalesHeader,LocationWhite.Code,ItemUnitOfMeasure."Item No.",Quantity);
+      CreateWhseShipmentAndPick(WarehouseShipmentNo,SalesHeader);
+      FindWarehouseActivityLine(
+        WarehouseActivityLine,WarehouseActivityLine."Source Document"::"Sales Order",SalesHeader."No.",
+        WarehouseActivityLine."Activity Type"::Pick);
+
+      // Exercise.
+      COMMIT;
+      WarehouseActivityHeader.SETRANGE(Type,WarehouseActivityLine."Activity Type");
+      WarehouseActivityHeader.SETRANGE("No.",WarehouseActivityLine."No.");
+      REPORT.RUN(REPORT::"Picking List",TRUE,FALSE,WarehouseActivityHeader);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ItemNo_WhseActLine',WarehouseActivityLine."Item No.",
+        'QtyBase_WhseActLine',WarehouseActivityLine."Qty. (Base)");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,InventoryPutAwayListRequestPageHandler)]
+    PROCEDURE InventoryPutAwayListWithBinCode@46();
+    VAR
+      Bin@1000 : Record 7354;
+      BinContent@1002 : Record 7302;
+      Item@1032 : Record 27;
+      Location@1029 : Record 14;
+      WarehouseEmployee@1001 : Record 7301;
+    BEGIN
+      // Setup: Create Location with Bin. Create Bin Content. Create Inventory Put-away from Purchase Order.
+      Initialize;
+      CreateItem(Item);
+      CreateLocation(Location,WarehouseEmployee,TRUE);  // TRUE for Bin Mandatory.
+      LibraryWarehouse.CreateBin(Bin,Location.Code,LibraryUtility.GenerateGUID,'','');
+      LibraryWarehouse.CreateBinContent(BinContent,Location.Code,'',Bin.Code,Item."No.",'',Item."Base Unit of Measure");
+      CreateInventoryPutAwayFromPurchaseOrder(Location.Code,Item."No.");
+
+      // Exercise.
+      Item.SETRANGE("No.",Item."No.");
+      REPORT.RUN(REPORT::"Inventory Put-away List",TRUE,FALSE,Item);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('No_Item',Item."No.",'LocationCode_PurchLine',Location.Code);
+
+      // Tear down.
+      WarehouseEmployee.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(PriceListRequestPageHandler)]
+    PROCEDURE PriceListReport@29();
+    VAR
+      SalesPrice@1000 : Record 7002;
+      Item@1171 : Record 27;
+      SalesType@1172 : 'Customer,Customer Price Group,All Customers,Campaign';
+    BEGIN
+      // Setup: Create Item with Sales Price.
+      Initialize;
+      CreateItemWithSalesPrice(SalesPrice);
+
+      // Exercise.
+      COMMIT;
+      Item.SETRANGE("No.",SalesPrice."Item No.");
+      LibraryVariableStorage.Enqueue(SalesPrice."Starting Date");
+      LibraryVariableStorage.Enqueue(SalesType::"All Customers");
+      REPORT.RUN(REPORT::"Price List",TRUE,FALSE,Item);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('No_Item',SalesPrice."Item No.",'MinimumQty_SalesPrices',SalesPrice."Minimum Quantity");
+    END;
+
+    [Test]
+    [HandlerFunctions(WhereUsedListRequestPageHandler)]
+    PROCEDURE WhereUsedListReport@97();
+    VAR
+      AssemblyItem@1000 : Record 27;
+      ComponentItem@1001 : Record 27;
+      Quantity@1002 : Decimal;
+    BEGIN
+      // Setup: Create Assembly Item with Component.
+      Initialize;
+      Quantity := CreateAssemblyItemWithComponent(AssemblyItem,ComponentItem);
+
+      // Exercise.
+      ComponentItem.SETRANGE("No.",ComponentItem."No.");
+      REPORT.RUN(REPORT::"Where-Used List",TRUE,FALSE,ComponentItem);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('ParentItemNo_BOMComponent',AssemblyItem."No.",'Quantityper_BOMComponent',Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,PutAwayListRequestPageHandler)]
+    PROCEDURE PutAwayListReportWithBinCode@28();
+    VAR
+      WarehouseActivityHeader@1007 : Record 5766;
+      Item@1001 : Record 27;
+      Location@1000 : Record 14;
+      WarehouseEmployee@1003 : Record 7301;
+      BinCode@1004 : Code[20];
+      PurchaseHeaderNo@1006 : Code[20];
+    BEGIN
+      // Setup: Create Location with Bin Content and Inventory Put-away from Purchase.
+      Initialize;
+      CreateItem(Item);
+      CreateLocation(Location,WarehouseEmployee,TRUE);
+      BinCode := CreateBinContent(Item,Location.Code);
+      PurchaseHeaderNo := CreateInventoryPutAwayFromPurchaseOrder(Location.Code,Item."No.");
+
+      // Exercise: Run the report Put-away List
+      WarehouseActivityHeader.SETRANGE("Source Document",WarehouseActivityHeader."Source Document"::"Purchase Order");
+      WarehouseActivityHeader.SETRANGE("Source No.",PurchaseHeaderNo);
+      REPORT.RUN(REPORT::"Put-away List",TRUE,FALSE,WarehouseActivityHeader);
+
+      // Verify: verify that Bin code is presented on report Put-away List
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyReportData('SrcNo_WhseActivLine',PurchaseHeaderNo,'BinCode_WhseActivLine',BinCode);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE CalcInvtOnPhysInvtJnlWithExistingWhseEntry@63();
+    VAR
+      Item@1018 : Record 27;
+      WarehouseJournalBatch@1001 : Record 7310;
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Setup: Create and register Warehouse Journal Line.
+      Initialize;
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(50,2);
+      CreateAndRegisterWhseJnlLine2(
+        LocationWhite,Item."No.",Quantity,WarehouseJournalBatch."Template Type"::"Physical Inventory");
+
+      // Exercise: Run Calculate Inventory on Phys. Inventory Journal.
+      RunCalculateInventory(Item."No.",TRUE);
+
+      // Verify: Verify Qty. (Calculated), Qty. (Phys. Inventory) and Quantity on Item Journal Line.
+      VerifyPhysInvtJournalLine(Item."No.",0,Quantity,Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplacingDescriptionOnlySalesLineBySalesLineWithItemTypeDoesNotPreventCombiningShipments@75();
+    VAR
+      Customer@1000 : Record 18;
+      Item@1003 : Record 27;
+      SalesHeader@1001 : Record 36;
+      SalesLine@1002 : Record 37;
+      SalesLineDescription@1006 : Text[50];
+      Quantity1@1007 : Decimal;
+      Quantity2@1008 : Decimal;
+    BEGIN
+      // [FEATURE] [Combine Shipments] [Description Sales Line]
+      // [SCENARIO 363166] Replacing Description Only Sales Line (Type = 0) by Sales Line with Item type does not prevent Combining Shipment
+      Quantity1 := LibraryRandom.RandDec(10,2);
+      Quantity2 := LibraryRandom.RandDec(10,2);
+
+      // [GIVEN] Sales Order with two lines
+      CreateItem(Item);
+      CreateCustomer(Customer);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+
+      // [GIVEN] Sales Line "L1", where "Type" = "Item", "No." = "X"
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",Quantity1);
+
+      // [GIVEN] Sales Line "L2", where "Type" = " ", "No." = " ", Description = "D"
+      CreateSalesLineDescriptionOnly(SalesHeader,SalesLine);
+      SalesLineDescription := SalesLine.Description;
+
+      // [GIVEN] Ship the Sales Order
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // [GIVEN] Overwrite Sales Line "L2" with "Type" = "Item", "No." = "X"
+      LibrarySales.ReopenSalesDocument(SalesHeader);
+      WITH SalesLine DO BEGIN
+        FIND;
+        VALIDATE(Type,Type::Item);
+        VALIDATE("No.",Item."No.");
+        VALIDATE(Quantity,Quantity2);
+        MODIFY(TRUE);
+      END;
+
+      // [GIVEN] Ship the Sales Order
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // [WHEN] Combine Shipment with "Post Invoices" and "Copy Text Lines" = YES
+      RunCombineShipments(Customer."No.",FALSE,TRUE,FALSE,TRUE);
+
+      // [THEN] Posted Sales Invoice contains 3 lines: "L1", "L2" and Description line
+      VerifyPostedSalesInvoice(Item."No.",Quantity1,Quantity2,SalesLineDescription);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CombineShipmentsWithItemCharge@10();
+    VAR
+      Customer@1001 : Record 18;
+      SalesHeader@1002 : Record 36;
+      DummySalesInvoiceLine@1006 : Record 113;
+      ItemCharge@1007 : Record 5800;
+    BEGIN
+      // [FEATURE] [Combine Shipments] [Item Charge]
+      // [SCENARIO 378180] Shipment with Item Charge Line first should not prevent Combine Shipments
+      Initialize;
+
+      // [GIVEN] Sales Order with two lines: 1st - Item Charge, 2-nd - Item
+      CreateCustomer(Customer);
+      LibraryInventory.CreateItemCharge(ItemCharge);
+      CreateSalesOrderWithItemCharge(SalesHeader,Customer."No.",ItemCharge."No.");
+
+      // [GIVEN] Post Sales Order as Shipped
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // [WHEN] Run Combine Shipment Report
+      LibraryVariableStorage.Enqueue(CombineShipmentMsg);  // Enqueue for MessageHandler
+      RunCombineShipments(Customer."No.",FALSE,TRUE,FALSE,FALSE);
+
+      // [THEN] Sales Invoice is created with Item Charge Line
+      DummySalesInvoiceLine.SETRANGE("No.",ItemCharge."No.");
+      Assert.RecordIsNotEmpty(DummySalesInvoiceLine);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      NoSeriesSetup;
+      CreateLocationSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@31();
+    VAR
+      PurchasesPayablesSetup@1005 : Record 312;
+      SalesSetup@1004 : Record 311;
+      WarehouseSetup@1002 : Record 5769;
+    BEGIN
+      LibraryWarehouse.NoSeriesSetup(WarehouseSetup);
+
+      SalesSetup.GET;
+      SalesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesSetup.MODIFY(TRUE);
+
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateLocationSetup@92();
+    VAR
+      WarehouseEmployee@1001 : Record 7301;
+    BEGIN
+      WarehouseEmployee.DELETEALL(TRUE);
+      CreateFullWarehouseSetup(LocationWhite,WarehouseEmployee,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseSetup@35(VAR Location@1005 : Record 14;VAR WarehouseEmployee@1000 : Record 7301;UsePutawayWorksheet@1004 : Boolean);
+    BEGIN
+      CreateLocation(Location,WarehouseEmployee,FALSE);
+      Location.VALIDATE("Use Put-away Worksheet",UsePutawayWorksheet);
+      Location.VALIDATE("Require Receive",TRUE);
+      Location.VALIDATE("Require Shipment",TRUE);
+      Location.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateFullWarehouseSetup@52(VAR Location@1000 : Record 14;VAR WarehouseEmployee@1001 : Record 7301;IsDefault@1002 : Boolean);
+    BEGIN
+      LibraryWarehouse.CreateFullWMSLocation(Location,2);  // Value used for number of bin per zone.
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,IsDefault);
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyItemWithComponent@101(VAR AssemblyItem@1000 : Record 27;VAR ComponentItem@1001 : Record 27) Quantity : Decimal;
+    VAR
+      BOMComponent@1002 : Record 90;
+    BEGIN
+      LibraryAssembly.CreateItem(AssemblyItem,AssemblyItem."Costing Method"::Standard,
+        AssemblyItem."Replenishment System"::Assembly,'','');
+      LibraryAssembly.CreateItem(ComponentItem,ComponentItem."Costing Method"::FIFO,
+        ComponentItem."Replenishment System"::Purchase,'','');
+      Quantity := LibraryRandom.RandDec(100,2);
+      LibraryAssembly.CreateAssemblyListComponent(BOMComponent.Type::Item,ComponentItem."No.",
+        AssemblyItem."No.",'',BOMComponent."Resource Usage Type",Quantity,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateItem@6(VAR Item@1001 : Record 27);
+    BEGIN
+      LibraryManufacturing.CreateItemManufacturing(
+        Item,Item."Costing Method"::Standard,LibraryRandom.RandDec(100,2),Item."Reordering Policy",
+        Item."Flushing Method",'','');
+      Item.VALIDATE("Reorder Quantity",LibraryRandom.RandDec(100,2));
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithPurchaseUnitOfMesaure@94(VAR ItemUnitOfMeasure@1001 : Record 5404);
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      CreateItemUnitOfMeasure(ItemUnitOfMeasure,Item."No.");
+      Item.VALIDATE("Purch. Unit of Measure",ItemUnitOfMeasure.Code);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemUnitOfMeasure@62(VAR ItemUnitOfMeasure@1000 : Record 5404;ItemNo@1001 : Code[20]);
+    BEGIN
+      LibraryInventory.CreateItemUnitOfMeasureCode(ItemUnitOfMeasure,ItemNo,LibraryRandom.RandInt(10) + 1);
+    END;
+
+    LOCAL PROCEDURE CreateBinContent@99(VAR Item@1000 : Record 27;LocationCode@1005 : Code[10]) : Code[20];
+    VAR
+      Bin@1001 : Record 7354;
+      BinContent@1004 : Record 7302;
+    BEGIN
+      LibraryWarehouse.CreateBin(Bin,LocationCode,LibraryUtility.GenerateGUID,'','');
+      LibraryWarehouse.CreateBinContent(BinContent,LocationCode,'',Bin.Code,Item."No.",'',Item."Base Unit of Measure");
+      BinContent.VALIDATE(Fixed,TRUE);
+      BinContent.VALIDATE(Default,TRUE);
+      BinContent.MODIFY(TRUE);
+      EXIT(Bin.Code);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateCustomer@42(VAR Customer@1000 : Record 18);
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Combine Shipments",TRUE);
+      Customer.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@13(VAR SalesHeader@1001 : Record 36;LocationCode@1002 : Code[10];ItemNo@1004 : Code[20];CustomerNo@1006 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      // Random values used are not important for test.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CustomerNo);
+      SalesHeader.VALIDATE("Location Code",LocationCode);
+      SalesHeader.MODIFY(TRUE);
+
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Qty. to Ship",Quantity);
+      SalesLine.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2));
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesLineDescriptionOnly@135(SalesHeader@1004 : Record 36;VAR SalesLine@1003 : Record 37);
+    VAR
+      RecRef@1000 : RecordRef;
+    BEGIN
+      WITH SalesLine DO BEGIN
+        INIT;
+        "Document Type" := SalesHeader."Document Type";
+        "Document No." := SalesHeader."No.";
+        RecRef.GETTABLE(SalesLine);
+        VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,FIELDNO("Line No.")));
+        Type := Type::" ";
+        Description := LibraryUtility.GenerateGUID;
+        INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@27(VAR PurchaseHeader@1006 : Record 38;LocationCode@1003 : Code[10];ItemNo@1004 : Code[20];Quantity@1001 : Decimal;DirectUnitCost@1002 : Decimal);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      // Create Purchase Order with One Item Line.Random values used are not important for test.
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      PurchaseHeader.VALIDATE(
+        "Vendor Invoice No.",LibraryUtility.GenerateRandomCode(PurchaseHeader.FIELDNO("Vendor Invoice No."),
+          DATABASE::"Purchase Header"));
+      PurchaseHeader.VALIDATE("Location Code",LocationCode);
+      PurchaseHeader.MODIFY(TRUE);
+
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Qty. to Receive",Quantity);
+      PurchaseLine.VALIDATE("Direct Unit Cost",DirectUnitCost);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE RegisterPutAway@86(LocationCode@1001 : Code[10];SourceNo@1002 : Code[20]);
+    VAR
+      WarehouseActivityHeader@1003 : Record 5766;
+      WarehouseActivityLine@1000 : Record 5767;
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Location Code",LocationCode);
+      FindWarehouseActivityLine(
+        WarehouseActivityLine,WarehouseActivityLine."Source Document"::"Purchase Order",SourceNo,
+        WarehouseActivityLine."Activity Type"::"Put-away");
+      WarehouseActivityHeader.GET(WarehouseActivityLine."Activity Type",WarehouseActivityLine."No.");
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateWhseShipmentAndPick@87(VAR WarehouseShipmentNo@1003 : Code[20];SalesHeader@1000 : Record 36);
+    VAR
+      WarehouseShipmentHeader@1002 : Record 7320;
+    BEGIN
+      // Create Warehouse Shipment. Run Create Pick.
+      WarehouseShipmentNo := FindWarehouseShipmentNo;
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      WarehouseShipmentHeader.GET(WarehouseShipmentNo);
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLine@67(ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      ItemJournalBatch@1006 : Record 233;
+      ItemJournalLine@1000 : Record 83;
+      ItemJournalTemplate@1003 : Record 82;
+    BEGIN
+      SelectItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.GET(ItemJournalBatch."Journal Template Name");
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,Quantity);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostWarehouseReceiptFromPurchaseOrder@78(VAR PurchaseHeader@1000 : Record 38;LocationCode@1001 : Code[10];ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      WarehouseReceiptNo@1004 : Code[20];
+    BEGIN
+      CreateAndReleasePurchaseOrder(PurchaseHeader,LocationCode,ItemNo,Quantity);
+      WarehouseReceiptNo := FindWarehouseReceiptNo;
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      PostWarehouseReceipt(WarehouseReceiptNo);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshPlannedProductionOrder@82(VAR ProductionOrder@1000 : Record 5405);
+    VAR
+      Item@1003 : Record 27;
+    BEGIN
+      CreateItemWithReplenishmentSystemAsProdOrder(Item);
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Planned,ProductionOrder."Source Type"::Item,Item."No.",
+        LibraryRandom.RandInt(10));
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);  // True for CalcLines, CalcRoutings and CalcComponents.
+    END;
+
+    LOCAL PROCEDURE CreateInventoryPutAwayFromPurchaseOrder@81(LocationCode@1002 : Code[10];ItemNo@1001 : Code[20]) : Code[20];
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      WhseRequest@1003 : Record 5765;
+    BEGIN
+      CreateAndReleasePurchaseOrder(PurchaseHeader,LocationCode,ItemNo,LibraryRandom.RandDec(10,2));
+      LibraryVariableStorage.Enqueue(InvtPutAwayCreated);  // Enqueue for MessageHandler.
+      LibraryWarehouse.CreateInvtPutPickMovement(
+        WhseRequest."Source Document"::"Purchase Order",PurchaseHeader."No.",TRUE,FALSE,FALSE);  // TRUE for PutAway.
+      EXIT(PurchaseHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemWithReplenishmentSystemAsProdOrder@206(VAR Item@1000 : Record 27);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Replenishment System",Item."Replenishment System"::"Prod. Order");
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleasePurchaseOrder@21(VAR PurchaseHeader@1000 : Record 38;LocationCode@1001 : Code[10];ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    BEGIN
+      CreatePurchaseOrder(PurchaseHeader,LocationCode,ItemNo,Quantity,LibraryRandom.RandDec(100,2));
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrder@38(VAR SalesHeader@1000 : Record 36;LocationCode@1001 : Code[10];ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    BEGIN
+      CreateSalesOrder(SalesHeader,LocationCode,ItemNo,'',Quantity);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateAndPostSalesOrder@79(CustomerNo@1001 : Code[20];ItemNo@1003 : Code[20];Count@1004 : Integer;Quantity@1002 : Decimal);
+    VAR
+      SalesHeader@1000 : Record 36;
+      I@1005 : Integer;
+    BEGIN
+      FOR I := 1 TO Count DO BEGIN
+        CLEAR(SalesHeader);
+        CreateSalesOrder(SalesHeader,'',ItemNo,CustomerNo,Quantity);
+        LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithItemCharge@118(VAR SalesHeader@1005 : Record 36;CustomerNo@1001 : Code[20];ItemChargeNo@1000 : Code[20]);
+    VAR
+      SalesLineItemCharge@1004 : Record 37;
+      SalesLineItem@1003 : Record 37;
+      ItemChargeAssignmentSales@1006 : Record 5809;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CustomerNo);
+      LibrarySales.CreateSalesLine(
+        SalesLineItemCharge,SalesHeader,SalesLineItemCharge.Type::"Charge (Item)",ItemChargeNo,LibraryRandom.RandInt(10));
+      SalesLineItemCharge.VALIDATE("Unit Price",LibraryRandom.RandInt(10));
+      SalesLineItemCharge.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(
+        SalesLineItem,SalesHeader,SalesLineItem.Type::Item,LibraryInventory.CreateItemNo,LibraryRandom.RandInt(10));
+      LibraryInventory.CreateItemChargeAssignment(
+        ItemChargeAssignmentSales,SalesLineItemCharge,SalesLineItem."Document Type",
+        SalesLineItem."Document No.",SalesLineItem."Line No.",SalesLineItem."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesReturnOrder@96(CustomerNo@1000 : Code[20];ItemNo@1001 : Code[20];Quantity@1002 : Decimal;ApplicationFromItemEntryNo@1005 : Integer) PostedDocumentNo : Code[20];
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",CustomerNo);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Appl.-from Item Entry",ApplicationFromItemEntryNo);
+      SalesLine.MODIFY(TRUE);
+      PostedDocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithSalesPrice@98(VAR SalesPrice@1001 : Record 7002);
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryCosting.CreateSalesPrice(SalesPrice,SalesPrice."Sales Type"::"All Customers",'',
+        Item."No.",WORKDATE,'','','',LibraryRandom.RandDec(100,2));
+      SalesPrice.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2));
+      SalesPrice.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateLocation@80(VAR Location@1000 : Record 14;VAR WarehouseEmployee@1002 : Record 7301;BinMandatory@1001 : Boolean);
+    BEGIN
+      LibraryWarehouse.CreateLocationWMS(Location,BinMandatory,TRUE,TRUE,FALSE,FALSE);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateMovementWorksheetLine@14(VAR WhseWorksheetLine@1004 : Record 7326;LocationCode@1000 : Code[10];ItemNo@1001 : Code[20]);
+    VAR
+      WhseWorksheetTemplate@1003 : Record 7328;
+      WhseWorksheetName@1002 : Record 7327;
+      BinContent@1005 : Record 7302;
+      Bin@1006 : Record 7354;
+      Zone@1008 : Record 7300;
+      WhseInternalPutAwayHeader@1007 : Record 7331;
+    BEGIN
+      WhseWorksheetLine.DELETEALL(TRUE);
+
+      // Select Bin Content with Quantity.
+      FindBinContent(BinContent,LocationCode,ItemNo);
+      Zone.GET(LocationCode,SHIP);
+      FindFirstBinRankingForZone(Bin,Zone.Code,LocationCode);
+
+      // Run Whse. Get Bin Content to populate the Whse. Worksheet Line.
+      // Assigning Worksheet Template Name, Name and Location Code to Whse. Worksheet Line for the report.
+      LibraryWarehouse.SelectWhseWorksheetTemplate(WhseWorksheetTemplate,WhseWorksheetTemplate.Type::Movement);
+      LibraryWarehouse.SelectWhseWorksheetName(WhseWorksheetName,WhseWorksheetTemplate.Name,LocationCode);
+      WhseWorksheetLine."Worksheet Template Name" := WhseWorksheetName."Worksheet Template Name";
+      WhseWorksheetLine.Name := WhseWorksheetName.Name;
+      WhseWorksheetLine."Location Code" := LocationCode;
+      WhseInternalPutAwayHeader.INIT;
+      LibraryWarehouse.WhseGetBinContent(BinContent,WhseWorksheetLine,WhseInternalPutAwayHeader,0);  // Value for destination Type.
+
+      // Find and Update the created Whse. Worksheet Line.
+      FindWhseWorkSheetLine(WhseWorksheetLine,WhseWorksheetName);
+      WhseWorksheetLine.VALIDATE("To Bin Code",Bin.Code);
+      WhseWorksheetLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE FindItemLedgerEntryNo@100(ItemNo@1000 : Code[20]) EntryNo : Integer;
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDFIRST;
+      EntryNo := ItemLedgerEntry."Entry No.";
+    END;
+
+    LOCAL PROCEDURE FindWarehouseActivityLine@91(VAR WarehouseActivityLine@1000 : Record 5767;SourceDocument@1001 : Option;SourceNo@1002 : Code[20];ActivityType@1003 : Option);
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Source Document",SourceDocument);
+      WarehouseActivityLine.SETRANGE("Source No.",SourceNo);
+      WarehouseActivityLine.SETRANGE("Activity Type",ActivityType);
+      WarehouseActivityLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseShipmentNo@7() : Code[20];
+    VAR
+      WarehouseSetup@1000 : Record 5769;
+      NoSeriesManagement@1001 : Codeunit 396;
+    BEGIN
+      WarehouseSetup.GET;
+      EXIT(NoSeriesManagement.GetNextNo(WarehouseSetup."Whse. Ship Nos.",WORKDATE,FALSE));
+    END;
+
+    LOCAL PROCEDURE FindWarehouseEntryNo@69(ItemNo@1001 : Code[20]) FromEntryNo : Integer;
+    VAR
+      WarehouseEntry@1000 : Record 7312;
+    BEGIN
+      WarehouseEntry.SETRANGE("Item No.",ItemNo);
+      WarehouseEntry.FINDFIRST;
+      FromEntryNo := WarehouseEntry."Entry No.";
+    END;
+
+    LOCAL PROCEDURE FindWarehouseReceiptNo@56() : Code[20];
+    VAR
+      WarehouseSetup@1000 : Record 5769;
+      NoSeriesManagement@1001 : Codeunit 396;
+    BEGIN
+      WarehouseSetup.GET;
+      EXIT(NoSeriesManagement.GetNextNo(WarehouseSetup."Whse. Receipt Nos.",WORKDATE,FALSE));
+    END;
+
+    LOCAL PROCEDURE FindWhseWorkSheetLine@58(VAR WhseWorksheetLine@1000 : Record 7326;WhseWorksheetName@1002 : Record 7327);
+    BEGIN
+      WhseWorksheetLine.SETRANGE("Worksheet Template Name",WhseWorksheetName."Worksheet Template Name");
+      WhseWorksheetLine.SETRANGE(Name,WhseWorksheetName.Name);
+      WhseWorksheetLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindLastRankingBin@23(VAR Bin@1000 : Record 7354;LocationCode@1001 : Code[10];ZoneCode@1002 : Code[10]);
+    BEGIN
+      Bin.SETCURRENTKEY("Location Code","Warehouse Class Code","Bin Ranking");
+      Bin.SETRANGE("Location Code",LocationCode);
+      Bin.SETRANGE("Zone Code",ZoneCode);
+      Bin.FINDLAST;
+    END;
+
+    LOCAL PROCEDURE FindFirstBinRankingForZone@44(VAR Bin@1000 : Record 7354;ZoneCode@1003 : Code[10];LocationCode@1001 : Code[10]);
+    BEGIN
+      Bin.SETCURRENTKEY("Location Code","Warehouse Class Code","Bin Ranking");
+      Bin.SETRANGE("Location Code",LocationCode);
+      Bin.SETRANGE("Zone Code",ZoneCode);
+      Bin.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseReceiptLine@41(VAR WarehouseReceiptLine@1002 : Record 7317;No@1000 : Code[20];ItemNo@1001 : Code[20]);
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("No.",No);
+      WarehouseReceiptLine.SETRANGE("Item No.",ItemNo);
+      WarehouseReceiptLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindPostedWarehouseReceiptHeader@24(VAR PostedWhseReceiptHeader@1000 : Record 7318;WhseReceiptNo@1001 : Code[20];LocationCode@1002 : Code[10]);
+    BEGIN
+      PostedWhseReceiptHeader.SETRANGE("Whse. Receipt No.",WhseReceiptNo);
+      PostedWhseReceiptHeader.SETRANGE("Location Code",LocationCode);
+      PostedWhseReceiptHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindAndUpdateWarehouseReceipt@72(WarehouseReceiptNo@1000 : Code[20];ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      WarehouseReceiptLine@1003 : Record 7317;
+    BEGIN
+      FindWarehouseReceiptLine(WarehouseReceiptLine,WarehouseReceiptNo,ItemNo);
+      WarehouseReceiptLine.VALIDATE("Qty. to Receive",Quantity);
+      WarehouseReceiptLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE FindPickBin@137(VAR Bin@1001 : Record 7354;LocationCode@1000 : Code[10]);
+    VAR
+      Zone@1002 : Record 7300;
+    BEGIN
+      FindPickZone(Zone,LocationCode);
+      Bin.SETRANGE("Location Code",LocationCode);
+      Bin.SETRANGE("Zone Code",Zone.Code);
+      LibraryWarehouse.FindBin(Bin,LocationCode,Zone.Code,RANDOM(Bin.COUNT));  // Find Random Bin.
+    END;
+
+    LOCAL PROCEDURE FindPickZone@89(VAR Zone@1000 : Record 7300;LocationCode@1001 : Code[10]);
+    BEGIN
+      Zone.SETRANGE("Location Code",LocationCode);
+      Zone.SETRANGE("Bin Type Code",LibraryWarehouse.SelectBinType(FALSE,FALSE,TRUE,TRUE));  // TRUE for Put-away and Pick.
+      Zone.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE PostWarehouseReceipt@3(WarehouseReceiptNo@1000 : Code[20]);
+    VAR
+      WarehouseReceiptHeader@1002 : Record 7316;
+    BEGIN
+      WarehouseReceiptHeader.GET(WarehouseReceiptNo);
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+    END;
+
+    LOCAL PROCEDURE RunWhseCalculateInventoryReport@88(LocationCode@1000 : Code[10];ItemNo@1001 : Code[20]);
+    VAR
+      WarehouseJournalLine@1002 : Record 7311;
+      WarehouseJournalBatch@1003 : Record 7310;
+      BinContent@1004 : Record 7302;
+    BEGIN
+      FindWhseJnlTemplateAndBatch(WarehouseJournalBatch,LocationCode,WarehouseJournalBatch."Template Type"::"Physical Inventory");
+      WarehouseJournalLine.INIT;
+      WarehouseJournalLine.VALIDATE("Journal Template Name",WarehouseJournalBatch."Journal Template Name");
+      WarehouseJournalLine.VALIDATE("Journal Batch Name",WarehouseJournalBatch.Name);
+      WarehouseJournalLine.VALIDATE("Location Code",LocationCode);
+      BinContent.SETRANGE("Location Code",LocationCode);
+      BinContent.SETRANGE("Item No.",ItemNo);
+      BinContent.FINDFIRST;
+      LibraryWarehouse.WhseCalculateInventory(WarehouseJournalLine,BinContent,WORKDATE,LibraryUtility.GenerateGUID,FALSE);
+    END;
+
+    LOCAL PROCEDURE RunCalculateInventory@71(ItemNo@1001 : Code[20];ItemsNotOnInvt@1002 : Boolean);
+    VAR
+      ItemJournalTemplate@1004 : Record 82;
+      ItemJournalBatch@1005 : Record 233;
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      SelectItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::"Phys. Inventory");
+      ItemJournalTemplate.GET(ItemJournalBatch."Journal Template Name");
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      ItemJournalLine.INIT;
+      ItemJournalLine.VALIDATE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.VALIDATE("Journal Batch Name",ItemJournalBatch.Name);
+      LibraryInventory.CalculateInventory(ItemJournalLine,ItemNo,WORKDATE,ItemsNotOnInvt);
+    END;
+
+    LOCAL PROCEDURE RunCombineShipments@105(CustomerNo@1002 : Code[20];CalcInvDisc@1006 : Boolean;PostInvoices@1005 : Boolean;OnlyStdPmtTerms@1004 : Boolean;CopyTextLines@1003 : Boolean);
+    VAR
+      SalesShipmentHeader@1001 : Record 110;
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      SalesHeader.SETRANGE("Sell-to Customer No.",CustomerNo);
+      SalesShipmentHeader.SETRANGE("Sell-to Customer No.",CustomerNo);
+      LibraryVariableStorage.Enqueue(CombineShipmentMsg);  // Enqueue for MessageHandler.
+      LibrarySales.CombineShipments(
+        SalesHeader,SalesShipmentHeader,WORKDATE,WORKDATE,CalcInvDisc,PostInvoices,OnlyStdPmtTerms,CopyTextLines);
+    END;
+
+    LOCAL PROCEDURE CreateTransferOrderLocations@54(VAR FromLocation@1001 : Record 14;VAR ToLocation@1002 : Record 14;VAR IntransitLocation@1000 : Record 14);
+    BEGIN
+      CreateAndUpdateLocation(FromLocation,FALSE);
+      CreateAndUpdateLocation(ToLocation,FALSE);
+      CreateAndUpdateLocation(IntransitLocation,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndRealeaseTransferOrder@40(VAR TransferHeader@1005 : Record 5740;VAR TransferLine@1001 : Record 5741;FromLocation@1003 : Code[10];ToLocation@1000 : Code[10];IntransitLocation@1006 : Code[10];ItemNo@1004 : Code[20];TransferQuantity@1007 : Decimal);
+    BEGIN
+      LibraryWarehouse.CreateTransferHeader(TransferHeader,FromLocation,ToLocation,IntransitLocation);
+      LibraryWarehouse.CreateTransferLine(TransferHeader,TransferLine,ItemNo,TransferQuantity);
+      LibraryWarehouse.ReleaseTransferOrder(TransferHeader);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateAndRegisterWhseJnlLine@2(Location@1000 : Record 14;ItemNo@1003 : Code[20];Quantity@1004 : Decimal);
+    VAR
+      WarehouseJournalBatch@1001 : Record 7310;
+    BEGIN
+      CreateAndRegisterWhseJnlLine2(Location,ItemNo,Quantity,WarehouseJournalBatch."Template Type"::Item);
+    END;
+
+    LOCAL PROCEDURE CreateAndRegisterWhseJnlLine2@90(Location@1000 : Record 14;ItemNo@1003 : Code[20];Quantity@1004 : Decimal;TemplateType@1002 : Option);
+    VAR
+      WarehouseJournalLine@1005 : Record 7311;
+      Bin@1010 : Record 7354;
+      Zone@1001 : Record 7300;
+    BEGIN
+      Zone.GET(Location.Code,BULK);
+      FindFirstBinRankingForZone(Bin,Zone.Code,Location.Code);
+      CreateWhseJnlLine(WarehouseJournalLine,Location.Code,Bin."Zone Code",Bin.Code,ItemNo,Quantity,TemplateType);
+      Bin.GET(Location.Code,Location."Adjustment Bin Code");
+      WarehouseJournalLine."From Zone Code" := Bin."Zone Code";
+      WarehouseJournalLine."From Bin Code" := Bin.Code;
+      WarehouseJournalLine.MODIFY(TRUE);
+      LibraryVariableStorage.Enqueue(WantToRegisterConfirm);  // Enqueue for ConfirmHandler.
+      LibraryVariableStorage.Enqueue(JournalLineRegistered);  // Enqueue for MessageHandler.
+      LibraryWarehouse.RegisterWhseJournalLine(
+        WarehouseJournalLine."Journal Template Name",WarehouseJournalLine."Journal Batch Name",Location.Code,FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateWhseJnlLine@8(VAR WarehouseJournalLine@1002 : Record 7311;LocationCode@1000 : Code[10];ZoneCode@1008 : Code[10];BinCode@1001 : Code[20];ItemNo@1003 : Code[20];Quantity@1004 : Decimal;TemplateType@1005 : Option);
+    VAR
+      WarehouseJournalBatch@1006 : Record 7310;
+    BEGIN
+      FindWhseJnlTemplateAndBatch(WarehouseJournalBatch,LocationCode,TemplateType);
+      LibraryWarehouse.CreateWhseJournalLine(
+        WarehouseJournalLine,WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,LocationCode,
+        ZoneCode,BinCode,WarehouseJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateLocation@120(VAR Location@1004 : Record 14;UseAsInTransit@1001 : Boolean);
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Location.VALIDATE("Use As In-Transit",UseAsInTransit);
+      Location.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE FindBinContent@9(VAR BinContent@1000 : Record 7302;LocationCode@1001 : Code[10];ItemNo@1002 : Code[20]);
+    BEGIN
+      BinContent.SETRANGE("Location Code",LocationCode);
+      BinContent.SETRANGE("Item No.",ItemNo);
+      BinContent.SETFILTER(Quantity,'>%1',0);
+      BinContent.FINDFIRST;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateRankingOnAllBins@26(LocationCode@1000 : Code[10]);
+    VAR
+      Bin@1001 : Record 7354;
+      Zone@1003 : Record 7300;
+      BinRanking@1002 : Integer;
+    BEGIN
+      Zone.SETRANGE("Location Code",LocationCode);
+      Zone.FINDSET;
+      REPEAT
+        BinRanking := 0;
+        Bin.SETRANGE("Location Code",LocationCode);
+        Bin.SETRANGE("Zone Code",Zone.Code);
+        Bin.FINDSET;
+        REPEAT
+          BinRanking += 10;  // Value Used for incrementing rank in Bin.
+          Bin.VALIDATE("Bin Ranking",BinRanking);
+          Bin.MODIFY(TRUE);
+        UNTIL Bin.NEXT = 0;
+      UNTIL Zone.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateBinContentForBin@18(Zone@1002 : Record 7300;Item@1003 : Record 27;MaxQty@1004 : Decimal);
+    VAR
+      Bin@1001 : Record 7354;
+      BinContent@1000 : Record 7302;
+    BEGIN
+      Bin.SETRANGE("Location Code",Zone."Location Code");
+      Bin.SETRANGE("Zone Code",Zone.Code);
+      Bin.FINDSET;
+      REPEAT
+        LibraryWarehouse.CreateBinContent(
+          BinContent,Zone."Location Code",Bin."Zone Code",Bin.Code,Item."No.",'',Item."Base Unit of Measure");
+        BinContent.VALIDATE("Min. Qty.",1);  // Value important For minimum quantity.
+        BinContent.VALIDATE("Max. Qty.",MaxQty);
+        BinContent.VALIDATE("Bin Ranking",Bin."Bin Ranking");
+        BinContent.VALIDATE("Bin Type Code",Bin."Bin Type Code");
+        BinContent.VALIDATE(Fixed,TRUE);
+        BinContent.MODIFY(TRUE);
+      UNTIL Bin.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindWhseJnlTemplateAndBatch@33(VAR WarehouseJournalBatch@1000 : Record 7310;LocationCode@1002 : Code[10];WarehouseJournalTemplateType@1003 : Option);
+    VAR
+      WarehouseJournalTemplate@1001 : Record 7309;
+    BEGIN
+      LibraryWarehouse.SelectWhseJournalTemplateName(WarehouseJournalTemplate,WarehouseJournalTemplateType);
+      LibraryWarehouse.SelectWhseJournalBatchName(
+        WarehouseJournalBatch,WarehouseJournalTemplate.Type,WarehouseJournalTemplate.Name,LocationCode);
+    END;
+
+    LOCAL PROCEDURE UpdateDateInSalesCommentLine@77(VAR SalesCommentLine@1000 : Record 44);
+    BEGIN
+      SalesCommentLine.VALIDATE(Date,WORKDATE);
+      SalesCommentLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectItemJournalBatch@68(VAR ItemJournalBatch@1001 : Record 233;Type@1002 : Option);
+    VAR
+      ItemJournalTemplate@1000 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,Type);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE ReleaseWarehouseShipment@51(LocationCode@1000 : Code[10]);
+    VAR
+      WarehouseShipmentHeader@1001 : Record 7320;
+    BEGIN
+      WarehouseShipmentHeader.SETRANGE("Location Code",LocationCode);
+      WarehouseShipmentHeader.FINDFIRST;
+      LibraryWarehouse.ReleaseWarehouseShipment(WarehouseShipmentHeader);
+    END;
+
+    LOCAL PROCEDURE FindAndVerifyWhseJnlLine@53(LocationCode@1001 : Code[10];Quantity@1003 : Decimal);
+    VAR
+      WarehouseJournalLine@1002 : Record 7311;
+      WarehouseJournalBatch@1000 : Record 7310;
+    BEGIN
+      FindWhseJnlTemplateAndBatch(WarehouseJournalBatch,LocationCode,WarehouseJournalBatch."Template Type"::"Physical Inventory");
+      WarehouseJournalLine.SETRANGE("Journal Template Name",WarehouseJournalBatch."Journal Template Name");
+      WarehouseJournalLine.SETRANGE("Journal Batch Name",WarehouseJournalBatch.Name);
+      WarehouseJournalLine.SETRANGE("Location Code",LocationCode);
+      WarehouseJournalLine.FINDFIRST;
+      Assert.AreEqual(
+        Quantity,WarehouseJournalLine."Qty. (Calculated)",
+        STRSUBSTNO(ValidationErr,WarehouseJournalLine.FIELDCAPTION("Qty. (Calculated)"),Quantity,WarehouseJournalLine.TABLECAPTION));
+    END;
+
+    LOCAL PROCEDURE UpdateQuantityPhysicalInventoryOnPhysicalInventoryJournal@73(ItemNo@1000 : Code[20]);
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      ItemJournalLine.SETRANGE("Item No.",ItemNo);
+      ItemJournalLine.FINDFIRST;
+      ItemJournalLine.VALIDATE(
+        "Qty. (Phys. Inventory)",ItemJournalLine."Qty. (Calculated)" - (ItemJournalLine."Qty. (Calculated)" / 2));  // Value required for the test.
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateInventoryUsingWarehouseJournal@85(Bin@1000 : Record 7354;Item@1002 : Record 27;Quantity@1003 : Decimal);
+    VAR
+      WarehouseJournalLine@1001 : Record 7311;
+      ItemJournalBatch@1008 : Record 233;
+      ItemJournalTemplate@1009 : Record 82;
+      WarehouseJournalBatch@1004 : Record 7310;
+    BEGIN
+      WarehouseJournalLine.DELETEALL(TRUE);  // Delete existing Warehouse Journal Lines.
+      CreateWhseJnlLine(
+        WarehouseJournalLine,
+        Bin."Location Code",
+        Bin."Zone Code",
+        Bin.Code,
+        Item."No.",
+        Quantity,
+        WarehouseJournalBatch."Template Type"::Item);
+      LibraryWarehouse.RegisterWhseJournalLine(
+        WarehouseJournalLine."Journal Template Name",WarehouseJournalLine."Journal Batch Name",Bin."Location Code",TRUE);
+      SelectItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Item);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      LibraryWarehouse.CalculateWhseAdjustment(Item,ItemJournalBatch);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE VerifyReportData@95(RowCaption@1000 : Text;RowValue@1001 : Variant;ColumnCaption@1002 : Text;ColumnValue@1003 : Variant);
+    BEGIN
+      LibraryReportDataset.SetRange(RowCaption,RowValue);
+      IF LibraryReportDataset.GetNextRow THEN
+        LibraryReportDataset.AssertCurrentRowValue(ColumnCaption,ColumnValue);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyWarehouseActivityLine@161(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10];ActionType@1002 : Option);
+    VAR
+      WarehouseActivityLine@1003 : Record 5767;
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Activity Type",WarehouseActivityLine."Activity Type"::Movement);
+      WarehouseActivityLine.SETRANGE("Item No.",ItemNo);
+      WarehouseActivityLine.SETRANGE("Location Code",LocationCode);
+      WarehouseActivityLine.SETRANGE("Action Type",ActionType);
+      WarehouseActivityLine.FINDFIRST;
+
+      LibraryReportDataset.SetRange('ActionType_WhseActivLine',FORMAT(WarehouseActivityLine."Action Type"));
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('ItemNo_WhseActivLine',WarehouseActivityLine."Item No.");
+      LibraryReportDataset.AssertCurrentRowValue('LocCode_WhseActivHeader',WarehouseActivityLine."Location Code");
+      LibraryReportDataset.AssertCurrentRowValue('BinCode_WhseActivLine',WarehouseActivityLine."Bin Code");
+      LibraryReportDataset.AssertCurrentRowValue('QtyBase_WhseActivLine',WarehouseActivityLine."Qty. (Base)");
+    END;
+
+    LOCAL PROCEDURE VerifyPhysInvtJournalLine@102(ItemNo@1001 : Code[20];CalculatedQty@1002 : Decimal;PhysInvtQty@1003 : Decimal;Qty@1004 : Decimal);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      WITH ItemJournalLine DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        FINDFIRST;
+        TESTFIELD("Qty. (Calculated)",CalculatedQty);
+        TESTFIELD("Qty. (Phys. Inventory)",PhysInvtQty);
+        TESTFIELD(Quantity,Qty);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyPostedSalesInvoice@149(ItemNo@1001 : Code[20];Quantity1@1002 : Decimal;Quantity2@1003 : Decimal;SalesLineDescription@1004 : Text[50]);
+    VAR
+      SalesInvoiceLine@1000 : Record 113;
+    BEGIN
+      WITH SalesInvoiceLine DO BEGIN
+        SETRANGE("No.",ItemNo);
+        SETRANGE(Quantity,Quantity1);
+        FINDFIRST;
+        Assert.AreEqual(Type::Item,Type,CombineShipmentErr);
+        SETRANGE(Quantity,Quantity2);
+        FINDFIRST;
+        Assert.AreEqual(Type::Item,Type,CombineShipmentErr);
+        RESET;
+        SETRANGE(Description,SalesLineDescription);
+        FINDFIRST;
+        Assert.AreEqual(Type::" ",Type,CombineShipmentErr);
+      END;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@36(ConfirmMessage@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    VAR
+      DequeueVariable@1002 : Variant;
+      LocalMessage@1003 : Text[1024];
+    BEGIN
+      LibraryVariableStorage.Dequeue(DequeueVariable);
+      LocalMessage := DequeueVariable;
+      Assert.IsTrue(STRPOS(ConfirmMessage,LocalMessage) > 0,ConfirmMessage);
+      Reply := TRUE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE PriceListRequestPageHandler@108(VAR PriceList@1000 : TestRequestPage 715);
+    VAR
+      DateReq@1170 : Variant;
+      SalesType@1171 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(DateReq);
+      LibraryVariableStorage.Dequeue(SalesType);
+
+      PriceList.Date.SETVALUE(DateReq);
+      PriceList.SalesType.SETVALUE(SalesType);
+      PriceList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@48(Message@1000 : Text[1024]);
+    VAR
+      DequeueVariable@1002 : Variant;
+      LocalMessage@1001 : Text[1024];
+    BEGIN
+      LibraryVariableStorage.Dequeue(DequeueVariable);
+      LocalMessage := DequeueVariable;
+      Assert.IsTrue(STRPOS(Message,LocalMessage) > 0,Message);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WarehouseBinListReportHandler@103(VAR WarehouseBinList@1001 : TestRequestPage 7319);
+    BEGIN
+      WarehouseBinList.ShowBinContents.SETVALUE(TRUE);
+      WarehouseBinList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhereUsedListRequestPageHandler@107(VAR WhereUsedList@1000 : TestRequestPage 809);
+    BEGIN
+      WhereUsedList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE PickingListRequestPageHandler@22(VAR PickingList@1000 : TestRequestPage 5752);
+    BEGIN
+      PickingList.Breakbulk.SETVALUE(TRUE);
+      PickingList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE PutAwayListRequestPageHandler@57(VAR PutawayList@1000 : TestRequestPage 5751);
+    BEGIN
+      PutawayList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryPutAwayListRequestPageHandler@66(VAR InventoryPutawayList@1000 : TestRequestPage 7322);
+    BEGIN
+      InventoryPutawayList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhseReceiptListRequestPageHandler@76(VAR WhseReceipt@1000 : TestRequestPage 7316);
+    BEGIN
+      WhseReceipt.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhseAdjustmentBinRequestPageHandler@93(VAR WhseAdjustmentBin@1000 : TestRequestPage 7320);
+    BEGIN
+      WhseAdjustmentBin.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE MovementListRequestPageHandler@106(VAR MovementList@1000 : TestRequestPage 7301);
+    BEGIN
+      MovementList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE TransferOrderRequestPageHandler@110(VAR TransferOrder@1000 : TestRequestPage 5703);
+    BEGIN
+      TransferOrder.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE TransferShipmentRequestPageHandler@111(VAR TransferShipment@1000 : TestRequestPage 5704);
+    BEGIN
+      TransferShipment.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE TransferReceiptRequestPageHandler@112(VAR TransferReceipt@1000 : TestRequestPage 5705);
+    BEGIN
+      TransferReceipt.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhsePostedReceiptRequestPageHandler@114(VAR WhsePostedReceipt@1000 : TestRequestPage 7308);
+    BEGIN
+      WhsePostedReceipt.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryPickingListRequestPageHandler@116(VAR InventoryPickingList@1000 : TestRequestPage 813);
+    BEGIN
+      InventoryPickingList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhseShipmentRequestPageHandler@117(VAR WhseShipment@1000 : TestRequestPage 7317);
+    BEGIN
+      WhseShipment.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhseShipmentStatusRequestPageHandler@119(VAR WhseShipmentStatus@1000 : TestRequestPage 7313);
+    BEGIN
+      WhseShipmentStatus.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhsePhysInventoryListRequestPageHandler@121(VAR WhsePhysInventoryList@1000 : TestRequestPage 7307);
+    VAR
+      ShowCalculatedQty@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ShowCalculatedQty);
+      WhsePhysInventoryList.ShowCalculatedQty.SETVALUE(ShowCalculatedQty);
+      WhsePhysInventoryList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhseRegisterQuantityRequestPageHandler@123(VAR WarehouseRegisterQuantity@1000 : TestRequestPage 7303);
+    BEGIN
+      WarehouseRegisterQuantity.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryPostingTestRequestPageHandler@124(VAR InventoryPostingTest@1000 : TestRequestPage 702);
+    BEGIN
+      InventoryPostingTest.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CustomerOrderDetailRequestPageHandler@128(VAR CustomerOrderDetail@1000 : TestRequestPage 108);
+    VAR
+      ShowAmountInLCY@1001 : Variant;
+      NewPagePerCustomer@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ShowAmountInLCY);
+      LibraryVariableStorage.Dequeue(NewPagePerCustomer);
+
+      CustomerOrderDetail.ShowAmountsInLCY.SETVALUE(ShowAmountInLCY);
+      CustomerOrderDetail.NewPagePerCustomer.SETVALUE(NewPagePerCustomer);
+      CustomerOrderDetail.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE SalesReturnReceiptRequestPageHandler@130(VAR SalesReturnReceipt@1000 : TestRequestPage 6646);
+    BEGIN
+      SalesReturnReceipt.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WorkOrderRequestPageHandler@132(VAR WorkOrder@1000 : TestRequestPage 752);
+    BEGIN
+      WorkOrder.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryAvailabilityPlanRequestPageHandler@134(VAR InventoryAvailabilityPlan@1000 : TestRequestPage 707);
+    VAR
+      StartingDate@1001 : Variant;
+      PeriodLength@1002 : Variant;
+      UseStockkeepingUnit@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(StartingDate);
+      LibraryVariableStorage.Dequeue(PeriodLength);
+      LibraryVariableStorage.Dequeue(UseStockkeepingUnit);
+
+      InventoryAvailabilityPlan.StartingDate.SETVALUE(StartingDate);
+      InventoryAvailabilityPlan.PeriodLength.SETVALUE(PeriodLength);
+      InventoryAvailabilityPlan.UseStockkeepUnit.SETVALUE(UseStockkeepingUnit);
+      InventoryAvailabilityPlan.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Warehouse] [Reports] [SCM]
+      Unsupported version tags:
+      CA: Unable to Execute
+      IT: Unable to Execute
+      IN: Unable to Execute
+      CH: Unable to Execute (TFS ID 51281)
+
+      Test Various SCM Warehouse Reports.
+       1. Report Picking List. Source No shown in report is equal to Source No in Warehouse Activity Line.
+       2. Check Item No. on Warehouse Worksheet Line after run Get Inbound Source Documents Batch Report.
+       3. Check Document No. shown in report Put-away List report is equal to Document No. of Purchase Order.
+       4. Check Document No. shown in report Inventory Put-away List  is equal to Document No. of Purchase Order.
+       5. Check Quantity shown in report Whse. - Receipt report is equal to Quantity on Purchase Order.
+       6. Check Bin on Movement Worksheet is correct as per Bin Ranking after run Calculate Bin Replenishment Batch Job.
+       7. Report Whse. Adjustment Bin Item No. Shown in report is equal to Item No. in Warehouse Entry.
+       8. Check Bin shown in report Warehouse Bin List is equal to Bin of Location.
+       9. Check Item No. on Warehouse Worksheet Line after run Get Outbound Source Documents Batch Report.
+      10. Check Bin Code shown in Warehouse Movement report is equal to bin in Movement Worksheet.
+      11. Check Calculated Inventory Quantity after run batch report Whse. Calculate Inventory With Inventory Quantity.
+      12. Check Transfer Quantity with generated Transfer Order Report Quantity.
+      13. Check Transfer Quantity with generated Transfer Shipment Report Quantity.
+      14. Check Transfer Quantity Warehouse with generated Transfer Receipt Report Quantity.
+      15. Check Quantity To Receive, Item No. Quantity exist in Warehouse Posted Receipt Report.
+      16. Source No ,ItemNo and Location shown in Inventory Picking List Report is equal to the Sales Order.
+      17. Item No, Quantity and Location shown in Warehouse Shipment Report is equal to the Sales Order.
+      18. Source No, Item No and Location shown in Warehouse Shipment Status Report is equal to the Sales Order.
+      19. Check That Sales Invoice Created after Run Batch Report with Option Post Sales FALSE.
+      20. Check That Posted Sales Invoice Created after Run Batch Report with Option Post Invoice TRUE.
+      21. Check Item No. and Quantity in Whse. Phys. Inventory List report after Calculate Inventory on Whse. Physical Inventory Journal.
+      22. Check the data on Warehouse Register - Quantity report is same as the Warehouse Register data.
+      23. Check the data on Inventory Posting Test report is same as the data after updating Quantity Physical Inventory on Whse. Physical Inventory Journal.
+      24. Test the functionality of Customer Order Detail Report.
+      25. Test the functionality of Sales Return Receipt Report.
+      26. Test the functionality of Work Order Report.
+      27. Test to verify Inventory Availability Plan report after create and refresh Production Order.
+      28. Test to verify Warehouse Bin List report.
+      29. Test the Picking List report for Break Bulk functionality.
+      30. Check that Bin Code exist in Inventory Put-away List report.
+      31. Test and verify Price List Report.
+      32. Test and verify Where Used List Report.
+      33. Test and verify to print Bin Code on Report Picking List.
+      34. Test and verify calculating Inventory on Phys. Inventory Journal with existing Warehouse Entries for initial Item.
+
+        Covers Test Cases for WI - 217046
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        PickingList                                      139508
+
+        Covers Test Cases for WI - 236870
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        GetInboundSourceDocuments                        129130
+        PutAwayList                                      139507,229518
+        InventoryPutAwayList                             139558
+        WhseReceipt                                      139555
+
+        Covers Test Cases for WI - 236869
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        CalculateBinReplenishment                        129127
+        WhseAdjustmentBin                                139462
+        WarehouseBinList                                 139461
+        GetOutboundSourceDocuments                       129128
+        WarehouseMovement                                139548
+        WhseCalculateInventory                           129137
+
+        Covers Test Cases for WI - 241084
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        TransferOrder                                    139504
+        TransferShipment                                 139505
+        TransferReceipt                                  139506
+
+        Covers Test Cases for WI - 261023
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        PostedWarehouseReceipt                           229517
+        InventoryPickingList                             139425
+        WarehouseShipment                                139556
+        WhseShipmentStatus                               139460
+        CombineShipment                                  128984
+        CombineShipmentPostInvoice                       128984
+
+        Covers Test Cases for WI - 301583
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        WarehousePhysicalInventoryList                   139373
+        WarehouseRegisterQuantity                        139550
+        InventoryPostingTest                             259852,259853
+
+        Covers Test Cases for WI - 303211
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        CustomerOrderDetailReport                        123374
+        SalesReturnReceiptReport                         139543
+        WorkOrderReport                                  123381
+
+        Covers Test Cases for WI - 308980
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        InventoryAvailabilityPlanReport                  265769
+        WarehouseBinListReport                           240695
+
+        Covers Test Cases for WI - 318116
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        PickingListWithSetBreakBulkAsTrue                286052
+
+        Covers Test Cases for WI - 318114
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        InventoryPutAwayListWithBinCode                  253266
+
+        Covers Test Cases for WI - 324375
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        PriceListReport                                  312895
+
+        Covers Test Cases for WI - 319867
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        WhereUsedListReport                              230883
+
+        Covers Test Cases for BUG - 6756
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        PutAwayListReportWithBinCode
+
+        Covers Test Cases for WI - 66711
+        -------------------------------------------------------------------------
+        Test Function Name                               TFS ID
+        -------------------------------------------------------------------------
+        CalcInvtOnPhysInvtJnlWithExistingWhseEntry       66711
+    }
+    END.
+  }
+}
+

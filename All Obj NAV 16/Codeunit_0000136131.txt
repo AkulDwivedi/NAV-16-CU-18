@@ -1,0 +1,918 @@
+OBJECT Codeunit 136131 Service Demand Overview
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1002 : Codeunit 130000;
+      LibraryJob@1003 : Codeunit 131920;
+      DescriptionText@1010 : TextConst 'ENU=NTF_TEST_NTF_TEST';
+      NoDataForExecutionError@1009 : TextConst 'ENU=No service item has a non-blocked customer and non-blocked item. Execution stops.';
+      LibraryService@1004 : Codeunit 131902;
+      LibraryInventory@1015 : Codeunit 132201;
+      LibraryWarehouse@1014 : Codeunit 132204;
+      LibraryPurchase@1013 : Codeunit 130512;
+      ShipmentDateDocumentError@1006 : TextConst 'ENU=No Sales Line found with sales order no %1.';
+      LibrarySales@1016 : Codeunit 130509;
+      DemandOverviewAllFilter@1017 : TextConst 'ENU=All Demand';
+      DemandOverviewSaleFilter@1018 : TextConst 'ENU=Sale';
+      LibraryPlanning@1012 : Codeunit 132203;
+      ItemNo@1008 : Code[20];
+      NoDate@1019 : Integer;
+      NeededDateBlankErrorText@1020 : TextConst 'ENU="Validation error for Field: Needed by Date,  Message = ''Needed by Date must have a value in Service Line: Document Type=Order, Document No.=%1, Line No.=10000. It cannot be zero or empty.''"';
+      IsInitialized@1000 : Boolean;
+      ReceiptDateDocumentError@1001 : TextConst 'ENU=No Purchase Line found with sales order no %1.';
+      RangeErrorMessage@1005 : TextConst 'ENU=RangeMin should be always greater than RangeMax.';
+      LineCountError@1007 : TextConst 'ENU=No. of Lines in %1 must be equal to %2.';
+      OriginalQuantity@1011 : Decimal;
+
+    LOCAL PROCEDURE Initialize@6();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      // Clear the needed globals
+      ClearGlobals;
+
+      IF IsInitialized THEN
+        EXIT;
+
+      // Setup demonstration data
+      LibraryService.SetupServiceMgtNoSeries;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      // Set the Stockout warning to checked in receivables setup
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    PROCEDURE StartDateNoEndDateQtySumCheck@74();
+    VAR
+      Item@1011 : Record 27;
+      DemandOverview@1008 : TestPage 5830;
+      FirstPurchaseQuantity@1000 : Integer;
+      SecondPurchaseQuantity@1001 : Integer;
+      FirstSaleQuantity@1002 : Integer;
+      SecondSaleQuantity@1003 : Integer;
+      PurchaseOrderNo@1004 : Code[20];
+      ExpectedRows@1005 : Integer;
+      SalesOrderNo@1006 : Code[20];
+      QuantitySum@1012 : Integer;
+      ActualRowCount@1013 : Integer;
+    BEGIN
+      // Test case - Sales demand, start date filter, no end date - Quantity sum check
+      // Set start date = W - 5. All supply and demand should be shown. The quantity sum should be 4.
+      Initialize;
+      FirstPurchaseQuantity := RANDOMRANGE(3,12);
+      SecondPurchaseQuantity := RANDOMRANGE(3,7);
+      FirstSaleQuantity := FirstPurchaseQuantity - 2;
+      SecondSaleQuantity := SecondPurchaseQuantity - 2;
+      ExpectedRows := 7;
+
+      // SETUP: Create Supply and demand.
+      CreateItem(Item,Item."Reordering Policy"::" ");
+      PurchaseOrderNo := CreatePurchaseSupply(Item."No.",FirstPurchaseQuantity);
+      CreatePurchaseSupplyAfter(Item."No.",SecondPurchaseQuantity,GetReceiptDate(PurchaseOrderNo));
+      SalesOrderNo := CreateSalesDemand(Item."No.",FirstSaleQuantity);
+      CreateSalesDemandAfter(Item."No.",SecondSaleQuantity,GetShipmentDate(SalesOrderNo));
+
+      // EXECUTE: Open Demand overview and set the needed fields.
+      DemandOverview.OPENEDIT;
+      SetItemOnlyFilter(DemandOverview,Item."No.");
+      DemandOverview.Calculate.INVOKE;
+
+      // VERIFY: The number of rows returned and the total sum of quantities returned matches.
+      ActualRowCount := 0;
+      REPEAT
+        IF NOT DemandOverview.ISEXPANDED THEN
+          DemandOverview.EXPAND(TRUE);
+        IF DemandOverview.QuantityText.VALUE <> '' THEN
+          QuantitySum := QuantitySum + DemandOverview.QuantityText.ASINTEGER;
+        ActualRowCount := ActualRowCount + 1;
+      UNTIL NOT DemandOverview.NEXT;
+
+      Assert.AreEqual(FirstPurchaseQuantity + SecondPurchaseQuantity - FirstSaleQuantity - SecondSaleQuantity,QuantitySum,
+        'Sum of quantities of all lines');
+      Assert.AreEqual(ExpectedRows,ActualRowCount,'No. of expected rows match');
+    END;
+
+    [Test]
+    PROCEDURE StartDateEndFilterTests@2();
+    VAR
+      Item@1011 : Record 27;
+      DemandOverview@1008 : TestPage 5830;
+      SalesOrderNo@1004 : Code[20];
+      PurchaseQuantity@1000 : Integer;
+      SaleQuantity@1002 : Integer;
+    BEGIN
+      // Test case - Sales demand
+      // Supply on workdate
+      // Demand on workdate, workdate + 1, workdate + 2
+      // Start date and end date are both before supply and demand.
+      // No lines should be shown.
+
+      Initialize;
+      PurchaseQuantity := RANDOM(100);
+      SaleQuantity := PurchaseQuantity;
+
+      CreateItem(Item,Item."Reordering Policy"::" ");
+      CreatePurchaseSupply(Item."No.",PurchaseQuantity);
+
+      // SETUP: Create one row of supply on work date.
+      // SETUP: Create one row of Demand on work date,work date + 1, work date + 2.
+      SalesOrderNo := CreateSalesDemand(Item."No.",SaleQuantity);
+      SalesOrderNo := CreateSalesDemandAfter(Item."No.",SaleQuantity,GetShipmentDate(SalesOrderNo));
+      SalesOrderNo := CreateSalesDemandAfter(Item."No.",SaleQuantity,GetShipmentDate(SalesOrderNo));
+
+      DemandOverview.OPENVIEW;
+      // VERIFY: When Start Date and end date are before supply and demand no lines are shown.
+      // VERIFY: When Start date before supply and demand, end Date on workdate + 1, 6 lines are shown.
+      // VERIFY: When Start Date on workdate + 1 and end date is blank, 5 lines are shown.
+      // VERIFY: When Start Date and end date are after supply and demand no lines are shown.
+      // VERIFY: When Start Date and end date are blank all lines (8) are shown.
+      SetAndVerifyDateFilters(DemandOverview,Item."No.",-10,-8,NoDate,0);
+      SetAndVerifyDateFilters(DemandOverview,Item."No.",-10,1,NoDate,6);
+      SetAndVerifyDateFilters(DemandOverview,Item."No.",1,NoDate,NoDate,5);
+      SetAndVerifyDateFilters(DemandOverview,Item."No.",10,20,NoDate,0);
+      SetAndVerifyDateFilters(DemandOverview,Item."No.",NoDate,NoDate,NoDate,8);
+    END;
+
+    [Test]
+    PROCEDURE SupplyDemandAllDemandTypes@75();
+    VAR
+      Item@1011 : Record 27;
+      DemandOverview@1008 : TestPage 5830;
+      PurchaseQuantity@1000 : Integer;
+      SaleQuantity@1002 : Integer;
+      JobQuantity@1001 : Integer;
+      ServiceQuantity@1003 : Integer;
+    BEGIN
+      // The demand overview page should contain one line of each category.
+      Initialize;
+      PurchaseQuantity := RANDOMRANGE(11,15);
+      SaleQuantity := RANDOM(3);
+      JobQuantity := RANDOM(7);
+      ServiceQuantity := PurchaseQuantity - SaleQuantity - JobQuantity;
+
+      // SETUP: Create supply, Create demand of types sales, service, job.
+      CreateItem(Item,Item."Reordering Policy"::" ");
+      CreatePurchaseSupply(Item."No.",PurchaseQuantity);
+      CreateJobDemand(Item."No.",JobQuantity);
+      CreateServiceDemand(Item."No.",ServiceQuantity);
+      CreateSalesDemand(Item."No.",SaleQuantity);
+
+      // EXECUTE: open demand overview page. Set filter on item no and all demand types only.
+      DemandOverview.OPENEDIT;
+      SetItemOnlyFilter(DemandOverview,Item."No.");
+      DemandOverview.Calculate.INVOKE;
+
+      // VERIFY: The number of rows returned and the sum of quantities returned.
+      VerifyOverviewLineQuantities(DemandOverview,'Sales',1,-SaleQuantity);
+      VerifyOverviewLineQuantities(DemandOverview,'Job',1,-JobQuantity);
+      VerifyOverviewLineQuantities(DemandOverview,'Service',1,-ServiceQuantity);
+      VerifyOverviewLineQuantities(DemandOverview,'Purchase',1,PurchaseQuantity);
+    END;
+
+    [Test]
+    PROCEDURE SupplyDemandUnusedItemFilter@111();
+    VAR
+      Item@1011 : Record 27;
+      UnusedItem@1005 : Record 27;
+      DemandOverview@1008 : TestPage 5830;
+      Quantity@1000 : Integer;
+    BEGIN
+      // Create demand of types job, sales, service.
+      // When running demand overview for the unused item, no lines should be shown.
+      Initialize;
+      Quantity := RANDOM(12);
+
+      // SETUP: Create demand of types job, sales, service for item 1.
+      CreateItem(Item,Item."Reordering Policy"::" ");
+      CreatePurchaseSupply(Item."No.",Quantity);
+      CreateJobDemand(Item."No.",Quantity);
+      CreateServiceDemand(Item."No.",Quantity);
+      CreateSalesDemand(Item."No.",Quantity);
+
+      // EXECUTE: Run demand overview for item 2.
+      CreateItem(UnusedItem,Item."Reordering Policy"::" ");
+      DemandOverview.OPENEDIT;
+      SetItemOnlyFilter(DemandOverview,UnusedItem."No.");
+      DemandOverview.Calculate.INVOKE;
+
+      // VERIFY: No lines are returned when no supply and demand have been created.
+      Assert.AreEqual(0,CountOverviewGridLines(DemandOverview),'Verify no rows are listed when filtering on a unused Item');
+    END;
+
+    [Test]
+    PROCEDURE SupplyDemandLocationFilter@30();
+    VAR
+      Item@1011 : Record 27;
+      DemandOverview@1008 : TestPage 5830;
+      Quantity@1000 : Integer;
+      LocationCode@1001 : Code[10];
+    BEGIN
+      // Create demand of types job, sales, service to location X.
+      // When running demand overview without location limitation, all lines should be shown.
+      // When running demand overview for a location without supply or demand, no lines should be shown.
+
+      Initialize;
+      Quantity := RANDOM(12);
+
+      // SETUP: Create demand of types job, sales, service for item in location A.
+      LocationCode := CreateLocation;
+      CreateItem(Item,Item."Reordering Policy"::" ");
+      CreatePurchaseSupplyAtLocation(Item."No.",Quantity,LocationCode);
+      CreateJobDemandAtLocation(Item."No.",Quantity,LocationCode);
+      CreateServiceDemandAtLocation(Item."No.",Quantity,LocationCode);
+      CreateSalesDemandAtLocation(Item."No.",Quantity,LocationCode);
+
+      // EXECUTE: Run demand overview for Location B.
+      DemandOverview.OPENEDIT;
+      SetItemOnlyFilter(DemandOverview,Item."No.");
+      DemandOverview.LocationFilter.VALUE(FORMAT(CreateLocation));
+      DemandOverview.Calculate.INVOKE;
+
+      // VERIFY: No lines are returned when no supply and demand have been created in location B.
+      Assert.AreEqual(0,CountOverviewGridLines(DemandOverview),'Verify no rows are listed when filtering on a unused Location');
+    END;
+
+    [Test]
+    PROCEDURE SupplyDemandSameVariantFilter@32();
+    VAR
+      Item@1011 : Record 27;
+      DemandOverview@1008 : TestPage 5830;
+      Quantity@1000 : Integer;
+      ActualRowsCount@1001 : Integer;
+    BEGIN
+      // Create supply and demand to variant no. 1
+      // When running demand overview without variant filter or for variant 1, all lines should be shown.
+      // When running demand overview for another variant, no lines should be shown.
+
+      Initialize;
+      Quantity := RANDOM(12);
+
+      // SETUP: Create Supply and Demand to Variant no. 1
+      CreateItemWithVariants(Item);
+      CreatePurchaseSupplyForVariant(Item."No.",Quantity,1);
+      CreateJobDemandForVariant(Item."No.",Quantity,1);
+      CreateServiceDemandForVariant(Item."No.",Quantity,1);
+      CreateSalesDemandForVariant(Item."No.",Quantity,1);
+
+      // EXECUTE: Open Demand Overview and set Demand to Variant no. 1 and count lines (count1).
+      // EXECUTE: Open Demand Overview and set Demand to Variant no. 2 and count lines (count2) .
+      DemandOverview.OPENEDIT;
+      SetItemOnlyFilter(DemandOverview,Item."No.");
+      DemandOverview.VariantFilter.VALUE(FORMAT(GetVariant(Item."No.",1)));
+      DemandOverview.Calculate.INVOKE;
+      ActualRowsCount := CountOverviewGridLines(DemandOverview);
+      DemandOverview.VariantFilter.VALUE(FORMAT(GetVariant(Item."No.",2)));
+      DemandOverview.Calculate.INVOKE;
+
+      // VERIFY: count1 matches the no. of supply and demand lines created.
+      // VERIFY: count2 is zero as no lines have been created for variant 2.
+      Assert.AreEqual(0,CountOverviewGridLines(DemandOverview),'Verify no rows are listed when filtering on a unused variant');
+      Assert.AreEqual(6,ActualRowsCount,'Verify rows are listed when filtering on a used variant');
+    END;
+
+    [Test]
+    PROCEDURE ServiceOrderBlankNeededByDate@65();
+    VAR
+      Item@1011 : Record 27;
+      ServiceLines@1008 : TestPage 5905;
+      PurchaseQuantity@1000 : Integer;
+      ServiceQuantity@1002 : Integer;
+      PurchaseOrderNo@1004 : Code[20];
+      ServiceOrderNo@1006 : Code[20];
+    BEGIN
+      // Test case - Sales demand, start date filter, no end date - Quantity sum check.
+      // Set start date = W - 5. All supply and demand should be shown. The quantity sum should be 4.
+      Initialize;
+      PurchaseQuantity := RANDOMRANGE(2,10);
+      ServiceQuantity := RANDOM(PurchaseQuantity - 1);
+
+      // SETUP: Create suppply and  service demand.
+      CreateItem(Item,Item."Reordering Policy"::" ");
+      PurchaseOrderNo := CreatePurchaseSupply(Item."No.",PurchaseQuantity);
+      CreatePurchaseSupplyAfter(Item."No.",PurchaseQuantity,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Edit the needed by date in Service line and blank it.
+      ServiceOrderNo := CreateServiceDemand(Item."No.",ServiceQuantity);
+      OpenFirstServiceLines(ServiceLines,ServiceOrderNo);
+      ServiceLines.FIRST;
+      ASSERTERROR ServiceLines."Needed by Date".VALUE := '';
+
+      // VERIFY: The validation error text is displayed and matches expected.
+      Assert.AreEqual(
+        STRSUBSTNO(NeededDateBlankErrorText,ServiceOrderNo),FORMAT(GETLASTERRORTEXT),
+        'Verify operation was cancelled and right error message is displayed');
+    END;
+
+    [Test]
+    PROCEDURE CalculatePlanForServiceAndJobDemand@3();
+    VAR
+      Item@1001 : Record 27;
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Check Planning Lines for Sevice and Job Demand using Reordering Policy as Order after running Calculate Regenerative Plan.
+
+      // 1. Setup: Create Item with Reordering Policy as Order, Create demand for Service and Job.
+      Initialize;
+      Quantity := RANDOM(10);  // Assigning Random integer value.
+      CreateItem(Item,Item."Reordering Policy"::Order);
+      CreateJobDemand(Item."No.",Quantity);
+      CreateServiceDemand(Item."No.",Quantity);
+
+      // 2. Exercise: Calculate Regenerative Plan. Using Random Date for Order Date.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + FORMAT(RANDOM(10)) + 'D>',WORKDATE));
+
+      // 3. Verify: Verify Planning Worksheet Lines.
+      VerifyRequisitionLine(Item."No.",Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE ReservationForServiceAndJobDemand@5();
+    VAR
+      Item@1004 : Record 27;
+      RequisitionLine@1003 : Record 246;
+    BEGIN
+      // Check Planning Lines Reservation for Sevice and Job Demand using Reordering Policy as Order after running Calculate Regenerative Plan.
+
+      // 1. Setup: Create Item with Reordering Policy as Order, Create demand for Service and Job, Calculate Regenerative Plan.Using Random Date for Order Date.
+      Initialize;
+      CreateItem(Item,Item."Reordering Policy"::Order);
+      ItemNo := Item."No.";  // Assigning global variables as required in Page Handler.
+      OriginalQuantity := RANDOM(10);  // Assigning Random integer value.
+      CreateJobDemand(Item."No.",OriginalQuantity);
+      CreateServiceDemand(Item."No.",OriginalQuantity);
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + FORMAT(RANDOM(10)) + 'D>',WORKDATE));
+
+      // 2. Exercise: Filter Planning Worksheet Lines for Item and run Reserve.
+      FilterRequisitionLine(RequisitionLine,Item."No.");
+      RequisitionLine.ShowReservation;
+
+      // 3. Verification Done on ReservationPageHandler.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationActionsPageHandler,AvailableJobPlanningLinesPageHandler,ReservationEntriesPageHandler)]
+    PROCEDURE ReservationQuantityForJobDemand@49();
+    VAR
+      Item@1004 : Record 27;
+      RequisitionLine@1003 : Record 246;
+    BEGIN
+      // Check Available Job Planning Lines and Reservation Entries from Reservation using Reordering Policy as Order after running Calculate Regenerative Plan.
+
+      // 1. Setup: Create Item with Reordering Policy as Order, Create demand for Service and Job, Calculate Regenerative Plan. Using Random Date for Order Date.
+      Initialize;
+      CreateItem(Item,Item."Reordering Policy"::Order);
+      ItemNo := Item."No."; // Assigning global variables as required in Page Handler.
+      OriginalQuantity := RANDOM(10);  // Assigning Random integer value.
+      CreateJobDemand(Item."No.",OriginalQuantity);
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + FORMAT(RANDOM(10)) + 'D>',WORKDATE));
+
+      // 2. Exercise: Filter Planning Worksheet Lines for Item and run Reserve.
+      FilterRequisitionLine(RequisitionLine,Item."No.");
+      RequisitionLine.ShowReservation;
+
+      // 3. Verification Done on AvailableJobPlanningLinesPageHandler and ReservationEntriesPageHandler.
+    END;
+
+    LOCAL PROCEDURE AddBiasToWorkDate@56(DateBias@1000 : Integer) : Date;
+    VAR
+      TheDate@1002 : Date;
+      BiasString@1001 : DateFormula;
+    BEGIN
+      TheDate := WORKDATE;
+      IF DateBias <> 0 THEN BEGIN
+        EVALUATE(BiasString,'<' + FORMAT(DateBias) + 'D>');
+        TheDate := CALCDATE(BiasString,TheDate);
+      END;
+      EXIT(TheDate);
+    END;
+
+    LOCAL PROCEDURE ClearGlobals@7();
+    BEGIN
+      // Clear all global variables
+      NoDate := -10000;
+      ItemNo := '';
+      OriginalQuantity := 0;
+    END;
+
+    LOCAL PROCEDURE ClearDemandTypeAndNoFilter@27(DemandOverview@1000 : TestPage 5830);
+    BEGIN
+      DemandOverview.DemandType.VALUE(DemandOverviewAllFilter);
+      DemandOverview.DemandType.VALUE(DemandOverviewSaleFilter);
+      DemandOverview.DemandNoCtrl.VALUE('');
+      DemandOverview.DemandType.VALUE(DemandOverviewAllFilter);
+    END;
+
+    LOCAL PROCEDURE CountOverviewGridLines@116(DemandOverview@1002 : TestPage 5830) : Integer;
+    VAR
+      RowsCount@1001 : Integer;
+    BEGIN
+      RowsCount := 0;
+      DemandOverview.FIRST;
+      IF DemandOverview."Item No.".VALUE = '' THEN
+        EXIT(RowsCount);
+      REPEAT
+        IF NOT DemandOverview.ISEXPANDED THEN
+          DemandOverview.EXPAND(TRUE);
+        RowsCount := RowsCount + 1;
+      UNTIL NOT DemandOverview.NEXT;
+
+      DemandOverview.FIRST;
+      EXIT(RowsCount);
+    END;
+
+    LOCAL PROCEDURE CreateItem@12(VAR Item@1000 : Record 27;ReorderingPolicy@1001 : Option);
+    BEGIN
+      // Creates a new item. Wrapper for the library method.
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Reordering Policy",ReorderingPolicy);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateLocation@15() : Code[10];
+    VAR
+      Location@1001 : Record 14;
+    BEGIN
+      // Creates a new Location. Wrapper for the library method.
+      LibraryWarehouse.CreateLocation(Location);
+      EXIT(Location.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyBasis@36(ItemNo@1008 : Code[20];Quantity@1000 : Integer;LocationCode@1006 : Code[10];VariantCode@1003 : Code[10];ReceiptDate@1001 : Date) : Code[20];
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1005 : Record 39;
+    BEGIN
+      // Creates a Purchase order for the given item.
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE(Quantity,Quantity);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.VALIDATE("Variant Code",VariantCode);
+      PurchaseLine.VALIDATE("Expected Receipt Date",ReceiptDate);
+      PurchaseLine.MODIFY;
+      EXIT(PurchaseHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupply@25(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,ItemQuantity,'','',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyAtLocation@13(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer;LocationCode@1000 : Code[10]) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item at the specified location.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,ItemQuantity,LocationCode,'',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyForVariant@45(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer;VariantNo@1000 : Integer) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,ItemQuantity,'',GetVariant(ItemNo,VariantNo),WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyAfter@26(ItemNo@1004 : Code[20];Quantity@1000 : Integer;ReceiptDate@1001 : Date) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item After a source document date.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,Quantity,'','',CALCDATE('<+1D>',ReceiptDate)));
+    END;
+
+    LOCAL PROCEDURE CreateServiceDemandBasis@1(ItemNo@1001 : Code[20];ItemQty@1000 : Integer;LocationCode@1009 : Code[10];VariantCode@1010 : Code[10];NeededBy@1008 : Date) : Code[20];
+    VAR
+      ServiceItem@1007 : Record 5940;
+      ServiceHeader@1004 : Record 5900;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      FindServiceItem(ServiceItem);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      ServiceHeader.VALIDATE("Bill-to Name",DescriptionText);
+      ServiceHeader.MODIFY;
+
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      ServiceItemLine.VALIDATE("Line No.",10000);
+      ServiceItemLine.MODIFY;
+
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ItemNo);
+      ServiceLine.SetHideReplacementDialog(TRUE);
+      ServiceLine.VALIDATE(Quantity,ItemQty);
+      ServiceLine.VALIDATE("Location Code",LocationCode);
+      ServiceLine.VALIDATE("Variant Code",VariantCode);
+      ServiceLine.VALIDATE("Needed by Date",NeededBy);
+      ServiceLine.VALIDATE("Variant Code",VariantCode);
+      ServiceLine.MODIFY;
+
+      EXIT(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateServiceDemand@40(ItemNo@1003 : Code[20];Quantity@1000 : Integer) : Code[20];
+    BEGIN
+      EXIT(CreateServiceDemandBasis(ItemNo,Quantity,'','',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateServiceDemandForVariant@71(ItemNo@1004 : Code[20];Quantity@1000 : Integer;VariantNo@1002 : Integer) : Code[20];
+    BEGIN
+      EXIT(CreateServiceDemandBasis(ItemNo,Quantity,'',GetVariant(ItemNo,VariantNo),WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateServiceDemandAtLocation@70(ItemNo@1004 : Code[20];Quantity@1000 : Integer;LocationCode@1002 : Code[10]) : Code[20];
+    BEGIN
+      EXIT(CreateServiceDemandBasis(ItemNo,Quantity,LocationCode,'',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateJobDemandAtBasis@31(ItemNo@1002 : Code[20];ItemQuantity@1001 : Integer;LocationCode@1003 : Code[10];VariantCode@1006 : Code[10];PlanDate@1010 : Date) : Code[20];
+    VAR
+      Job@1000 : Record 167;
+      JobTaskLine@1004 : Record 1001;
+      JobPlanningLine@1005 : Record 1003;
+      DocumentNo@1007 : Code[20];
+    BEGIN
+      LibraryJob.CreateJob(Job);
+      Job.VALIDATE("Apply Usage Link",TRUE);
+      Job.VALIDATE("Description 2",DescriptionText);
+      Job.MODIFY;
+
+      // Job Task Line:
+      LibraryJob.CreateJobTask(Job,JobTaskLine);
+      JobTaskLine.MODIFY;
+
+      // Job Planning Line:
+      LibraryJob.CreateJobPlanningLine(JobPlanningLine."Line Type"::Schedule,
+        JobPlanningLine.Type::Item,JobTaskLine,JobPlanningLine);
+
+      JobPlanningLine.VALIDATE("Planning Date",PlanDate);
+      JobPlanningLine.VALIDATE("Usage Link",TRUE);
+
+      DocumentNo := DELCHR(FORMAT(TODAY),'=','-/') + '_' + DELCHR(FORMAT(TIME),'=',':');
+      JobPlanningLine.VALIDATE("Document No.",DocumentNo);
+      JobPlanningLine.VALIDATE("No.",ItemNo);
+      JobPlanningLine.VALIDATE("Location Code",LocationCode);
+      JobPlanningLine.VALIDATE("Variant Code",VariantCode);
+      JobPlanningLine.VALIDATE(Quantity,ItemQuantity);
+      JobPlanningLine.MODIFY;
+
+      EXIT(Job."No.");
+    END;
+
+    LOCAL PROCEDURE CreateJobDemand@79(ItemNo@1002 : Code[20];ItemQuantity@1001 : Integer) : Code[20];
+    BEGIN
+      EXIT(CreateJobDemandAtBasis(ItemNo,ItemQuantity,'','',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateJobDemandAtLocation@33(ItemNo@1002 : Code[20];ItemQuantity@1001 : Integer;LocationCode@1003 : Code[10]) : Code[20];
+    BEGIN
+      EXIT(CreateJobDemandAtBasis(ItemNo,ItemQuantity,LocationCode,'',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateJobDemandForVariant@47(ItemNo@1002 : Code[20];ItemQuantity@1001 : Integer;VariantNo@1003 : Integer) : Code[20];
+    BEGIN
+      EXIT(CreateJobDemandAtBasis(ItemNo,ItemQuantity,'',GetVariant(ItemNo,VariantNo),WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateItemWithVariants@35(VAR Item@1000 : Record 27);
+    VAR
+      ItemVariantA@1001 : Record 5401;
+      ItemVariantB@1002 : Record 5401;
+    BEGIN
+      // Creates a new item with a variant.
+      CreateItem(Item,Item."Reordering Policy"::" ");
+      LibraryInventory.CreateItemVariant(ItemVariantA,Item."No.");
+      ItemVariantA.VALIDATE(Description,Item.Description);
+      ItemVariantA.MODIFY;
+      LibraryInventory.CreateItemVariant(ItemVariantB,Item."No.");
+      ItemVariantB.VALIDATE(Description,Item.Description);
+      ItemVariantB.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CreateSalesDemandBasis@11(ItemNo@1008 : Code[20];Quantity@1000 : Integer;LocationCode@1006 : Code[10];VariantCode@1005 : Code[10];ShipDate@1001 : Date) : Code[20];
+    VAR
+      SalesLine@1003 : Record 37;
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      // Creates a sales order for the given item.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.VALIDATE("Shipment Date",ShipDate);
+      SalesLine.VALIDATE("Variant Code",VariantCode);
+      SalesLine.MODIFY;
+      EXIT(SalesHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateSalesDemand@10(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer) : Code[20];
+    BEGIN
+      // Creates a sales order for the given item.
+      EXIT(CreateSalesDemandBasis(ItemNo,ItemQuantity,'','',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateSalesDemandAfter@9(ItemNo@1004 : Code[20];Quantity@1000 : Integer;ShipDate@1001 : Date) : Code[20];
+    BEGIN
+      // Creates sales order after a source document date.
+      EXIT(CreateSalesDemandBasis(ItemNo,Quantity,'','',CALCDATE('<+1D>',ShipDate)));
+    END;
+
+    LOCAL PROCEDURE CreateSalesDemandAtLocation@16(ItemNo@1004 : Code[20];Quantity@1000 : Integer;LocationCode@1003 : Code[10]) : Code[20];
+    BEGIN
+      // Creates sales order for a specific item at a specified date.
+      EXIT(CreateSalesDemandBasis(ItemNo,Quantity,LocationCode,'',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateSalesDemandForVariant@48(ItemNo@1004 : Code[20];Quantity@1000 : Integer;VariantNo@1003 : Integer) : Code[20];
+    BEGIN
+      // Creates sales order for a specific item at a specified date.
+      EXIT(CreateSalesDemandBasis(ItemNo,Quantity,'',GetVariant(ItemNo,VariantNo),WORKDATE));
+    END;
+
+    LOCAL PROCEDURE FilterRequisitionLine@100(VAR RequisitionLine@1000 : Record 246;No@1001 : Code[20]);
+    BEGIN
+      RequisitionLine.SETRANGE(Type,RequisitionLine.Type::Item);
+      RequisitionLine.SETRANGE("No.",No);
+      RequisitionLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindServiceItem@23(VAR ServiceItem@1000 : Record 5940);
+    VAR
+      Item@1001 : Record 27;
+      Customer@1002 : Record 18;
+    BEGIN
+      CLEAR(ServiceItem);
+      IF ServiceItem.FINDFIRST THEN
+        REPEAT
+          Customer.GET(ServiceItem."Customer No.");
+          Item.GET(ServiceItem."Item No.");
+          IF (Customer.Blocked = Customer.Blocked::" ") AND NOT Item.Blocked THEN
+            EXIT;
+        UNTIL ServiceItem.NEXT = 0;
+      ERROR(NoDataForExecutionError);
+    END;
+
+    LOCAL PROCEDURE GetReceiptDate@20(PurchaseHeaderNo@1000 : Code[20]) : Date;
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      // Method returns the expected receipt date from a purchase order.
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeaderNo);
+      PurchaseLine.FINDFIRST;
+      IF PurchaseLine.COUNT > 0 THEN
+        EXIT(PurchaseLine."Expected Receipt Date");
+      ERROR(ReceiptDateDocumentError,PurchaseHeaderNo);
+    END;
+
+    LOCAL PROCEDURE GetShipmentDate@19(SalesHeaderNo@1000 : Code[20]) : Date;
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      // Method returns the shipment date from a sales order.
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SalesLine.SETRANGE("Document No.",SalesHeaderNo);
+      SalesLine.FINDFIRST;
+      IF SalesLine.COUNT > 0 THEN
+        EXIT(SalesLine."Shipment Date");
+      ERROR(ShipmentDateDocumentError,SalesHeaderNo);
+    END;
+
+    LOCAL PROCEDURE GetVariant@43(ItemNo@1003 : Code[20];VarNo@1000 : Integer) : Code[10];
+    VAR
+      ItemVariant@1001 : Record 5401;
+    BEGIN
+      ItemVariant.SETRANGE("Item No.",ItemNo);
+      ItemVariant.FIND('-');
+      IF VarNo > 1 THEN
+        ItemVariant.NEXT(VarNo - 1);
+      EXIT(ItemVariant.Code);
+    END;
+
+    LOCAL PROCEDURE OpenFirstServiceLines@66(ServiceLinesToReturn@1005 : TestPage 5905;ServiceOrderNo@1001 : Code[20]);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLineToSelect@1003 : Record 5902;
+    BEGIN
+      ServiceHeader.GET(ServiceHeader."Document Type"::Order,ServiceOrderNo);
+      ServiceLinesToReturn.OPENEDIT;
+
+      ServiceLineToSelect.SETRANGE("Document Type",ServiceLineToSelect."Document Type"::Order);
+      ServiceLineToSelect.SETRANGE("Document No.",ServiceOrderNo);
+      ServiceLineToSelect.FINDFIRST;
+
+      ServiceLinesToReturn.FIRST;
+      ServiceLinesToReturn.FILTER.SETFILTER("Document Type",'Order');
+      ServiceLinesToReturn.FILTER.SETFILTER("Document No.",ServiceOrderNo);
+      ServiceLinesToReturn.FILTER.SETFILTER("Line No.",FORMAT(ServiceLineToSelect."Line No."));
+      ServiceLinesToReturn.FIRST;
+    END;
+
+    LOCAL PROCEDURE RANDOMRANGE@34(RangeMin@1000 : Integer;RangeMax@1001 : Integer) : Integer;
+    VAR
+      RandomNumber@1002 : Integer;
+    BEGIN
+      // Method returns a Random value within a range
+      IF RangeMax <= RangeMin THEN
+        ERROR(RangeErrorMessage);
+      RandomNumber := RangeMin + RANDOM(RangeMax - RangeMin + 1) - 1;
+      EXIT(RandomNumber);
+    END;
+
+    LOCAL PROCEDURE SetItemOnlyFilter@29(DemandOverview@1000 : TestPage 5830;ItemNo@1001 : Code[20]);
+    BEGIN
+      ClearDemandTypeAndNoFilter(DemandOverview);
+      DemandOverview.ItemFilter.VALUE(ItemNo);
+    END;
+
+    LOCAL PROCEDURE SetDateFilters@37(DemandOverview@1000 : TestPage 5830;StartDateBias@1001 : Integer;EndDateBias@1002 : Integer;NoDateBias@1003 : Integer);
+    VAR
+      StartDate@1004 : Date;
+      EndDate@1005 : Date;
+    BEGIN
+      IF StartDateBias <> NoDateBias THEN BEGIN
+        StartDate := AddBiasToWorkDate(StartDateBias);
+        DemandOverview.StartDate.VALUE(FORMAT(StartDate));
+      END ELSE
+        DemandOverview.StartDate.VALUE('');
+
+      IF EndDateBias <> NoDateBias THEN BEGIN
+        EndDate := AddBiasToWorkDate(EndDateBias);
+        DemandOverview.EndDate.VALUE(FORMAT(EndDate));
+      END ELSE
+        DemandOverview.EndDate.VALUE('');
+    END;
+
+    LOCAL PROCEDURE SetAndVerifyDateFilters@58(DemandOverview@1004 : TestPage 5830;ItemNo@1005 : Code[20];StartDateBias@1003 : Integer;EndDateBias@1002 : Integer;NoDateBias@1001 : Integer;ExpectedRowsCount@1000 : Integer);
+    BEGIN
+      SetItemOnlyFilter(DemandOverview,ItemNo);
+      SetDateFilters(DemandOverview,StartDateBias,EndDateBias,NoDateBias);
+      DemandOverview.Calculate.INVOKE;
+
+      VerifyOveriewGridForDates(DemandOverview,StartDateBias,EndDateBias,NoDateBias,ExpectedRowsCount);
+    END;
+
+    LOCAL PROCEDURE VerifyOveriewGridForDates@46(DemandOverview@1003 : TestPage 5830;StartDateBias@1002 : Integer;EndDateBias@1001 : Integer;NoDateBias@1000 : Integer;ExpectedRowsCount@1004 : Integer);
+    VAR
+      StartDate@1006 : Date;
+      EndDate@1005 : Date;
+      RowDate@1008 : Date;
+      ActualRowCount@1007 : Integer;
+    BEGIN
+      // Method verifies that all date listed in the grid are with in the date interval
+      // Method verifes the actual count of rows matched the expected rows count
+      ActualRowCount := 0;
+
+      IF StartDateBias <> NoDateBias THEN
+        StartDate := AddBiasToWorkDate(StartDateBias);
+      IF EndDateBias <> NoDateBias THEN
+        EndDate := AddBiasToWorkDate(EndDateBias);
+      DemandOverview.FIRST;
+
+      IF DemandOverview."Item No.".VALUE <> '' THEN
+        REPEAT
+          IF NOT DemandOverview.ISEXPANDED THEN
+            DemandOverview.EXPAND(TRUE);
+          ActualRowCount := ActualRowCount + 1;
+          IF DemandOverview.Date.VALUE <> '' THEN BEGIN
+            EVALUATE(RowDate,DemandOverview.Date.VALUE);
+            IF StartDateBias <> NoDateBias THEN
+              Assert.IsTrue(StartDate <= RowDate,'Start Date Should be lesser than or equal to row date');
+            IF EndDateBias <> NoDateBias THEN
+              Assert.IsTrue(EndDate >= RowDate,'End Date Should be Greater than or equal to row date');
+          END;
+        UNTIL NOT DemandOverview.NEXT;
+
+      Assert.AreEqual(ExpectedRowsCount,ActualRowCount,'No. of expected rows match');
+    END;
+
+    LOCAL PROCEDURE VerifyOverviewLineQuantities@97(DemandOverview@1002 : TestPage 5830;DemandLineType@1003 : Text[30];ExpectedRowsCount@1004 : Integer;ExpectedQuantitySum@1005 : Integer);
+    VAR
+      ActualRowsCount@1001 : Integer;
+      QuantitySum@1000 : Integer;
+    BEGIN
+      DemandOverview.FIRST;
+      REPEAT
+        IF NOT DemandOverview.ISEXPANDED THEN
+          DemandOverview.EXPAND(TRUE);
+        IF FORMAT(DemandOverview.SourceTypeText.VALUE) = DemandLineType THEN BEGIN
+          ActualRowsCount := ActualRowsCount + 1;
+          IF DemandOverview.QuantityText.VALUE <> '' THEN
+            QuantitySum := QuantitySum + DemandOverview.QuantityText.ASINTEGER;
+        END;
+      UNTIL NOT DemandOverview.NEXT;
+
+      Assert.AreEqual(ExpectedRowsCount,ActualRowsCount,'No. of rows match');
+      Assert.AreEqual(ExpectedQuantitySum,QuantitySum,'Sum of line Quantities matches');
+    END;
+
+    LOCAL PROCEDURE VerifyRequisitionLine@162(No@1004 : Code[20];Quantity@1005 : Decimal);
+    VAR
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      FilterRequisitionLine(RequisitionLine,No);
+      Assert.AreEqual(2,RequisitionLine.COUNT,STRSUBSTNO(LineCountError,RequisitionLine.TABLECAPTION,2));
+      REPEAT
+        RequisitionLine.TESTFIELD("Action Message",RequisitionLine."Action Message"::New);
+        RequisitionLine.TESTFIELD("Due Date",WORKDATE);
+        RequisitionLine.TESTFIELD(Quantity,Quantity);
+        RequisitionLine.TESTFIELD("Location Code",'');
+      UNTIL RequisitionLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyReservationLine@8(Reservation@1000 : TestPage 498;SummaryType@1001 : Text[80]);
+    BEGIN
+      Reservation."Summary Type".ASSERTEQUALS(SummaryType);
+      Reservation."Total Quantity".ASSERTEQUALS(OriginalQuantity);
+      Reservation.TotalReservedQuantity.ASSERTEQUALS(OriginalQuantity);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationPageHandler@4(VAR Reservation@1000 : TestPage 498);
+    VAR
+      ServiceLine@1001 : Record 5902;
+      JobPlanningLine@1002 : Record 1003;
+      SummaryType@1003 : Text[80];
+    BEGIN
+      // Verify Item No., Service Line, Job Planning Line and Current Reserved Quantity on Reservation Page.
+      Reservation.ItemNo.ASSERTEQUALS(ItemNo);
+      Reservation.FIRST;
+      SummaryType := COPYSTR(STRSUBSTNO('%1',ServiceLine.TABLECAPTION),1,MAXSTRLEN(SummaryType));
+      VerifyReservationLine(Reservation,SummaryType);
+      Reservation.NEXT;
+      SummaryType := COPYSTR(STRSUBSTNO('%1, %2',JobPlanningLine.TABLECAPTION,JobPlanningLine.Status),1,MAXSTRLEN(SummaryType));
+      VerifyReservationLine(Reservation,SummaryType);
+      Reservation.FILTER.SETFILTER("Current Reserved Quantity",FORMAT(-OriginalQuantity));
+      Reservation.FIRST;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationActionsPageHandler@51(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      // Verify Reserved Quantity on Available Job Planning Lines Page and on Reservation Entries Page.
+      Reservation."Total Quantity".DRILLDOWN;
+      Reservation.TotalReservedQuantity.DRILLDOWN;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AvailableJobPlanningLinesPageHandler@41(VAR AvailableJobPlanningLines@1000 : TestPage 1032);
+    VAR
+      JobPlanningLine@1001 : Record 1003;
+    BEGIN
+      // Verify Status, Reserved Quantity and "Remaining Qty. (Base)" on Available Job Planning Lines Page.
+      AvailableJobPlanningLines.Status.ASSERTEQUALS(JobPlanningLine.Status::Order);
+      AvailableJobPlanningLines."Reserved Quantity".ASSERTEQUALS(OriginalQuantity);
+      AvailableJobPlanningLines."Remaining Qty. (Base)".ASSERTEQUALS(OriginalQuantity);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationEntriesPageHandler@17(VAR ReservationEntries@1000 : TestPage 497);
+    BEGIN
+      // Verify "Quantity (Base)" on Reservation Entries Page.
+      ReservationEntries."Quantity (Base)".ASSERTEQUALS(-OriginalQuantity);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Demand Overview]
+      1. Tests Demand Overview for service and jobs.
+      2. Verify Planning Lines for Sevice and Job Demand using Reordering Policy as Order after running Calculate Regenerative Plan.
+      3. Verify Planning Lines Reservation for Sevice and Job Demand using Reordering Policy as Order after running Calculate Regenerative Plan.
+      4. Verify Available Job Planning Lines and Reservation Entries from Reservation using Reordering Policy as Order after running Calculate Regenerative Plan.
+
+      Covered Test cases:
+      -------------------------------------------------------------------
+      Test Function Name               TFS ID
+      -------------------------------------------------------------------
+      StartDateNoEndDateQtySumCheck    178289
+      StartDateEndFilterTests          178290,178291,178292,178293,178294
+      ServiceOrderBlankNeededByDate    178295
+      SupplyDemandAllDemandTypes       178296
+      SupplyDemandUnusedItemFilter     178297
+      SupplyDemandLocationFilter       178298
+      SupplyDemandSameVariantFilter    178299,178300
+
+      TFS_TS_ID = 278082
+      Cover Test cases:
+      --------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                     TFS ID
+      --------------------------------------------------------------------------------------------------------------------
+      CalculatePlanForServiceAndJobDemand,ReservationForServiceAndJobDemand,                                 177968
+      ReservationQuantityForJobDemand
+    }
+    END.
+  }
+}
+

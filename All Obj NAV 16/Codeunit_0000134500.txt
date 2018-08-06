@@ -1,0 +1,1293 @@
+OBJECT Codeunit 134500 ERM Cash Manager
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1002 : Codeunit 130000;
+      LibraryERM@1005 : Codeunit 131300;
+      LibraryInventory@1018 : Codeunit 132201;
+      LibraryPurchase@1019 : Codeunit 130512;
+      LibrarySales@1020 : Codeunit 130509;
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryJournals@1021 : Codeunit 131306;
+      LibraryRandom@1001 : Codeunit 130440;
+      LibraryVariableStorage@1017 : Codeunit 131004;
+      isInitialized@1000 : Boolean;
+      AmountErrorErr@1016 : TextConst 'ENU=Amount must be same.';
+      EmailIDTxt@1008 : TextConst '@@@={Locked};ENU=abc@microsoft.com';
+      HomePageTxt@1007 : TextConst '@@@={Locked};ENU=http://microsoft.com';
+      PhoneAndFaxNoTxt@1006 : TextConst 'ENU=4600600';
+      CurrencyErrorErr@1009 : TextConst '@@@="%1 Balance field; %2 Bank Account table.";ENU=%1 must be equal to 0 in %2.';
+      ValueErrorErr@1010 : TextConst '@@@=%1 field name.;ENU=%1 must have a value.';
+      BankAccountBlockedErrorErr@1015 : TextConst '@@@="%1 Blocked field; %2 Bank Account table";ENU=%1 must be equal to No in %2.';
+      VATAmountErrorErr@1003 : TextConst 'ENU=VAT Amount must be equal.';
+      NoOfVATEntryErrorErr@1011 : TextConst '@@@="%1 VAT Entry table; %2 count";ENU="No. of  %1 must be %2. "';
+      CheckPrintErrorErr@1012 : TextConst '@@@="%1 Gen.Journal Line table; %2 Journal Template Name caption; %3 Journal Template Name value; %4 Journal Batch Name caption; %5 Journal Batch Name value; %6 Line No caption; %7 Line No value.";ENU="Check Printed must be equal to ''Yes''  in %1: %2=%3, %4=%5, %6=%7. Current value is ''No''."';
+      StatementEndingBalanceErrorErr@1013 : TextConst '@@@=Statement Ending Balance;ENU=%1 is not equal to Total Balance.';
+      UnknownErrorErr@1014 : TextConst 'ENU=Unknown Error.';
+      ExportedToPaymentFileMustBeNoMsg@1023 : TextConst 'ENU=Exported to Payment File must be equal to ''No''  in Gen. Journal Line';
+      SameCurrencyErrorMsg@1022 : TextConst 'ENU=The Bank Account and the General Journal Line must have the same currency';
+
+    [Test]
+    PROCEDURE UpdateBankAccount@3();
+    VAR
+      BankAccount@1000 : Record 270;
+    BEGIN
+      // Test if Application allows to creating New Bank Account.
+
+      // 1.Setup:
+      Initialize;
+
+      // 2.Exercise: Create and Update Bank Account.
+      LibraryERM.CreateBankAccount(BankAccount);
+      InputValuesInBankAccount(BankAccount);
+
+      // 3.Verification: Verify New Bank Account Created.
+      VerifyBankAccountCreated(BankAccount);
+    END;
+
+    [Test]
+    PROCEDURE ChangeCurrencyOnBankAccount@2();
+    VAR
+      BankAccount@1000 : Record 270;
+      Currency@1001 : Record 4;
+      Currency2@1002 : Record 4;
+    BEGIN
+      // Test if Application allows changing the Currency Code in the Bank Account Card
+      // if balance in the Bank Account is not equal to zero.
+
+      // 1.Setup: Create Bank Account with Currency. Create and Post General Journal.
+      Initialize;
+      LibraryERM.FindCurrency(Currency);
+      CreateBankAccountWithCurrency(BankAccount,Currency.Code);
+      CreatePostCustomerGenJnlLine(BankAccount."No.");
+
+      // 2.Exercise: Change Currency on Bank Account.
+      Currency2.SETFILTER(Code,'<>%1',Currency.Code);
+      ASSERTERROR BankAccount.VALIDATE("Currency Code",FindCurrency(Currency2));
+
+      // 3.Verification: Error occurs while changing Currency Code on Bank Account.
+      Assert.AreNotEqual(
+        0,STRPOS(GETLASTERRORTEXT,BankAccount."No."),
+        STRSUBSTNO(CurrencyErrorErr,BankAccount.FIELDCAPTION(Balance),BankAccount.TABLECAPTION));
+    END;
+
+    [Test]
+    PROCEDURE BankAccountPostingGroup@9();
+    VAR
+      BankAccount@1001 : Record 270;
+      GenJournalLine@1000 : Record 81;
+    BEGIN
+      // Test if Application allows posting any transactions without specifying
+      // the "Bank Acc. Posting Group" in the Bank Account Card.
+
+      // 1.Setup: Create Bank Account and Find Customer.
+      Initialize;
+      LibraryERM.CreateBankAccount(BankAccount);
+      BankAccount.VALIDATE("Bank Acc. Posting Group",'');
+      BankAccount.MODIFY(TRUE);
+
+      // 2.Exercise: Create General Journal and Post without Bank Acc. Posting Group.
+      CreateGenJnlLine(
+        GenJournalLine,BankAccount."No.",GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+        -LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+      ASSERTERROR LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // 3.Verification: Error occurs while post General Journal without Bank Acc. Posting Group.
+      Assert.AreNotEqual(
+        0,STRPOS(GETLASTERRORTEXT,BankAccount."No."),
+        STRSUBSTNO(ValueErrorErr,BankAccount.FIELDCAPTION("Bank Acc. Posting Group")));
+    END;
+
+    [Test]
+    PROCEDURE PrintCheckWithoutLastCheckNo@5();
+    VAR
+      BankAccount@1001 : Record 270;
+      GenJournalLine@1000 : Record 81;
+      Vendor@1002 : Record 23;
+      Check@1006 : Report 1401;
+    BEGIN
+      // Test if Application allows printing a check without providing the Last Check No. on the Posting tab of Bank Account Card.
+
+      // 1.Setup: Create Bank Account. Find Vendor. Create and Post Gen. Journal Line. Create and apply General Journal Line.
+      Initialize;
+      LibraryERM.CreateBankAccount(BankAccount);
+      LibraryPurchase.CreateVendor(Vendor);
+      CreatePostInvoiceGenJnlLine(GenJournalLine,Vendor."No.");
+      CreateAndApplyGenJnlLine(GenJournalLine,GenJournalLine."Document No.",BankAccount."No.",Vendor."No.");
+
+      // 2.Exercise: Print Check Report.
+      CLEAR(Check);
+      Check.InitializeRequest(BankAccount."No.",BankAccount."Last Check No.",FALSE,FALSE,FALSE,FALSE);
+      ASSERTERROR Check.InputBankAccount;
+
+      // 3.Verification: Error occurs while Print check report without last check No.
+      Assert.AreNotEqual(
+        0,STRPOS(GETLASTERRORTEXT,BankAccount."No."),
+        STRSUBSTNO(ValueErrorErr,BankAccount.FIELDCAPTION("Last Check No.")));
+    END;
+
+    [Test]
+    PROCEDURE BalanceAndBalanceLCYInAccount@11();
+    VAR
+      BankAccount@1000 : Record 270;
+      Currency@1001 : Record 4;
+      CurrencyCode@1002 : Code[10];
+    BEGIN
+      // Test if Application updates the "Balance" and "Balance (LCY)" fields in the Bank Account Card with correct values after posting
+      // Cash Receipt/Payment transactions in bank's currency.
+
+      // 1.Setup: Create Currency with Exchange Rate. Create Bank Account with currency.
+      Initialize;
+      CurrencyCode := LibraryERM.CreateCurrencyWithExchangeRate(
+          DMY2DATE(1,1,2000),LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(10,2));
+      CreateBankAccountWithCurrency(BankAccount,CurrencyCode);
+
+      // 2.Exercise: Create and Post General Journal.
+      CreatePostCustomerGenJnlLine(BankAccount."No.");
+
+      // 3.Verification: Verify Bank Account Balance and Balance (LCY).
+      Currency.GET(CurrencyCode);
+      BankAccount.CALCFIELDS(Balance,"Balance (LCY)");
+      BankAccount.TESTFIELD(
+        "Balance (LCY)",
+        ROUND(
+          LibraryERM.ConvertCurrency(
+            BankAccount.Balance,CurrencyCode,'',
+            LibraryERM.FindEarliestDateForExhRate),Currency."Amount Rounding Precision"));
+    END;
+
+    [Test]
+    PROCEDURE BankAccountWithBlockedOption@18();
+    VAR
+      BankAccount@1003 : Record 270;
+      GenJournalLine@1001 : Record 81;
+    BEGIN
+      // Test if Application allows using any Bank Account in journals, when the "Blocked" field in that
+      // Bank Account Card contains a check mark.
+
+      // 1.Setup: Find Bank Account and Find Customer.
+      Initialize;
+      BlockedBankAccount(BankAccount);
+
+      // 2.Exercise: Create General Journal.
+      ASSERTERROR CreateGenJnlLine(
+          GenJournalLine,BankAccount."No.",GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+          -LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+
+      // 3.Verification: Error occurs while using Blocked Bank Account in General Journal.
+      Assert.AreNotEqual(
+        0,STRPOS(GETLASTERRORTEXT,BankAccount."No."),
+        STRSUBSTNO(BankAccountBlockedErrorErr,BankAccount.FIELDCAPTION(Blocked),BankAccount.TABLECAPTION));
+
+      // 4.TearDown: Roll back the Previous Bank Account.
+      UnBlockedBankAccount(BankAccount);
+    END;
+
+    [Test]
+    PROCEDURE BankAccountOnGenJournalBatch@17();
+    VAR
+      BankAccount@1003 : Record 270;
+      GenJournalLine@1001 : Record 81;
+    BEGIN
+      // Test if Application correctly updates the "Balancing Account No." in the Cash Receipt/Payment journals.
+      // when the "Balance Account Type" and "Balance Account No." fields in the General Journal Batches are filled in.
+
+      // 1.Setup: Create Bank Account and Find Customer.
+      Initialize;
+      LibraryERM.FindBankAccount(BankAccount);
+
+      // 2.Exercise: Update Bank Account on General Journal Batch and Create General Journal.
+      CreateGenJnlLine(
+        GenJournalLine,BankAccount."No.",GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+        -LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+
+      // 3.Verification: Verify "Bal. Account No." must be same as Bank Account "No.".
+      GenJournalLine.TESTFIELD("Bal. Account No.",BankAccount."No.");
+    END;
+
+    [Test]
+    PROCEDURE BankAccountReconcile@16();
+    VAR
+      BankAccount@1000 : Record 270;
+      GLAccount@1001 : Record 15;
+      GenJournalLine@1002 : Record 81;
+      TempGLAccountNetChange@1004 : TEMPORARY Record 269;
+      Reconciliation@1003 : Page 345;
+    BEGIN
+      // Test if Application correctly updates the values in the Bank - Reconciliation window before a payment journal is posted.
+
+      // 1.Setup: Create Bank Account, G/L Account and General Journal.
+      Initialize;
+      LibraryERM.CreateBankAccount(BankAccount);
+      CreateGLAccount(GLAccount);
+      CreateGenJnlLine(
+        GenJournalLine,BankAccount."No.",GenJournalLine."Account Type"::"G/L Account",GLAccount."No.",
+        LibraryRandom.RandDec(1000,2));  // Using RANDOM for Amount.
+
+      // 2.Exercise: Reconcile.
+      Reconciliation.SetGenJnlLine(GenJournalLine);
+      Reconciliation.ReturnGLAccountNetChange(TempGLAccountNetChange);
+
+      // 3.Verification: Verify Amount must be same as "Net Change in Jnl.".
+      TempGLAccountNetChange.GET(GLAccount."No.");
+      GenJournalLine.TESTFIELD(Amount,TempGLAccountNetChange."Net Change in Jnl.");
+    END;
+
+    [Test]
+    PROCEDURE PostBankAccountComputerCheck@13();
+    VAR
+      BankAccount@1000 : Record 270;
+      Vendor@1002 : Record 23;
+      GenJournalLine@1003 : Record 81;
+    BEGIN
+      // Test whether the Application allows posting a payment transaction using the Computer Check option before the check is printed.
+
+      // 1.Setup: Create Bank Account, find Vendor. Create and Post General Journal Line. Create and apply General Journal Line.
+      Initialize;
+      LibraryERM.CreateBankAccount(BankAccount);
+      LibraryPurchase.CreateVendor(Vendor);
+      CreatePostInvoiceGenJnlLine(GenJournalLine,Vendor."No.");
+      CreateAndApplyGenJnlLine(GenJournalLine,GenJournalLine."Document No.",BankAccount."No.",Vendor."No.");
+
+      // 2.Exercise: Posting General Journal with Computer Check option before Check is printed.
+      ASSERTERROR LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // 3.Verification: Error occurs while Posting General Journal with Computer Check option before Check is printed.
+      Assert.AreEqual(
+        STRSUBSTNO(
+          CheckPrintErrorErr,GenJournalLine.TABLECAPTION,GenJournalLine.FIELDCAPTION("Journal Template Name"),
+          GenJournalLine."Journal Template Name",GenJournalLine.FIELDCAPTION("Journal Batch Name"),
+          GenJournalLine."Journal Batch Name",GenJournalLine.FIELDCAPTION("Line No."),GenJournalLine."Line No."),
+        GETLASTERRORTEXT,
+        UnknownErrorErr);
+    END;
+
+    [Test]
+    PROCEDURE PostBankAccountWithManualCheck@32();
+    VAR
+      BankAccount@1000 : Record 270;
+      Vendor@1001 : Record 23;
+      GenJournalLine@1003 : Record 81;
+      LastCheckNo@1004 : Code[20];
+    BEGIN
+      // Test that the Application does not update the Last Check No. field in the Bank Account Card
+      // after posting a Payment Journal with Bank Payment Type as Manual check.
+
+      // 1.Setup: Create Bank Account, Find Vendor, Create General Journal Line with Bank Payment Type as Manual check.
+      Initialize;
+      CreateBankAccountLastCheckNo(BankAccount);
+      LastCheckNo := BankAccount."Last Check No.";
+      Vendor.SETRANGE("Currency Code",'');
+      LibraryPurchase.CreateVendor(Vendor);
+      CreateGenJnlLineWithBankPaymentType(
+        GenJournalLine,BankAccount."No.",Vendor."No.",GenJournalLine."Bank Payment Type"::"Manual Check");
+
+      // 2.Exercise: Posting General Journal with Manual Check option.
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // 3.Verification: Verify Bank Account Last Check No. does not update.
+      BankAccount.GET(BankAccount."No.");
+      BankAccount.TESTFIELD("Last Check No.",LastCheckNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ApplyCheckLedgerEntriesPageHandler)]
+    PROCEDURE ApplyBankRecLineToCheckEntry@61();
+    VAR
+      CheckLedgerEntry@1002 : Record 272;
+      BankAccReconciliationLine@1001 : Record 274;
+      BankAccReconciliation@1003 : Record 273;
+      BankAccReconciliationPage@1000 : TestPage 379;
+    BEGIN
+      // Setup.
+      SetupBankAccRecForApplication(BankAccReconciliationLine.Type::"Check Ledger Entry",
+        BankAccReconciliation,BankAccReconciliationLine);
+
+      // Exercise.
+      BankAccReconciliationPage.OPENEDIT;
+      BankAccReconciliationPage.GOTORECORD(BankAccReconciliation);
+      BankAccReconciliationPage.StmtLine.ApplyEntries.INVOKE;
+
+      // Verify.
+      BankAccReconciliationLine.GET(
+        BankAccReconciliationLine."Statement Type",
+        BankAccReconciliationLine."Bank Account No.",
+        BankAccReconciliationLine."Statement No.",
+        BankAccReconciliationLine."Statement Line No.");
+      BankAccReconciliationLine.TESTFIELD("Applied Amount",BankAccReconciliationLine."Statement Amount");
+      BankAccReconciliationLine.TESTFIELD("Applied Entries",1);
+
+      CheckLedgerEntry.SETRANGE("Bank Account No.",BankAccReconciliationLine."Bank Account No.");
+      CheckLedgerEntry.FINDFIRST;
+      CheckLedgerEntry.TESTFIELD("Statement No.",BankAccReconciliationLine."Statement No.");
+      CheckLedgerEntry.TESTFIELD("Statement Line No.",BankAccReconciliationLine."Statement Line No.");
+      BankAccReconciliationLine.TESTFIELD("Check No.",CheckLedgerEntry."Check No.");
+    END;
+
+    [Test]
+    PROCEDURE ApplyBankRecLineToCheckEntryNegative@87();
+    VAR
+      BankAccReconciliation@1000 : Record 273;
+      BankAccReconciliationLine@1006 : Record 274;
+      BankAccReconciliationPage@1007 : TestPage 379;
+    BEGIN
+      // Setup.
+      SetupBankAccRecForApplication(BankAccReconciliationLine.Type::"Bank Account Ledger Entry",
+        BankAccReconciliation,BankAccReconciliationLine);
+
+      // Exercise.
+      BankAccReconciliationPage.OPENEDIT;
+      BankAccReconciliationPage.GOTORECORD(BankAccReconciliation);
+
+      // Verify.
+      Assert.IsFalse(BankAccReconciliationPage.StmtLine.ApplyEntries.ENABLED,'Action should be disabled.');
+    END;
+
+    [Test]
+    PROCEDURE StatementNoBankReconciliation@37();
+    VAR
+      BankAccount@1000 : Record 270;
+      BankAccReconciliation@1001 : Record 273;
+    BEGIN
+      // Test whether the program automatically updates the value in "Balance Last Statement" and "Statement No." fields
+      // in the Bank Reconciliation window, except when it is the first Reconciliation Statement.
+
+      // 1.Setup: Create Bank Account with "Statement No." and "Balance Last Statement" fields Value.
+      Initialize;
+      CreateBankAccountStatementNo(BankAccount);
+
+      // 2.Exercise: Create "Bank Acc. Reconciliation" using Bank Account.
+      CreateBankAccReconciliation(BankAccReconciliation,BankAccount."No.");
+
+      // 3.Verification: Verify "Balance Last Statement" and "Statement No." fields value.
+      BankAccReconciliation.TESTFIELD("Statement No.",INCSTR(BankAccount."Last Statement No."));
+      BankAccReconciliation.TESTFIELD("Balance Last Statement",BankAccount."Balance Last Statement");
+    END;
+
+    [Test]
+    PROCEDURE PostBankReconciliationError@40();
+    VAR
+      BankAccount@1000 : Record 270;
+      GenJournalLine@1002 : Record 81;
+      BankAccReconciliation@1003 : Record 273;
+    BEGIN
+      // Test whether the Application allows posting the Bank Reconciliation when the value in Statement Ending Balance field
+      // is different from the Total Balance.
+
+      // 1.Setup: Create Bank Account with "Statement No." and "Balance Last Statement" fields Value, Find Customer,
+      // Create and Post General Journal Line, and Create "Bank Acc. Reconciliation" using Bank Account.
+      Initialize;
+      CreateBankAccountStatementNo(BankAccount);
+      CreateGenJnlLine(
+        GenJournalLine,BankAccount."No.",GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+        -LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      CreateBankAccReconciliation(BankAccReconciliation,BankAccount."No.");
+      SuggestLines(BankAccReconciliation,BankAccount);
+
+      // 2.Exercise: Post "Bank Acc. Reconciliation".
+      ASSERTERROR LibraryERM.PostBankAccReconciliation(BankAccReconciliation);
+
+      // 3.Verification: Verify Error Occurs when Value in Statement Ending Balance field is different from the Total Balance.
+      Assert.AreEqual(
+        STRSUBSTNO(
+          StatementEndingBalanceErrorErr,BankAccReconciliation.FIELDCAPTION("Statement Ending Balance")),
+        GETLASTERRORTEXT,UnknownErrorErr);
+    END;
+
+    [Test]
+    PROCEDURE PostBankReconciliationTotal@44();
+    VAR
+      BankAccount@1004 : Record 270;
+      GenJournalLine@1002 : Record 81;
+      BankAccReconciliation@1001 : Record 273;
+      BankAccReconciliationLine@1005 : Record 274;
+      NewBankAccount@1009 : Record 270;
+    BEGIN
+      // Test whether the Application allows posting the Bank Reconciliation when the value in the Total Difference
+      // field is equal to sum total of all values shown in the Difference column of various lines.
+
+      // 1.Setup: Create Bank Account with "Statement No." and "Balance Last Statement" fields Value, Find Customer,
+      // Create and Post General Journal Line, and Create "Bank Acc. Reconciliation" using Bank Account.
+      Initialize;
+      CreateBankAccountStatementNo(BankAccount);
+      CreateGenJnlLine(
+        GenJournalLine,BankAccount."No.",GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+        -LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      CreateBankAccReconciliation(BankAccReconciliation,BankAccount."No.");
+      SuggestLines(BankAccReconciliation,BankAccount);
+      CreateBankAccReconciliationLn(BankAccReconciliationLine,BankAccReconciliation);
+      UpdateBalanceLastStatement(BankAccReconciliation);
+
+      // 2.Exercise: Post "Bank Acc. Reconciliation".
+      LibraryERM.PostBankAccReconciliation(BankAccReconciliation);
+
+      // 3.Verification: Verify Error Occurs when Value in Statement Ending Balance field is different from the Total Balance.
+      NewBankAccount.GET(BankAccount."No.");
+      NewBankAccount.TESTFIELD("Balance Last Statement",BankAccReconciliation."Statement Ending Balance");
+    END;
+
+    [Test]
+    PROCEDURE BankReconciliationSuggestLine@42();
+    VAR
+      BankAccount@1009 : Record 270;
+      GenJournalLine@1007 : Record 81;
+      BankAccReconciliation@1006 : Record 273;
+    BEGIN
+      // Test whether any entry is unapplied in the Reconciliation window it gets again available in next reconciliation
+      // window on doing suggest lines.
+
+      // 1.Setup: Create Bank Account with "Statement No." and "Balance Last Statement" fields Value, Find Customer,
+      // Create and Post General Journal Line, and Create "Bank Acc. Reconciliation" using Bank Account.
+      Initialize;
+      CreateBankAccountStatementNo(BankAccount);
+      CreateGenJnlLine(
+        GenJournalLine,BankAccount."No.",GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+        -LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      CreateBankAccReconciliation(BankAccReconciliation,BankAccount."No.");
+
+      // 2.Exercise: Create Suggest lines for "Bank Acc. Reconciliation".
+      SuggestLines(BankAccReconciliation,BankAccount);
+
+      // 3.Verification: Verify Bank Entry available in Reconciliation
+      BankAccount.GET(BankAccount."No.");
+      BankAccount.CALCFIELDS(Balance);
+      BankAccount.TESTFIELD(
+        Balance,
+        CalculateStatementAmount(
+          BankAccReconciliation."Statement No.",BankAccReconciliation."Bank Account No."));
+    END;
+
+    [Test]
+    PROCEDURE PurchaseOrderWithoutBalAccount@45();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      GLEntry@1002 : Record 17;
+    BEGIN
+      // Verify GL Entry after posting Purchase Order without Balancing Account.
+
+      // Setup.
+      Initialize;
+
+      // Exercise: Create and Post Purchase order Without Balancing Account.
+      CreatePurchaseOrder(PurchaseHeader,FindVendor(''));
+
+      // Verify: Verify GL Entry Without Balancing Account.
+      VerifyGLEntry(PurchaseHeader."No.",'',GLEntry."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseOrderWithBalAccount@43();
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      GLEntry@1003 : Record 17;
+    BEGIN
+      // Verify GL Entry and Vendor Ledger Entry after posting Purchase Order with Balancing Account.
+
+      // Setup.
+      Initialize;
+
+      // Exercise: Create and Post Purchase order With Balancing Account.
+      CreatePurchaseOrder(PurchaseHeader,FindVendor('<>'''''));
+
+      // Verify: Verify GL Entry and Vendor Ledger Entry With Balancing Account.
+      VerifyGLEntry(PurchaseHeader."No.",'<>''''',GLEntry."Document Type"::Payment);
+      VerifyVendorLedgerEntry(PurchaseHeader."No.",PurchaseHeader."Buy-from Vendor No.");
+    END;
+
+    [Test]
+    PROCEDURE ReconciliationStatementAmount@50();
+    VAR
+      BankAccount@1009 : Record 270;
+      GenJournalLine@1007 : Record 81;
+      BankAccReconciliation@1006 : Record 273;
+    BEGIN
+      // Test the Suggest Bank Account Reconciliation Lines.
+
+      // 1.Setup: Create Bank Account with "Statement No." and "Balance Last Statement" fields Value, Find Customer,
+      // Create and Post General Journal Line, and Create "Bank Acc. Reconciliation" using Bank Account.
+      Initialize;
+      CreateBankAccountStatementNo(BankAccount);
+      CreateGenJnlLine(
+        GenJournalLine,BankAccount."No.",GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+        -LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      CreateBankAccReconciliation(BankAccReconciliation,BankAccount."No.");
+
+      // 2.Exercise: Create Suggest lines for "Bank Acc. Reconciliation".
+      SuggestLines(BankAccReconciliation,BankAccount);
+
+      // 3.Verification: Verify Amount in Bank Account Ledger Entry and in Bank Account Reconciliation.
+      Assert.AreEqual(
+        CalculateStatementAmount(BankAccReconciliation."Statement No.",BankAccReconciliation."Bank Account No."),
+        AmountInBankAccountLedgerEntry(BankAccount."No.",BankAccReconciliation."Statement No."),
+        AmountErrorErr);
+    END;
+
+    [Test]
+    PROCEDURE PostGeneralLineWithCorrection@57();
+    VAR
+      BankAccount@1000 : Record 270;
+      Customer@1002 : Record 18;
+      GenJournalLine@1003 : Record 81;
+    BEGIN
+      // Test the Application works properly when the Correction field in the Journals contains a check mark.
+
+      // 1. Setup: Create Bank Account, create Customer and create General Journal line.
+      Initialize;
+      LibraryERM.CreateBankAccount(BankAccount);
+      LibrarySales.CreateCustomer(Customer);
+      CreateGenJnlLine(
+        GenJournalLine,BankAccount."No.",GenJournalLine."Account Type"::Customer,Customer."No.",
+        -LibraryRandom.RandDec(500,2)); // Using RANDOM for Amount.
+
+      // 2. Exercise: Post General Journal Line with Correction check mark.
+      CorrectionGeneralJournalLine(GenJournalLine);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // 3. Verify: Verify Debit amount for Correction in Customer Ledger Entry.
+      VerifyLedgerEntryForCorrection(GenJournalLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmYes)]
+    PROCEDURE ChangeBalanceLastStatement_ConfirmYes@62();
+    VAR
+      BankAccount@1000 : Record 270;
+      BalanceLastStatement@1001 : Decimal;
+    BEGIN
+      // 1.Setup:
+      InitBalanceLastStatementScenario(BankAccount,BalanceLastStatement);
+
+      // 2.Exercise: Update Balance Last Statement
+      UpdateOnPageBalanceLastStatement(BankAccount."No.",BalanceLastStatement);
+
+      // 3. Verify: Balance Last Statement is updated
+      BankAccount.FIND;
+      BankAccount.TESTFIELD("Balance Last Statement",BalanceLastStatement);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmNo)]
+    PROCEDURE ChangeBalanceLastStatement_ConfirmNo@71();
+    VAR
+      BankAccount@1000 : Record 270;
+      BalanceLastStatement@1001 : Decimal;
+    BEGIN
+      // 1.Setup:
+      InitBalanceLastStatementScenario(BankAccount,BalanceLastStatement);
+
+      // 2.Exercise: Update Balance Last Statement, but decline confirmation
+      ASSERTERROR UpdateOnPageBalanceLastStatement(BankAccount."No.",BalanceLastStatement);
+    END;
+
+    [Test]
+    PROCEDURE CheckLedgerEntryWithManualCheck@73();
+    VAR
+      GenJournalLine@1002 : Record 81;
+      BankAccount@1000 : Record 270;
+    BEGIN
+      // [FEATURE] [General Journal] [Bank Payment] [Manual Check]
+      // [SCENARIO 374790] post a payment journal with Bank Payment Type = Manual Check the Check Ledger Entry has Bank Payment Type = Manual Check.
+      Initialize;
+
+      // [GIVEN] General Journal Line with "Bal. Account Type" = Bank Account, "Bank Payment Type" = "Manual Check"
+      LibraryERM.CreateBankAccount(BankAccount);
+      CreateGenJnlLineWithBankPaymentType(
+        GenJournalLine,BankAccount."No.",LibraryPurchase.CreateVendorNo,GenJournalLine."Bank Payment Type"::"Manual Check");
+
+      // [WHEN] Post General Journal Line.
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // [THEN] "Check Ledger Entry" Field "Bank Payment Type" is set to "Manual Check".
+      VerifyCheckLedgerEntry(GenJournalLine."Document No.",BankAccount."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(CheckRequstPageHandler)]
+    PROCEDURE PrintCheckForPaymentsInMultipleCurrencies@59();
+    VAR
+      CustomerPaymentGenJnlLine@1000 : Record 81;
+      Customer@1004 : Record 18;
+      BankAccount@1006 : Record 270;
+      BatchName@1001 : Code[10];
+      TemplateName@1003 : Code[10];
+      CurrencyCode@1002 : Code[10];
+    BEGIN
+      Initialize;
+
+      // 1. Create lines in different currencies and same document no.
+      LibraryERM.CreateBankAccount(BankAccount);
+      BankAccount."Last Check No." := '1';
+      BankAccount.MODIFY(TRUE);
+      CurrencyCode := LibraryERM.CreateCurrencyWithExchangeRate(
+          DMY2DATE(1,1,2000),LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(10,2));
+
+      LibrarySales.CreateCustomer(Customer);
+      CreateGenJnlLinesWithDifferentCurrencies(CustomerPaymentGenJnlLine,BankAccount."No.",
+        CustomerPaymentGenJnlLine."Account Type"::Customer,Customer."No.",CurrencyCode,BatchName,TemplateName);
+      COMMIT;
+
+      // 2. Print check - there should be an error since the currency of the bank and the gen. jnl line are not the same. (TFS 319808)
+      LibraryVariableStorage.Enqueue(BankAccount."No.");
+      LibraryVariableStorage.Enqueue(BankAccount."Last Check No.");
+      CustomerPaymentGenJnlLine.SETRANGE("Journal Template Name",CustomerPaymentGenJnlLine."Journal Template Name");
+      CustomerPaymentGenJnlLine.SETRANGE("Journal Batch Name",CustomerPaymentGenJnlLine."Journal Batch Name");
+      CustomerPaymentGenJnlLine.SETRANGE("Posting Date",CustomerPaymentGenJnlLine."Posting Date");
+      ASSERTERROR REPORT.RUN(REPORT::Check,TRUE,FALSE,CustomerPaymentGenJnlLine);
+
+      Assert.ExpectedError(SameCurrencyErrorMsg);
+
+      CustomerPaymentGenJnlLine.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(CheckRequstPageHandler)]
+    PROCEDURE DisablePrintCheckForExportedPayment@56();
+    VAR
+      BankAccount@1002 : Record 270;
+      GenJournalLine@1000 : Record 81;
+      GenJournalBatch@1003 : Record 232;
+    BEGIN
+      // [FEATURE] [Payment][Check]
+
+      // [SCENARIO 375650] "Check" should not be printed for a Gen. Journal Line, where "Exported to Payment File" is Yes
+      Initialize;
+
+      // [GIVEN] Gen. Journal Line, where "Bank Payment Type" is "Computer Check", "Exported to Payment File" is Yes
+      CreateBankAccountLastCheckNo(BankAccount);
+      CreateGenJnlLineWithBankPaymentType(
+        GenJournalLine,BankAccount."No.",LibraryPurchase.CreateVendorNo,GenJournalLine."Bank Payment Type"::"Computer Check");
+      GenJournalLine."Exported to Payment File" := TRUE;
+      GenJournalLine.MODIFY;
+      CreateGenJnlBatchForBank(GenJournalBatch,BankAccount."No.");
+      LibraryVariableStorage.Enqueue(BankAccount."No.");
+      LibraryVariableStorage.Enqueue(BankAccount."Last Check No.");
+      GenJournalLine.SETRANGE("Journal Template Name",GenJournalLine."Journal Template Name");
+      COMMIT;
+
+      // [WHEN] Run report "Check"
+      ASSERTERROR REPORT.RUN(REPORT::Check,TRUE,FALSE,GenJournalLine);
+
+      // [THEN] Error "Exported to Payment File must be equal to 'No' in Gen. Journal Line" should be show
+      Assert.ExpectedError(ExportedToPaymentFileMustBeNoMsg);
+    END;
+
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateLocalPostingSetup;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE SetupBankAccRecForApplication@88(LineType@1006 : Option;VAR BankAccReconciliation@1001 : Record 273;VAR BankAccReconciliationLine@1008 : Record 274);
+    VAR
+      BankAccount@1004 : Record 270;
+      Vendor@1003 : Record 23;
+      GenJournalLine@1002 : Record 81;
+    BEGIN
+      // Setup.
+      Initialize;
+      CreateBankAccountLastCheckNo(BankAccount);
+      BankAccount.VALIDATE("Last Statement No.",
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(BankAccount.FIELDNO("Last Statement No."),DATABASE::"Bank Account"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Bank Account",BankAccount.FIELDNO("Last Statement No."))));
+      BankAccount.MODIFY(TRUE);
+
+      LibraryPurchase.CreateVendor(Vendor);
+      CreateGenJnlLineWithBankPaymentType(
+        GenJournalLine,BankAccount."No.",Vendor."No.",GenJournalLine."Bank Payment Type"::"Manual Check");
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      CreateBankAccReconciliation(BankAccReconciliation,BankAccount."No.");
+
+      LibraryERM.CreateBankAccReconciliationLn(BankAccReconciliationLine,BankAccReconciliation);
+      BankAccReconciliationLine.VALIDATE(Type,LineType);
+      BankAccReconciliationLine.VALIDATE("Statement Amount",-GenJournalLine.Amount);
+      BankAccReconciliationLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE AmountInBankAccountLedgerEntry@55(BankAccountNo@1000 : Code[20];StatementNo@1001 : Code[20]) : Decimal;
+    VAR
+      BankAccountLedgerEntry@1002 : Record 271;
+    BEGIN
+      BankAccountLedgerEntry.SETRANGE("Bank Account No.",BankAccountNo);
+      BankAccountLedgerEntry.SETRANGE("Statement No.",StatementNo);
+      BankAccountLedgerEntry.FINDFIRST;
+      EXIT(BankAccountLedgerEntry.Amount);
+    END;
+
+    LOCAL PROCEDURE BlockedBankAccount@22(VAR BankAccount@1000 : Record 270);
+    BEGIN
+      LibraryERM.FindBankAccount(BankAccount);
+      BankAccount.VALIDATE(Blocked,TRUE);
+      BankAccount.VALIDATE(IBAN,FindIBAN);
+      BankAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CalculateStatementAmount@49(StatementNo@1001 : Code[20];BankAccountNo@1000 : Code[20]) : Decimal;
+    VAR
+      BankAccReconciliationLine@1003 : Record 274;
+    BEGIN
+      BankAccReconciliationLine.SETRANGE("Statement Type",BankAccReconciliationLine."Statement Type"::"Bank Reconciliation");
+      BankAccReconciliationLine.SETRANGE("Bank Account No.",BankAccountNo);
+      BankAccReconciliationLine.SETRANGE("Statement No.",StatementNo);
+      BankAccReconciliationLine.CALCSUMS("Statement Amount");
+      EXIT(BankAccReconciliationLine."Statement Amount");
+    END;
+
+    LOCAL PROCEDURE CorrectionGeneralJournalLine@69(VAR GenJournalLine@1000 : Record 81);
+    BEGIN
+      GenJournalLine.VALIDATE(Correction,TRUE);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateBankAccReconciliation@38(VAR BankAccReconciliation@1000 : Record 273;BankAccountNo@1001 : Code[20]);
+    BEGIN
+      LibraryERM.CreateBankAccReconciliation(BankAccReconciliation,BankAccountNo,
+        BankAccReconciliation."Statement Type"::"Bank Reconciliation");
+      BankAccReconciliation.VALIDATE("Statement Date",WORKDATE);
+      BankAccReconciliation.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateBankAccountWithCurrency@34(VAR BankAccount@1000 : Record 270;CurrencyCode@1001 : Code[10]);
+    BEGIN
+      LibraryERM.CreateBankAccount(BankAccount);
+      BankAccount.VALIDATE("Currency Code",CurrencyCode);
+      BankAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndApplyGenJnlLine@15(VAR GenJournalLine@1000 : Record 81;AppliesToDocNo@1006 : Code[20];BankAccountNo@1001 : Code[20];AccountNo@1004 : Code[20]);
+    BEGIN
+      CreateGenJnlLine(
+        GenJournalLine,BankAccountNo,GenJournalLine."Account Type"::Vendor,AccountNo,
+        LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+      GenJournalLine.VALIDATE("Applies-to Doc. Type",GenJournalLine."Applies-to Doc. Type"::Invoice);
+      GenJournalLine.VALIDATE("Applies-to Doc. No.",AppliesToDocNo);
+      GenJournalLine.VALIDATE("Bank Payment Type",GenJournalLine."Bank Payment Type"::"Computer Check");
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateBankAccountLastCheckNo@41(VAR BankAccount@1011 : Record 270);
+    BEGIN
+      LibraryERM.CreateBankAccount(BankAccount);
+      BankAccount.VALIDATE(
+        "Last Check No.",
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(BankAccount.FIELDNO("Last Check No."),DATABASE::"Bank Account"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Bank Account",BankAccount.FIELDNO("Last Check No."))));
+      BankAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateBankAccountStatementNo@26(VAR BankAccount@1000 : Record 270);
+    BEGIN
+      // Using RANDOM value for Balance Last Statement.
+      LibraryERM.CreateBankAccount(BankAccount);
+      BankAccount.VALIDATE("Balance Last Statement",LibraryRandom.RandDec(50000,2));
+      BankAccount.VALIDATE(
+        "Last Statement No.",
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(BankAccount.FIELDNO("Last Statement No."),DATABASE::"Bank Account"),
+          1,LibraryUtility.GetFieldLength(DATABASE::"Bank Account",BankAccount.FIELDNO("Last Statement No."))));
+      BankAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateGenJnlLineWithBankPaymentType@35(VAR GenJournalLine@1000 : Record 81;BankAccountNo@1001 : Code[20];AccountNo@1006 : Code[20];BankPaymentType@1002 : Option);
+    BEGIN
+      CreateGenJnlLine(GenJournalLine,BankAccountNo,GenJournalLine."Account Type"::Vendor,AccountNo,
+        LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+      GenJournalLine.VALIDATE("Bank Payment Type",BankPaymentType);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateGenJnlLine@6(VAR GenJournalLine@1000 : Record 81;BankAccountNo@1001 : Code[20];AccountType@1005 : Option;AccountNo@1006 : Code[20];Amount@1003 : Decimal);
+    VAR
+      GenJournalBatch@1004 : Record 232;
+    BEGIN
+      CreateGenJnlBatchForBank(GenJournalBatch,BankAccountNo);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,GenJournalLine."Document Type"::Payment,
+        AccountType,AccountNo,Amount);
+    END;
+
+    LOCAL PROCEDURE CreatePostCustomerGenJnlLine@23(BankAccountNo@1000 : Code[20]);
+    VAR
+      GenJournalLine@1003 : Record 81;
+    BEGIN
+      CreateGenJnlLine(
+        GenJournalLine,BankAccountNo,GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+        -LibraryRandom.RandDec(500,2));  // Using RANDOM for Amount.
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE CreatePostInvoiceGenJnlLine@10(VAR GenJournalLine@1003 : Record 81;AccountNo@1000 : Code[20]);
+    BEGIN
+      LibraryJournals.CreateGenJournalLineWithBatch(
+        GenJournalLine,GenJournalLine."Document Type"::Invoice,
+        GenJournalLine."Account Type"::Vendor,
+        AccountNo,-LibraryRandom.RandDec(2000,2));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE CreateGLAccount@20(VAR GLAccount@1000 : Record 15);
+    BEGIN
+      LibraryERM.CreateGLAccount(GLAccount);
+      GLAccount.VALIDATE("Direct Posting",TRUE);
+      GLAccount.VALIDATE("Reconciliation Account",TRUE);
+      GLAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateGenJnlBatchForBank@33(VAR GenJournalBatch@1000 : Record 232;BalAccountNo@1001 : Code[20]);
+    BEGIN
+      LibraryJournals.CreateGenJournalBatch(GenJournalBatch);
+      GenJournalBatch.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      GenJournalBatch.VALIDATE("Bal. Account Type",GenJournalBatch."Bal. Account Type"::"Bank Account");
+      GenJournalBatch.VALIDATE("Bal. Account No.",BalAccountNo);
+      GenJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateBankAccReconciliationLn@47(VAR BankAccReconciliationLine@1000 : Record 274;BankAccReconciliation@1001 : Record 273);
+    BEGIN
+      LibraryERM.CreateBankAccReconciliationLn(BankAccReconciliationLine,BankAccReconciliation);
+      BankAccReconciliationLine.VALIDATE(Type,BankAccReconciliationLine.Type::Difference);
+      BankAccReconciliationLine.VALIDATE(Difference,LibraryRandom.RandDec(50,2));  // Using RANDOM for Amount.
+      BankAccReconciliationLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@46(VAR PurchaseHeader@1000 : Record 38;VendorNo@1003 : Code[20]);
+    VAR
+      PurchaseLine@1001 : Record 39;
+      Item@1004 : Record 27;
+    BEGIN
+      // Using Random value for Modify Last Direct cost of Item.
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Last Direct Cost",LibraryRandom.RandInt(100));
+      Item.MODIFY(TRUE);
+
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,VendorNo);
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",PurchaseHeader."No.");
+      PurchaseHeader.MODIFY(TRUE);
+
+      // Using Random value for creating purchase line.
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",LibraryRandom.RandInt(10));
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE FindVendor@52(BalAccountNo@1002 : Code[20]) : Code[20];
+    VAR
+      Vendor@1000 : Record 23;
+      PaymentMethod@1001 : Record 289;
+    BEGIN
+      PaymentMethod.SETFILTER("Bal. Account No.",BalAccountNo);
+      PaymentMethod.FINDFIRST;
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("Payment Method Code",PaymentMethod.Code);
+      Vendor.MODIFY(TRUE);
+      EXIT(Vendor."No.");
+    END;
+
+    LOCAL PROCEDURE FindVATEntry@30(VAR VATEntry@1003 : Record 254;DocumentNo@1000 : Code[20]);
+    BEGIN
+      VATEntry.SETRANGE("Document No.",DocumentNo);
+      VATEntry.SETRANGE("Posting Date",WORKDATE);
+      VATEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindCurrency@12(VAR Currency@1001 : Record 4) : Code[10];
+    BEGIN
+      LibraryERM.FindCurrency(Currency);
+      EXIT(Currency.Code);
+    END;
+
+    LOCAL PROCEDURE FindIBAN@91() : Code[50];
+    VAR
+      CompanyInformation@1000 : Record 79;
+    BEGIN
+      CompanyInformation.GET;
+      EXIT(CompanyInformation.IBAN);
+    END;
+
+    LOCAL PROCEDURE FindPostCode@28() : Code[20];
+    VAR
+      PostCode@1000 : Record 225;
+    BEGIN
+      LibraryERM.CreatePostCode(PostCode);
+      EXIT(PostCode.Code);
+    END;
+
+    LOCAL PROCEDURE FindCountryRegionCode@29() : Code[10];
+    VAR
+      CountryRegion@1001 : Record 9;
+    BEGIN
+      LibraryERM.CreateCountryRegion(CountryRegion);
+      EXIT(CountryRegion.Code);
+    END;
+
+    LOCAL PROCEDURE FindSalespersonPurchaserCode@31() : Code[10];
+    VAR
+      SalespersonPurchaser@1001 : Record 13;
+    BEGIN
+      LibrarySales.CreateSalesperson(SalespersonPurchaser);
+      EXIT(SalespersonPurchaser.Code);
+    END;
+
+    LOCAL PROCEDURE InputValuesInBankAccount@4(VAR BankAccount@1000 : Record 270);
+    VAR
+      Currency@1005 : Record 4;
+    BEGIN
+      BankAccount.VALIDATE(
+        Address,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(BankAccount.FIELDNO(Address),DATABASE::"Bank Account"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Bank Account",BankAccount.FIELDNO(Address))));
+      BankAccount.VALIDATE("Address 2",BankAccount.Address);
+      BankAccount.VALIDATE("Post Code",FindPostCode);
+      BankAccount.VALIDATE("Country/Region Code",FindCountryRegionCode);
+      BankAccount.VALIDATE("Phone No.",PhoneAndFaxNoTxt);  // Using text.
+      BankAccount.VALIDATE(
+        Contact,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(BankAccount.FIELDNO(Contact),DATABASE::"Bank Account"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Bank Account",BankAccount.FIELDNO(Contact))));
+      BankAccount.VALIDATE(
+        "Bank Branch No.",
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(BankAccount.FIELDNO("Bank Branch No."),DATABASE::"Bank Account"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Bank Account",BankAccount.FIELDNO("Bank Branch No."))));
+      BankAccount.VALIDATE("Bank Account No.",BankAccount."Bank Branch No.");
+      BankAccount.VALIDATE("Min. Balance",LibraryRandom.RandDec(50000,2));  // Using RANDOM for Minimum Balance.
+      BankAccount.VALIDATE("Our Contact Code",FindSalespersonPurchaserCode);
+      BankAccount.VALIDATE("Fax No.",PhoneAndFaxNoTxt);  // Using text.
+      BankAccount.VALIDATE("E-Mail",EmailIDTxt);  // Using text.
+      BankAccount.VALIDATE("Home Page",HomePageTxt);  // Using text.
+      BankAccount.VALIDATE(
+        "Last Check No.",
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(BankAccount.FIELDNO("Last Check No."),DATABASE::"Bank Account"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Bank Account",BankAccount.FIELDNO("Last Check No."))));
+      BankAccount.VALIDATE("Transit No.",BankAccount."Last Check No.");
+      BankAccount.VALIDATE("Last Statement No.",BankAccount."Last Check No.");
+      BankAccount.VALIDATE("Balance Last Statement",LibraryRandom.RandDec(50000,2));
+      BankAccount.VALIDATE(IBAN,FindIBAN);
+      BankAccount.VALIDATE("SWIFT Code",LibraryUtility.GenerateRandomCode(BankAccount.FIELDNO("SWIFT Code"),DATABASE::"Bank Account"));
+      BankAccount.VALIDATE("Currency Code",FindCurrency(Currency));
+      BankAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SuggestLines@39(BankAccReconciliation@1000 : Record 273;BankAccount@1001 : Record 270);
+    VAR
+      SuggestBankAccReconLines@1002 : Report 1496;
+    BEGIN
+      CLEAR(SuggestBankAccReconLines);
+      BankAccount.SETRANGE("No.",BankAccount."No.");
+      SuggestBankAccReconLines.SETTABLEVIEW(BankAccount);
+      SuggestBankAccReconLines.InitializeRequest(WORKDATE,WORKDATE,FALSE);
+      SuggestBankAccReconLines.USEREQUESTPAGE(FALSE);
+      SuggestBankAccReconLines.SetStmt(BankAccReconciliation);
+      SuggestBankAccReconLines.RUN;
+    END;
+
+    LOCAL PROCEDURE UnBlockedBankAccount@48(BankAccount@1000 : Record 270);
+    BEGIN
+      BankAccount.VALIDATE(Blocked,FALSE);
+      BankAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateGenJnlLineForVAT@27(VAR GenJournalLine@1000 : Record 81;VATPostingSetup@1001 : Record 325;BankAccountNo@1002 : Code[20]);
+    VAR
+      GLAccount@1003 : Record 15;
+    BEGIN
+      LibraryERM.FindGLAccount(GLAccount);
+      CreateGenJnlLine(
+        GenJournalLine,BankAccountNo,GenJournalLine."Account Type"::"G/L Account",GLAccount."No.",
+        LibraryRandom.RandDec(1000,2));  // Using RANDOM for Amount.
+      GenJournalLine.VALIDATE("Applies-to Doc. Type",GenJournalLine."Applies-to Doc. Type"::Invoice);
+      GenJournalLine.VALIDATE("Gen. Posting Type",GenJournalLine."Gen. Posting Type"::Purchase);
+      GenJournalLine.VALIDATE("VAT Bus. Posting Group",VATPostingSetup."VAT Bus. Posting Group");
+      GenJournalLine.VALIDATE("VAT Prod. Posting Group",VATPostingSetup."VAT Prod. Posting Group");
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateBalanceLastStatement@51(VAR BankAccReconciliation@1000 : Record 273);
+    BEGIN
+      BankAccReconciliation.VALIDATE(
+        "Statement Ending Balance",
+        CalculateStatementAmount(
+          BankAccReconciliation."Statement No.",BankAccReconciliation."Bank Account No.") +
+        BankAccReconciliation."Balance Last Statement");
+      BankAccReconciliation.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyBankAccountCreated@21(BankAccount@1000 : Record 270);
+    VAR
+      NewBankAccount@1001 : Record 270;
+    BEGIN
+      NewBankAccount.GET(BankAccount."No.");
+      NewBankAccount.TESTFIELD(Name,BankAccount.Name);
+      NewBankAccount.TESTFIELD(Address,BankAccount.Address);
+      NewBankAccount.TESTFIELD("Address 2",BankAccount."Address 2");
+      NewBankAccount.TESTFIELD("Post Code",BankAccount."Post Code");
+      NewBankAccount.TESTFIELD("Country/Region Code",BankAccount."Country/Region Code");
+      NewBankAccount.TESTFIELD("Phone No.",BankAccount."Phone No.");
+      NewBankAccount.TESTFIELD(Contact,BankAccount.Contact);
+      NewBankAccount.TESTFIELD("Bank Branch No.",BankAccount."Bank Branch No.");
+      NewBankAccount.TESTFIELD("Bank Account No.",BankAccount."Bank Account No.");
+      NewBankAccount.TESTFIELD("Min. Balance",BankAccount."Min. Balance");
+      NewBankAccount.TESTFIELD("Our Contact Code",BankAccount."Our Contact Code");
+      NewBankAccount.TESTFIELD("Fax No.",BankAccount."Fax No.");
+      NewBankAccount.TESTFIELD("E-Mail",BankAccount."E-Mail");
+      NewBankAccount.TESTFIELD("Home Page",BankAccount."Home Page");
+      NewBankAccount.TESTFIELD("Last Check No.",BankAccount."Last Check No.");
+      NewBankAccount.TESTFIELD("Transit No.",BankAccount."Transit No.");
+      NewBankAccount.TESTFIELD("Last Statement No.",BankAccount."Last Statement No.");
+      NewBankAccount.TESTFIELD("Balance Last Statement",BankAccount."Balance Last Statement");
+      NewBankAccount.TESTFIELD("SWIFT Code",BankAccount."SWIFT Code");
+      NewBankAccount.TESTFIELD("Currency Code",BankAccount."Currency Code");
+      NewBankAccount.TESTFIELD("Bank Acc. Posting Group",BankAccount."Bank Acc. Posting Group");
+    END;
+
+    LOCAL PROCEDURE VerifyLedgerEntryForCorrection@89(GenJournalLine@1001 : Record 81);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+    BEGIN
+      CustLedgerEntry.SETRANGE("Customer No.",GenJournalLine."Account No.");
+      CustLedgerEntry.SETRANGE("Document No.",GenJournalLine."Document No.");
+      CustLedgerEntry.FINDFIRST;
+      CustLedgerEntry.CALCFIELDS("Debit Amount");
+      CustLedgerEntry.TESTFIELD("Debit Amount",GenJournalLine.Amount);
+    END;
+
+    LOCAL PROCEDURE VerifyGLEntry@54(OrderNo@1002 : Code[20];BalAccountNo@1003 : Code[20];DocumentType@1004 : Option);
+    VAR
+      GLEntry@1000 : Record 17;
+      PurchInvHeader@1001 : Record 122;
+    BEGIN
+      PurchInvHeader.SETRANGE("Order No.",OrderNo);
+      PurchInvHeader.FINDFIRST;
+
+      GLEntry.SETRANGE("Document No.",PurchInvHeader."No.");
+      GLEntry.SETRANGE("Document Type",DocumentType);
+      GLEntry.SETFILTER("Bal. Account No.",BalAccountNo);
+      COMMIT;
+      GLEntry.FINDLAST;
+    END;
+
+    LOCAL PROCEDURE VerifyVendorLedgerEntry@53(OrderNo@1002 : Code[20];VendorNo@1000 : Code[20]);
+    VAR
+      VendorLedgerEntry@1001 : Record 25;
+      PurchInvHeader@1003 : Record 122;
+    BEGIN
+      PurchInvHeader.SETRANGE("Order No.",OrderNo);
+      PurchInvHeader.FINDFIRST;
+
+      VendorLedgerEntry.SETRANGE("Document No.",PurchInvHeader."No.");
+      VendorLedgerEntry.SETRANGE("Vendor No.",VendorNo);
+      VendorLedgerEntry.SETRANGE("Document Type",VendorLedgerEntry."Document Type"::Payment);
+      VendorLedgerEntry.SETFILTER("Bal. Account No.",'<>''''');
+      VendorLedgerEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE VerifyCheckLedgerEntry@134(DocumentNo@1002 : Code[20];BankAccountNo@1001 : Code[20]);
+    VAR
+      CheckLedgerEntry@1000 : Record 272;
+    BEGIN
+      CheckLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CheckLedgerEntry.SETRANGE("Bank Account No.",BankAccountNo);
+      CheckLedgerEntry.FINDFIRST;
+      CheckLedgerEntry.TESTFIELD("Bank Payment Type",CheckLedgerEntry."Bank Payment Type"::"Manual Check");
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmYes@1(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmNo@65(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := FALSE;
+    END;
+
+    LOCAL PROCEDURE UpdateOnPageBalanceLastStatement@58(BankAccountNo@1000 : Code[20];NewBalanceLastStatement@1002 : Decimal);
+    VAR
+      BankAccountCard@1001 : TestPage 370;
+    BEGIN
+      BankAccountCard.OPENEDIT;
+      BankAccountCard.FILTER.SETFILTER("No.",BankAccountNo);
+      BankAccountCard."Balance Last Statement".SETVALUE(NewBalanceLastStatement);
+      BankAccountCard.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE InitBalanceLastStatementScenario@78(VAR BankAccount@1001 : Record 270;VAR BalanceLastStatement@1000 : Decimal);
+    BEGIN
+      Initialize;
+      LibraryERM.CreateBankAccount(BankAccount);
+      BalanceLastStatement := LibraryRandom.RandDec(100,2);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CheckRequstPageHandler@100(VAR CheckRequestPage@1000 : TestRequestPage 1401);
+    VAR
+      LastCheckNo@1001 : Variant;
+      BankAccountNo@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(BankAccountNo);
+      LibraryVariableStorage.Dequeue(LastCheckNo);
+      CheckRequestPage.BankAccount.SETVALUE(FORMAT(BankAccountNo));
+      CheckRequestPage.LastCheckNo.SETVALUE(FORMAT(LastCheckNo));
+      CheckRequestPage.OneCheckPerVendorPerDocumentNo.SETVALUE(TRUE);
+      CheckRequestPage.ReprintChecks.SETVALUE(TRUE);
+      CheckRequestPage.SAVEASPDF(FORMAT(CREATEGUID));
+    END;
+
+    LOCAL PROCEDURE CreateGenJnlLinesWithDifferentCurrencies@60(VAR GenJournalLine@1000 : Record 81;BankAccountNo@1005 : Code[20];AccountType@1004 : Option;AccountNo@1003 : Code[20];CurrencyCode@1002 : Code[10];VAR BatchName@1006 : Code[10];VAR TemplateName@1007 : Code[10]) Amount : Decimal;
+    VAR
+      GenJournalBatch@1001 : Record 232;
+      DocNo@1008 : Code[20];
+    BEGIN
+      CreateGenJnlBatchForBank(GenJournalBatch,BankAccountNo);
+      BatchName := GenJournalBatch.Name;
+      TemplateName := GenJournalBatch."Journal Template Name";
+
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,TemplateName,BatchName,GenJournalLine."Document Type"::Refund,AccountType,AccountNo,
+        LibraryRandom.RandDec(500,2));
+      GenJournalLine.VALIDATE("Bal. Account Type",GenJournalLine."Bal. Account Type"::"Bank Account");
+      GenJournalLine.VALIDATE("Bal. Account No.",BankAccountNo);
+      GenJournalLine.VALIDATE("Bank Payment Type",GenJournalLine."Bank Payment Type"::"Computer Check");
+      DocNo := GenJournalLine."Document No.";
+      GenJournalLine.MODIFY(TRUE);
+
+      Amount += GenJournalLine."Amount (LCY)";
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,TemplateName,BatchName,GenJournalLine."Document Type"::Refund,AccountType,AccountNo,
+        LibraryRandom.RandDec(500,2));
+      GenJournalLine.VALIDATE("Currency Code",CurrencyCode);
+      GenJournalLine.VALIDATE("Bal. Account Type",GenJournalLine."Bal. Account Type"::"Bank Account");
+      GenJournalLine.VALIDATE("Bal. Account No.",BankAccountNo);
+      GenJournalLine.VALIDATE("Bank Payment Type",GenJournalLine."Bank Payment Type"::"Computer Check");
+      GenJournalLine.VALIDATE("Document No.",DocNo);
+      GenJournalLine.MODIFY(TRUE);
+      Amount += GenJournalLine."Amount (LCY)";
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ApplyCheckLedgerEntriesPageHandler@70(VAR ApplyCheckLedgerEntries@1000 : TestPage 382);
+    BEGIN
+      ApplyCheckLedgerEntries.FIRST;
+      ApplyCheckLedgerEntries.LineApplied.SETVALUE(TRUE);
+      ApplyCheckLedgerEntries.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Bank Account]
+      Unsupported version tags:
+      NA: Unable to Execute
+      ES: Unable to Execute
+
+      Check the functionalities of Cash Management.
+       1. Test if Application allows to creating New Bank Account.
+       2. Test if Application allows changing the Currency Code in the Bank Account Card
+          if balance in the Bank Account is not equal to zero.
+       3. Test if Application allows posting any transactions without specifying
+          the "Bank Acc. Posting Group" in the Bank Account Card.
+       4. Test if Application allows printing a check without providing the Last Check No. on the Posting tab of Bank Account Card.
+       5. Test if Application updates the "Balance" and "Balance (LCY)" fields in the Bank Account Card with correct values after posting
+          Cash Receipt/Payment transactions in bank's currency.
+       6. Test if the tax components value (e.g. - VAT) is correctly calculated in LCY for the transaction/s posted in FCY.
+       7. Test if Application allows using any Bank Account in journals, when the "Blocked" field in that
+          Bank Account Card contains a check mark.
+       8. Test if Application correctly updates the "Balancing Account No." in the Cash Receipt/Payment journals.
+          when the "Balance Account Type" and "Balance Account No." fields in the General Journal Batches are filled in.
+       9. Test if Application correctly updates the values in the Bank - Reconciliation window before a payment journal is posted.
+      10. Test whether the Application allows posting a payment transaction using the Computer Check option before the check is printed.
+      11. Test that the Application does not update the Last Check No. field in the Bank Account Card
+          after posting a Payment Journal with Bank Payment Type as Manual check.
+      12. Test whether the Application automatically updates the value in "Balance Last Statement" and "Statement No."
+          fields in the Bank Reconciliation window, except when it is the first Reconciliation Statement.
+      13. Test whether the Application allows posting the Bank Reconciliation when the value in Statement Ending Balance field
+          is different from the Total Balance.
+      14. Test whether the Application allows posting the Bank Reconciliation when the value in the Total Difference
+          field is equal to sum total of all values shown in the Difference column of various lines.
+      15. Test whether any entry is unapplied in the Reconciliation window it gets again available in next reconciliation
+          window on doing suggest lines.
+      16. Verify GL Entry without Balancing Account for Vendor.
+      17. Verify GL Entry and Vendor Ledger Entry with Balancing Account for Vendor.
+      18. Verify Bank Account Ledger Entry using Suggest Line functionality.
+      19. Test the application works properly when the Correction field in the Journals contains a check mark.
+
+      Covers Test Cases:
+      ------------------------------------------------------
+      Test Function Name                      TFS ID
+      ------------------------------------------------------
+      UpdateBankAccount                       122924
+      ChangeCurrencyOnBankAccount             122906
+      BankAccountPostingGroup                 122907
+      PrintCheckWithoutLastCheckNo            122908
+      BalanceAndBalanceLCYInAccount           122910
+      PostBankAccountWithVAT                  122911
+      BankAccountWithBlockedOption            122912
+      BankAccountOnGenJournalBatch            122913
+      BankAccountReconcile                    122930
+      PostBankAccountComputerCheck            122937
+      PostBankAccountWithManualCheck          122931
+      StatementNoBankReconciliation           122941
+      PostBankReconciliationError             122943
+      PostBankReconciliationTotal             122944
+      BankReconciliationSuggestLine           122945
+      PurchaseOrderWithoutBalAccount          140960
+      PurchaseOrderWithBalAccount             140960
+
+      TFS_TS_ID = 217008
+      Cover Test cases:
+      ------------------------------------------------------
+      Test Function Name                      TFS ID
+      ------------------------------------------------------
+      ReconciliationStatementAmount           129033
+
+      TFS_TS_ID = 237761
+      Cover Test cases:
+      ------------------------------------------------------
+      Test Function Name                          TFS ID
+      ------------------------------------------------------
+      PostGeneralLineWithCorrection               122929
+    }
+    END.
+  }
+}
+

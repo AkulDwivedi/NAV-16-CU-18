@@ -1,0 +1,1182 @@
+OBJECT Codeunit 136117 Service Posting - Undo Ship
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1003 : Codeunit 130000;
+      LibraryERM@1026 : Codeunit 131300;
+      LibraryInventory@1027 : Codeunit 132201;
+      LibraryItemTracking@1011 : Codeunit 130502;
+      LibraryResource@1008 : Codeunit 130511;
+      LibraryService@1002 : Codeunit 131902;
+      LibrarySales@1023 : Codeunit 130509;
+      LibraryPurchase@1025 : Codeunit 130512;
+      LibraryUtility@1001 : Codeunit 131000;
+      isInitialized@1000 : Boolean;
+      WarningMsg@1013 : TextConst 'ENU=The field Automatic Cost Posting should not be set to Yes if field Use Legacy G/L Entry Locking in General Ledger Setup table is set to No because of possibility of deadlocks.';
+      ExpectedMsg@1005 : TextConst 'ENU=Expected Cost Posting to G/L has been changed';
+      QtyMustBeZeroError@1010 : TextConst 'ENU=%1 must be zero.';
+      UnknownError@1009 : TextConst 'ENU=Unknown error.';
+      ExpectedCostPostingConfirm@1004 : TextConst 'ENU=If you change the Expected Cost Posting to G/L';
+      QtyShippedErrorServiceTier@1007 : TextConst 'ENU="%1 must be equal to ''%2''  in %3: %4=%5, %6=%7. Current value is ''%8''."';
+      ServiceShipLineMustNotExist@1006 : TextConst 'ENU="%1 = %2,%3 = %4 must not exist in %5."';
+      ConfirmUndoConsumption@1014 : TextConst 'ENU=Do you want to undo consumption of the selected shipment line(s)?';
+      ConfirmUndoSelectedShipment@1015 : TextConst 'ENU=Do you want to undo the selected shipment line(s)?';
+      ConfirmServiceCost@1016 : TextConst 'ENU=You must confirm Service Cost';
+      SetHandler@1018 : Boolean;
+      CreateNewLotNo@1017 : Boolean;
+      NoOfEntriesError@1019 : TextConst 'ENU=No of entries for %1 must be %2.';
+
+    LOCAL PROCEDURE Initialize@20();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      // Initialize global variable.
+      CLEAR(SetHandler);
+      CLEAR(CreateNewLotNo);
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryService.SetupServiceMgtNoSeries;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      COMMIT;
+      isInitialized := TRUE;
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartialShipManual@1();
+    BEGIN
+      // Covers document number TC-PP-US-1 - refer to TFS ID 20883.
+      // Test that the posted shipment document, all the relevant ledger entries and the service line are updated accordingly on Undo
+      // Shipment for the item shipped partially with Auto cost Posting and Expected Cost Posting set to false.
+
+      UndoPartialShip(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartialShipAutoEx@17();
+    BEGIN
+      // Covers document number TC-PP-US-1 - refer to TFS ID 20883.
+      // Test that the posted shipment document, all the relevant ledger entries and the service line are updated accordingly on Undo
+      // Shipment for the item shipped partially with Auto cost Posting and Expected Cost Posting set to true.
+
+      UndoPartialShip(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoPartialShipAuto@18();
+    BEGIN
+      // Covers document number TC-PP-US-1 - refer to TFS ID 20883.
+      // Test that the posted shipment document, all the relevant ledger entries and the service line are updated accordingly on Undo
+      // Shipment for the item shipped partially with Auto cost Posting set to true and Expected Cost Posting set to false.
+
+      UndoPartialShip(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE UndoPartialShip@122(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+    BEGIN
+      // 1. Setup: Create Inventory Setup. Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type
+      // as Item, Update Qty to Ship.
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader,ServiceLine);
+      UpdatePartialQtyToShip(ServiceLine);
+
+      // 2. Exercise: Post Service Order partially as Ship. Undo Shipment.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to Zero. Item Ledger Entry and Value Entry are created with the Quantity
+      // equal to the quantity that was shipped. Verify Service Shipment Line and Service Ledger Entry.
+      VerifyEntriesOnPostedShipment(ServiceHeader."No.");
+      VerifyQtyOnItemLedgerEntry(ServiceHeader."No.");
+      VerifyQtyOnValueEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE UndoPartialShipResourceCostGL@2();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      // Covers document number TC-PP-US-2 - refer to TFS ID 20883.
+      // Test that on Undo Shipment line of type Resource, Cost, G/L Account which was shipped partially, the posted shipment
+      // document, all the relevant ledger entries and the service line are updated accordingly.
+
+      // 1. Setup: Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource, Cost and
+      // G/L Account. Update Qty to Ship.
+      CreateServiceOrderResourceCost(ServiceHeader,ServiceLine);
+      UpdatePartialQtyToShip(ServiceLine);
+
+      // 2. Exercise: Post Service Order partially as Ship. Undo Shipment.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to Zero. Verify Service Shipment Line and Service Ledger Entry.
+      VerifyEntriesOnPostedShipment(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoFullShipManual@4();
+    BEGIN
+      // Covers document number TC-PP-US-3 - refer to TFS ID 20883.
+      // Test that the posted shipment document, all the relevant ledger entries and the service line are updated accordingly on Undo
+      // Shipment for the item shipped fully with Auto cost Posting and Expected Cost Posting set to false.
+
+      UndoFullShip(FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoFullShipAutoEx@3();
+    BEGIN
+      // Covers document number TC-PP-US-3 - refer to TFS ID 20883.
+      // Test that the posted shipment document, all the relevant ledger entries and the service line are updated accordingly on Undo
+      // Shipment for the item shipped fully with Auto cost Posting and Expected Cost Posting set to true.
+
+      UndoFullShip(TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE UndoFullShipAuto@5();
+    BEGIN
+      // Covers document number TC-PP-US-3 - refer to TFS ID 20883.
+      // Test that the posted shipment document, all the relevant ledger entries and the service line are updated accordingly on Undo
+      // Shipment for the item shipped fully with Auto cost Posting set to true and Expected Cost Posting set to false.
+
+      UndoFullShip(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE UndoFullShip@33(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1000 : Boolean);
+    VAR
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+    BEGIN
+      // 1. Setup: Create Inventory Setup. Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type
+      // as Item. Update Quantity.
+      SetupCostPostingInventory(AutomaticCostPosting,ExpectedCostPostingToGL);
+      CreateServiceOrder(ServiceHeader,ServiceLine);
+      UpdateQuantity(ServiceLine);
+
+      // 2. Exercise: Post Service Order fully as Ship. Undo Shipment.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // 3. Verify: Quantity Shipped on Service Line is equal Zero. Item Ledger Entry and Value Entry are created with the Quantity equal
+      // to the quantity that was shipped. Verify Service Shipment Line and Service Ledger Entry.
+      VerifyEntriesOnPostedShipment(ServiceHeader."No.");
+      VerifyQtyOnItemLedgerEntry(ServiceHeader."No.");
+      VerifyQtyOnValueEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE UndoFullShipResourceCostGL@6();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      // Covers document number TC-PP-US-4 - refer to TFS ID 20883.
+      // Test that on Undo Shipment for the line of type Resource, Cost, G/L Account which was shipped fully, the posted shipment
+      // document, all the relevant ledger entries and the service line are updated.
+
+      // 1. Setup: Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Resource, Cost and
+      // G/L Account. Update Quantity.
+      CreateServiceOrderResourceCost(ServiceHeader,ServiceLine);
+      UpdateQuantity(ServiceLine);
+
+      // 2. Exercise: Post Service Order partially as Ship. Undo Shipment.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // 3. Verify: Quantity Shipped on Service Line is equal to Zero. Verify Service Shipment Line and Service Ledger Entry.
+      VerifyEntriesOnPostedShipment(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE UndoShipAfterInvoice@7();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      // Covers document number TC-PP-US-7 - refer to TFS ID 20883.
+      // Test that the application generates an error on undo shipment which was previously invoiced.
+
+      // 1. Setup: Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Post the
+      // Service Order partially as Ship.
+      CreateServiceOrder(ServiceHeader,ServiceLine);
+      UpdatePartialQtyToShip(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Post Service Order partially as Invoice.
+      UpdatePartialQtyToInvoice(ServiceLine);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Error is generated on Undo Shipment.
+      VerifyErrorOnUndoShipment(ServiceHeader."No.");
+    END;
+
+    [Test]
+    PROCEDURE ShipWithNothingToShip@19();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      ServiceShipmentLine@1001 : Record 5991;
+    BEGIN
+      // Covers document number TC-PP-US-8 - refer to TFS ID 20883.
+      // Test that shipping Service Order with lines some with and other without Qty to Ship does not create lines on Service Shipment
+      // Line for the lines that does not have Qty to Ship.
+
+      // 1. Setup: Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as as Item. Update Zero
+      // Quantity on Last Line.
+      CreateServiceOrder(ServiceHeader,ServiceLine);
+      UpdatePartialQtyToShip(ServiceLine);
+      UpdateZeroQuantityOnLastLine(ServiceLine);
+
+      // 2. Exercise: Post Service Order partially as Ship.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Check that Line for Item without Quantity does not create on Service Shipment Line.
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceLine."Document No.");
+      ServiceShipmentLine.SETRANGE("Order Line No.",ServiceLine."Line No.");
+      Assert.IsFalse(
+        ServiceShipmentLine.FINDFIRST,
+        STRSUBSTNO(
+          ServiceShipLineMustNotExist,ServiceShipmentLine.FIELDCAPTION("Document No."),ServiceShipmentLine."Document No.",
+          ServiceShipmentLine.FIELDCAPTION("Line No."),ServiceShipmentLine."Line No.",ServiceShipmentLine.TABLECAPTION));
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE UndoShipAfterShipAndInvoice@11();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Covers document number TC-PP-US-9 - refer to TFS ID 20883.
+      // Test that the application generates an error on undo shipment which was previously shipped and invoiced.
+
+      // 1. Setup: Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Update
+      // Quantity.
+      CreateServiceOrder(ServiceHeader,ServiceLine);
+      UpdateQuantity(ServiceLine);
+
+      // 2. Exercise: Post the Service Order as Ship and Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Error is generated on Undo Shipment which was previously shipped and invoiced.
+      VerifyErrorOnUndoShipment(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE UndoShipAfterShipAndConsume@13();
+    VAR
+      ServiceHeader@1002 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Covers document number TC-PP-US-10 - refer to TFS ID 20883.
+      // Test that the application generates an error on undo shipment which was previously shipped and consumed.
+
+      // 1. Setup: Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item. Update
+      // Qty to Consume.
+      CreateServiceOrder(ServiceHeader,ServiceLine);
+      UpdateQtyToConsume(ServiceLine);
+
+      // 2. Exercise: Post the Service Order as Ship and Consume.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // 3. Verify: Error is generated on Undo Shipment which was previously shipped and consumed.
+      VerifyErrorOnUndoShipment(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE UndoShipAfterUndoShip@9();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      // Covers document number TC-PP-US-11 - refer to TFS ID 20883.
+      // Test that the application generates an error on undo the shipment line which was previously undone.
+
+      // 1. Setup: Create Service Order - Service Header, Service Item, Service Item Line, Service Line with Type as Item.
+      CreateServiceOrder(ServiceHeader,ServiceLine);
+
+      // 2. Exercise: Post Service Order partially as Ship. Undo Shipment.
+      UpdatePartialQtyToShip(ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      UndoShipment(ServiceHeader."No.");
+
+      // 3. Verify: Error is generated on Undo Shipment after previous undone.
+      ASSERTERROR UndoShipment(ServiceHeader."No.");
+      Assert.AssertNothingInsideFilter;
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler,QuantityToCreatePageHandler,ServiceLinesPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ShipWithSerialNo@30();
+    BEGIN
+      // Test Posted Entries after posting Service Order as Ship with Item having Item Tracking Code for Serial No.
+
+      ShipWithItemTracking(CreateItemWithItemTrackingCode(FindItemTrackingCode(FALSE,TRUE)),FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler,QuantityToCreatePageHandler,ServiceLinesPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ShipWithSerialAndLotNo@36();
+    BEGIN
+      // Test Posted Entries after posting Service Order as Ship with Item having Item Tracking Code for Serial and Lot No.
+
+      ShipWithItemTracking(CreateItemWithItemTrackingCode(CreateItemTrackingCode(TRUE,TRUE)),TRUE);
+    END;
+
+    LOCAL PROCEDURE ShipWithItemTracking@195(ItemNo@1003 : Code[20];CreateNewLotNoFrom@1004 : Boolean);
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      ServiceHeader@1007 : Record 5900;
+      ServiceItemLine@1008 : Record 5901;
+      ShipmentHeaderNo@1005 : Code[20];
+    BEGIN
+      // 1. Setup: Create Item with Item Tracking Code for Serial No., Purchase Order, assign Item Tracking on Purchase Line and Post it as Receive.
+      Initialize;
+      CreatePurchaseHeader(PurchaseHeader);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,RANDOM(10));
+
+      // Assign global variables for page handler.
+      SetHandler := TRUE;
+      CreateNewLotNo := CreateNewLotNoFrom;
+      OpenItemTrackingLinesForPurchaseOrder(PurchaseHeader."No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // 2. Exercise: Create Service Order, select Item Tracking for Service Line and Post it as Ship.
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      CreateServiceLine(ServiceHeader,PurchaseLine."No.",PurchaseLine.Quantity,ServiceItemLine."Line No.");
+
+      SetHandler := FALSE;  // Assign global variable for page handler.
+      OpenServiceLinesPage(ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Verify Service Ledger Entry, Value Entry and Item Ledger Entry.
+      ShipmentHeaderNo := FindServiceShipmentHeader(ServiceHeader."No.");
+      VerifyLedgerEntryAfterPosting(ShipmentHeaderNo,PurchaseLine."No.",PurchaseLine.Quantity);
+      VerifyNoOfValueEntry(ShipmentHeaderNo,PurchaseLine.Quantity);
+      VerifyNoOfItemLedgerEntry(ShipmentHeaderNo,PurchaseLine."No.",PurchaseLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandlerForLot,ServiceLinesPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ShipWithLotNo@32();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      ServiceHeader@1007 : Record 5900;
+      ServiceItemLine@1008 : Record 5901;
+      ShipmentHeaderNo@1002 : Code[20];
+    BEGIN
+      // Test Posted Entries after posting Service Order as Ship with Item having Item Tracking Code for Lot No.
+
+      // 1. Setup: Create Item with Item Tracking Code for Lot No., Purchase Order, assign Lot No. on Purchase Line and Post it as Receive.
+      Initialize;
+      CreatePurchaseHeader(PurchaseHeader);
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,CreateItemWithItemTrackingCode(FindItemTrackingCode(TRUE,FALSE)),
+        RANDOM(10));
+
+      SetHandler := TRUE;  // Assign global variable for page handler.
+      OpenItemTrackingLinesForPurchaseOrder(PurchaseHeader."No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // 2. Exercise: Create Service Order, select Lot No. for Service Line and Post it as Ship.
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      CreateServiceLine(ServiceHeader,PurchaseLine."No.",PurchaseLine.Quantity,ServiceItemLine."Line No.");
+
+      SetHandler := FALSE;  // Assign global variable for page handler.
+      OpenServiceLinesPage(ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Verify Service Ledger Entry, Value Entry and Item Ledger Entry.
+      ShipmentHeaderNo := FindServiceShipmentHeader(ServiceHeader."No.");
+      VerifyLedgerEntryAfterPosting(ShipmentHeaderNo,PurchaseLine."No.",PurchaseLine.Quantity);
+
+      // Use 1 for Lot No.
+      VerifyNoOfValueEntry(ShipmentHeaderNo,1);
+      VerifyNoOfItemLedgerEntry(ShipmentHeaderNo,PurchaseLine."No.",1);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler,QuantityToCreatePageHandler,ServiceLinesPageHandler,ItemTrackingSummaryPageHandler,UndoShipmentFromServiceShipmentLinesHandler,ConfirmHandler)]
+    PROCEDURE UndoShipmentPostingWithSerialNo@170();
+    BEGIN
+      // Test Undo Shipment after posting Service Order as Ship with Item having Item Tracking Code for Serial No.
+
+      UndoShipmentPostingWithItemTracking(CreateItemWithItemTrackingCode(FindItemTrackingCode(FALSE,TRUE)),FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandlerForLot,ServiceLinesPageHandler,ItemTrackingSummaryPageHandler,UndoShipmentFromServiceShipmentLinesHandler,ConfirmHandler)]
+    PROCEDURE UndoShipmentPostingWithLotNo@207();
+    BEGIN
+      // Test Undo Shipment after posting Service Order as Ship with Item having Item Tracking Code for Lot No.
+
+      UndoShipmentPostingWithItemTracking(CreateItemWithItemTrackingCode(FindItemTrackingCode(TRUE,FALSE)),FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler,QuantityToCreatePageHandler,ServiceLinesPageHandler,ItemTrackingSummaryPageHandler,UndoShipmentFromServiceShipmentLinesHandler,ConfirmHandler)]
+    PROCEDURE UndoShipmentPostingWithSerialAndLotNo@208();
+    BEGIN
+      // Test Undo Shipment after posting Service Order as Ship with Item having Item Tracking Code for Serial and Lot No.
+
+      UndoShipmentPostingWithItemTracking(CreateItemWithItemTrackingCode(CreateItemTrackingCode(TRUE,TRUE)),TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler,QuantityToCreatePageHandler,ItemTrackingSummaryPageHandler,UndoDocumentConfirmHandler)]
+    PROCEDURE UndoShipmentWithSerialNoAndExpirationDateForFreeEntryTracking@44();
+    BEGIN
+      // Test Undo Shipment With Serial No and Expiration Date for Free Entry Tracking successfully.
+      // Serial No. is created by ItemTrackingPageHandler.
+      UndoShipmentWithExpirationDateForFreeEntryTracking(CreateItemWithItemTrackingCode(FindItemTrackingCode(FALSE,FALSE)),FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandlerForLot,ItemTrackingSummaryPageHandler,UndoDocumentConfirmHandler)]
+    PROCEDURE UndoShipmentWithLotNoAndExpirationDateForFreeEntryTracking@43();
+    BEGIN
+      // Test Undo Shipment With Lot No and Expiration Date for Free Entry Tracking successfully.
+      // Lot No. is created by ItemTrackingPageHandlerForLot.
+      UndoShipmentWithExpirationDateForFreeEntryTracking(CreateItemWithItemTrackingCode(FindItemTrackingCode(FALSE,FALSE)),FALSE);
+    END;
+
+    LOCAL PROCEDURE UndoShipmentWithExpirationDateForFreeEntryTracking@41(ItemNo@1016 : Code[20];CreateNewLotNoFrom@1002 : Boolean);
+    VAR
+      PurchaseHeader1@1000 : Record 38;
+      PurchaseHeader2@1012 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      Customer@1004 : Record 18;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1009 : Record 37;
+      DocumentNo@1011 : Code[20];
+      Quantity@1013 : Integer;
+    BEGIN
+      Initialize;
+      // Setup: Create and post 2 purchase receipts, order1 without Item Tracking, order2 with Expiration Date and Serial No. / Lot No.
+      CreatePurchaseHeader(PurchaseHeader1);
+      Quantity := RANDOM(10);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader1,PurchaseLine.Type::Item,ItemNo,Quantity);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader1,TRUE,FALSE);
+
+      CreatePurchaseHeader(PurchaseHeader2);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader2,PurchaseLine.Type::Item,ItemNo,Quantity);
+      SetHandler := TRUE; // Assign global variables for ItemTrackingPageHandler / ItemTrackingPageHandlerForLot.
+      CreateNewLotNo := CreateNewLotNoFrom;
+      OpenItemTrackingLinesForPurchaseOrder(PurchaseHeader2."No.");
+      UpdateReservationEntry(PurchaseLine."No.",WORKDATE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader2,TRUE,FALSE);
+
+      // Setup: Create and post sales shipment with Expiration Date and Serial No. / Lot No.
+      LibrarySales.CreateCustomer(Customer);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SetHandler := FALSE;
+      SalesLine.OpenItemTrackingLines;
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // Exercise: Undo the shipment.
+      UndoSalesShipmentLine(DocumentNo,SalesLine."No.");
+
+      // Verify: Undo shipment successfully. Posted Sales Shipment lines are correct.
+      VerifyPostedSalesShipmentLine(DocumentNo,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE UndoSalesShipmentLine@158(DocumentNo@1001 : Code[20];No@1002 : Code[20]);
+    VAR
+      SalesShipmentLine@1000 : Record 111;
+    BEGIN
+      SalesShipmentLine.SETRANGE("Document No.",DocumentNo);
+      SalesShipmentLine.SETRANGE("No.",No);
+      SalesShipmentLine.FINDFIRST;
+      LibrarySales.UndoSalesShipmentLine(SalesShipmentLine);
+    END;
+
+    LOCAL PROCEDURE UndoShipmentPostingWithItemTracking@68(ItemNo@1016 : Code[20];CreateNewLotNoFrom@1002 : Boolean);
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      ServiceHeader@1007 : Record 5900;
+      ServiceItemLine@1008 : Record 5901;
+      PostedServiceShipment@1017 : TestPage 5975;
+    BEGIN
+      // 1. Setup: Create Purchase Order, assign Item Tracking on Purchase Line, Post it as Receive, Create Service Order, select Item Tracking for Service Line
+      // and Post Service Order as Ship.
+      Initialize;
+      CreatePurchaseHeader(PurchaseHeader);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,1);  // 1 is important for test case.
+
+      // Assign global variables for page handler.
+      SetHandler := TRUE;
+      CreateNewLotNo := CreateNewLotNoFrom;
+      OpenItemTrackingLinesForPurchaseOrder(PurchaseHeader."No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,'');
+      CreateServiceLine(ServiceHeader,PurchaseLine."No.",PurchaseLine.Quantity + RANDOM(10),ServiceItemLine."Line No.");  // Use random for Quantity.
+      UpdateQuantityToShipOnServiceLine(ServiceHeader."No.");
+      SetHandler := FALSE;  // Assign global variable for page handler.
+      OpenServiceLinesPage(ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Open Posted Service Shipment page and perform Undo Shipment from it.
+      PostedServiceShipment.OPENVIEW;
+      PostedServiceShipment.FILTER.SETFILTER("No.",FindServiceShipmentHeader(ServiceHeader."No."));
+      PostedServiceShipment.ServShipmentItemLines.ServiceShipmentLines.INVOKE;
+
+      // 3. Verify: Verify Service Line after Undo Shipment.
+      VerifyQtyShippedAfterUndoShip(ServiceHeader."No.");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ConvertMessage@25(ErrorMessage@1001 : Text[1024]) : Text[1024];
+    VAR
+      NewLine@1000 : Text[1];
+    BEGIN
+      // Remove New Line Character from Error Message.
+      NewLine[1] := 13;
+      EXIT(DELCHR(ErrorMessage,'=',NewLine));
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@92() : Code[20];
+    VAR
+      Customer@1001 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemWithItemTrackingCode@47(ItemCategoryCode@1002 : Code[10]) : Code[20];
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Item Tracking Code",ItemCategoryCode);
+      Item.VALIDATE("Serial Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      Item.VALIDATE("Lot Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingCode@40(LotSpecific@1001 : Boolean;SNSpecific@1003 : Boolean) : Code[10];
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,FALSE,FALSE);
+      ItemTrackingCode.VALIDATE("Lot Sales Inbound Tracking",LotSpecific);
+      ItemTrackingCode.VALIDATE("Lot Sales Outbound Tracking",LotSpecific);
+      ItemTrackingCode.VALIDATE("SN Sales Inbound Tracking",SNSpecific);
+      ItemTrackingCode.VALIDATE("SN Sales Outbound Tracking",SNSpecific);
+      ItemTrackingCode.VALIDATE("Man. Expir. Date Entry Reqd.",FALSE);
+      ItemTrackingCode.VALIDATE("Man. Warranty Date Entry Reqd.",FALSE);
+      ItemTrackingCode.MODIFY;
+      EXIT(ItemTrackingCode.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeader@38(VAR PurchaseHeader@1000 : Record 38);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      PurchaseHeader.VALIDATE("Location Code",'');
+      PurchaseHeader.VALIDATE("Expected Receipt Date",WORKDATE);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceCost@64(VAR ServiceCost@1000 : Record 5905);
+    VAR
+      GLAccount@1001 : Record 15;
+    BEGIN
+      LibraryERM.FindGLAccount(GLAccount);
+      LibraryService.CreateServiceCost(ServiceCost);
+      ServiceCost.VALIDATE("Account No.",GLAccount."No.");
+      ServiceCost.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceItemLine@8(ServiceHeader@1001 : Record 5900);
+    VAR
+      ServiceItem@1000 : Record 5940;
+      ServiceItemLine@1002 : Record 5901;
+      Counter@1003 : Integer;
+    BEGIN
+      // Create 2 to 10 Service Item Lines - Boundary 2 is important.
+      FOR Counter := 2 TO 2 + RANDOM(8) DO BEGIN
+        CLEAR(ServiceItem);
+        LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+        LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLine@112(ServiceHeader@1001 : Record 5900;No@1004 : Code[20];Quantity@1002 : Decimal;ServiceItemLineNo@1003 : Integer);
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,No);
+      ServiceLine.VALIDATE("Location Code",'');
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLineNo);
+      ServiceLine.VALIDATE(Quantity,Quantity);
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForCost@27(ServiceHeader@1004 : Record 5900);
+    VAR
+      ServiceCost@1002 : Record 5905;
+      ServiceItemLine@1001 : Record 5901;
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        CreateServiceCost(ServiceCost);
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Cost,ServiceCost.Code);
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForItem@16(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1004 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+      Item@1003 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,Item."No.");
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.MODIFY(TRUE);
+        Item.NEXT;
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForGLAccount@62(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1004 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        LibraryService.CreateServiceLine(
+          ServiceLine,ServiceHeader,ServiceLine.Type::"G/L Account",LibraryERM.CreateGLAccountWithSalesSetup);
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineForResource@24(ServiceHeader@1004 : Record 5900);
+    VAR
+      ServiceItemLine@1001 : Record 5901;
+      ServiceLine@1000 : Record 5902;
+      Resource@1003 : Record 156;
+    BEGIN
+      ServiceItemLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceItemLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceItemLine.FINDSET;
+      REPEAT
+        LibraryResource.CreateResourceNew(Resource);
+        LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,Resource."No.");
+        ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceItemLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrder@171(VAR ServiceHeader@1001 : Record 5900;VAR ServiceLine@1002 : Record 5902);
+    BEGIN
+      // Create a new Service Order - Service Header, Service Item, Service Item Line.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      CreateServiceItemLine(ServiceHeader);
+      CreateServiceLineForItem(ServiceLine,ServiceHeader);
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrderResourceCost@91(VAR ServiceHeader@1001 : Record 5900;VAR ServiceLine@1002 : Record 5902);
+    BEGIN
+      // Create a new Service Order - Service Header, Service Item, Service Item Line.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      CreateServiceItemLine(ServiceHeader);
+      CreateServiceLineForResource(ServiceHeader);
+      CreateServiceLineForCost(ServiceHeader);
+      CreateServiceLineForGLAccount(ServiceLine,ServiceHeader);
+    END;
+
+    LOCAL PROCEDURE FindItemTrackingCode@48(LotSpecific@1001 : Boolean;SNSpecific@1003 : Boolean) : Code[10];
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,FALSE,FALSE);
+      ItemTrackingCode.VALIDATE("Lot Sales Inbound Tracking",LotSpecific);
+      ItemTrackingCode.VALIDATE("Lot Sales Outbound Tracking",LotSpecific);
+      ItemTrackingCode.VALIDATE("SN Sales Inbound Tracking",SNSpecific);
+      ItemTrackingCode.VALIDATE("SN Sales Outbound Tracking",SNSpecific);
+      ItemTrackingCode.VALIDATE("Man. Expir. Date Entry Reqd.",FALSE);
+      ItemTrackingCode.VALIDATE("Man. Warranty Date Entry Reqd.",FALSE);
+      ItemTrackingCode.MODIFY(TRUE);
+      EXIT(ItemTrackingCode.Code);
+    END;
+
+    LOCAL PROCEDURE FindServiceLine@125(VAR ServiceLine@1000 : Record 5902;DocumentNo@1001 : Code[20]);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindServiceShipmentHeader@176(OrderNo@1001 : Code[20]) : Code[20];
+    VAR
+      ServiceShipmentHeader@1000 : Record 5990;
+    BEGIN
+      ServiceShipmentHeader.SETRANGE("Order No.",OrderNo);
+      ServiceShipmentHeader.FINDFIRST;
+      EXIT(ServiceShipmentHeader."No.");
+    END;
+
+    LOCAL PROCEDURE OpenItemTrackingLinesForPurchaseOrder@96(No@1000 : Code[20]);
+    VAR
+      PurchaseOrder@1001 : TestPage 50;
+    BEGIN
+      PurchaseOrder.OPENEDIT;
+      PurchaseOrder.FILTER.SETFILTER("No.",No);
+      PurchaseOrder.PurchLines."Item Tracking Lines".INVOKE;
+    END;
+
+    LOCAL PROCEDURE OpenServiceLinesPage@100(No@1001 : Code[20]);
+    VAR
+      ServiceOrder@1000 : TestPage 5900;
+    BEGIN
+      ServiceOrder.OPENEDIT;
+      ServiceOrder.FILTER.SETFILTER("No.",No);
+      ServiceOrder.ServItemLines."Service Lines".INVOKE;
+    END;
+
+    LOCAL PROCEDURE SetupCostPostingInventory@12(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingToGL@1002 : Boolean);
+    VAR
+      InventorySetup@1000 : Record 313;
+    BEGIN
+      // Sometimes this function triggers a message and a confirm dialog
+      // This is to make sure the corresponding handlers are always executed
+      // (otherwise tests would fail)
+      ExecuteUIHandlers;
+
+      InventorySetup.GET;
+      InventorySetup.VALIDATE("Automatic Cost Posting",AutomaticCostPosting);
+      InventorySetup.VALIDATE("Expected Cost Posting to G/L",ExpectedCostPostingToGL);
+      InventorySetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdatePartialQtyToInvoice@35(ServiceLine@1000 : Record 5902);
+    BEGIN
+      FindServiceLine(ServiceLine,ServiceLine."Document No.");
+      REPEAT
+        ServiceLine.VALIDATE("Qty. to Invoice",ServiceLine.Quantity * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdatePartialQtyToShip@14(ServiceLine@1000 : Record 5902);
+    BEGIN
+      FindServiceLine(ServiceLine,ServiceLine."Document No.");
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,RANDOM(10));  // Required field - value is not important to test case.
+        ServiceLine.VALIDATE("Qty. to Ship",ServiceLine.Quantity * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateQtyToConsume@52(ServiceLine@1000 : Record 5902);
+    BEGIN
+      FindServiceLine(ServiceLine,ServiceLine."Document No.");
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,RANDOM(10));  // Required field - value is not important to test case.
+        ServiceLine.VALIDATE("Qty. to Consume",ServiceLine.Quantity);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateQuantity@28(ServiceLine@1000 : Record 5902);
+    BEGIN
+      FindServiceLine(ServiceLine,ServiceLine."Document No.");
+      REPEAT
+        ServiceLine.VALIDATE(Quantity,RANDOM(10));  // Required field - value is not important to test case.
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateQuantityToShipOnServiceLine@141(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      FindServiceLine(ServiceLine,DocumentNo);
+      ServiceLine.VALIDATE("Qty. to Ship",1);  // 1 is important for test case.
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UndoShipment@77(ServiceDocumentNo@1001 : Code[20]);
+    VAR
+      ServiceShipmentLine@1000 : Record 5991;
+    BEGIN
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceDocumentNo);
+      CODEUNIT.RUN(CODEUNIT::"Undo Service Shipment Line",ServiceShipmentLine);
+    END;
+
+    LOCAL PROCEDURE UpdateZeroQuantityOnLastLine@34(ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDLAST;
+      ServiceLine.VALIDATE(Quantity,0);
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateReservationEntry@115(ItemNo@1001 : Code[20];ExpirationDate@1002 : Date);
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.MODIFYALL("Expiration Date",ExpirationDate,TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ExecuteUIHandlers@78();
+    BEGIN
+      MESSAGE(STRSUBSTNO(ExpectedMsg));
+      IF CONFIRM(STRSUBSTNO(ExpectedCostPostingConfirm)) THEN ;
+    END;
+
+    LOCAL PROCEDURE VerifyEntriesOnPostedShipment@15(ServiceHeaderNo@1000 : Code[20]);
+    BEGIN
+      VerifyQtyShippedAfterUndoShip(ServiceHeaderNo);
+      VerifyQtyOnServiceShipment(ServiceHeaderNo);
+      VerifyServiceLedgerEntry(ServiceHeaderNo);
+    END;
+
+    LOCAL PROCEDURE VerifyErrorOnUndoShipment@10(OrderNo@1000 : Code[20]);
+    VAR
+      ServiceShipmentLine@1001 : Record 5991;
+    BEGIN
+      ASSERTERROR UndoShipment(OrderNo);
+      ServiceShipmentLine.SETRANGE("Order No.",OrderNo);
+      ServiceShipmentLine.FINDFIRST;
+      Assert.AreEqual(
+        STRSUBSTNO(
+          QtyShippedErrorServiceTier,ServiceShipmentLine.FIELDCAPTION("Qty. Shipped Not Invoiced"),
+          ServiceShipmentLine.Quantity,ServiceShipmentLine.TABLECAPTION,ServiceShipmentLine.FIELDCAPTION("Document No."),
+          ServiceShipmentLine."Document No.",ServiceShipmentLine.FIELDCAPTION("Line No."),ServiceShipmentLine."Line No.",
+          ServiceShipmentLine."Qty. Shipped Not Invoiced"),
+        ConvertMessage(GETLASTERRORTEXT),UnknownError);
+    END;
+
+    LOCAL PROCEDURE VerifyLedgerEntryAfterPosting@39(DocumentNo@1001 : Code[20];No@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ServiceLedgerEntry@1000 : Record 5907;
+    BEGIN
+      ServiceLedgerEntry.SETRANGE("Document Type",ServiceLedgerEntry."Document Type"::Shipment);
+      ServiceLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      ServiceLedgerEntry.FINDFIRST;
+      ServiceLedgerEntry.TESTFIELD("No.",No);
+      ServiceLedgerEntry.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyNoOfItemLedgerEntry@46(DocumentNo@1001 : Code[20];ItemNo@1002 : Code[20];ExpectedValue@1000 : Integer);
+    VAR
+      ItemLedgerEntry@1003 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      Assert.AreEqual(ExpectedValue,ItemLedgerEntry.COUNT,STRSUBSTNO(NoOfEntriesError,ItemLedgerEntry.TABLECAPTION,ExpectedValue));
+    END;
+
+    LOCAL PROCEDURE VerifyNoOfValueEntry@42(DocumentNo@1000 : Code[20];ExpectedValue@1001 : Integer);
+    VAR
+      ValueEntry@1002 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Document No.",DocumentNo);
+      ValueEntry.SETRANGE("Document Type",ValueEntry."Document Type"::"Service Shipment");
+      Assert.AreEqual(ExpectedValue,ValueEntry.COUNT,STRSUBSTNO(NoOfEntriesError,ValueEntry.TABLECAPTION,ExpectedValue));
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnItemLedgerEntry@29(DocumentNo@1000 : Code[20]);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+      ServiceLine@1004 : Record 5902;
+      ServiceShipmentLine@1002 : Record 5991;
+      TotalQuantity@1003 : Decimal;
+    BEGIN
+      // Verify that the value of the field Quantity of the Item Ledger Entry is equal to the value of the field Qty. to Ship of the
+      // relevant Service Line.
+      FindServiceLine(ServiceLine,DocumentNo);
+      REPEAT
+        ServiceShipmentLine.SETRANGE("Order No.",ServiceLine."Document No.");
+        ServiceShipmentLine.SETRANGE("Order Line No.",ServiceLine."Line No.");
+        ServiceShipmentLine.FINDSET;
+        REPEAT
+          ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Shipment");
+          ItemLedgerEntry.SETRANGE("Document No.",ServiceShipmentLine."Document No.");
+          ItemLedgerEntry.SETRANGE("Document Line No.",ServiceShipmentLine."Line No.");
+          ItemLedgerEntry.FINDSET;
+          REPEAT
+            TotalQuantity += ItemLedgerEntry.Quantity;
+          UNTIL ItemLedgerEntry.NEXT = 0;
+        UNTIL ServiceShipmentLine.NEXT = 0;
+        Assert.AreEqual(0,TotalQuantity,STRSUBSTNO(QtyMustBeZeroError,ItemLedgerEntry.FIELDCAPTION(Quantity)));
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnServiceShipment@26(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+      ServiceShipmentLine@1004 : Record 5991;
+      TotalQuantity@1003 : Decimal;
+    BEGIN
+      // Verify that the values of the field Qty. Shipped Not Invoiced of Service Shipment Line are equal to the value of the
+      // field Qty. to Ship of the relevant Service Line.
+      FindServiceLine(ServiceLine,DocumentNo);
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceLine."Document No.");
+      REPEAT
+        ServiceShipmentLine.SETRANGE("Order Line No.",ServiceLine."Line No.");
+        ServiceShipmentLine.FINDSET;
+        REPEAT
+          TotalQuantity += ServiceShipmentLine."Qty. Shipped Not Invoiced";
+        UNTIL ServiceShipmentLine.NEXT = 0;
+        Assert.AreEqual(0,TotalQuantity,STRSUBSTNO(QtyMustBeZeroError,ServiceShipmentLine.FIELDCAPTION("Qty. Shipped Not Invoiced")));
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnValueEntry@31(DocumentNo@1003 : Code[20]);
+    VAR
+      ValueEntry@1001 : Record 5802;
+      ServiceLine@1002 : Record 5902;
+      ServiceShipmentLine@1000 : Record 5991;
+      TotalQuantity@1004 : Decimal;
+    BEGIN
+      // Verify that the value of the field Valued Quantity of the Value Entry is equal to the value of the field Qty. to Ship of
+      // the relevant Service Line.
+      FindServiceLine(ServiceLine,DocumentNo);
+      REPEAT
+        ServiceShipmentLine.SETRANGE("Order No.",ServiceLine."Document No.");
+        ServiceShipmentLine.SETRANGE("Order Line No.",ServiceLine."Line No.");
+        ServiceShipmentLine.FINDSET;
+        REPEAT
+          ValueEntry.SETRANGE("Document Type",ValueEntry."Document Type"::"Service Shipment");
+          ValueEntry.SETRANGE("Document No.",ServiceShipmentLine."Document No.");
+          ValueEntry.SETRANGE("Document Line No.",ServiceShipmentLine."Line No.");
+          ValueEntry.FINDSET;
+          REPEAT
+            TotalQuantity += ValueEntry."Valued Quantity";
+          UNTIL ValueEntry.NEXT = 0;
+        UNTIL ServiceShipmentLine.NEXT = 0;
+        Assert.AreEqual(0,TotalQuantity,STRSUBSTNO(QtyMustBeZeroError,ValueEntry.FIELDCAPTION("Valued Quantity")));
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyShippedAfterUndoShip@45(DocumentNo@1001 : Code[20]);
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      // Verify that the value of the field Quantity Shipped of the new Service Line is equal to Zero.
+      FindServiceLine(ServiceLine,DocumentNo);
+      REPEAT
+        ServiceLine.TESTFIELD("Quantity Shipped",0);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyServiceLedgerEntry@54(DocumentNo@1003 : Code[20]);
+    VAR
+      ServiceLedgerEntry@1001 : Record 5907;
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      // Verify that the Service Ledger Entry created corresponds with the relevant Service Line by matching the fields No., Posting Date
+      // and Bill-to Customer No.
+      FindServiceLine(ServiceLine,DocumentNo);
+      ServiceLedgerEntry.SETRANGE("Document Type",ServiceLedgerEntry."Document Type"::Shipment);
+      ServiceLedgerEntry.SETRANGE("Document No.",FindServiceShipmentHeader(ServiceLine."Document No."));
+      REPEAT
+        ServiceLedgerEntry.SETRANGE("Document Line No.",ServiceLine."Line No.");
+        ServiceLedgerEntry.FINDFIRST;
+        ServiceLedgerEntry.TESTFIELD("No.",ServiceLine."No.");
+        ServiceLedgerEntry.TESTFIELD("Posting Date",ServiceLine."Posting Date");
+        ServiceLedgerEntry.TESTFIELD("Bill-to Customer No.",ServiceLine."Bill-to Customer No.");
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyPostedSalesShipmentLine@156(DocumentNo@1003 : Code[20];ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      SalesShipmentLine@1000 : Record 111;
+    BEGIN
+      SalesShipmentLine.SETRANGE("Document No.",DocumentNo);
+      SalesShipmentLine.SETRANGE("No.",ItemNo);
+      SalesShipmentLine.FINDSET;
+      SalesShipmentLine.TESTFIELD(Quantity,Quantity);
+      SalesShipmentLine.NEXT;
+      SalesShipmentLine.TESTFIELD(Quantity,-Quantity);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@23(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.IsTrue(
+        (STRPOS(Question,ExpectedCostPostingConfirm) = 1) OR
+        (STRPOS(Question,ConfirmServiceCost) = 1) OR
+        (STRPOS(Question,ConfirmUndoSelectedShipment) = 1) OR
+        (STRPOS(Question,ConfirmUndoConsumption) = 1),
+        'Unexpected confirm dialog: ' + Question);
+      Reply := TRUE
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@22(Msg@1000 : Text[1024]);
+    BEGIN
+      IF STRPOS(Msg,WarningMsg) = 1 THEN
+        EXIT;
+      Assert.IsTrue(STRPOS(Msg,ExpectedMsg) = 1,'Unexpected message dialog: ' + Msg)
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE UndoShipmentFromServiceShipmentLinesHandler@186(VAR PostedServiceShipmentLines@1000 : TestPage 5970);
+    BEGIN
+      PostedServiceShipmentLines.UndoShipment.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingPageHandlerForLot@75(VAR ItemTrackingLines@1000 : TestPage 6510);
+    BEGIN
+      COMMIT;
+      IF SetHandler THEN
+        ItemTrackingLines."Assign Lot No.".INVOKE
+      ELSE
+        ItemTrackingLines."Select Entries".INVOKE;
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingSummaryPageHandler@73(VAR ItemTrackingSummary@1000 : TestPage 6500);
+    BEGIN
+      ItemTrackingSummary.OK.INVOKE;
+      COMMIT;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ServiceLinesPageHandler@74(VAR ServiceLines@1000 : TestPage 5905);
+    BEGIN
+      ServiceLines.ItemTrackingLines.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingPageHandler@69(VAR ItemTrackingLines@1000 : TestPage 6510);
+    BEGIN
+      COMMIT;
+      IF SetHandler THEN
+        ItemTrackingLines."Assign Serial No.".INVOKE
+      ELSE
+        ItemTrackingLines."Select Entries".INVOKE;
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE QuantityToCreatePageHandler@72(VAR EnterQuantityToCreate@1000 : TestPage 6513);
+    BEGIN
+      EnterQuantityToCreate.CreateNewLotNo.SETVALUE(CreateNewLotNo);
+      EnterQuantityToCreate.OK.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE UndoDocumentConfirmHandler@114(Message@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      // Send Reply = TRUE for Confirmation Message.
+      Reply := TRUE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Undo] [Shipment] [Service]
+      Unsupported version tags:
+      NA: Unable to Execute
+      SE: Unable to Execute
+
+      Test for Service Posting - Undo Ship:
+        1. Undoing a Shipment of the Line That Was Shipped Partially.
+           a. TC-PP-US-1 - Undo Shipment of the Line of Type 'Item', Which Was Shipped Partially.
+           b. TC-PP-US-2 - Undo Shipment of the Line of Type 'Resource', 'Cost', 'G/L Account', Which Was Shipped Partially.
+        2. Undo Shipment of the Line That Was Shipped Fully.
+           a. TC-PP-US-3 - Undo Shipment of the Line of Type 'Item' Which Was Shipped Fully.
+           b. TC-PP-US-4 - Undo Shipment of the Line of Type 'Resource', 'Cost', 'G/L Account', Which Was Shipped Fully.
+        3. Undo Shipment When There Is Nothing to Undo.
+           a. TC-PP-US-7  - Undo Shipment of the Line That Was Invoiced.
+           b. TC-PP-US-8  - Shipment if Nothing Was Shipped.
+           c. TC-PP-US-9  - Undo Shipment of the Line That Was Shipped and Invoiced.
+           d. TC-PP-US-10 - Undo Shipment of the Line That Was Consumed.
+           e. TC-PP-US-11 - Undo Shipment of the Line That Was Previously Subject to the Undo Shipment Function.
+        4. Test Posted Entries after posting Service Order as Ship with Item having Item Tracking Code for Serial No.
+        5. Test Posted Entries after posting Service Order as Ship with Item having Item Tracking Code for Serial and Lot No.
+        6. Test Posted Entries after posting Service Order as Ship with Item having Item Tracking Code for Lot No.
+        7. Test Undo Shipment after posting Service Order as Ship with Item having Item Tracking Code for Serial No.
+        8. Test Undo Shipment after posting Service Order as Ship with Item having Item Tracking Code for Lot No.
+        9. Test Undo Shipment after posting Service Order as Ship with Item having Item Tracking Code for Serial and Lot No.
+
+      TFS_TS_ID = 20883
+      Covers Test cases:
+        TG-1  TFS_TC_ID=12093 and 31885
+        TG-2  TFS_TC_ID=12095 and 31887
+        TG-3  TFS_TC_ID=12096 and 31898
+
+      TFS_TS_ID = 245346
+      Covers Test cases:
+      ----------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                TFS ID
+      ----------------------------------------------------------------------------------------------------------
+      ShipWithSerialNo, ShipWithSerialAndLotNo, ShipWithLotNo, UndoShipmentPostingWithSerialNo          128106
+      UndoShipmentPostingWithLotNo, UndoShipmentPostingWithSerialAndLotNo                               128108
+
+      TFS_CD_ID = 48249
+      Covers Test Cases:
+      ----------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                TFS ID
+      ----------------------------------------------------------------------------------------------------------
+      UndoShipmentWithSerialNoAndExpirationDateForFreeEntryTracking                                      48249
+      UndoShipmentWithLotNoAndExpirationDateForFreeEntryTracking                                         48249
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,216 @@
+OBJECT Codeunit 131341 Library - G/L Transfer
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1004 : Codeunit 130000;
+      LibraryCostAccounting@1003 : Codeunit 131340;
+      LibraryDimension@1001 : Codeunit 131001;
+      LibraryERM@1000 : Codeunit 131300;
+      LibraryRandom@1002 : Codeunit 130440;
+      CostEntriesCountError@1006 : TextConst 'ENU=Incorrect number of cost entries.';
+      ExpectedValueIsDifferentError@1005 : TextConst 'ENU=Expected value of %1 field is different than the actual one.';
+
+    PROCEDURE CheckBlockedDimCombination@4();
+    VAR
+      DimensionCombination@1000 : Record 350;
+    BEGIN
+      DimensionCombination.SETFILTER("Dimension 1 Code",'%1|%2',CostCenterDimension,CostObjectDimension);
+      DeleteBlockedDimCombinations(DimensionCombination);
+
+      CLEAR(DimensionCombination);
+      DimensionCombination.SETFILTER("Dimension 2 Code",'%1|%2',CostCenterDimension,CostObjectDimension);
+      DeleteBlockedDimCombinations(DimensionCombination);
+    END;
+
+    PROCEDURE CheckBlockedDimensionValues@33(AccountNo@1000 : Code[20]);
+    VAR
+      DimensionValue@1001 : Record 349;
+      DefaultDimension@1002 : Record 352;
+    BEGIN
+      // Un-block any blocked default dimension values for an account
+
+      LibraryDimension.FindDefaultDimension(DefaultDimension,DATABASE::"G/L Account",AccountNo);
+      IF DefaultDimension.FINDSET THEN
+        REPEAT
+          DimensionValue.GET(DefaultDimension."Dimension Code",DefaultDimension."Dimension Value Code");
+          IF DimensionValue.Blocked THEN BEGIN
+            DimensionValue.VALIDATE(Blocked,FALSE);
+            DimensionValue.MODIFY(TRUE);
+          END;
+        UNTIL DefaultDimension.NEXT = 0;
+    END;
+
+    PROCEDURE CostCenterDimension@43() : Code[20];
+    VAR
+      CostAccountingSetup@1000 : Record 1108;
+    BEGIN
+      CostAccountingSetup.GET;
+      EXIT(CostAccountingSetup."Cost Center Dimension");
+    END;
+
+    PROCEDURE CostObjectDimension@41() : Code[20];
+    VAR
+      CostAccountingSetup@1000 : Record 1108;
+    BEGIN
+      CostAccountingSetup.GET;
+      EXIT(CostAccountingSetup."Cost Object Dimension");
+    END;
+
+    PROCEDURE CreateJnlLine@22(VAR GenJournalLine@1000 : Record 81;AccountNo@1002 : Code[20]);
+    VAR
+      GenJournalBatch@1001 : Record 232;
+    BEGIN
+      SetupGeneralJnlBatch(GenJournalBatch);
+
+      // Create General Journal Line.
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,GenJournalLine."Document Type"::Payment,
+        GenJournalLine."Account Type"::"G/L Account",AccountNo,LibraryRandom.RandDec(1000,2));
+
+      // Update journal line to avoid Posting errors
+      GenJournalLine.VALIDATE("Gen. Posting Type",GenJournalLine."Gen. Posting Type"::" ");
+      GenJournalLine.VALIDATE("Gen. Bus. Posting Group",'');
+      GenJournalLine.VALIDATE("Gen. Prod. Posting Group",'');
+      GenJournalLine.VALIDATE("Party Type",GenJournalLine."Party Type"::Customer);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE DeleteBlockedDimCombinations@39(VAR DimensionCombination@1001 : Record 350);
+    BEGIN
+      IF DimensionCombination.FINDSET THEN
+        REPEAT
+          IF DimensionCombination."Combination Restriction" = DimensionCombination."Combination Restriction"::Blocked THEN
+            DimensionCombination.DELETE(TRUE);
+        UNTIL DimensionCombination.NEXT = 0;
+    END;
+
+    PROCEDURE PostGenJournalLine@31(AccountNo@1000 : Code[20]);
+    VAR
+      GenJournalLine@1001 : Record 81;
+    BEGIN
+      CreateJnlLine(GenJournalLine,AccountNo);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    PROCEDURE SetDefaultDimension@17(GLAccountNo@1000 : Code[20]);
+    VAR
+      CostCenter@1003 : Record 1112;
+      DimValue@1002 : Record 349;
+      DefaultDimension@1001 : Record 352;
+    BEGIN
+      IF NOT DefaultDimension.GET(DATABASE::"G/L Account",GLAccountNo,CostCenterDimension) THEN BEGIN
+        LibraryDimension.FindDimensionValue(DimValue,CostCenterDimension);
+        LibraryDimension.CreateDefaultDimensionGLAcc(DefaultDimension,GLAccountNo,DimValue."Dimension Code",DimValue.Code);
+      END;
+
+      // Make sure corresponding cost center exists
+      IF NOT CostCenter.GET(DefaultDimension."Dimension Value Code") THEN BEGIN
+        CostCenter.INIT;
+        CostCenter.VALIDATE(Code,DefaultDimension."Dimension Value Code");
+        CostCenter.VALIDATE("Line Type",CostCenter."Line Type"::"Cost Center");
+        CostCenter.INSERT(TRUE);
+      END;
+
+      CheckBlockedDimensionValues(GLAccountNo); // check for blocked default dimension values, which prevent posting
+      CheckBlockedDimCombination; // check for blocked dimension combinations, which prevent posting
+    END;
+
+    PROCEDURE SetupGeneralJnlBatch@78(VAR GenJournalBatch@1000 : Record 232);
+    VAR
+      GLAccount@1002 : Record 15;
+    BEGIN
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryCostAccounting.CreateBalanceSheetGLAccount(GLAccount);
+      GenJournalBatch.VALIDATE("Bal. Account No.",GLAccount."No.");
+      GenJournalBatch.MODIFY(TRUE);
+
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+    END;
+
+    PROCEDURE SetupGLAccount@24(VAR GLAccount@1000 : Record 15);
+    BEGIN
+      LibraryCostAccounting.FindGLAccLinkedToCostType(GLAccount);
+      SetDefaultDimension(GLAccount."No.");
+    END;
+
+    PROCEDURE ValidateEntriesTransfered@23();
+    VAR
+      GLRegister@1000 : Record 45;
+      GLEntry@1002 : Record 17;
+      CostRegister@1001 : Record 1105;
+      CostEntry@1003 : Record 1104;
+      GLAccount@1004 : Record 15;
+    BEGIN
+      GLRegister.FINDLAST;
+      GLEntry.GET(GLRegister."From Entry No.");
+      CostRegister.SETFILTER(Source,FORMAT(CostRegister.Source::"Transfer from G/L"));
+      CostRegister.FINDLAST;
+      CostEntry.GET(CostRegister."From Cost Entry No.");
+      GLAccount.GET(CostEntry."G/L Account");
+
+      // Validate Cost Register Entry
+      Assert.AreEqual(1,CostRegister."No. of Entries",
+        STRSUBSTNO(ExpectedValueIsDifferentError,CostRegister.FIELDNAME("No. of Entries")));
+      Assert.AreEqual(0,CostRegister."To Cost Entry No." - CostRegister."From Cost Entry No.",CostEntriesCountError);
+      Assert.AreEqual(GLEntry.Amount,CostRegister."Debit Amount",
+        STRSUBSTNO(ExpectedValueIsDifferentError,CostRegister.FIELDNAME("Debit Amount")));
+
+      // Validate Cost Entry
+      Assert.AreEqual(GLEntry.Amount,CostEntry.Amount,STRSUBSTNO(ExpectedValueIsDifferentError,CostEntry.FIELDNAME(Amount)));
+      Assert.AreEqual(GLEntry."Entry No.",CostEntry."G/L Entry No.",
+        STRSUBSTNO(ExpectedValueIsDifferentError,CostEntry.FIELDNAME("G/L Entry No.")));
+      Assert.AreEqual(GLAccount."Cost Type No.",CostEntry."Cost Type No.",
+        STRSUBSTNO(ExpectedValueIsDifferentError,CostEntry.FIELDNAME("Cost Type No.")));
+      Assert.AreEqual(GLEntry."G/L Account No.",CostEntry."G/L Account",
+        STRSUBSTNO(ExpectedValueIsDifferentError,CostEntry.FIELDNAME("G/L Account")));
+      Assert.AreEqual(GLEntry."Document No.",CostEntry."Document No.",
+        STRSUBSTNO(ExpectedValueIsDifferentError,CostEntry.FIELDNAME("Document No.")));
+      Assert.AreEqual(FALSE,CostEntry.Allocated,STRSUBSTNO(ExpectedValueIsDifferentError,CostEntry.FIELDNAME(Allocated)));
+    END;
+
+    PROCEDURE ValidateGLAccountCostTypeRef@56(CostTypeNo@1001 : Code[20]);
+    VAR
+      CostType@1003 : Record 1103;
+      GLAccount@1002 : Record 15;
+    BEGIN
+      // The Cost Type has the G/L Account Range filled in.
+      CostType.GET(CostTypeNo);
+      CostType.TESTFIELD("G/L Account Range");
+
+      // The G/L Accounts have the Cost Type No. filled in.
+      LibraryCostAccounting.FindGLAccountsByCostType(GLAccount,CostType."G/L Account Range");
+      REPEAT
+        GLAccount.TESTFIELD("Cost Type No.",CostType."No.");
+      UNTIL GLAccount.NEXT = 0;
+    END;
+
+    PROCEDURE ValidateGLAccountIsIncomeStmt@55(VAR CostType@1000 : Record 1103);
+    VAR
+      GLAccount@1001 : Record 15;
+    BEGIN
+      REPEAT
+        LibraryCostAccounting.FindGLAccountsByCostType(GLAccount,CostType."G/L Account Range");
+        REPEAT
+          GLAccount.TESTFIELD("Income/Balance",GLAccount."Income/Balance"::"Income Statement");
+        UNTIL GLAccount.NEXT = 0;
+      UNTIL CostType.NEXT = 0;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

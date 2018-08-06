@@ -1,0 +1,2668 @@
+OBJECT Codeunit 137309 SCM Reports
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryReportDataset@1008 : Codeunit 131007;
+      LibraryVariableStorage@1014 : Codeunit 131004;
+      LibraryInventory@1004 : Codeunit 132201;
+      LibraryManufacturing@1009 : Codeunit 132202;
+      LibraryPurchase@1020 : Codeunit 130512;
+      LibrarySales@1021 : Codeunit 130509;
+      LibraryUtility@1010 : Codeunit 131000;
+      LibraryWarehouse@1019 : Codeunit 132204;
+      LibraryRandom@1002 : Codeunit 130440;
+      LibraryAssembly@1016 : Codeunit 132207;
+      Assert@1001 : Codeunit 130000;
+      isInitialized@1003 : Boolean;
+      AvgCostingMethodErr@1000 : TextConst 'ENU=You must not revalue items with Costing Method Average, if Calculate Per is Item Ledger Entry.';
+      BlockedMsg@1023 : TextConst '@@@="%1 = The Item Number.";ENU=Blocked must be No for Item %1.';
+      DateMsg@1022 : TextConst '@@@="%1 = The date being tested.";ENU=%1 is not within your allowed range of registering dates.';
+      RoutingLineNotExistErr@1005 : TextConst '@@@="%1 = The routing operation number being tested.";ENU=Only Routing Line with Operation No. %1 should present.';
+      ProductionBOMStatusErr@1006 : TextConst '@@@="%1 = Max. Level Value, %2 = Item No. Value";ENU=The maximum number of BOM levels, %1, was exceeded. The process stopped at item number %2, BOM header number';
+      LineCountErr@1007 : TextConst '@@@="%1 = The report type being tested, e.g. Sales Invoice";ENU=Line count on page does not match line count in table for Usage %1.';
+      MustBeEmptyErr@1011 : TextConst '@@@="%1 = the expected value, %2 = the actual value.";ENU=%1 must be empty for %2.';
+      RepItemAgeCompQty_Qty1Txt@1012 : TextConst 'ENU=InvtQty1_ItemLedgEntry';
+      RepItemAgeCompQty_Qty3Txt@1013 : TextConst 'ENU=InvtQty3_ItemLedgEntry';
+      RepItemAgeCompQty_TotalTxt@1015 : TextConst 'ENU=TotalInvtQty';
+
+    [Test]
+    [HandlerFunctions(ItemAgeCompositionValueRequestPageHandler)]
+    PROCEDURE ItemAgeCompositionValueWithoutPeriodLength@1();
+    BEGIN
+      // Run Item Age Composition Value report without Period Length and validate the data.
+      Initialize;
+      RunItemAgeCompositionValueReportAndValidateData(0,'InvtValue1_Item','InvtValue5_Item');
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemAgeCompositionValueRequestPageHandler)]
+    PROCEDURE ItemAgeCompositionValueWithPeriodLength@2();
+    BEGIN
+      // Run Item Age Composition Value report with Period Length and validate the data.
+      Initialize;
+      RunItemAgeCompositionValueReportAndValidateData(
+        LibraryRandom.RandInt(5),'InvtValue1_Item','InvtValue5_Item');
+    END;
+
+    LOCAL PROCEDURE RunItemAgeCompositionValueReportAndValidateData@10(RandomDays@1005 : Integer;Column1@1006 : Text[30];Column2@1007 : Text[30]);
+    VAR
+      PeriodLength@1001 : DateFormula;
+      ItemNo@1002 : Code[20];
+    BEGIN
+      // Setup: Create an Item, post its ledger entry before workdate.
+      EVALUATE(PeriodLength,'<' + FORMAT(RandomDays) + 'D>');
+      ItemNo := LibraryInventory.CreateItemNo;
+      CreateAndPostItemJournal(ItemNo,4 * RandomDays,'');
+
+      // Exercise: Run the Item Age Composition Value report and save it.
+      RunItemAgeCompositionValueReport(ItemNo,PeriodLength);
+
+      // Verify: Verify the data in the Report.
+      VerifyItemAgeCompositionReport(ItemNo,Column1,Column2,GetCostAmountFromItemLedgerEntry(ItemNo),0);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemAgeCompositionQtyRequestPageHandler)]
+    PROCEDURE ItemAgeCompositionQuantityWithoutPeriodLength@3();
+    BEGIN
+      // [FEATURE] [Item] [Item Age Composition - Qty.]
+      // [SCENARIO] Report 5807 "Item Age Composition - Qty." without Period Length and validate the data.
+      Initialize;
+      RunItemAgeCompositionQuantityReportAndValidateData(
+        0,RepItemAgeCompQty_Qty1Txt,RepItemAgeCompQty_TotalTxt);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemAgeCompositionQtyRequestPageHandler)]
+    PROCEDURE ItemAgeCompositionQuantityWithPeriodLength@4();
+    BEGIN
+      // [FEATURE] [Item] [Item Age Composition - Qty.]
+      // [SCENARIO] Report 5807 "Item Age Composition - Qty." with Period Length and validate the data.
+      Initialize;
+
+      // Date range on the Report is calculated based on Random days as the difference between the two dates is the No. of Random days.
+      RunItemAgeCompositionQuantityReportAndValidateData(
+        LibraryRandom.RandInt(5),
+        RepItemAgeCompQty_Qty3Txt,RepItemAgeCompQty_TotalTxt);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemAgeCompositionQtyRequestPageHandler)]
+    PROCEDURE ItemAgeCompositionQuantityLocationFilter@155();
+    VAR
+      PeriodLength@1001 : DateFormula;
+      ItemNo@1000 : Code[20];
+      LocationCode@1003 : ARRAY [2] OF Code[10];
+      ExpectedQty@1002 : Decimal;
+      i@1004 : Integer;
+    BEGIN
+      // [FEATURE] [Item] [Item Age Composition - Qty.] [Location]
+      // [SCENARIO 375795] Report 5807 "Item Age Composition - Qty." filters data by Location Filter
+      Initialize;
+
+      // [GIVEN] Item with 2 Positive Adjustments: Location="A" with Qty="X", Location="B" with Qty="Y"
+      ItemNo := LibraryInventory.CreateItemNo;
+      FOR i := 1 TO 2 DO BEGIN
+        LocationCode[i] := CreateLocation;
+        CreateAndPostItemJournal(ItemNo,0,LocationCode[i]);
+      END;
+
+      // [WHEN] Run REP 5807 "Item Age Composition - Qty." with Location Filter = "A"
+      EVALUATE(PeriodLength,'');
+      RunItemAgeCompositionQuantityReport(ItemNo,PeriodLength,LocationCode[1]);
+
+      // [THEN] Report shows item Quantity = "X"
+      ExpectedQty := GetQuantityFromItemLedgerEntry(ItemNo,LocationCode[1]);
+      VerifyItemAgeCompositionReport(ItemNo,RepItemAgeCompQty_Qty1Txt,RepItemAgeCompQty_TotalTxt,ExpectedQty,ExpectedQty);
+    END;
+
+    LOCAL PROCEDURE RunItemAgeCompositionQuantityReportAndValidateData@23(RandomDays@1006 : Integer;Column1@1005 : Text[30];Column2@1004 : Text[30]);
+    VAR
+      PeriodLength@1001 : DateFormula;
+      ItemNo@1000 : Code[20];
+      ExpectedQty@1002 : Decimal;
+    BEGIN
+      // Setup: Create an Item, post its ledger entry before workdate.
+      EVALUATE(PeriodLength,'<' + FORMAT(RandomDays) + 'D>');
+      ItemNo := LibraryInventory.CreateItemNo;
+      CreateAndPostItemJournal(ItemNo,RandomDays,'');
+
+      // Exercise: Run the Item Age Composition Quantity report and save it.
+      RunItemAgeCompositionQuantityReport(ItemNo,PeriodLength,'');
+
+      // Verify: Verify the data in the Report.
+      ExpectedQty := GetQuantityFromItemLedgerEntry(ItemNo,'');
+      VerifyItemAgeCompositionReport(ItemNo,Column1,Column2,ExpectedQty,ExpectedQty);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalcInventoryValueTestRequestPageHandler)]
+    PROCEDURE CalculateInventoryValueError@7();
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1001 : Record 99000771;
+      RoutingHeader@1003 : Record 99000763;
+      CalculatePer@1002 : 'Item Ledger Entry,Item';
+    BEGIN
+      // Test the functionality of Calculate Inventory Value Test with Average Costing Method.
+
+      // Setup: Create Item with Certified BOM and Routing.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Average,ProductionBOMHeader.Status::Certified,RoutingHeader.Status::Certified);
+
+      // Exercise: Run Calculate Inventory Value Test report.
+      COMMIT;
+      RunCalculateInventoryValueTest(Item."No.",CalculatePer::"Item Ledger Entry");
+
+      // Verify: Verify Error Message.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('ItemLedgEntryErrBuf__Item_No__',Item."No.");
+      LibraryReportDataset.AssertElementWithValueExists('ItemLedgEntryErrBuf_Error_Text',FORMAT(AvgCostingMethodErr));
+    END;
+
+    [Test]
+    [HandlerFunctions(CalcInventoryValueTestRequestPageHandler)]
+    PROCEDURE CalculateInventoryValueWithCertifiedBOMAndRouting@16();
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+      RoutingHeader@1004 : Record 99000763;
+      CalculatePer@1001 : 'Item Ledger Entry,Item';
+    BEGIN
+      // Test the functionality of Calculate Inventory Value Test with Certified BOM and Routing.
+
+      // Setup: Create Item with Certified BOM and Routing.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Standard,ProductionBOMHeader.Status::Certified,RoutingHeader.Status::Certified);
+
+      // Exercise: Run Calculate Inventory Value Test report.
+      COMMIT;
+      RunCalculateInventoryValueTest(Item."No.",CalculatePer::Item);
+
+      // Verify: Verify item info is not present in report.
+      LibraryReportDataset.LoadDataSetFile;
+      ASSERTERROR
+        LibraryReportDataset.AssertElementWithValueExists('ItemLedgEntryErrBuf__Item_No__',Item."No.");
+      ASSERTERROR
+        LibraryReportDataset.AssertElementWithValueExists('ProdBOMVersionErrBuf__Production_BOM_No__',Item."Production BOM No.");
+      ASSERTERROR
+        LibraryReportDataset.AssertElementWithValueExists('RtngVersionErrBuf__Routing_No__',Item."Routing No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(CalcInventoryValueTestRequestPageHandler)]
+    PROCEDURE CalculateInventoryValueWithUnderDevelopmentBOMAndRouting@27();
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+      RoutingHeader@1004 : Record 99000763;
+      CalculatePer@1001 : 'Item Ledger Entry,Item';
+    BEGIN
+      // Test the functionality of Calculate Inventory Value Test with Under Development BOM and Routing.
+
+      // Setup: Create Item with Under Development BOM and Routing.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Standard,ProductionBOMHeader.Status::"Under Development",
+        RoutingHeader.Status::"Under Development");
+
+      // Exercise: Run Calculate Inventory Value Test report.
+      COMMIT;
+      RunCalculateInventoryValueTest(Item."No.",CalculatePer::Item);
+
+      // Verify: Verify report data.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyCalculateInventoryValueReport(
+        'ProdBOMVersionErrBuf__Production_BOM_No__',Item."Production BOM No.",
+        'ProdBOMVersionErrBuf_Status',FORMAT(ProductionBOMHeader.Status::"Under Development"));
+      VerifyCalculateInventoryValueReport(
+        'RtngVersionErrBuf__Routing_No__',Item."Routing No.",
+        'RtngVersionErrBuf_Status',FORMAT(RoutingHeader.Status::"Under Development"));
+    END;
+
+    [Test]
+    [HandlerFunctions(CalcInventoryValueTestRequestPageHandler)]
+    PROCEDURE CalculateInventoryValueWithBOMAndRoutingVersion@31();
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+      RoutingHeader@1004 : Record 99000763;
+      RoutingVersion@1002 : Record 99000786;
+      CalculatePer@1001 : 'Item Ledger Entry,Item';
+    BEGIN
+      // Test the functionality of Calculate Inventory Value Test with BOM and Routing Versions.
+
+      // Setup: Create Item with Under Development BOM and Routing. Create Production BOM Version and Routing Version.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Standard,ProductionBOMHeader.Status::"Under Development",
+        RoutingHeader.Status::"Under Development");
+      CreateProductionBOMVersion(Item."Production BOM No.");
+      CreateRoutingVersion(RoutingVersion,Item."Routing No.");
+
+      // Exercise: Run Calculate Inventory Value Test report.
+      COMMIT;
+      RunCalculateInventoryValueTest(Item."No.",CalculatePer::Item);
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyCalculateInventoryValueReport(
+        'ProdBOMVersionErrBuf__Production_BOM_No__',Item."Production BOM No.",
+        'ProdBOMVersionErrBuf_Status',FORMAT(ProductionBOMHeader.Status::"Under Development"));
+      VerifyCalculateInventoryValueReport(
+        'RtngVersionErrBuf__Routing_No__',Item."Routing No.",
+        'RtngVersionErrBuf_Status',FORMAT(RoutingHeader.Status::"Under Development"));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentSalesHandler,ItemChargesSpecificationRequestPageHandler)]
+    PROCEDURE ItemChargesSpecificationSales@45();
+    VAR
+      SalesLine@1003 : Record 37;
+      SalesReceivablesSetup@1005 : Record 311;
+      OldStockoutWarning@1002 : Boolean;
+      OldCreditWarnings@1000 : Option;
+      SourceType@1007 : 'Sale,Purchase';
+    BEGIN
+      // Run Item Charges Specification Report and Verify Posted Item Charge for Sales Order.
+
+      // Setup: Create and Post Sales Order with Item Charge.
+      Initialize;
+      UpdateSalesReceivableSetup(OldCreditWarnings,OldStockoutWarning,SalesReceivablesSetup."Credit Warnings"::"No Warning",FALSE);
+      CreateAndPostSalesOrderWithItemCharge(SalesLine);
+
+      // Exercise: Run Item Charges Specification Report with Source Type as Sales.
+      RunItemChargesSpecification(SalesLine."Sell-to Customer No.",SourceType::Sale);
+
+      // Verify: Item Charge for the posted Sales Document.
+      VerifyItemChargesSpecificationReport(SalesLine."Sell-to Customer No.",SalesLine.Amount);
+
+      // Teardown: Rollback Sales and Receivable Setup.
+      UpdateSalesReceivableSetup(OldCreditWarnings,OldStockoutWarning,OldCreditWarnings,OldStockoutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentPurchaseHandler,ItemChargesSpecificationRequestPageHandler)]
+    PROCEDURE ItemChargesSpecificationPurchase@19();
+    VAR
+      PurchaseLine@1003 : Record 39;
+      SourceType@1007 : 'Sale,Purchase';
+    BEGIN
+      // Used Integer Values for Quantity and Cost Due to Difference in Decimal Values Bug ID: 274326.
+      // Run Item Charges Specification Report and Verify Posted Item Charge for Purchase Order.
+
+      // Setup: Create and Post Purchase Order with Item Charge.
+      Initialize;
+      CreateAndPostPurchaseOrderWithItemCharge(PurchaseLine);
+
+      // Exercise: Run Item Charges Specification Report with Source Type as Purchase.
+      RunItemChargesSpecification(PurchaseLine."Buy-from Vendor No.",SourceType::Purchase);
+
+      // Verify: Item Charge for the Posted Purchase Document.
+      VerifyItemChargesSpecificationReport(PurchaseLine."Buy-from Vendor No.",PurchaseLine.Amount);
+    END;
+
+    [Test]
+    [HandlerFunctions(CompareListRequestPageHandler)]
+    PROCEDURE CompareListReportForTwoItemsWithDifferentBOM@59();
+    VAR
+      Item@1001 : Record 27;
+      Item2@1002 : Record 27;
+      ProductionBOMHeader@1007 : Record 99000771;
+      RoutingHeader@1006 : Record 99000763;
+      Component@1004 : Code[20];
+      Component2@1005 : Code[20];
+      ExpectedValue@1000 : Decimal;
+      ExpectedValue2@1003 : Decimal;
+    BEGIN
+      // Run Compare List Report for Two Items with different BOMs and validate the data.
+
+      // Setup: Create two Items with Routing and Production BOM.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Standard,ProductionBOMHeader.Status::Certified,RoutingHeader.Status::Certified);
+      CreateManufacturingItem(
+        Item2,Item."Costing Method"::Standard,ProductionBOMHeader.Status::Certified,RoutingHeader.Status::Certified);
+
+      // Exercise: Run Compare List Report and calculate expected values for verification.
+      COMMIT;
+      RunCompareListReport(Item."No.",Item2."No.");
+      Component := GetComponent(Item."Production BOM No.");
+      Component2 := GetComponent(Item2."Production BOM No.");
+      ExpectedValue := CalculateExpectedValue(Item."Production BOM No.",Component) -
+        CalculateExpectedValue(Item2."Production BOM No.",Component);
+      ExpectedValue2 := CalculateExpectedValue(Item."Production BOM No.",Component2) -
+        CalculateExpectedValue(Item2."Production BOM No.",Component2);
+
+      // Verify: Verify data in the Report.
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyCompareListReport(Component,ExpectedValue);
+      VerifyCompareListReport(Component2,ExpectedValue2);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemRegisterValueRequestPageHandler)]
+    PROCEDURE ItemRegisterValueReport@74();
+    VAR
+      ItemNo@1001 : Code[20];
+      JournalBatchName@1005 : Code[10];
+    BEGIN
+      // Verify data in Item Register Value report after Posting Item Journal Line.
+
+      // Setup: Create and Post Item Journal Line.
+      Initialize;
+      ItemNo := LibraryInventory.CreateItemNo;
+      JournalBatchName := CreateAndPostItemJournal(ItemNo,LibraryRandom.RandInt(5),'');
+
+      // Exercise: Run Item Register Value Report.
+      RunItemRegisterValueReport(JournalBatchName);
+
+      // Verify: Verify Item Value Entry Report.
+      VerifyItemValueEntryReport(ItemNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(SubcontractorDispatchListRequestPageHandler)]
+    PROCEDURE SubcontractorDispatchListWithoutSubcontractor@78();
+    VAR
+      ProductionOrder@1003 : Record 5405;
+      ProdOrderRoutingLine@1004 : Record 5409;
+    BEGIN
+      // Test functionality of Subcontractor Dispatch List report without updating Subcontractor No. on Work Center.
+
+      // Setup: Create and Refresh Production Order.
+      Initialize;
+      ProductionOrder.GET(ProductionOrder.Status::Released,CreateAndRefreshProductionOrder);
+
+      // Exercise: Run Subcontractor Dispatch List report without updating Subcontractor No. on Work Center.
+      COMMIT;
+      ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      RunSubcontractorDispatchList(ProdOrderRoutingLine);
+
+      // Verify: Verify Report is not generated.
+      LibraryReportDataset.LoadDataSetFile;
+      Assert.IsFalse(LibraryReportDataset.GetNextRow,'Report should be empty.');
+    END;
+
+    [Test]
+    [HandlerFunctions(SubcontractorDispatchListRequestPageHandler)]
+    PROCEDURE SubcontractorDispatchListWithSubcontractor@73();
+    VAR
+      ProductionOrder@1003 : Record 5405;
+      ProdOrderRoutingLine@1004 : Record 5409;
+    BEGIN
+      // Test functionality of Subcontractor Dispatch List report with updating Subcontractor No. on Work Center.
+
+      // Setup: Create and Refresh Production Order.
+      Initialize;
+      ProductionOrder.GET(ProductionOrder.Status::Released,CreateAndRefreshProductionOrder);
+
+      // Exercise: Run Subcontractor Dispatch List report with updating Subcontractor No. on Work Center.
+      ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderRoutingLine.FINDFIRST;
+      UpdateAndCalculateWorkCenterCalendar(ProdOrderRoutingLine."No.");
+      COMMIT;
+      RunSubcontractorDispatchList(ProdOrderRoutingLine);
+
+      // Verify: Verify Subcontractor Dispatch List report.
+      VerifySubcontractorDispatchListReport(ProductionOrder,ProdOrderRoutingLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(BinContentCreationWkshtRequestPageHandler)]
+    PROCEDURE BinContentCreateWorksheetReport@84();
+    VAR
+      BinCreationWorksheetLine@1000 : Record 7338;
+    BEGIN
+      // Test functionality of Bin Content Create Worksheet Report.
+
+      // Setup: Create Location with Zones and Bins. Create Bin Creation Worksheet Line.
+      Initialize;
+      CreateBinCreationWorksheetLine(BinCreationWorksheetLine);
+
+      // Exercise: Run Bin Content Create Worksheet Report.
+      COMMIT;
+      RunBinContentCreateWorksheetReport(BinCreationWorksheetLine);
+
+      // Verify: Verify that the Bin Code and Location Code exist in the Report.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('BinCode_BinCreateWkshLine',BinCreationWorksheetLine."Bin Code");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('LocCode_BinCreateWkshLine',
+        BinCreationWorksheetLine."Location Code");
+    END;
+
+    [Test]
+    [HandlerFunctions(WhsePostedShipmentRequestPageHandler)]
+    PROCEDURE WarehousePostedShipmentReport@86();
+    VAR
+      Location@1000 : Record 14;
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      SalesHeader@1007 : Record 36;
+      WarehouseShipmentHeader@1009 : Record 7320;
+      WarehouseActivityLine@1001 : Record 5767;
+    BEGIN
+      // Test and verify functionality of Warehouse Posted Shipment report.
+
+      // Setup: Create Full Warehouse Setup. Create and release Purchase Order. Create and post Warehouse Receipt. Register Put away. Create and release Sales Order. Create, release and post Warehouse Shipment.
+      Initialize;
+      CreateFullWarehouseSetup(Location);
+      CreateAndReleasePurchaseOrder(PurchaseHeader,PurchaseLine,Location.Code);
+      CreateAndPostWarehouseReceipt(PurchaseHeader);
+      RegisterWarehouseActivity(PurchaseHeader."No.",WarehouseActivityLine."Activity Type"::"Put-away");
+      CreateAndReleaseSalesOrder(SalesHeader,PurchaseLine);
+      CreateAndReleaseWarehouseShipment(WarehouseShipmentHeader,SalesHeader);
+      LibraryWarehouse.CreateWhsePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(SalesHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // Exercise: Run Warehouse Posted Shipment report.
+      RunWarehousePostedShipmentReport(WarehouseShipmentHeader."No.");
+
+      // Verify: Verify Warehouse Posted Shipment report.
+      VerifyWarehousePostedShipmentReport(PurchaseLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(WhseInvtRegisteringTestRequestPageHandler)]
+    PROCEDURE WarehouseInventoryRegisteringTestReportWithBlockedWarning@103();
+    VAR
+      Location@1001 : Record 14;
+      ItemNo@1000 : Code[20];
+    BEGIN
+      // Test to check the Blocked Warning on Warehouse Inventory Registering Test report.
+
+      // Setup: Create Location, Create and modify Item and Create Warehouse Item Journal line.
+      Initialize;
+      CreateFullWarehouseSetup(Location);
+      ItemNo := CreateBlockedItem;
+      CreateWarehouseItemJournalLine(Location.Code,ItemNo,WORKDATE);
+
+      // Exercise: Run Warehouse Inventory Registering Test report.
+      COMMIT;
+      RunWarehouseInventoryRegisteringTestReport(ItemNo);
+
+      // Verify: Warning for Blocked Item exist on the report.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('Warehouse_Journal_Line__Item_No__',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('ErrorText_Number_',
+        FORMAT(STRSUBSTNO(BlockedMsg,ItemNo)));
+    END;
+
+    [Test]
+    [HandlerFunctions(WhseInvtRegisteringTestRequestPageHandler)]
+    PROCEDURE WarehouseInventoryRegisteringTestReportWithDateWarning@102();
+    VAR
+      Item@1007 : Record 27;
+      Location@1006 : Record 14;
+      UserSetup@1004 : Record 91;
+      RegisteringDate@1000 : Date;
+    BEGIN
+      // Test to check the Date range Warning on Warehouse Inventory Registering Test report.
+
+      // Setup: Create Location, Create an Item, Create and modify User Setup and Create Warehouse Item Journal line.
+      Initialize;
+      CreateFullWarehouseSetup(Location);
+      LibraryInventory.CreateItem(Item);
+      CreateAndModifyUserSetup(UserSetup);
+      RegisteringDate := CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',UserSetup."Allow Posting To");
+      CreateWarehouseItemJournalLine(Location.Code,Item."No.",RegisteringDate);
+
+      // Exercise: Run Warehouse Inventory Registering Test report.
+      COMMIT;
+      RunWarehouseInventoryRegisteringTestReport(Item."No.");
+
+      // Verify: Warning for Date range exist on the report.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('Warehouse_Journal_Line__Item_No__',Item."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('Warehouse_Journal_Line__Registering_Date_',FORMAT(RegisteringDate));
+      LibraryReportDataset.AssertCurrentRowValue('ErrorText_Number_',
+        FORMAT(STRSUBSTNO(DateMsg,RegisteringDate)));
+
+      // Clean Up: Delete the User Setup.
+      UserSetup.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CalculateStdCostMenuHandler)]
+    PROCEDURE StandardCostOnItemAfterCalculatingStandardCost@35();
+    VAR
+      InventorySetup@1000 : Record 313;
+      ChildItem@1006 : Record 27;
+      ParentItem@1005 : Record 27;
+      CalculateStandardCost@1008 : Codeunit 5812;
+      QuantityPer@1009 : Decimal;
+    BEGIN
+      // Verify Standard Cost on Item after running Calculate Standard Cost of the Item.
+
+      // Setup: Update Inventory Setup and Create Parent and Child Items with different Replenishment Systems.
+      // Also assign BOM No. to Parent Item with Component of Child Item.
+      Initialize;
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,TRUE,TRUE,InventorySetup."Automatic Cost Adjustment"::Always,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+      QuantityPer := LibraryRandom.RandInt(10);
+      CreateItemsWithDifferentReplenishmentSystems(ParentItem,ChildItem,QuantityPer);
+
+      // Exercise: Calculate Standard Cost for Parent Item.
+      CalculateStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      // Verify: Verify Standard Cost on Parent Item.
+      ParentItem.GET(ParentItem."No.");
+      ParentItem.TESTFIELD("Standard Cost",ChildItem."Unit Cost" * QuantityPer);
+
+      // Teardown.
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Always,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CalculateStdCostMenuHandler,ProdJournalPageHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE InvValuationWIPReportWithLessthanUnitCost@49();
+    BEGIN
+      // Verify Inventory Valuation Test Report values when Revaluation Journal posted before finishing Prod. Order with Lessthan Unit Cost(Revalued).
+      InventoryValuationWIPReportWithFinishedRelProdOrder(LibraryRandom.RandDec(5,2),WORKDATE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CalculateStdCostMenuHandler,ProdJournalPageHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE InvValuationWIPReportWithGreaterthanUnitCost@68();
+    BEGIN
+      // Verify Inventory Valuation Test Report values when Revaluation Journal posted before finishing Prod. Order with morethan Unit Cost(Revalued).
+      InventoryValuationWIPReportWithFinishedRelProdOrder(-LibraryRandom.RandDec(5,2),WORKDATE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CalculateStdCostMenuHandler,ProdJournalPageHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE InvValuationWIPReportWithExactUnitCost@100();
+    BEGIN
+      // Verify Inventory Valuation Test Report values when Revaluation Journal posted before finishing Prod. Order with total Unit Cost(Revalued).
+      InventoryValuationWIPReportWithFinishedRelProdOrder(0,WORKDATE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CalculateStdCostMenuHandler,ProdJournalPageHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE InvValuationWIPReportDateGreaterThanRevJournalPosted@108();
+    BEGIN
+      // Verify Inventory Valuation WIP Test Report values when report is run for next month of Revaluation Journal Posted.
+      InventoryValuationWIPReportWithFinishedRelProdOrder(0,CALCDATE('<2M>',WORKDATE),TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CalculateStdCostMenuHandler,ProdJournalPageHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE InvValuationWIPReportAfterFinishingReleasedProdOrderWithLessUnitCost@67();
+    BEGIN
+      // Verify Inventory Valuation WIP Test Report values when Revaluation Journal posted after finishing Prod. Order with Lessthan Unit Cost(Revalued).
+      InventoryValuationWIPReportWithFinishedRelProdOrder(LibraryRandom.RandDec(5,2),WORKDATE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CalculateStdCostMenuHandler,ProdJournalPageHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE InvValuationWIPReportAfterFinishingReleasedProdOrderWithMoreUnitCost@61();
+    BEGIN
+      // Verify Inventory Valuation WIP Test Report values when Revaluation Journal posted after finishing Prod. Order with morethan Unit Cost(Revalued).
+      InventoryValuationWIPReportWithFinishedRelProdOrder(-LibraryRandom.RandDec(5,2),WORKDATE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CalculateStdCostMenuHandler,ProdJournalPageHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE InvValuationWIPReportAfterFinishingReleasedProdOrderWithExactUnitCost@56();
+    BEGIN
+      // Verify Inventory Valuation WIP Test Report values when Revaluation Journal posted before finishing Prod. Order with Total Unit Cost(Revalued).
+      InventoryValuationWIPReportWithFinishedRelProdOrder(0,WORKDATE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(QuantityExplosionOfBOMRequestPageHandler)]
+    PROCEDURE QuantityExplosionOfBOMWithoutVersion@69();
+    VAR
+      ParentItem@1000 : Record 27;
+      FirstChildItem@1005 : Record 27;
+      SecondChildItem@1006 : Record 27;
+      Item@1002 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+      ProductionBOMLine@1001 : Record 99000772;
+      ProductionBOMHeaderNo@1011 : Code[20];
+    BEGIN
+      // Verify Quantity Explosion of BOM Test Report values when Production Bom created without version.
+
+      // Setup: Create Item with New BOM.
+      Initialize;
+      LibraryInventory.CreateItem(SecondChildItem);
+      CreateItemWithReplSysAndCostingMethod(FirstChildItem,FirstChildItem."Costing Method"::FIFO,
+        FirstChildItem."Replenishment System"::"Prod. Order",
+        CreateProductionBOM(SecondChildItem."Base Unit of Measure",ProductionBOMHeader.Status::New),0);
+      ProductionBOMHeaderNo := CreateProductionBOMWithLines(FirstChildItem,ProductionBOMLine.Type::Item,SecondChildItem."No.");
+      CreateItemWithReplSysAndCostingMethod(ParentItem,ParentItem."Costing Method"::FIFO,
+        ParentItem."Replenishment System"::"Prod. Order",ProductionBOMHeaderNo,LibraryRandom.RandDec(10,2));
+
+      // Exercise: Run Quantity Explosion of BOM Report.
+      COMMIT;
+      Item.SETRANGE("No.",ParentItem."No.");
+      REPORT.RUN(REPORT::"Quantity Explosion of BOM",TRUE,FALSE,Item);
+
+      // Verify: Verify Values on Quantity Explosion of BOM Test report values.
+      VerifyQuantityExplosionOfBOMReport(SecondChildItem."No.",ParentItem."Production BOM No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(QuantityExplosionOfBOMRequestPageHandler)]
+    PROCEDURE QuantityExplosionOfBOMWithUnCertifiedVersion@38();
+    VAR
+      ProductionBOMVersion@1012 : Record 99000779;
+    BEGIN
+      // Verify Quantity Explosion of BOM Test Report values when Production Bom created with Un Certified version.
+      QuantityExplosionOfBOMWithVersions(ProductionBOMVersion.Status::New);
+    END;
+
+    [Test]
+    [HandlerFunctions(QuantityExplosionOfBOMRequestPageHandler)]
+    PROCEDURE QuantityExplosionOfBOMCertifiedVersion@110();
+    VAR
+      ProductionBOMVersion@1002 : Record 99000779;
+    BEGIN
+      // Verify Quantity Explosion of BOM Test Report values when Production Bom created with Certified versions.
+      QuantityExplosionOfBOMWithVersions(ProductionBOMVersion.Status::Certified);
+    END;
+
+    [Test]
+    [HandlerFunctions(RolledUpCostSharesRequestPageHandler)]
+    PROCEDURE RolledUpCostSharesWithoutVersion@70();
+    VAR
+      ParentItem@1005 : Record 27;
+      FirstChildItem@1004 : Record 27;
+      SecondChildItem@1003 : Record 27;
+      Item@1002 : Record 27;
+      ProductionBOMLine@1001 : Record 99000772;
+      ProductionBOMHeaderNo@1000 : Code[20];
+    BEGIN
+      // Verify Rolled-up Cost Shares Test Report values when Production Bom created without versions.
+
+      // Setup: Create Item with New BOM.
+      Initialize;
+      CreateItemWithReplSysAndCostingMethod(FirstChildItem,FirstChildItem."Costing Method"::FIFO,
+        FirstChildItem."Replenishment System"::"Prod. Order",'',LibraryRandom.RandDec(10,2));
+      ProductionBOMHeaderNo := CreateProductionBOMWithLines(FirstChildItem,ProductionBOMLine.Type::Item,
+          LibraryInventory.CreateItem(SecondChildItem));
+      CreateItemWithReplSysAndCostingMethod(ParentItem,ParentItem."Costing Method"::FIFO,
+        ParentItem."Replenishment System"::"Prod. Order",ProductionBOMHeaderNo,0);
+
+      // Exercise: Run Rolled-up Cost Shares Report.
+      COMMIT;
+      Item.SETRANGE("No.",ParentItem."No.");
+      REPORT.RUN(REPORT::"Rolled-up Cost Shares",TRUE,FALSE,Item);
+
+      // Verify: Verify Values on Rolled-up Cost Shares Test report values.
+      LibraryReportDataset.LoadDataSetFile;
+      SelectProductionBOMLines(ProductionBOMLine,ParentItem."Production BOM No.");
+      REPEAT
+        LibraryReportDataset.SetRange('ProdBOMLineIndexNo',ProductionBOMLine."No.");
+        LibraryReportDataset.GetNextRow;
+        LibraryReportDataset.AssertCurrentRowValue('BOMCompQtyBase',ProductionBOMLine.Quantity);
+      UNTIL ProductionBOMLine.NEXT = 0;
+    END;
+
+    [Test]
+    [HandlerFunctions(RolledUpCostSharesRequestPageHandler)]
+    PROCEDURE RolledUpCostSharesWithItemAndVersion@60();
+    VAR
+      Item@1006 : Record 27;
+      ParentItem@1005 : Record 27;
+      FirstChildItem@1004 : Record 27;
+      SecondChildItem@1003 : Record 27;
+      ProductionBOMLine@1001 : Record 99000772;
+      ProductionBOMVersion@1007 : Record 99000779;
+      ProductionBOMHeaderNo@1000 : Code[20];
+    BEGIN
+      // Verify Rolled-up Cost Shares Test Report values when Production Bom Line created with Type Item and Certified version.
+
+      // Setup: Create Item with New BOM with certified Production BOM Version.
+      Initialize;
+      CreateItemWithReplSysAndCostingMethod(FirstChildItem,FirstChildItem."Costing Method"::FIFO,
+        FirstChildItem."Replenishment System"::"Prod. Order",'',LibraryRandom.RandDec(10,2));
+      CreateItemWithReplSysAndCostingMethod(SecondChildItem,SecondChildItem."Costing Method"::FIFO,
+        SecondChildItem."Replenishment System"::"Prod. Order",CreateProductionBOMWithLines(FirstChildItem,ProductionBOMLine.Type::Item,
+          LibraryInventory.CreateItem(Item)),0);
+      ProductionBOMHeaderNo := CreateProductionBOMWithLines(SecondChildItem,ProductionBOMLine.Type::Item,
+          LibraryInventory.CreateItem(Item));
+      CreateItemWithReplSysAndCostingMethod(ParentItem,ParentItem."Costing Method"::FIFO,
+        ParentItem."Replenishment System"::"Prod. Order",ProductionBOMHeaderNo,0);
+      CreateProductionBOMVersionWithBOMLines(ProductionBOMHeaderNo,ParentItem."Production BOM No.",
+        LibraryInventory.CreateItem(Item),FirstChildItem."No.",ProductionBOMVersion.Status::Certified);
+
+      // Exercise: Run Rolled-up Cost Shares Report .
+      COMMIT;
+      Item.SETRANGE("No.",ParentItem."No.");
+      REPORT.RUN(REPORT::"Rolled-up Cost Shares",TRUE,FALSE,Item);
+
+      // Verify: Verify Values on Rolled-up Cost Shares Test report values.
+      VerifyRolledupCostSharesReport(FirstChildItem."No.",ParentItem."Production BOM No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(RolledUpCostSharesRequestPageHandler)]
+    PROCEDURE RolledUpCostSharesWithTypeProdBomAndVersion@54();
+    VAR
+      Item@1007 : Record 27;
+      ParentItem@1006 : Record 27;
+      FirstChildItem@1005 : Record 27;
+      SecondChildItem@1004 : Record 27;
+      ProductionBOMLine@1002 : Record 99000772;
+      ProductionBOMVersion@1001 : Record 99000779;
+      ProductionBOMHeaderNo@1000 : Code[20];
+    BEGIN
+      // Verify Rolled-up Cost Shares Test Report values when Production Bom Line created with Type Production BOM and Certified version.
+
+      // Setup: Create Item with New BOM with certified Production BOM Version.
+      Initialize;
+      CreateItemWithReplSysAndCostingMethod(FirstChildItem,FirstChildItem."Costing Method"::FIFO,
+        FirstChildItem."Replenishment System"::"Prod. Order",'',LibraryRandom.RandDec(10,2));
+      CreateItemWithReplSysAndCostingMethod(SecondChildItem,SecondChildItem."Costing Method"::FIFO,
+        SecondChildItem."Replenishment System"::"Prod. Order",CreateProductionBOMWithLines(FirstChildItem,ProductionBOMLine.Type::Item,
+          LibraryInventory.CreateItem(Item)),0);
+      ProductionBOMHeaderNo := CreateProductionBOMWithLines(FirstChildItem,
+          ProductionBOMLine.Type::"Production BOM",SecondChildItem."Production BOM No.");
+      CreateItemWithReplSysAndCostingMethod(ParentItem,ParentItem."Costing Method"::FIFO,
+        ParentItem."Replenishment System"::"Prod. Order",ProductionBOMHeaderNo,0);
+      CreateProductionBOMVersionWithBOMLines(ProductionBOMHeaderNo,ParentItem."Production BOM No.",
+        LibraryInventory.CreateItem(Item),SecondChildItem."No.",ProductionBOMVersion.Status::Certified);
+
+      // Exercise: Run Rolled-up Cost Shares Report.
+      COMMIT;
+      Item.SETRANGE("No.",ParentItem."No.");
+      REPORT.RUN(REPORT::"Rolled-up Cost Shares",TRUE,FALSE,Item);
+
+      // Verify: Verify Values on Rolled-up Cost Shares Test report values.
+      VerifyRolledupCostSharesReport(SecondChildItem."No.",ParentItem."Production BOM No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(DetailedCalculationRequestPageHandler)]
+    PROCEDURE DetailedCalculationWithTypeItemAndVersion@115();
+    VAR
+      Item@1007 : Record 27;
+      ParentItem@1006 : Record 27;
+      FirstChildItem@1005 : Record 27;
+      SecondChildItem@1004 : Record 27;
+      ProductionBOMLine@1002 : Record 99000772;
+      ProductionBOMVersion@1001 : Record 99000779;
+      ProductionBOMHeaderNo@1000 : Code[20];
+    BEGIN
+      // Verify Detailed Calculation Test Report values when Production Bom created with Type Item and Certified version.
+
+      // Setup: Create Item with New BOM with certified Production BOM Version.
+      Initialize;
+      CreateItemWithReplSysAndCostingMethod(FirstChildItem,FirstChildItem."Costing Method"::FIFO,
+        FirstChildItem."Replenishment System"::"Prod. Order",'',LibraryRandom.RandDec(10,2));
+      CreateItemWithReplSysAndCostingMethod(SecondChildItem,SecondChildItem."Costing Method"::FIFO,
+        SecondChildItem."Replenishment System"::"Prod. Order",CreateProductionBOMWithLines(FirstChildItem,ProductionBOMLine.Type::Item,
+          LibraryInventory.CreateItem(Item)),0);
+      ProductionBOMHeaderNo := CreateProductionBOMWithLines(SecondChildItem,ProductionBOMLine.Type::Item,
+          LibraryInventory.CreateItem(Item));
+      CreateItemWithReplSysAndCostingMethod(ParentItem,ParentItem."Costing Method"::FIFO,
+        ParentItem."Replenishment System"::"Prod. Order",ProductionBOMHeaderNo,0);
+      CreateProductionBOMVersionWithBOMLines(ProductionBOMHeaderNo,ParentItem."Production BOM No.",
+        LibraryInventory.CreateItem(Item),FirstChildItem."No.",ProductionBOMVersion.Status::Certified);
+      LibraryVariableStorage.Enqueue(WORKDATE);
+
+      // Exercise: Run Detailed Calculation Report.
+      COMMIT;
+      Item.SETRANGE("No.",ParentItem."No.");
+      REPORT.RUN(REPORT::"Detailed Calculation",TRUE,FALSE,Item);
+
+      // Verify: Verify Values on Detailed Calculation Test report values.
+      VerifyDetailedCalculationReport(FirstChildItem."No.",ParentItem."Production BOM No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(DetailedCalculationRequestPageHandler)]
+    PROCEDURE DetailedCalculationWithTypeProdBomAndVersion@95();
+    VAR
+      Item@1007 : Record 27;
+      ParentItem@1006 : Record 27;
+      FirstChildItem@1005 : Record 27;
+      SecondChildItem@1004 : Record 27;
+      ProductionBOMLine@1002 : Record 99000772;
+      ProductionBOMVersion@1001 : Record 99000779;
+      ProductionBOMHeaderNo@1000 : Code[20];
+    BEGIN
+      // Verify Detailed Calculation Test Report values when Production Bom created with Type Production Bom and Certified version.
+
+      // Setup: Create Item with New BOM with certified Production BOM Version.
+      Initialize;
+      CreateItemWithReplSysAndCostingMethod(FirstChildItem,FirstChildItem."Costing Method"::FIFO,
+        FirstChildItem."Replenishment System"::"Prod. Order",'',LibraryRandom.RandDec(10,2));
+      CreateItemWithReplSysAndCostingMethod(SecondChildItem,SecondChildItem."Costing Method"::FIFO,
+        SecondChildItem."Replenishment System"::"Prod. Order",CreateProductionBOMWithLines(FirstChildItem,ProductionBOMLine.Type::Item,
+          LibraryInventory.CreateItem(Item)),0);
+      ProductionBOMHeaderNo := CreateProductionBOMWithLines(FirstChildItem,ProductionBOMLine.Type::"Production BOM",
+          SecondChildItem."Production BOM No.");
+      CreateItemWithReplSysAndCostingMethod(ParentItem,ParentItem."Costing Method"::FIFO,
+        ParentItem."Replenishment System"::"Prod. Order",ProductionBOMHeaderNo,0);
+      CreateProductionBOMVersionWithBOMLines(ProductionBOMHeaderNo,ParentItem."Production BOM No.",
+        LibraryInventory.CreateItem(Item),SecondChildItem."No.",ProductionBOMVersion.Status::Certified);
+      LibraryVariableStorage.Enqueue(WORKDATE);
+
+      // Exercise: Run Detailed Calculation Report.
+      COMMIT;
+      Item.SETRANGE("No.",ParentItem."No.");
+      REPORT.RUN(REPORT::"Detailed Calculation",TRUE,FALSE,Item);
+
+      // Verify: Verify Values on Detailed Calculation Test report values.
+      VerifyDetailedCalculationReport(SecondChildItem."No.",ParentItem."Production BOM No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(DetailedCalculationRequestPageHandler)]
+    PROCEDURE DetailedCalculationWithStatusCertifiedAndGreaterThanWorkDate@143();
+    VAR
+      Item@1007 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+      RoutingHeader@1008 : Record 99000763;
+      RoutingLine@1009 : Record 99000764;
+      RoutingVersion@1010 : Record 99000786;
+      StartingDate@1011 : Date;
+    BEGIN
+      // Verify Detailed Calculation Test Report values when Routing created with certified version and report run for greater than Routing Version Starting Date.
+
+      // Setup: Create Item with Routing Version and delete one routing line from Routing version after copy Routing version.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Standard,ProductionBOMHeader.Status::New,RoutingHeader.Status::"Under Development");
+      CreateRoutingLineWithTypeMachineCenter(RoutingHeader,Item."Routing No.");
+      CreateRoutingVersion(RoutingVersion,Item."Routing No.");
+      StartingDate := CALCDATE(STRSUBSTNO('<%1D>',LibraryRandom.RandInt(5)),WORKDATE);
+      FindRoutingLine(RoutingLine,RoutingVersion."Routing No.",RoutingVersion."Version Code");
+      RoutingLine.DELETE(TRUE);
+      UpdateRoutingVersion(RoutingVersion,RoutingVersion.Status::Certified,StartingDate);
+      LibraryVariableStorage.Enqueue(CALCDATE(STRSUBSTNO('<%1D>',LibraryRandom.RandInt(5)),StartingDate));
+
+      // Exercise: Run Detailed Calculation Report greater than Routing version starting date.
+      COMMIT;
+      Item.SETRANGE("No.",Item."No.");
+      REPORT.RUN(REPORT::"Detailed Calculation",TRUE,FALSE,Item);
+
+      // Verify: Verify values on Detailed Calculation Test report values.
+      FindRoutingLine(RoutingLine,RoutingVersion."Routing No.",RoutingVersion."Version Code");
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('RtngVersionCode',RoutingVersion."Version Code");
+      IF LibraryReportDataset.GetNextRow THEN
+        LibraryReportDataset.AssertCurrentRowValue('OperationNo_RtngLine',RoutingLine."Operation No.")
+      ELSE
+        ERROR(STRSUBSTNO(RoutingLineNotExistErr,RoutingLine."Operation No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(DetailedCalculationRequestPageHandler)]
+    PROCEDURE DetailedCalculationWithStatusCertifiedAndLessThanWorkDate@146();
+    VAR
+      RoutingVersion@1010 : Record 99000786;
+    BEGIN
+      // Verify Detailed Calculation Test Report values when Routing created with certified version and report run for less than Routing Version Starting Date.
+      Initialize;
+      DetailedCalculationWithTypeRoutingVersionAndCalcDate(RoutingVersion.Status::Certified,-LibraryRandom.RandInt(5));
+    END;
+
+    [Test]
+    [HandlerFunctions(DetailedCalculationRequestPageHandler)]
+    PROCEDURE DetailedCalculationWithStatusClosedAndGreaterThanWorkDate@117();
+    VAR
+      RoutingVersion@1010 : Record 99000786;
+    BEGIN
+      // Verify Detailed Calculation Test Report values when Routing created with closed version and report run for greater than Routing Version Starting Date.
+      Initialize;
+      DetailedCalculationWithTypeRoutingVersionAndCalcDate(RoutingVersion.Status::Closed,LibraryRandom.RandInt(5));
+    END;
+
+    [Test]
+    [HandlerFunctions(DetailedCalculationRequestPageHandler)]
+    PROCEDURE DetailedCalculationWithStatusClosedAndLessThanWorkDate@114();
+    VAR
+      RoutingVersion@1010 : Record 99000786;
+    BEGIN
+      // Verify Detailed Calculation Test Report values when Routing created with closed version and report run for less than Routing Version Starting Date.
+      Initialize;
+      DetailedCalculationWithTypeRoutingVersionAndCalcDate(RoutingVersion.Status::Closed,-LibraryRandom.RandInt(5));
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,QuantityExplosionOfBOMRequestPageHandler)]
+    PROCEDURE QuantityExplosionOfBOMWithStatusClosed@125();
+    VAR
+      ParentItem@1000 : Record 27;
+      ChildItem@1005 : Record 27;
+      Item@1002 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+    BEGIN
+      // Verify Quantity Explosion of BOM Test Report values when Production BOM is closed wihout any Error message.
+
+      // Setup: Create Item with New Production BOM.
+      Initialize;
+      LibraryInventory.CreateItem(ChildItem);
+      CreateItemWithReplSysAndCostingMethod(ParentItem,ParentItem."Costing Method"::FIFO,
+        ParentItem."Replenishment System"::"Prod. Order",
+        CreateProductionBOM(ChildItem."Base Unit of Measure",ProductionBOMHeader.Status::Closed),0);
+
+      // Exercise: Run Quantity Explosion of BOM Report.
+      COMMIT;
+      Item.SETRANGE("No.",ParentItem."No.");
+      REPORT.RUN(REPORT::"Quantity Explosion of BOM",TRUE,FALSE,Item);
+
+      // Verify: Verify no error message appear after running Quantity Explosion of BOM.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.AssertElementWithValueExists('No_Item',ParentItem."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(QuantityExplosionOfBOMRequestPageHandler)]
+    PROCEDURE QuantityExplosionOfBOMWithProdBomLineTypeItem@140();
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1005 : Record 99000771;
+      ProductionBOMLine@1001 : Record 99000772;
+      RoutingHeader@1002 : Record 99000763;
+    BEGIN
+      // Verify Error message when Quantity Explosion of Bom report is run for Production Bom Line Type Item.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Average,ProductionBOMHeader.Status::Certified,RoutingHeader.Status::Certified);
+      VerifyProductionBomErrorForTheReport(Item,ProductionBOMLine.Type::Item,
+        Item."No.",Item."Production BOM No.",REPORT::"Quantity Explosion of BOM");
+    END;
+
+    [Test]
+    [HandlerFunctions(QuantityExplosionOfBOMRequestPageHandler)]
+    PROCEDURE QuantityExplosionOfBOMWithProdBomLineTypeProdBom@154();
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1005 : Record 99000771;
+      ProductionBOMLine@1001 : Record 99000772;
+      RoutingHeader@1002 : Record 99000763;
+    BEGIN
+      // Verify Error message when Quantity Explosion of Bom report is run for Production Bom Line Type Production Bom.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Average,ProductionBOMHeader.Status::Certified,RoutingHeader.Status::Certified);
+      VerifyProductionBomErrorForTheReport(Item,ProductionBOMLine.Type::"Production BOM",
+        Item."Production BOM No.",Item."Production BOM No.",REPORT::"Quantity Explosion of BOM");
+    END;
+
+    [Test]
+    [HandlerFunctions(RolledUpCostSharesRequestPageHandler)]
+    PROCEDURE RolledupCostSharesWithProdBomLineTypeItem@172();
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1005 : Record 99000771;
+      ProductionBOMLine@1001 : Record 99000772;
+      RoutingHeader@1002 : Record 99000763;
+    BEGIN
+      // Verify Error message when Rolled-up Cost Shares report is run for Production Bom Line Type Item.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Average,ProductionBOMHeader.Status::Certified,RoutingHeader.Status::Certified);
+      VerifyProductionBomErrorForTheReport(Item,ProductionBOMLine.Type::Item,
+        Item."No.",Item."Production BOM No.",REPORT::"Rolled-up Cost Shares");
+    END;
+
+    [Test]
+    [HandlerFunctions(RolledUpCostSharesRequestPageHandler)]
+    PROCEDURE RolledupCostSharesWithProdBomLineTypeProdBom@171();
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1005 : Record 99000771;
+      ProductionBOMLine@1001 : Record 99000772;
+      RoutingHeader@1002 : Record 99000763;
+    BEGIN
+      // Verify Error message when Rolled-up Cost Shares report is run for Production Bom Line Type Production Bom.
+      Initialize;
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Average,ProductionBOMHeader.Status::Certified,RoutingHeader.Status::Certified);
+      VerifyProductionBomErrorForTheReport(Item,ProductionBOMLine.Type::"Production BOM",
+        Item."Production BOM No.",Item."Production BOM No.",REPORT::"Rolled-up Cost Shares");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,CalculateStdCostMenuHandler,ProdJournalPageHandler,AdjustCostRequestPageHandler,InventoryValuationWIPRequestPageHandler,ConfirmHandler)]
+    PROCEDURE InvValuationWIPReportForCostPostedtoGLOnStartingPeriod@187();
+    BEGIN
+      // Verify Inv. Valu. WIP Test Report values for starting period when Output is made to Expected cost in period First and Output invoiced in period Third.
+      Initialize;
+      InvValuationWIPReportForCostPostedtoGL(
+        WORKDATE,CALCDATE(STRSUBSTNO('<%1M>',LibraryRandom.RandIntInRange(3,5)),WORKDATE));
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,CalculateStdCostMenuHandler,ProdJournalPageHandler,InventoryValuationWIPRequestPageHandler,ConfirmHandler,AdjustCostRequestPageHandler)]
+    PROCEDURE InvValuationWIPReportForForCostPostedtoGLOnEndingPeriod@179();
+    VAR
+      InventoryValuationWIPDate@1001 : Date;
+    BEGIN
+      // Verify Inv. Valu. WIP Test Report values for ending period when Output is made to Expected cost in period First and Output invoiced in period Third.
+      Initialize;
+      InventoryValuationWIPDate := CALCDATE(STRSUBSTNO('<%1M>',LibraryRandom.RandIntInRange(3,5)),WORKDATE);
+      InvValuationWIPReportForCostPostedtoGL(InventoryValuationWIPDate,InventoryValuationWIPDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemAgeCompositionQtyRequestPageHandler)]
+    PROCEDURE CheckItemAgeCompositionQtyWithYear@137();
+    VAR
+      ItemNo@1000 : Code[20];
+      PeriodLength@1001 : DateFormula;
+    BEGIN
+      // Verify that Item Age Composition - Qty. report running successfully with year value.
+
+      // Setup: Craete Item and evaluate date formula.
+      Initialize;
+      ItemNo := LibraryInventory.CreateItemNo;
+      EVALUATE(PeriodLength,STRSUBSTNO('<%1Y>',LibraryRandom.RandInt(5)));
+
+      // Exercise: Run Item Age Composition - Qty Report.
+      COMMIT;
+      RunItemAgeCompositionQuantityReport(ItemNo,PeriodLength,'');
+
+      // Verify: Verifying that report running successfully with year value and Item no on report.
+      VerifyItemNoOnItemAgeCompositionReport(ItemNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemAgeCompositionValueRequestPageHandler)]
+    PROCEDURE CheckItemAgeCompositionValueWithYear@157();
+    VAR
+      ItemNo@1000 : Code[20];
+      PeriodLength@1001 : DateFormula;
+    BEGIN
+      // Verify that Item Age Composition - Value report running successfully with year value.
+
+      // Setup: Craete Item and evaluate date formula.
+      Initialize;
+      ItemNo := LibraryInventory.CreateItemNo;
+      EVALUATE(PeriodLength,STRSUBSTNO('<%1Y>',LibraryRandom.RandInt(5)));
+
+      // Exercise: Run Item Age Composition - Value Report.
+      COMMIT;
+      RunItemAgeCompositionValueReport(ItemNo,PeriodLength);
+
+      // Verify: Verifying that report running successfully with year value and Item no on report.
+      VerifyItemNoOnItemAgeCompositionReport(ItemNo);
+    END;
+
+    [Test]
+    PROCEDURE VerifyPickInstructionOptionForReportSelectionSales@158();
+    VAR
+      ReportSelections@1000 : Record 77;
+      UsageOptionForPage@1002 : 'Quote,Blanket Order,Order,Invoice,Work Order,Return Order,Credit Memo,Shipment,Return Receipt,Sales Document - Test,Prepayment Document - Test,S.Arch. Quote,S.Arch. Order,S. Arch. Return Order,Pick Instruction';
+    BEGIN
+      // Test to check that Pick Instruction option is present and working on page report Selection - Sales.
+
+      VerifySelectedOptionForReportSelectionSales(
+        UsageOptionForPage::"Pick Instruction",
+        ReportSelections.Usage::"S.Order Pick Instruction",
+        REPORT::"Pick Instruction");
+    END;
+
+    [Test]
+    PROCEDURE VerifyNotPickInstructionOptionForReportSelectionSales@150();
+    VAR
+      ReportSelections@1000 : Record 77;
+      UsageOptionForPage@1002 : 'Quote,Blanket Order,Order,Invoice,Work Order,Return Order,Credit Memo,Shipment,Return Receipt,Sales Document - Test,Prepayment Document - Test,S.Arch. Quote,S.Arch. Order,S. Arch. Return Order,Pick Instruction';
+    BEGIN
+      // Test to check that when Pick Instruction option is not selected page report Selection - Sales shows correct reports.
+
+      VerifySelectedOptionForReportSelectionSales(
+        UsageOptionForPage::Order,
+        ReportSelections.Usage::"S.Order",
+        REPORT::"Order Confirmation");
+    END;
+
+    [Test]
+    PROCEDURE DeleteRoutingVersionAfterUpdateStatus@235();
+    VAR
+      RoutingHeader@1004 : Record 99000763;
+      RoutingVersion@1002 : Record 99000786;
+      RoutingNo@1001 : Code[20];
+    BEGIN
+      // Test Routing version can be deleted after update Status without reopen the routing version page.
+
+      // Setup: Create Item with Under Development BOM and Routing. Create a Routing Version.
+      Initialize;
+      RoutingNo := CreateRouting(RoutingHeader.Status::"Under Development");
+      CreateRoutingVersion(RoutingVersion,RoutingNo);
+      UpdateRoutingVersion(RoutingVersion,RoutingVersion.Status::Certified,WORKDATE);
+
+      // Exercise: Update Status and delete Routing Version.
+      RoutingVersion.VALIDATE(Status,RoutingVersion.Status::New);
+      RoutingVersion.DELETE(TRUE);
+
+      // Verify: Routing Version is deleted without error pops up.
+      RoutingVersion.SETRANGE("Routing No.",RoutingNo);
+      Assert.IsTrue(RoutingVersion.ISEMPTY,STRSUBSTNO(MustBeEmptyErr,RoutingVersion.TABLENAME,RoutingNo));
+    END;
+
+    [Test]
+    [HandlerFunctions(AssemblyBOMsRequestPageHandler)]
+    PROCEDURE AssemblyBOMsReportForAssemledComponent@25();
+    VAR
+      ParentItem@1002 : Record 27;
+      ComponentItem@1000 : Record 27;
+      BOMComponent@1003 : Record 90;
+    BEGIN
+      // [FEATURE] [Assembly] [Assembly BOM]
+      // [SCENARIO] Field "BOM" in report 801 "Assembly BOMs" is set to "Yes" if a component is an assembled item
+
+      // [GIVEN] Create item "I1"
+      LibraryAssembly.CreateItem(
+        ComponentItem,ComponentItem."Costing Method"::Standard,ComponentItem."Replenishment System"::Assembly,'','');
+      // [GIVEN] Create assembly BOM with 1 component "COMP" and assign to item "I1"
+      LibraryAssembly.CreateAssemblyList(ComponentItem."Costing Method"::Standard,ComponentItem."No.",TRUE,1,0,0,1,'','');
+
+      BOMComponent.SETRANGE("Parent Item No.",ComponentItem."No.");
+      BOMComponent.FINDFIRST;
+
+      // [GIVEN] Create item "I2", create assembly BOM component. Set "I1" as component of "I2"
+      LibraryAssembly.CreateItem(
+        ParentItem,ComponentItem."Costing Method"::Standard,ParentItem."Replenishment System"::Assembly,'','');
+      LibraryAssembly.CreateAssemblyListComponent(BOMComponent.Type::Item,ComponentItem."No.",ParentItem."No.",'',0,1,TRUE);
+      // [GIVEN] Create assembly BOM component and set item "COMP" as a component of "I2"
+      // [GIVEN] Assembly setup: "I1" is assembled from "COMP", "I2" is assembled from "I1" + "COMP"
+      LibraryAssembly.CreateAssemblyListComponent(BOMComponent.Type::Item,BOMComponent."No.",ParentItem."No.",'',0,1,TRUE);
+
+      // [WHEN] Run report 801 "Assembly BOMs" for item "I2"
+      ParentItem.SETRECFILTER;
+      REPORT.RUN(REPORT::"Assembly BOMs",TRUE,FALSE,ParentItem);
+
+      // [THEN] Field "BOM" in the report line corresponding to item "I1" is "Yes", "BOM" in the line corresponding to "COMP" is "No"
+      LibraryReportDataset.LoadDataSetFile;
+      VerifyAssemblyBOMComponent(ParentItem."No.",ComponentItem."No.",TRUE);
+      VerifyAssemblyBOMComponent(ParentItem."No.",BOMComponent."No.",FALSE);
+    END;
+
+    LOCAL PROCEDURE Initialize@5();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateInventoryPostingSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE AddParentItemAsBOMComponent@131(Type@1003 : Option;No@1004 : Code[20];ItemProductionBOMNo@1000 : Code[20]);
+    VAR
+      ProductionBOMHeader@1002 : Record 99000771;
+      ProductionBOMLine@1001 : Record 99000772;
+    BEGIN
+      ProductionBOMHeader.GET(ItemProductionBOMNo);
+      ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::"Under Development");
+      ProductionBOMHeader.MODIFY(TRUE);
+      LibraryManufacturing.CreateProductionBOMLine(
+        ProductionBOMHeader,ProductionBOMLine,'',Type,No,LibraryRandom.RandDec(100,2));
+    END;
+
+    LOCAL PROCEDURE CalculateExpectedValue@65(ProductionBOMNo@1003 : Code[20];ComponentNo@1001 : Code[20]) : Decimal;
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMLine@1002 : Record 99000772;
+    BEGIN
+      ProductionBOMLine.SETRANGE("Production BOM No.",ProductionBOMNo);
+      ProductionBOMLine.SETRANGE("No.",ComponentNo);
+      IF ProductionBOMLine.FINDFIRST THEN BEGIN
+        Item.GET(ComponentNo);
+        EXIT(ROUND(Item."Unit Cost" * ProductionBOMLine.Quantity));
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateAndModifyUserSetup@104(VAR UserSetup@1000 : Record 91);
+    VAR
+      LibraryTimeSheet@1001 : Codeunit 131904;
+    BEGIN
+      LibraryTimeSheet.CreateUserSetup(UserSetup,TRUE);
+      UserSetup.VALIDATE("Allow Posting From",WORKDATE);
+      UserSetup.VALIDATE("Allow Posting To",CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'M>',WORKDATE));  // Adding Random months to WORKDATE.
+      UserSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournal@30(ItemNo@1002 : Code[20];RandomDays@1005 : Integer;LocationCode@1003 : Code[10]) : Code[10];
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      CreateItemJournalLine(ItemJournalBatch,ItemJournalLine,ItemNo);
+      ItemJournalLine.VALIDATE("Posting Date",CALCDATE('<' + FORMAT(-RandomDays) + 'D>',WORKDATE));
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      EXIT(ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrderWithItemCharge@21(VAR PurchaseLine@1001 : Record 39);
+    VAR
+      Vendor@1003 : Record 23;
+      PurchaseHeader@1000 : Record 38;
+      Item@1004 : Record 27;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,LibraryInventory.CreateItem(Item),LibraryRandom.RandInt(100)); // Use Random Quantity.
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::"Charge (Item)",
+        LibraryInventory.CreateItemChargeNo,PurchaseLine.Quantity);
+      PurchaseLine.ShowItemChargeAssgnt;
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesOrderWithItemCharge@42(VAR SalesLine@1001 : Record 37);
+    VAR
+      Customer@1003 : Record 18;
+      SalesHeader@1000 : Record 36;
+      Item@1004 : Record 27;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::Item,LibraryInventory.CreateItem(Item),LibraryRandom.RandDec(100,2)); // Use Random Quantity.
+      CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::"Charge (Item)",LibraryInventory.CreateItemChargeNo,SalesLine.Quantity);
+      SalesLine.ShowItemChargeAssgnt;
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostWarehouseReceipt@141(PurchaseHeader@1001 : Record 38);
+    VAR
+      WarehouseReceiptHeader@1000 : Record 7316;
+      WarehouseReceiptLine@1002 : Record 7317;
+    BEGIN
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      FindWarehouseReceiptLine(WarehouseReceiptLine,WarehouseReceiptLine."Source Document"::"Purchase Order",PurchaseHeader."No.");
+      WarehouseReceiptHeader.GET(WarehouseReceiptLine."No.");
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrder@50(ItemNo@1000 : Code[20]);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1007 : Record 39;
+    BEGIN
+      CreatePurchaseHeader(PurchaseHeader);
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,LibraryRandom.RandDecInRange(50,100,2));
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostProductionJournal@72(ItemNo@1000 : Code[20]) : Code[20];
+    VAR
+      ProductionOrder@1001 : Record 5405;
+      ProdOrderLine@1002 : Record 5406;
+      ProductionJournalMgt@1003 : Codeunit 5510;
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo,LibraryRandom.RandInt(5));
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+      LibraryVariableStorage.Enqueue(ProductionOrder."No.");
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+      ProductionJournalMgt.Handling(ProductionOrder,ProdOrderLine."Line No.");
+      EXIT(ProductionOrder."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrderWithDirectUnitCost@148(ItemNo@1000 : Code[20]);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      CreatePurchaseHeader(PurchaseHeader);
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,LibraryRandom.RandDecInRange(50,100,2));
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshProductionOrder@62() : Code[20];
+    VAR
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1001 : Record 99000771;
+      RoutingHeader@1002 : Record 99000763;
+      ProductionOrder@1003 : Record 5405;
+    BEGIN
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Standard,ProductionBOMHeader.Status::Certified,RoutingHeader.Status::Certified);
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,Item."No.",
+        LibraryRandom.RandDec(10,2));  // Taking Random Quantity.
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,TRUE,TRUE,TRUE,TRUE,FALSE);
+      EXIT(ProductionOrder."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndReleasePurchaseOrder@87(VAR PurchaseHeader@1001 : Record 38;VAR PurchaseLine@1002 : Record 39;LocationCode@1004 : Code[10]);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,LibraryInventory.CreateItemNo,LibraryRandom.RandDec(100,2));  // Use random Qunatity.
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.MODIFY(TRUE);
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrder@89(VAR SalesHeader@1001 : Record 36;PurchaseLine@1003 : Record 39);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,PurchaseLine."No.",PurchaseLine.Quantity);
+      SalesLine.VALIDATE("Location Code",PurchaseLine."Location Code");
+      SalesLine.MODIFY(TRUE);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseWarehouseShipment@90(VAR WarehouseShipmentHeader@1000 : Record 7320;SalesHeader@1001 : Record 36);
+    VAR
+      WarehouseShipmentLine@1003 : Record 7321;
+    BEGIN
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      FindWarehouseShipmentLine(WarehouseShipmentLine,WarehouseShipmentLine."Source Document"::"Sales Order",SalesHeader."No.");
+      WarehouseShipmentHeader.GET(WarehouseShipmentLine."No.");
+      LibraryWarehouse.ReleaseWarehouseShipment(WarehouseShipmentHeader);
+    END;
+
+    LOCAL PROCEDURE CreateBinCreationWorksheetLine@96(VAR BinCreationWorksheetLine@1001 : Record 7338);
+    VAR
+      Bin@1008 : Record 7354;
+      BinCreationWkshName@1007 : Record 7337;
+      Item@1006 : Record 27;
+      Location@1005 : Record 14;
+    BEGIN
+      CreateFullWarehouseSetup(Location);
+      FindBin(Bin,Location.Code);
+      LibraryInventory.CreateItem(Item);
+      BinCreationWkshName.FINDFIRST;
+      LibraryWarehouse.CreateBinCreationWorksheetLine(
+        BinCreationWorksheetLine,BinCreationWkshName."Worksheet Template Name",BinCreationWkshName.Name,Location.Code,Bin.Code);
+      BinCreationWorksheetLine.VALIDATE("Item No.",Item."No.");
+      BinCreationWorksheetLine.VALIDATE(Fixed,TRUE);
+      BinCreationWorksheetLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateRevaluationJournal@36(VAR ItemJournalLine@1000 : Record 83);
+    VAR
+      ItemJournalTemplate@1001 : Record 82;
+      ItemJournalBatch@1002 : Record 233;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Revaluation);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      LibraryInventory.CreateItemJnlLineWithNoItem(
+        ItemJournalLine,ItemJournalBatch,ItemJournalBatch."Journal Template Name",
+        ItemJournalBatch.Name,ItemJournalLine."Entry Type"::"Positive Adjmt.");
+    END;
+
+    LOCAL PROCEDURE CreateBlockedItem@123() : Code[20];
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE(Blocked,TRUE);
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateFullWarehouseSetup@85(VAR Location@1000 : Record 14);
+    VAR
+      WarehouseEmployee@1001 : Record 7301;
+    BEGIN
+      WarehouseEmployee.SETRANGE("User ID",USERID);
+      WarehouseEmployee.DELETEALL(TRUE);
+      LibraryWarehouse.CreateFullWMSLocation(Location,2);  // Value used for number of bin per zone.
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalLine@47(VAR ItemJournalBatch@1004 : Record 233;VAR ItemJournalLine@1000 : Record 83;ItemNo@1003 : Code[20]);
+    BEGIN
+      // Create Item Journal line taking Random Quantity and Unit Cost.
+      SelectItemJournalBatch(ItemJournalBatch);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,LibraryRandom.RandDecInRange(10,20,2));
+      ItemJournalLine.VALIDATE("Unit Cost",LibraryRandom.RandDecInRange(100,200,2));
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemsWithIndirectCost@188(VAR ParentItem@1002 : Record 27;VAR ChildItem@1001 : Record 27);
+    BEGIN
+      CreateItemsWithDifferentReplenishmentSystems(ParentItem,ChildItem,LibraryRandom.RandDec(10,2));
+      ParentItem.VALIDATE("Indirect Cost %",LibraryRandom.RandInt(5));
+      ParentItem.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithReplSysAndCostingMethod@57(VAR Item@1000 : Record 27;CostingMethod@1001 : Option;ReplenishmentSystem@1002 : Option;ProductionBOMNo@1003 : Code[20];UnitCost@1004 : Decimal);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Costing Method",CostingMethod);
+      Item.VALIDATE("Replenishment System",ReplenishmentSystem);
+      Item.VALIDATE("Production BOM No.",ProductionBOMNo);
+      Item.VALIDATE("Unit Cost",UnitCost);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateManufacturingItem@52(VAR Item@1000 : Record 27;CostingMethod@1003 : Option;ProductionBOMHeaderStatus@1001 : Option;RoutingHeaderStatus@1002 : Option);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Costing Method",CostingMethod);
+      Item.VALIDATE("Replenishment System",Item."Replenishment System"::"Prod. Order");
+      Item.VALIDATE("Production BOM No.",CreateProductionBOM(Item."Base Unit of Measure",ProductionBOMHeaderStatus));
+      Item.VALIDATE("Routing No.",CreateRouting(RoutingHeaderStatus));
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateProductionBOM@34(UnitOfMeasureCode@1001 : Code[10];Status@1004 : Option) : Code[20];
+    VAR
+      ProductionBOMHeader@1000 : Record 99000771;
+      ProductionBOMLine@1002 : Record 99000772;
+      Item@1003 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,UnitOfMeasureCode);
+      LibraryManufacturing.CreateProductionBOMLine(
+        ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2));
+      ProductionBOMHeader.VALIDATE(Status,Status);
+      ProductionBOMHeader.MODIFY(TRUE);
+      EXIT(ProductionBOMHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateProductionBOMVersion@14(ProductionBOMNo@1001 : Code[20]);
+    VAR
+      ProductionBOMVersion@1000 : Record 99000779;
+      ProductionBOMHeader@1002 : Record 99000771;
+      ProductionBOMCopy@1003 : Codeunit 99000768;
+    BEGIN
+      ProductionBOMHeader.GET(ProductionBOMNo);
+      LibraryManufacturing.CreateProductionBOMVersion(
+        ProductionBOMVersion,ProductionBOMNo,FORMAT(LibraryRandom.RandInt(5)),ProductionBOMHeader."Unit of Measure Code");  // Use Random Version Code.
+      ProductionBOMCopy.CopyBOM(ProductionBOMHeader."No.",'',ProductionBOMHeader,ProductionBOMVersion."Version Code");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@24(VAR PurchaseLine@1000 : Record 39;PurchaseHeader@1001 : Record 38;Type@1003 : Option;ItemNo@1002 : Code[20];Quantity@1004 : Decimal);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,Type,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandInt(100));  // Value not Important for test.
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateRouting@8(Status@1003 : Option) : Code[20];
+    VAR
+      RoutingHeader@1000 : Record 99000763;
+      RoutingLine@1001 : Record 99000764;
+      WorkCenter@1002 : Record 99000754;
+    BEGIN
+      CreateWorkCenterWithWorkCenterGroup(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine,'',FORMAT(LibraryRandom.RandInt(100)),RoutingLine.Type::"Work Center",WorkCenter."No.");
+      RoutingHeader.VALIDATE(Status,Status);
+      RoutingHeader.MODIFY(TRUE);
+      EXIT(RoutingHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateRoutingVersion@9(VAR RoutingVersion@1002 : Record 99000786;RoutingNo@1003 : Code[20]);
+    VAR
+      RoutingHeader@1001 : Record 99000763;
+      RoutingLineCopyLines@1000 : Codeunit 99000753;
+    BEGIN
+      RoutingHeader.GET(RoutingNo);
+      LibraryManufacturing.CreateRoutingVersion(RoutingVersion,RoutingNo,FORMAT(LibraryRandom.RandInt(5)));  // Use Random Version Code.
+      RoutingLineCopyLines.CopyRouting(RoutingNo,'',RoutingHeader,RoutingVersion."Version Code");
+    END;
+
+    LOCAL PROCEDURE CreateRoutingLineWithTypeMachineCenter@152(VAR RoutingHeader@1000 : Record 99000763;ItemRoutingNo@1005 : Code[20]);
+    VAR
+      RoutingLine@1001 : Record 99000764;
+      MachineCenter@1002 : Record 99000758;
+      WorkCenter@1003 : Record 99000754;
+    BEGIN
+      RoutingHeader.GET(ItemRoutingNo);
+      CreateWorkCenterWithWorkCenterGroup(WorkCenter);
+      LibraryManufacturing.CreateMachineCenter(MachineCenter,WorkCenter."No.",LibraryRandom.RandInt(5));
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine,'',FORMAT(LibraryRandom.RandInt(100)),
+        RoutingLine.Type::"Machine Center",MachineCenter."No.");
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@15(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36;Type@1003 : Option;ItemNo@1002 : Code[20];Quantity@1004 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,Type,ItemNo,Quantity);
+      SalesLine.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2)); // Use random Unit Price.
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseItemJournalLine@112(LocationCode@1000 : Code[10];ItemNo@1002 : Code[20];RegisteringDate@1004 : Date);
+    VAR
+      WarehouseJournalBatch@1001 : Record 7310;
+      WarehouseJournalLine@1003 : Record 7311;
+    BEGIN
+      CreateWarehouseJournalBatch(WarehouseJournalBatch,LocationCode);
+      LibraryWarehouse.CreateWhseJournalLine(
+        WarehouseJournalLine,WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,LocationCode,'','',
+        WarehouseJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,
+        LibraryRandom.RandDec(10,2));  // Taking Random Quantity.
+      WarehouseJournalLine.VALIDATE("Registering Date",RegisteringDate);
+      WarehouseJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseJournalBatch@105(VAR WarehouseJournalBatch@1000 : Record 7310;LocationCode@1001 : Code[10]);
+    VAR
+      WarehouseJournalTemplate@1002 : Record 7309;
+    BEGIN
+      LibraryWarehouse.SelectWhseJournalTemplateName(WarehouseJournalTemplate,WarehouseJournalTemplate.Type::Item);
+      LibraryWarehouse.CreateWhseJournalBatch(WarehouseJournalBatch,WarehouseJournalTemplate.Name,LocationCode);
+    END;
+
+    LOCAL PROCEDURE CreateWorkCenterWithWorkCenterGroup@83(VAR WorkCenter@1001 : Record 99000754);
+    BEGIN
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+    END;
+
+    LOCAL PROCEDURE CreateItemsWithDifferentReplenishmentSystems@6(VAR ParentItem@1000 : Record 27;VAR ChildItem@1001 : Record 27;QuantityPer@1003 : Decimal);
+    VAR
+      ProductionBOMHeader@1002 : Record 99000771;
+    BEGIN
+      CreateItemWithReplSysAndCostingMethod(ChildItem,ChildItem."Costing Method"::FIFO,
+        ChildItem."Replenishment System"::Purchase,'',LibraryRandom.RandDec(10,2));
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ChildItem."No.",QuantityPer);
+      CreateItemWithReplSysAndCostingMethod(ParentItem,ParentItem."Costing Method"::Standard,
+        ParentItem."Replenishment System"::"Prod. Order",ProductionBOMHeader."No.",0);
+    END;
+
+    LOCAL PROCEDURE CreateProductionBOMWithLines@132(VAR FirstChildItem@1000 : Record 27;Type@1004 : Option;No@1001 : Code[20]) : Code[20];
+    VAR
+      ProductionBOMHeader@1002 : Record 99000771;
+      ProductionBOMLine@1003 : Record 99000772;
+    BEGIN
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,FirstChildItem."Base Unit of Measure");
+      LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,
+        FirstChildItem."No.",LibraryRandom.RandDec(10,2));
+      LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,'',Type,
+        No,LibraryRandom.RandDec(10,2));
+      EXIT(ProductionBOMHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateProductionBOMVersionWithBOMLines@164(ProductionBOMNo@1003 : Code[20];ItemProductionBOMNo@1000 : Code[20];FirstChildItemNo@1001 : Code[20];SecondChildItemNo@1002 : Code[20];Status@1004 : Option);
+    VAR
+      ProductionBOMVersion@1005 : Record 99000779;
+      ProductionBOMHeader@1007 : Record 99000771;
+      ProductionBOMLine@1006 : Record 99000772;
+    BEGIN
+      ProductionBOMHeader.GET(ProductionBOMNo);
+      LibraryManufacturing.CreateProductionBOMVersion(
+        ProductionBOMVersion,ItemProductionBOMNo,FORMAT(LibraryRandom.RandInt(5)),
+        ProductionBOMHeader."Unit of Measure Code");
+      LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,ProductionBOMVersion."Version Code",
+        ProductionBOMLine.Type::Item,FirstChildItemNo,LibraryRandom.RandDec(10,2));
+      LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,ProductionBOMVersion."Version Code",
+        ProductionBOMLine.Type::Item,SecondChildItemNo,LibraryRandom.RandDec(10,2));
+      ProductionBOMVersion.VALIDATE(Status,Status);
+      ProductionBOMVersion.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeader@151(VAR PurchaseHeader@1000 : Record 38);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+    END;
+
+    LOCAL PROCEDURE DetailedCalculationWithTypeRoutingVersionAndCalcDate@119(Status@1012 : Option;Days@1013 : Integer);
+    VAR
+      Item@1007 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+      RoutingHeader@1008 : Record 99000763;
+      RoutingLine@1009 : Record 99000764;
+      RoutingVersion@1010 : Record 99000786;
+    BEGIN
+      // Setup: Create Item with Routing Version and delete one routing line from Routing version after copy routing version.
+      CreateManufacturingItem(
+        Item,Item."Costing Method"::Standard,ProductionBOMHeader.Status::"Under Development",
+        RoutingHeader.Status::"Under Development");
+      CreateRoutingLineWithTypeMachineCenter(RoutingHeader,Item."Routing No.");
+      CreateRoutingVersion(RoutingVersion,Item."Routing No.");
+      FindRoutingLine(RoutingLine,RoutingVersion."Routing No.",RoutingVersion."Version Code");
+      RoutingLine.DELETE(TRUE);
+      UpdateRoutingVersion(RoutingVersion,Status,CALCDATE(STRSUBSTNO('<%1D>',LibraryRandom.RandInt(5)),WORKDATE));
+      LibraryVariableStorage.Enqueue(CALCDATE(STRSUBSTNO('<%1D>',Days),RoutingVersion."Starting Date"));
+
+      // Exercise: Run Detailed Calculation Report.
+      COMMIT;
+      Item.SETRANGE("No.",Item."No.");
+      REPORT.RUN(REPORT::"Detailed Calculation",TRUE,FALSE,Item);
+
+      // Verify: Verify Values on Detailed Calculation Test report values.
+      LibraryReportDataset.LoadDataSetFile;
+      RoutingHeader.GET(Item."Routing No.");
+      FindRoutingLine(RoutingLine,RoutingHeader."No.",RoutingHeader."Version Nos.");
+      REPEAT
+        LibraryReportDataset.AssertElementWithValueExists('OperationNo_RtngLine',RoutingLine."Operation No.");
+      UNTIL RoutingLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateReportSelection@153(UsageOption@1000 : Option;ReportID@1001 : Integer);
+    VAR
+      ReportSelections@1002 : Record 77;
+    BEGIN
+      WITH ReportSelections DO BEGIN
+        INIT;
+        Usage := UsageOption;
+        Sequence :=
+          LibraryUtility.GenerateRandomCode(FIELDNO(Sequence),DATABASE::"Report Selections");
+        VALIDATE("Report ID",ReportID);
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateRandNumberRepSelections@149(UsageOption@1000 : Option;ReportID@1001 : Integer) Result : Integer;
+    VAR
+      ReportSelections@1002 : Record 77;
+      Counter@1003 : Integer;
+    BEGIN
+      Result := LibraryRandom.RandIntInRange(1,10);
+      FOR Counter := 1 TO Result DO
+        CreateReportSelection(UsageOption,ReportID);
+
+      ReportSelections.SETRANGE(Usage,UsageOption);
+      Result := ReportSelections.COUNT;
+    END;
+
+    LOCAL PROCEDURE CreateLocation@159() : Code[10];
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      EXIT(LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location));
+    END;
+
+    LOCAL PROCEDURE FindBin@88(VAR Bin@1000 : Record 7354;LocationCode@1001 : Code[10]);
+    VAR
+      Zone@1002 : Record 7300;
+    BEGIN
+      Zone.SETRANGE("Location Code",LocationCode);
+      Zone.FINDFIRST;
+      Bin.SETRANGE("Location Code",LocationCode);
+      Bin.SETRANGE("Zone Code",Zone.Code);
+      Bin.SETRANGE("Adjustment Bin",FALSE);
+      Bin.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseActivityLine@94(VAR WarehouseActivityLine@1000 : Record 5767;SourceNo@1002 : Code[20];ActivityType@1003 : Option);
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Source No.",SourceNo);
+      WarehouseActivityLine.SETRANGE("Activity Type",ActivityType);
+      WarehouseActivityLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseReceiptLine@93(VAR WarehouseReceiptLine@1000 : Record 7317;SourceDocument@1002 : Option;SourceNo@1003 : Code[20]);
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("Source Document",SourceDocument);
+      WarehouseReceiptLine.SETRANGE("Source No.",SourceNo);
+      WarehouseReceiptLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseShipmentLine@92(VAR WarehouseShipmentLine@1000 : Record 7321;SourceDocument@1002 : Option;SourceNo@1003 : Code[20]);
+    BEGIN
+      WarehouseShipmentLine.SETRANGE("Source Document",SourceDocument);
+      WarehouseShipmentLine.SETRANGE("Source No.",SourceNo);
+      WarehouseShipmentLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindValueEntry@130(VAR ValueEntry@1000 : Record 5802;ItemNo@1001 : Code[20]);
+    BEGIN
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::Output);
+      ValueEntry.SETRANGE("Entry Type",ValueEntry."Entry Type"::Revaluation);
+      ValueEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindRoutingLine@139(VAR RoutingLine@1002 : Record 99000764;RoutingNo@1000 : Code[20];VersionCode@1001 : Code[20]);
+    BEGIN
+      RoutingLine.SETRANGE("Routing No.",RoutingNo);
+      RoutingLine.SETRANGE("Version Code",VersionCode);
+      RoutingLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE GetComponent@64(ProductionBOMNo@1000 : Code[20]) : Code[20];
+    VAR
+      ProductionBOMLine@1002 : Record 99000772;
+    BEGIN
+      ProductionBOMLine.SETRANGE("Production BOM No.",ProductionBOMNo);
+      ProductionBOMLine.FINDFIRST;
+      EXIT(ProductionBOMLine."No.");
+    END;
+
+    LOCAL PROCEDURE GetCostAmountFromItemLedgerEntry@17(ItemNo@1001 : Code[20]) : Decimal;
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)");
+      EXIT(ItemLedgerEntry."Cost Amount (Actual)");
+    END;
+
+    LOCAL PROCEDURE GetCostPostedtoGLFromValueEntry@138(VAR ValueEntry@1000 : Record 5802;DocumentNo@1001 : Code[20];PostingDate@1002 : Date) CostPostedtoGL : Decimal;
+    BEGIN
+      WITH ValueEntry DO BEGIN
+        SETRANGE("Document No.",DocumentNo);
+        SETRANGE("Posting Date",PostingDate);
+        FINDSET;
+        REPEAT
+          CostPostedtoGL += "Cost Amount (Expected)" + "Cost Posted to G/L";
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetQuantityFromItemLedgerEntry@22(ItemNo@1000 : Code[20];LocationCode@1002 : Code[10]) : Decimal;
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      WITH ItemLedgerEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        IF LocationCode <> '' THEN
+          SETRANGE("Location Code",LocationCode);
+        FINDFIRST;
+        EXIT(Quantity);
+      END;
+    END;
+
+    LOCAL PROCEDURE InvValuationWIPReportForCostPostedtoGL@106(InventoryValuationWIPDate@1001 : Date;AllowPostingFromDate@1005 : Date);
+    VAR
+      InventorySetup@1008 : Record 313;
+      ChildItem@1007 : Record 27;
+      ParentItem@1006 : Record 27;
+      ProductionOrder@1009 : Record 5405;
+      ValueEntry@1000 : Record 5802;
+      CalculateStandardCost@1004 : Codeunit 5812;
+      ProductionOrderNo@1003 : Code[20];
+      OldAllowPostingFrom@1011 : Date;
+      CostPostedtoGL@1002 : Decimal;
+    BEGIN
+      // Setup: Post Purchase Order,Production Journal and Run Adjust Cost item entries batch job.
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,TRUE,TRUE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+      CreateItemsWithIndirectCost(ParentItem,ChildItem);
+      CalculateStandardCost.CalcItem(ParentItem."No.",FALSE);
+      CreateAndPostPurchaseOrderWithDirectUnitCost(ChildItem."No.");
+      ProductionOrderNo := CreateAndPostProductionJournal(ParentItem."No.");
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      OldAllowPostingFrom := UpdateGeneralLedgerSetup(AllowPostingFromDate);
+      COMMIT;
+      REPORT.RUN(REPORT::"Adjust Cost - Item Entries");
+      LibraryVariableStorage.Enqueue(InventoryValuationWIPDate);
+
+      // Exercise: Run Inventory Valuation WIP Report.
+      COMMIT;
+      ProductionOrder.SETRANGE("No.",ProductionOrderNo);
+      REPORT.RUN(REPORT::"Inventory Valuation - WIP",TRUE,FALSE,ProductionOrder);
+
+      // Verify: Verify Cost Posted to GL on Inventory Valuation WIP Test Report.
+      CostPostedtoGL := GetCostPostedtoGLFromValueEntry(ValueEntry,ProductionOrderNo,InventoryValuationWIPDate);
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.AssertElementWithValueExists('ValueEntryCostPostedtoGL',-CostPostedtoGL);
+
+      // Teardown.
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Always,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+      UpdateGeneralLedgerSetup(OldAllowPostingFrom);
+    END;
+
+    LOCAL PROCEDURE QuantityExplosionOfBOMWithVersions@177(ProdBOMVersionStatus@1014 : Option);
+    VAR
+      ParentItem@1010 : Record 27;
+      FirstChildItem@1006 : Record 27;
+      SecondChildItem@1005 : Record 27;
+      Item@1000 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+      ProductionBOMLine@1009 : Record 99000772;
+      ProductionBOMVersion@1002 : Record 99000779;
+      ProductionBOMNo@1001 : Code[20];
+    BEGIN
+      // Setup: Create Item with New BOM and Production BOM Versions.
+      Initialize;
+      CreateItemWithReplSysAndCostingMethod(FirstChildItem,FirstChildItem."Costing Method"::FIFO,
+        FirstChildItem."Replenishment System"::"Prod. Order",'',LibraryRandom.RandDec(10,2));
+      ProductionBOMNo := CreateProductionBOMWithLines(FirstChildItem,ProductionBOMLine.Type::Item,LibraryInventory.CreateItem(Item));
+      CreateItemWithReplSysAndCostingMethod(SecondChildItem,SecondChildItem."Costing Method"::FIFO,
+        SecondChildItem."Replenishment System"::"Prod. Order",ProductionBOMNo,0);
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,SecondChildItem."Base Unit of Measure");
+      LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,
+        LibraryInventory.CreateItem(Item),LibraryRandom.RandDec(10,2));
+      CreateItemWithReplSysAndCostingMethod(ParentItem,ParentItem."Costing Method"::FIFO,
+        ParentItem."Replenishment System"::"Prod. Order",ProductionBOMHeader."No.",0);
+      CreateProductionBOMVersionWithBOMLines(ProductionBOMHeader."No.",ParentItem."Production BOM No.",
+        FirstChildItem."No.",SecondChildItem."No.",ProductionBOMVersion.Status::Certified);
+      CreateProductionBOMVersionWithBOMLines(ProductionBOMNo,SecondChildItem."Production BOM No.",
+        LibraryInventory.CreateItem(Item),FirstChildItem."No.",ProdBOMVersionStatus);
+
+      // Exercise: Run Quantity Explosion of BOM Report.
+      COMMIT;
+      Item.SETRANGE("No.",ParentItem."No.");
+      REPORT.RUN(REPORT::"Quantity Explosion of BOM",TRUE,FALSE,Item);
+
+      // Verify: Verify Values on Quantity Explosion of BOM Test report values.
+      VerifyQuantityExplosionOfBOMReport(SecondChildItem."No.",ParentItem."Production BOM No.");
+    END;
+
+    LOCAL PROCEDURE RegisterWarehouseActivity@142(SourceNo@1001 : Code[20];ActivityType@1003 : Option);
+    VAR
+      WarehouseActivityHeader@1002 : Record 5766;
+      WarehouseActivityLine@1000 : Record 5767;
+    BEGIN
+      FindWarehouseActivityLine(WarehouseActivityLine,SourceNo,ActivityType);
+      WarehouseActivityHeader.GET(WarehouseActivityLine."Activity Type",WarehouseActivityLine."No.");
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+    END;
+
+    LOCAL PROCEDURE RevalueItemAutomatically@58(ItemNo@1002 : Code[20];PostingDate@1000 : Date;UnitCost@1006 : Decimal);
+    VAR
+      Item@1007 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+      LibraryCosting@1003 : Codeunit 132200;
+      CalculatePer@1005 : 'Item Ledger Entry,Item';
+      CalculationBase@1004 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      CreateRevaluationJournal(ItemJournalLine);
+      Item.SETRANGE("No.",ItemNo);
+      LibraryCosting.CalculateInventoryValue(
+        ItemJournalLine,Item,PostingDate,ItemJournalLine."Document No.",
+        CalculatePer::Item,FALSE,FALSE,TRUE,CalculationBase::" ",FALSE);
+      UpdateRevaluedUnitCost(ItemJournalLine."Journal Template Name",
+        ItemJournalLine."Journal Batch Name",ItemNo,ItemJournalLine."Unit Cost" + UnitCost);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE InventoryValuationWIPReportWithFinishedRelProdOrder@71(UnitCostRevalued@1017 : Decimal;InventoryValuationWIPStartingDate@1001 : Date;RevalueThenFinish@1002 : Boolean);
+    VAR
+      InventorySetup@1008 : Record 313;
+      ChildItem@1007 : Record 27;
+      ParentItem@1006 : Record 27;
+      ProductionOrder@1009 : Record 5405;
+      ValueEntry@1000 : Record 5802;
+      CalculateStandardCost@1004 : Codeunit 5812;
+      ProductionOrderNo@1003 : Code[20];
+    BEGIN
+      // Setup: Post Purchase Order,Production Journal and Revaluation Journal with modified Unit Cost(Revalued)
+      // before finishing Released Prod. Order.
+      Initialize;
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,TRUE,TRUE,InventorySetup."Automatic Cost Adjustment"::Always,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+      CreateItemsWithDifferentReplenishmentSystems(ParentItem,ChildItem,LibraryRandom.RandInt(5));
+      CalculateStandardCost.CalcItem(ParentItem."No.",FALSE);
+      CreateAndPostPurchaseOrder(ChildItem."No.");
+      ProductionOrderNo := CreateAndPostProductionJournal(ParentItem."No.");
+      IF RevalueThenFinish THEN BEGIN
+        RevalueItemAutomatically(ParentItem."No.",
+          CALCDATE(STRSUBSTNO('<%1M>',LibraryRandom.RandInt(2)),WORKDATE),UnitCostRevalued);
+        LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      END ELSE BEGIN
+        LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+        RevalueItemAutomatically(ParentItem."No.",
+          CALCDATE(STRSUBSTNO('<%1M>',LibraryRandom.RandInt(2)),WORKDATE),UnitCostRevalued);
+      END;
+      LibraryVariableStorage.Enqueue(InventoryValuationWIPStartingDate);
+
+      // Exercise: Run Inventory Valuation WIP Report for the Workdate.
+      ProductionOrder.SETRANGE("No.",ProductionOrderNo);
+      REPORT.RUN(REPORT::"Inventory Valuation - WIP",TRUE,FALSE,ProductionOrder);
+
+      // Verify: Verify Values on Inventory Valuation WIP Test Report.
+      FindValueEntry(ValueEntry,ParentItem."No.");
+      VerifyInventoryValuationWIPReport(ValueEntry."Cost Amount (Expected)",InventoryValuationWIPStartingDate);
+
+      // Teardown.
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Always,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+    END;
+
+    LOCAL PROCEDURE RunBinContentCreateWorksheetReport@82(VAR BinCreationWorksheetLine@1000 : Record 7338);
+    BEGIN
+      BinCreationWorksheetLine.SETRANGE("Item No.",BinCreationWorksheetLine."Item No.");
+      REPORT.RUN(REPORT::"Bin Content Create Wksh Report",TRUE,FALSE,BinCreationWorksheetLine);
+    END;
+
+    LOCAL PROCEDURE RunCalculateInventoryValueTest@20(ItemNo@1003 : Code[20];CalculatePer@1002 : Option);
+    VAR
+      Item@1000 : Record 27;
+      CalcBase@1004 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      Item.SETRANGE("No.",ItemNo);
+      LibraryVariableStorage.Enqueue(WORKDATE);
+      LibraryVariableStorage.Enqueue(CalculatePer);
+      LibraryVariableStorage.Enqueue(TRUE);
+      LibraryVariableStorage.Enqueue(TRUE);
+      LibraryVariableStorage.Enqueue(CalcBase::"Standard Cost - Manufacturing");
+      REPORT.RUN(REPORT::"Calc. Inventory Value - Test",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunCompareListReport@63(ItemNo@1001 : Code[20];ItemNo2@1002 : Code[20]);
+    BEGIN
+      LibraryVariableStorage.Enqueue(ItemNo);
+      LibraryVariableStorage.Enqueue(ItemNo2);
+      LibraryVariableStorage.Enqueue(WORKDATE);
+      REPORT.RUN(REPORT::"Compare List",TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE RunItemAgeCompositionQuantityReport@40(ItemNo@1000 : Code[20];PeriodLength@1001 : DateFormula;LocationFilter@1002 : Text);
+    VAR
+      Item@1003 : Record 27;
+    BEGIN
+      Item.SETRANGE("No.",ItemNo);
+      LibraryVariableStorage.Enqueue(WORKDATE);
+      LibraryVariableStorage.Enqueue(PeriodLength);
+      LibraryVariableStorage.Enqueue(LocationFilter);
+      REPORT.RUN(REPORT::"Item Age Composition - Qty.",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunItemAgeCompositionValueReport@32(ItemNo@1000 : Code[20];PeriodLength@1001 : DateFormula);
+    VAR
+      Item@1003 : Record 27;
+    BEGIN
+      Item.SETRANGE("No.",ItemNo);
+      LibraryVariableStorage.Enqueue(WORKDATE);
+      LibraryVariableStorage.Enqueue(PeriodLength);
+      REPORT.RUN(REPORT::"Item Age Composition - Value",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunItemChargesSpecification@12(SourceNo@1000 : Code[20];SourceType@1001 : Option);
+    VAR
+      ValueEntry@1003 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Source No.",SourceNo);
+      LibraryVariableStorage.Enqueue(TRUE);
+      LibraryVariableStorage.Enqueue(SourceType);
+      REPORT.RUN(REPORT::"Item Charges - Specification",TRUE,FALSE,ValueEntry);
+    END;
+
+    LOCAL PROCEDURE RunItemRegisterValueReport@76(JournalBatchName@1001 : Code[10]);
+    VAR
+      ItemRegister@1002 : Record 46;
+    BEGIN
+      ItemRegister.SETRANGE("Journal Batch Name",JournalBatchName);
+      REPORT.RUN(REPORT::"Item Register - Value",TRUE,FALSE,ItemRegister);
+    END;
+
+    LOCAL PROCEDURE RunSubcontractorDispatchList@79(VAR ProdOrderRoutingLine@1001 : Record 5409);
+    BEGIN
+      REPORT.RUN(REPORT::"Subcontractor - Dispatch List",TRUE,FALSE,ProdOrderRoutingLine);
+    END;
+
+    LOCAL PROCEDURE RunWarehousePostedShipmentReport@99(WarehouseShipmentNo@1002 : Code[20]);
+    VAR
+      PostedWhseShipmentHeader@1001 : Record 7322;
+    BEGIN
+      PostedWhseShipmentHeader.SETRANGE("Whse. Shipment No.",WarehouseShipmentNo);
+      REPORT.RUN(REPORT::"Whse. - Posted Shipment",TRUE,FALSE,PostedWhseShipmentHeader);
+    END;
+
+    LOCAL PROCEDURE RunWarehouseInventoryRegisteringTestReport@133(ItemNo@1001 : Code[20]);
+    VAR
+      WarehouseJournalLine@1000 : Record 7311;
+    BEGIN
+      WarehouseJournalLine.SETRANGE("Item No.",ItemNo);
+      REPORT.RUN(REPORT::"Whse. Invt.-Registering - Test",TRUE,FALSE,WarehouseJournalLine);
+    END;
+
+    LOCAL PROCEDURE SelectItemJournalBatch@75(VAR ItemJournalBatch@1002 : Record 233);
+    VAR
+      ItemJournalTemplate@1000 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE SelectProductionBOMLines@109(VAR ProductionBOMLine@1000 : Record 99000772;ProductionBOMNo@1001 : Code[20]);
+    BEGIN
+      ProductionBOMLine.SETRANGE("Production BOM No.",ProductionBOMNo);
+      ProductionBOMLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE UpdateAndCalculateWorkCenterCalendar@80(WorkCenterNo@1001 : Code[20]);
+    VAR
+      WorkCenter@1000 : Record 99000754;
+      Vendor@1002 : Record 23;
+    BEGIN
+      WorkCenter.GET(WorkCenterNo);
+      LibraryPurchase.CreateSubcontractor(Vendor);
+      WorkCenter.VALIDATE("Subcontractor No.",Vendor."No.");
+      WorkCenter.MODIFY(TRUE);
+      LibraryManufacturing.CalculateWorkCenterCalendar(WorkCenter,WORKDATE,WORKDATE);
+    END;
+
+    LOCAL PROCEDURE UpdateGeneralLedgerSetup@134(AllowPostingFrom@1001 : Date) OldAllowPostingFrom : Date;
+    VAR
+      GeneralLedgerSetup@1000 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      OldAllowPostingFrom := GeneralLedgerSetup."Allow Posting From";
+      GeneralLedgerSetup."Allow Posting From" := AllowPostingFrom;
+      GeneralLedgerSetup.MODIFY(TRUE);
+      EXIT(OldAllowPostingFrom);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesReceivableSetup@48(VAR OldCreditWarnings@1004 : Option;VAR OldStockoutWarning@1003 : Boolean;NewCreditWarnings@1001 : Option;NewStockoutWarning@1002 : Boolean);
+    VAR
+      SalesReceivablesSetup@1000 : Record 311;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      OldCreditWarnings := SalesReceivablesSetup."Credit Warnings";
+      OldStockoutWarning := SalesReceivablesSetup."Stockout Warning";
+      SalesReceivablesSetup.VALIDATE("Credit Warnings",NewCreditWarnings);
+      SalesReceivablesSetup.VALIDATE("Stockout Warning",NewStockoutWarning);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateRevaluedUnitCost@41(JournalTemplateName@1002 : Text[10];JournalTemplateBatch@1003 : Text[10];ItemNo@1000 : Code[20];UnitCostRevalued@1004 : Decimal);
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      ItemJournalLine.SETRANGE("Journal Template Name",JournalTemplateName);
+      ItemJournalLine.SETRANGE("Journal Batch Name",JournalTemplateBatch);
+      ItemJournalLine.SETRANGE("Item No.",ItemNo);
+      ItemJournalLine.FINDFIRST;
+      ItemJournalLine.VALIDATE("Unit Cost (Revalued)",UnitCostRevalued);
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateRoutingVersion@128(VAR RoutingVersion@1000 : Record 99000786;Status@1001 : Option;StartingDate@1002 : Date);
+    BEGIN
+      RoutingVersion.VALIDATE(Status,Status);
+      RoutingVersion.VALIDATE("Starting Date",StartingDate);
+      RoutingVersion.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyAssemblyBOMComponent@160(ParentItemNo@1000 : Code[20];ComponentItemNo@1001 : Code[20];ExpectedValue@1002 : Boolean);
+    BEGIN
+      LibraryReportDataset.SetRange('No_Item',ParentItemNo);
+      LibraryReportDataset.SetRange('No_BOMComp',ComponentItemNo);
+      LibraryReportDataset.AssertElementWithValueExists('AssemblyBOM_BOMComp',FORMAT(ExpectedValue));
+    END;
+
+    LOCAL PROCEDURE VerifyCalculateInventoryValueReport@11(RowCaption@1000 : Text;RowValue@1001 : Variant;ColumnCaption@1002 : Text;ExpectedValue@1003 : Variant);
+    BEGIN
+      LibraryReportDataset.SetRange(RowCaption,RowValue);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue(ColumnCaption,ExpectedValue);
+    END;
+
+    LOCAL PROCEDURE VerifyCompareListReport@66(ItemNo@1001 : Code[20];ExpectedValue@1000 : Decimal);
+    BEGIN
+      LibraryReportDataset.SetRange('BOMMatrixListItemNo',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('CostDiff',ExpectedValue);
+    END;
+
+    LOCAL PROCEDURE VerifyItemAgeCompositionReport@18(ItemNo@1001 : Code[20];Column1@1002 : Text;Column2@1003 : Text;ExpectedValueColumn1@1005 : Variant;ExpectedValueColumn2@1000 : Variant);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('No_Item',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue(Column1,ExpectedValueColumn1);
+      LibraryReportDataset.AssertCurrentRowValue(Column2,ExpectedValueColumn2);
+    END;
+
+    LOCAL PROCEDURE VerifyItemChargesSpecificationReport@13(SourceNo@1000 : Code[20];Amount@1001 : Decimal);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('SourceNo_ValueEntry',SourceNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('ValEntyCostAmtActSalesAct',Amount);
+    END;
+
+    LOCAL PROCEDURE VerifyItemValueEntryReport@77(ItemNo@1001 : Code[20]);
+    VAR
+      ValueEntry@1003 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.FINDFIRST;
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('ItemNo_ValueEntry',ItemNo);
+      LibraryReportDataset.GetNextRow;
+
+      LibraryReportDataset.AssertCurrentRowValue('InvoicedQuantity_ValueEntry',ValueEntry."Invoiced Quantity");
+      LibraryReportDataset.AssertCurrentRowValue('CostperUnit_ValueEntry',ValueEntry."Cost per Unit");
+    END;
+
+    LOCAL PROCEDURE VerifyItemNoOnItemAgeCompositionReport@174(ItemNo@1000 : Code[20]);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.AssertElementWithValueExists('No_Item',ItemNo);
+    END;
+
+    LOCAL PROCEDURE VerifySubcontractorDispatchListReport@81(ProductionOrder@1001 : Record 5405;ProdOrderRoutingLine@1002 : Record 5409);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('PONo_ProdOrderRtngLine',ProductionOrder."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('OprtnNo_ProdOrderRtngLine',ProdOrderRoutingLine."Operation No.");
+      LibraryReportDataset.AssertCurrentRowValue('RemaingQty_ProdOrderLine',ProductionOrder.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyWarehousePostedShipmentReport@91(PurchaseLine@1000 : Record 39);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('ItemNo_PostedWhseShptLine',PurchaseLine."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('Qty_PostedWhseShptLine',PurchaseLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyInventoryValuationWIPReport@122(CostAmountExpected@1000 : Decimal;StartingDate@1002 : Date);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      IF StartingDate = WORKDATE THEN BEGIN
+        LibraryReportDataset.AssertElementWithValueExists('LastOutput',CostAmountExpected);
+        LibraryReportDataset.AssertElementWithValueExists('AtLastDate',CostAmountExpected);
+        LibraryReportDataset.AssertElementWithValueExists('ValueOfWIP',0);
+      END ELSE BEGIN
+        LibraryReportDataset.AssertElementWithValueExists('LastOutput',-CostAmountExpected);
+        LibraryReportDataset.AssertElementWithValueExists('ValueOfWIP',CostAmountExpected);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyQuantityExplosionOfBOMReport@181(ChildItemNo@1001 : Code[20];ParentItemProdBOMNo@1002 : Code[20]);
+    VAR
+      ProductionBOMLine@1000 : Record 99000772;
+    BEGIN
+      ProductionBOMLine.SETRANGE("No.",ChildItemNo);
+      SelectProductionBOMLines(ProductionBOMLine,ParentItemProdBOMNo);
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('BomCompLevelNo',ChildItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('BOMQty',ProductionBOMLine.Quantity);
+      LibraryReportDataset.AssertCurrentRowValue('BomCompLevelQty',ProductionBOMLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyRolledupCostSharesReport@147(ChildItemNo@1000 : Code[20];ParentItemProdBOMNo@1002 : Code[20]);
+    VAR
+      ProductionBOMLine@1001 : Record 99000772;
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      ProductionBOMLine.SETRANGE("No.",ChildItemNo);
+      SelectProductionBOMLines(ProductionBOMLine,ParentItemProdBOMNo);
+      LibraryReportDataset.SetRange('ProdBOMLineIndexNo',ProductionBOMLine."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('BOMCompQtyBase',ProductionBOMLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyDetailedCalculationReport@111(ChildItemNo@1001 : Code[20];ParentItemProdBOMNo@1000 : Code[20]);
+    VAR
+      ProductionBOMLine@1002 : Record 99000772;
+      Item@1003 : Record 27;
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      ProductionBOMLine.SETRANGE("No.",ChildItemNo);
+      SelectProductionBOMLines(ProductionBOMLine,ParentItemProdBOMNo);
+      LibraryReportDataset.SetRange('ProdBOMLineLevelNo',ProductionBOMLine."No.");
+      LibraryReportDataset.GetNextRow;
+      Item.GET(ProductionBOMLine."No.");
+      LibraryReportDataset.AssertCurrentRowValue('ProdBOMLineLevelDesc',Item.Description);
+    END;
+
+    LOCAL PROCEDURE VerifyProductionBomErrorForTheReport@144(Item@1000 : Record 27;Type@1003 : Option;No@1004 : Code[20];ProdBomNo@1006 : Code[20];ReportId@1007 : Integer);
+    BEGIN
+      // Setup: Add Type ProductionBom/Item as a Component in BOM.
+      AddParentItemAsBOMComponent(Type,No,ProdBomNo);
+
+      // Exercise: Run the Report.
+      COMMIT;
+      Item.SETRANGE("No.",Item."No.");
+      ASSERTERROR REPORT.RUN(ReportId,TRUE,FALSE,Item);
+
+      // Verify: Verify Error.
+      Assert.ExpectedError(STRSUBSTNO(ProductionBOMStatusErr,50,Item."No."));
+    END;
+
+    LOCAL PROCEDURE CountReportSelections@135(ReportSelectionSalesPage@1000 : TestPage 306) Result : Integer;
+    BEGIN
+      IF ReportSelectionSalesPage.LAST THEN
+        REPEAT
+          Result += 1;
+        UNTIL NOT ReportSelectionSalesPage.PREVIOUS;
+    END;
+
+    LOCAL PROCEDURE VerifySelectedOptionForReportSelectionSales@136(UsageOptionForPage@1000 : Option;UsageOptionForTable@1004 : Option;ReportID@1002 : Integer);
+    VAR
+      ReportSelectionsSalesPage@1003 : TestPage 306;
+      SelectionsWithFilter@1001 : Integer;
+    BEGIN
+      // Setup:
+      Initialize;
+
+      SelectionsWithFilter := CreateRandNumberRepSelections(UsageOptionForTable,ReportID);
+
+      // Exercise: run Report Selection - Sales page and select "Pick Instruction" for Usage.
+      ReportSelectionsSalesPage.TRAP;
+      PAGE.RUN(PAGE::"Report Selection - Sales");
+      ReportSelectionsSalesPage.ReportUsage.SETVALUE(UsageOptionForPage);
+
+      // Verify: line number on page corresponds to lines in table.
+      Assert.AreEqual(
+        SelectionsWithFilter,CountReportSelections(ReportSelectionsSalesPage),
+        STRSUBSTNO(LineCountErr,UsageOptionForPage));
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE AdjustCostRequestPageHandler@145(VAR AdjustCostItemEntries@1000 : TestRequestPage 795);
+    BEGIN
+      AdjustCostItemEntries.Post.SETVALUE(TRUE);
+      AdjustCostItemEntries.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemChargeAssignmentSalesHandler@33(VAR ItemChargeAssignmentSales@1000 : TestPage 5814);
+    BEGIN
+      ItemChargeAssignmentSales."Qty. to Assign".SETVALUE(ItemChargeAssignmentSales.AssignableQty.ASDECIMAL);
+      ItemChargeAssignmentSales.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemChargeAssignmentPurchaseHandler@26(VAR ItemChargeAssignmentPurch@1000 : TestPage 5805);
+    BEGIN
+      ItemChargeAssignmentPurch."Qty. to Assign".SETVALUE(ItemChargeAssignmentPurch.AssignableQty.ASDECIMAL);
+      ItemChargeAssignmentPurch.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@101(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CompareListRequestPageHandler@53(VAR CompareList@1000 : TestRequestPage 99000758);
+    VAR
+      ItemNo1@1001 : Variant;
+      ItemNo2@1002 : Variant;
+      CalcDate@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ItemNo1);
+      LibraryVariableStorage.Dequeue(ItemNo2);
+      LibraryVariableStorage.Dequeue(CalcDate);
+
+      CompareList.ItemNo1.SETVALUE(ItemNo1);
+      CompareList.ItemNo2.SETVALUE(ItemNo2);
+      CompareList.CalculationDt.SETVALUE(CalcDate);
+
+      CompareList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE BinContentCreationWkshtRequestPageHandler@51(VAR BinContentCreateWkshReport@1000 : TestRequestPage 7312);
+    BEGIN
+      BinContentCreateWkshReport.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ItemAgeCompositionValueRequestPageHandler@113(VAR ItemAgeCompositionValue@1000 : TestRequestPage 5808);
+    VAR
+      EndingDate@1001 : Variant;
+      PeriodLength@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(EndingDate);
+      LibraryVariableStorage.Dequeue(PeriodLength);
+
+      ItemAgeCompositionValue.EndingDate.SETVALUE(EndingDate);
+      ItemAgeCompositionValue.PeriodLength.SETVALUE(PeriodLength);
+      ItemAgeCompositionValue.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ItemAgeCompositionQtyRequestPageHandler@116(VAR ItemAgeCompositionQty@1000 : TestRequestPage 5807);
+    BEGIN
+      ItemAgeCompositionQty.EndingDate.SETVALUE(LibraryVariableStorage.DequeueDate);
+      ItemAgeCompositionQty.PeriodLength.SETVALUE(LibraryVariableStorage.DequeueText);
+      ItemAgeCompositionQty.Item.SETFILTER("Location Filter",LibraryVariableStorage.DequeueText);
+      ItemAgeCompositionQty.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CalcInventoryValueTestRequestPageHandler@118(VAR CalcInventoryValueTest@1000 : TestRequestPage 5811);
+    VAR
+      PostingDate@1001 : Variant;
+      CalculatePer@1002 : Variant;
+      ByLocation@1003 : Variant;
+      ByVariant@1004 : Variant;
+      CalcBase@1005 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(PostingDate);
+      LibraryVariableStorage.Dequeue(CalculatePer);
+      LibraryVariableStorage.Dequeue(ByLocation);
+      LibraryVariableStorage.Dequeue(ByVariant);
+      LibraryVariableStorage.Dequeue(CalcBase);
+
+      CalcInventoryValueTest.Control10.SETVALUE(PostingDate);
+      CalcInventoryValueTest.Control3.SETVALUE(CalculatePer);
+      CalcInventoryValueTest."By Location".SETVALUE(ByLocation);
+      CalcInventoryValueTest."By Variant".SETVALUE(ByVariant);
+      CalcInventoryValueTest.CalcBase.SETVALUE(CalcBase);
+
+      CalcInventoryValueTest.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ItemChargesSpecificationRequestPageHandler@120(VAR ItemChargesSpecification@1000 : TestRequestPage 5806);
+    VAR
+      PrintDetails@1001 : Variant;
+      SourceType@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(PrintDetails);
+      LibraryVariableStorage.Dequeue(SourceType);
+
+      ItemChargesSpecification.Control21.SETVALUE(PrintDetails);
+      ItemChargesSpecification.Control1.SETVALUE(SourceType);
+      ItemChargesSpecification.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ItemRegisterValueRequestPageHandler@124(VAR ItemRegisterValue@1000 : TestRequestPage 5805);
+    BEGIN
+      ItemRegisterValue.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE SubcontractorDispatchListRequestPageHandler@126(VAR SubcontractorDispatchList@1000 : TestRequestPage 99000789);
+    BEGIN
+      SubcontractorDispatchList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhsePostedShipmentRequestPageHandler@127(VAR WhsePostedShipment@1000 : TestRequestPage 7309);
+    BEGIN
+      WhsePostedShipment.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhseInvtRegisteringTestRequestPageHandler@129(VAR WhseInvtRegisteringTest@1000 : TestRequestPage 7302);
+    BEGIN
+      WhseInvtRegisteringTest.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ProdJournalPageHandler@39(VAR ProductionJournal@1000 : Page 5510;VAR Response@1001 : Action);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+      ProductionOrderNo@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ProductionOrderNo);
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.FINDSET;
+      REPEAT
+        CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post Batch",ItemJournalLine);
+      UNTIL ItemJournalLine.NEXT = 0;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE CalculateStdCostMenuHandler@44(Option@1000 : Text[1024];VAR Choice@1001 : Integer;Instruction@1002 : Text[1024]);
+    BEGIN
+      // Calculate Standard Cost for All Level when Costing Method Standard.
+      Choice := 2;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryValuationWIPRequestPageHandler@43(VAR InventoryValuationWIP@1000 : TestRequestPage 5802);
+    VAR
+      StartingDate@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(StartingDate);
+      InventoryValuationWIP.StartingDate.SETVALUE(StartingDate);
+      InventoryValuationWIP.EndingDate.SETVALUE(CALCDATE('<CM>',StartingDate));
+      InventoryValuationWIP.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@37(ConfirmMessage@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE DetailedCalculationRequestPageHandler@121(VAR DetailedCalculation@1000 : TestRequestPage 99000756);
+    VAR
+      CalcDate@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(CalcDate);
+      DetailedCalculation.CalculationDate.SETVALUE(CalcDate);
+      DetailedCalculation.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE RolledUpCostSharesRequestPageHandler@107(VAR RolledUpCostShares@1000 : TestRequestPage 99000754);
+    BEGIN
+      RolledUpCostShares.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE QuantityExplosionOfBOMRequestPageHandler@55(VAR QuantityExplosionOfBOM@1000 : TestRequestPage 99000753);
+    BEGIN
+      QuantityExplosionOfBOM.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE AssemblyBOMsRequestPageHandler@28(VAR AssemblyBOMs@1000 : TestRequestPage 801);
+    BEGIN
+      AssemblyBOMs.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [SCM] [Reports]
+      Unsupported version tags:
+      SE: Unable to Execute
+
+      1. Run Item Age Composition Value report without Period Length and validate the data.
+      2. Run Item Age Composition Value report with Period Length and validate the data.
+      3. Run Item Age Composition Quantity report without Period Length and validate the data.
+      4. Run Item Age Composition Quantity report with Period Length and validate the data.
+      5. Test the functionality of Calculate Inventory Value Test with Average Costing Method.
+      6. Test the functionality of Calculate Inventory Value Test with Certified BOM and Routing.
+      7. Test the functionality of Calculate Inventory Value Test with Under Development BOM and Routing.
+      8. Test the functionality of Calculate Inventory Value Test with BOM and Routing Versions.
+      9. Run Item Charges Specification Report and Verify Posted Item Charge for Sales Order.
+      10. Run Item Charges Specification Report and Verify Posted Item Charge for Purchase Order.
+      11. Run Compare List Report for Two Items with different BOMs and validate the data.
+      12. Verify data in Item Register Value report after Posting Item Journal Line.
+      13. Test functionality of Subcontractor Dispatch List report without updating Subcontractor No. on Work Center.
+      14. Test functionality of Subcontractor Dispatch List report with updating Subcontractor No. on Work Center.
+      15. Test functionality of Bin Content Create Worksheet Report.
+      16. Test and verify functionality of Warehouse Posted Shipment report.
+      17. Test to check the Blocked Warning on Warehouse Inventory Registering Test report.
+      18. Test to check the Date range Warning on Warehouse Inventory Registering Test report.
+      19. Verify Standard Cost on Item after running Calculate Standard Cost of the Item.
+      20. Verify Inv. Valu. WIP Report values when Revaluation Journal posted before finishing Prod. Order with Lessthan Unit Cost.
+      21. Verify Inv. Valu. WIP Report values when Revaluation Journal posted before finishing Prod. Order with Morethan Unit Cost.
+      22. Verify Inv. Valu. WIP Report values when Revaluation Journal posted before finishing Prod. Order with Total Unit Cost.
+      23. Verify Inv. Valu. WIP Test Report values when Revaluation Journal posted after finishing Prod. Order with Lessthan Unit Cost.
+      24. Verify Inv. Valu. WIP Test Report values when Revaluation Journal posted after finishing Prod. Order with morethan Unit Cost.
+      25. Verify Inv. Valu. WIP Test Report values when Revaluation Journal posted after finishing Prod. Order with Total Unit Cost.
+      26. Verify Inventory Valuation WIP Test Report values when report is run for next month of Revaluation Journal Posted.
+      27. Verify Quantity Explosion of BOM Test Report values when Production Bom created without version.
+      28. Verify Quantity Explosion of BOM Test Report values when Production Bom created with Un Certified version.
+      29. Verify Quantity Explosion of BOM Test Report values when Production Bom created with Certified versions.
+      30. Verify Rolled-up Cost Shares Test Report values when Production Bom created without versions.
+      31. Verify Rolled-up Cost Shares Test Report values when Production Bom Line created with Type Item and Certified version.
+      32. Verify Rolled-up Cost Shares Test Report values when Production Bom Line created with Type Production BOM and Certified version.
+      33. Verify Detailed Calculation Test Report values when Production Bom created with Type Item and Certified version.
+      34. Verify Detailed Calculation Test Report values when Production Bom created with Type Production Bom and Certified version.
+      35. Verify Detailed Calculation Test Report values when Routing created with certified version and report run for greater than Routing Version Starting Date.
+      36. Verify Detailed Calculation Test Report values when Routing created with certified version and report run for less than Routing Version Starting Date.
+      37. Verify Detailed Calculation Test Report values when Routing created with closed version and report run for greater than Routing Version Starting Date.
+      38. Verify Detailed Calculation Test Report values when Routing created with closed version and report run for less than Routing Version Starting Date.
+      39. Verify Quantity Explosion of BOM Test Report values when Production BOM is closed wihout any Error message.
+      40. Verify Error message when Quantity Explosion of Bom report is run for Production Bom Line Type Item.
+      41. Verify Error message when Quantity Explosion of Bom report is run for Production Bom Line Type Prod. Bom.
+      42. Verify Error message when Rolled-up Cost Shares report is run for Production Bom Line Type Item.
+      43. Verify Error message when Rolled-up Cost Shares report is run for Production Bom Line Type Production Bom.
+      44. Verify Inv. Valu. WIP Test Report values for starting period when Output is made to Expected cost in period First and Output invoiced in period Third.
+      45. Verify Inv. Valu. WIP Test Report values for ending period when Output is made to Expected cost in period First and Output invoiced in period Third.
+      46. Verify that Item Age Composition - Qty. report running successfully with year value.
+      47. Verify that Item Age Composition - Value report running successfully with year value.
+      48. Test to check that Pick Instruction option is present and working on page report Selection - Sales.
+      49. Test to check that when Pick Instruction option is not selected page report Selection - Sales shows correct reports.
+      50. Test Routing version can be deleted after update Status without reopen the routing version page.
+
+      TFS_WI: 268583
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      ItemAgeCompositionValueWithoutPeriodLength,ItemAgeCompositionValueWithPeriodLength               139512
+      ItemAgeCompositionQtyWithoutPeriodLength,ItemAgeCompositionQtyWithPeriodLength                   139511
+
+      TFS_WI: 273157
+      Covers Test Cases:
+      -----------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                        TFS ID
+      -----------------------------------------------------------------------------------------------------------------
+      CalculateInventoryValueError,CalculateInventoryValueWithCertifiedBOMAndRouting                            139514
+      CalculateInventoryValueWithUnderDevelopmentBOMAndRouting,CalculateInventoryValueWithBOMAndRoutingVersion  139514
+
+      TFS_WI: 268606
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      ItemChargesSpecificationSales,ItemChargesSpecificationPurchase                                   139510
+
+      TFS_WI: 273898
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      CompareListReportForTwoItemsWithDifferentBOM                                                     139564
+
+      TFS_WI: 276191
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      ItemRegisterValueReport                                                                          141339
+
+      TFS_WI: 276185
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      SubcontractorDispatchListWithoutSubcontractor,SubcontractorDispatchListWithSubcontractor         139470
+
+      TFS_WI: 278732
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      BinContentCreateWorksheetReport                                                                  139554
+
+      TFS_WI: 278728
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      WarehousePostedShipmentReport                                                                    139552
+
+      TFS_WI: 281509
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      WarehouseInventoryRegisteringTestReportWithBlockedWarning                                        139549
+      WarehouseInventoryRegisteringTestReportWithDateWarning                                           139549
+
+      Bug_ID: 6690
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      StandardCostOnItemAfterCalculatingStandardCost,InvValuationWIPReportWithLessthanUnitCost,
+      InvValuationWIPReportWithGreaterthanUnitCost,InvValuationWIPReportWithExactUnitCost,
+      InvValuationWIPReportAfterFinishingReleasedProdOrderWithLessUnitCost,
+      InvValuationWIPReportAfterFinishingReleasedProdOrderWithMoreUnitCost,
+      InvValuationWIPReportAfterFinishingReleasedProdOrderWithExactUnitCost,
+      InvValuationWIPReportDateGreaterThanRevJournalPosted
+
+      Bug_ID: 27171
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      QuantityExplosionOfBOMWithoutVersion,QuantityExplosionOfBOMWithUnCertifiedVersion
+      QuantityExplosionOfBOMWithCertifiedVersion,RolledUpCostSharesWithoutVersion,
+      RolledUpCostSharesWithItemAndVersion,RolledUpCostSharesWithTypeProdBomAndVersion,
+      DetailedCalculationWithTypeItemAndVersion,DetailedCalculationWithTypeProdBomAndVersion
+
+      Bug_ID: 49334
+      Covers Test Cases:
+      -----------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                           TFS ID
+      -----------------------------------------------------------------------------------------------------------------------------------------
+      DetailedCalculationWithStatusCertifiedAndGreaterThanWorkDate,DetailedCalculationWithStatusCertifiedAndLessThanWorkDate,
+      DetailedCalculationWithStatusClosedAndGreaterThanWorkDate,DetailedCalculationWithStatusClosedAndLessThanWorkDate,
+      QuantityExplosionOfBOMWithStatusClosed,QuantityExplosionOfBOMWithProdBomLineTypeItem,
+      QuantityExplosionOfBOMWithProdBomLineTypeProdBom,RolledupCostSharesWithProdBomLineTypeItem,
+      RolledupCostSharesWithProdBomLineTypeProdBom
+
+      Bug_ID: 41707
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      InvValuationWIPReportForCostPostedtoGLOnStartingPeriod
+      InvValuationWIPReportForForCostPostedtoGLOnEndingPeriod
+
+      Bug_ID: 52465
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      CheckItemAgeCompositionQtyWithYear,CheckItemAgeCompositionValueWithYear
+
+      BUG_ID: 55895
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      VerifyPickInstructionOptionForreportSelectionSales                                               55895
+      VerifyNotPickInstructionOptionForreportSelectionSales                                            55895
+
+      RFH_ID: 356756
+      Covers Test Cases:
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      --------------------------------------------------------------------------------------------------------
+      DeleteRoutingVersionAfterUpdateStatus                                                            96769
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,1059 @@
+OBJECT Codeunit 137036 SCM PS Bugs - II
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1010 : Codeunit 130000;
+      LibraryRandom@1000 : Codeunit 130440;
+      LibraryUtility@1009 : Codeunit 131000;
+      LibraryPurchase@1005 : Codeunit 130512;
+      LibrarySales@1011 : Codeunit 130509;
+      LibraryPlanning@1008 : Codeunit 132203;
+      LibraryInventory@1002 : Codeunit 132201;
+      LibraryManufacturing@1007 : Codeunit 132202;
+      LibraryDimension@1003 : Codeunit 131001;
+      LibrarySetupStorage@1014 : Codeunit 131009;
+      LibraryVariableStorage@1013 : Codeunit 131004;
+      isInitialized@1001 : Boolean;
+      ErrMsgDimension@1004 : TextConst 'ENU=Values Must Match.';
+      DeletePickedLinesQst@1012 : TextConst '@@@=Production order no.: Components for production order 101001 have already been picked. Do you want to continue?;ENU=Components for production order %1 have already been picked. Do you want to continue?';
+
+    [Test]
+    PROCEDURE RequisitionWorksheetBatch@2();
+    VAR
+      Item@1004 : Record 27;
+      RequisitionWkshName@1001 : Record 245;
+      SalesHeader@1007 : Record 36;
+      SalesOrderNo@1003 : Code[20];
+      SalesOrderNo2@1000 : Code[20];
+      ReqWorksheetName@1005 : Code[10];
+      ReqWorksheetName2@1006 : Code[10];
+    BEGIN
+      // Setup: Create two Sales Orders with different Item lines.
+      Initialize;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+
+      SalesOrderNo :=
+        CreateSalesDocumentSetup(
+          Item."Replenishment System"::Purchase,SalesHeader."Document Type"::Order);
+      SalesOrderNo2 :=
+        CreateSalesDocumentSetup(
+          Item."Replenishment System"::Purchase,SalesHeader."Document Type"::Order);
+
+      // Exercise: Create Requisition Lines through Drop Shipment - Get Sales Order.
+      // Create Requisition Line with First Requisition Batch Name.
+      CreateRequisitionWorksheetName(RequisitionWkshName);
+      ReqWorksheetName := RequisitionWkshName.Name;
+      CreateReqLineDropShipment(RequisitionWkshName,SalesOrderNo);
+
+      // Create Requisition Line with Second Requisition Batch Name.
+      CreateRequisitionWorksheetName(RequisitionWkshName);
+      ReqWorksheetName2 := RequisitionWkshName.Name;
+      CreateReqLineDropShipment(RequisitionWkshName,SalesOrderNo2);
+
+      // Verify: Verification of Requisition line contained in each Batch.
+      VerifyNewBatchRequisitionLine(ReqWorksheetName,SalesOrderNo);
+      VerifyNewBatchRequisitionLine(ReqWorksheetName2,SalesOrderNo2);
+    END;
+
+    [Test]
+    [HandlerFunctions(MsgHandler,ConfirmHandler)]
+    PROCEDURE SalesBlanketOrderQtyShipped@13();
+    VAR
+      Item@1006 : Record 27;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1004 : Record 37;
+      PurchaseHeader@1005 : Record 38;
+      BlanketOrderNo@1001 : Code[20];
+    BEGIN
+      // Setup: Create Sales Blanket Order and Make Order.
+      Initialize;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+
+      BlanketOrderNo :=
+        CreateSalesDocumentSetup(
+          Item."Replenishment System"::Purchase,SalesHeader."Document Type"::"Blanket Order");
+      CreateSalesOrderFromBlanket(BlanketOrderNo);
+
+      // Update Sales Lines with Drop Shipment.
+      SalesLine.SETRANGE("Blanket Order No.",BlanketOrderNo);
+      SalesLine.FINDFIRST;
+      LibraryInventory.UpdateSalesLine(SalesLine,SalesLine.FIELDNO("Drop Shipment"),TRUE);
+
+      // Create Purchase Order from Drop Shipment - Get Sales Order.
+      CreatePurchOrderDropShipment(PurchaseHeader,SalesLine);
+
+      // Exercise: Post Purchase Order as Receive and Sales Order as Invoice.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+      SalesHeader.GET(SalesHeader."Document Type"::Order,SalesLine."Document No.");
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,TRUE);
+
+      // Verify: Verification of Blanket Sales Order for Quantity Shipped.
+      VerifySalesBlanketOrder(BlanketOrderNo,PurchaseHeader."No.");
+    END;
+
+    [Test]
+    PROCEDURE ItemLedgerItemCategoryCode@15();
+    VAR
+      PurchaseHeader@1005 : Record 38;
+      SalesHeader@1001 : Record 36;
+      ItemNo@1002 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup.
+      ItemNo := DropShipmentPrepare(PurchaseHeader,SalesHeader);
+
+      // Exercise.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // Verify.
+      VerifyItemCategoryCode(ItemNo);
+    END;
+
+    [Test]
+    PROCEDURE ProdOrderLinesDimension@17();
+    VAR
+      ProductionBOMHeader@1003 : Record 99000771;
+      ProductionOrder@1008 : Record 5405;
+      ItemNo@1010 : Code[20];
+      ChildItemNo@1004 : Code[20];
+      ChildItemNo2@1007 : Code[20];
+      NewDimSetId@1011 : Integer;
+    BEGIN
+      Initialize;
+
+      // Create Child Items with Default Dimensions. Create Production BOM.
+      ChildItemNo := CreateItemWithDimension;
+      ChildItemNo2 := CreateItemWithDimension;
+      LibraryManufacturing.CreateCertifProdBOMWithTwoComp(ProductionBOMHeader,ChildItemNo,ChildItemNo,1);  // Value important.
+
+      // Create Parent Item and attach Production BOM to it. Create Released Production Order and Refresh.
+      // Update Dimension on Production Order.
+      ItemNo := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+      CreateAndRefreshRelProdOrder(ProductionOrder,ItemNo);
+      NewDimSetId := UpdateProductionOrderDimension(ProductionOrder."No.",ProductionOrder."Dimension Set ID");
+
+      // Exercise: Update Dimensions on Production Order Lines.
+      UpdateProdOrderLinesDimension(ProductionOrder."No.",ProductionOrder."Dimension Set ID",NewDimSetId);
+
+      // Verify: Verification of Production Order Lines for Updated Dimension entries.
+      VerifyLineDimension(ProductionOrder."No.");
+    END;
+
+    [Test]
+    PROCEDURE "ProdOrderCompDimension-B322868"@5();
+    VAR
+      ProductionBOMHeader@1003 : Record 99000771;
+      ProductionOrder@1005 : Record 5405;
+      ProdOrderLine@1007 : Record 5406;
+      ProdOrderComponent@1008 : Record 5407;
+      ChildItemNo@1002 : Code[20];
+      ChildItemNo2@1001 : Code[20];
+      ParentItemNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup Items with dimensions for production order
+      ChildItemNo := CreateItemWithDimension;
+      ChildItemNo2 := CreateItemWithDimension;
+      LibraryManufacturing.CreateCertifProdBOMWithTwoComp(ProductionBOMHeader,ChildItemNo,ChildItemNo,1);
+      ParentItemNo := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+      AddDimensionToItem(ParentItemNo,TRUE);
+
+      // Create released production order, change dimensions and refresh
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ParentItemNo,1);
+      ProductionOrder."Dimension Set ID" := CreateNewDimSetID(ProductionOrder."Dimension Set ID");
+      ProductionOrder.MODIFY(TRUE);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+
+      // Verification
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+      Assert.AreEqual(ProductionOrder."Dimension Set ID",ProdOrderLine."Dimension Set ID",'Wrong dimension in Prod. Order Line');
+
+      ProdOrderComponent.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderComponent.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderComponent.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+      ProdOrderComponent.FINDSET;
+      REPEAT
+        Assert.AreEqual(
+          ProductionOrder."Dimension Set ID",ProdOrderComponent."Dimension Set ID",'Wrong dimension in Prod. Order Component');
+      UNTIL ProdOrderComponent.NEXT = 0;
+    END;
+
+    [Test]
+    PROCEDURE ProdOrderLineDimensionsAfterRefresh@20();
+    VAR
+      ProductionBOMHeader@1001 : Record 99000771;
+      ProductionOrder@1003 : Record 5405;
+      ProdOrderLine@1004 : Record 5406;
+      ParentItemNo@1002 : Code[20];
+      ChildItemNo@1000 : Code[20];
+    BEGIN
+      // Verify Production Line and Component Dimesions after refreshing Production Order.
+
+      // Setup: Setup Items with dimensions for production order
+      Initialize;
+      ChildItemNo := CreateItemWithDimension;
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ChildItemNo,LibraryRandom.RandInt(5));
+      ParentItemNo := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+      AddDimensionToItem(ParentItemNo,FALSE);
+
+      // Exercise: Create released Production Order.
+      CreateAndRefreshRelProdOrder(ProductionOrder,ParentItemNo);
+
+      // Verify: Verify Dimensions on Production Line and Componenets.
+      VerifyLineDimension(ProductionOrder."No.");
+      FindProductionOrderLine(ProdOrderLine,ProductionOrder);
+      VerifyProductionOrderComponentDimension(ProductionOrder,ProdOrderLine."Dimension Set ID",ProdOrderLine."Line No.");
+    END;
+
+    [Test]
+    PROCEDURE ComponentDimensionsAfterCreatingNewDimOnProdOrder@28();
+    VAR
+      ProductionBOMHeader@1004 : Record 99000771;
+      ProductionOrder@1003 : Record 5405;
+      ProdOrderLine@1002 : Record 5406;
+      ParentItemNo@1001 : Code[20];
+      ChildItemNo@1000 : Code[20];
+    BEGIN
+      // Verify Production Line and Component Dimesions when New Dimension created on Production Order.
+
+      // Setup: Setup Items with dimensions for production order
+      Initialize;
+      ChildItemNo := CreateItemWithDimension;
+      LibraryManufacturing.CreateCertifProdBOMWithTwoComp(ProductionBOMHeader,ChildItemNo,ChildItemNo,1);
+      ParentItemNo := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+      AddDimensionToItem(ParentItemNo,FALSE);
+
+      // Exercise: Create released production order, Create New dimensions and refresh
+      LibraryManufacturing.CreateProductionOrder(ProductionOrder,
+        ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ParentItemNo,
+        LibraryRandom.RandDec(10,2));
+      UpdateProductionOrderDimensionSetId(ProductionOrder,CreateNewDimSetID(ProductionOrder."Dimension Set ID"));
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+
+      // Verify: Verify  Production Order Line and Component Dimension.
+      VerifyLineDimension(ProductionOrder."No.");
+      FindProductionOrderLine(ProdOrderLine,ProductionOrder);
+      VerifyProductionOrderComponentDimension(ProductionOrder,ProdOrderLine."Dimension Set ID",ProdOrderLine."Line No.");
+    END;
+
+    [Test]
+    PROCEDURE ComponentDimensionsAfterDeletingDimOnProdOrder@33();
+    VAR
+      ProductionBOMHeader@1004 : Record 99000771;
+      ProductionOrder@1003 : Record 5405;
+      ProdOrderLine@1002 : Record 5406;
+      ParentItemNo@1001 : Code[20];
+      ChildItemNo@1000 : Code[20];
+    BEGIN
+      // Verify Production Order Component Dimesions when Dimension on Production Order is Deleted.
+
+      // Setup: Setup Items with dimensions for production order
+      Initialize;
+      ChildItemNo := CreateItemWithDimension;
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ChildItemNo,LibraryRandom.RandInt(5));
+      ParentItemNo := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+      AddDimensionToItem(ParentItemNo,FALSE);
+
+      // Exercise: Create released Production Order,Delete dimensions and refresh.
+      LibraryManufacturing.CreateProductionOrder(ProductionOrder,
+        ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ParentItemNo,
+        LibraryRandom.RandDec(10,2));
+      UpdateProductionOrderDimensionSetId(ProductionOrder,0);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+
+      // Verify: Verify Production Order Component Dimesions.
+      FindProductionOrderLine(ProdOrderLine,ProductionOrder);
+      VerifyProductionOrderComponentDimension(ProductionOrder,ProdOrderLine."Dimension Set ID",ProdOrderLine."Line No.");
+    END;
+
+    [Test]
+    PROCEDURE ComponentDimensionsAfterDeletingDimOnProdLines@30();
+    VAR
+      ProductionBOMHeader@1004 : Record 99000771;
+      ProductionOrder@1003 : Record 5405;
+      ProdOrderLine@1002 : Record 5406;
+      ParentItemNo@1001 : Code[20];
+      ChildItemNo@1000 : Code[20];
+    BEGIN
+      // Verify Production Order Component Dimesions when Production Order Line Dimension is Deleted.
+
+      // Setup: Setup Items with dimensions for production order.
+      Initialize;
+      ChildItemNo := CreateItemWithDimension;
+      LibraryManufacturing.CreateCertifProdBOMWithTwoComp(ProductionBOMHeader,ChildItemNo,ChildItemNo,1);
+      ParentItemNo := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+      AddDimensionToItem(ParentItemNo,FALSE);
+      CreateAndRefreshRelProdOrder(ProductionOrder,ParentItemNo);
+
+      // Exercise: Validate Dimension Set Id on Prod. Order Line.
+      FindProductionOrderLine(ProdOrderLine,ProductionOrder);
+      ProdOrderLine.VALIDATE("Dimension Set ID",0);
+      ProdOrderLine.MODIFY(TRUE);
+
+      // Verify: Verify Production Order Component Dimensions.
+      VerifyProductionOrderComponentDimension(ProductionOrder,ProductionOrder."Dimension Set ID",ProdOrderLine."Line No.");
+    END;
+
+    [Test]
+    PROCEDURE PostDropShptPurchOrderForSalesOrderInvoicedTwice@39();
+    VAR
+      PurchaseHeader@1005 : Record 38;
+      SalesHeader@1002 : Record 36;
+      ItemNo@1001 : Code[20];
+    BEGIN
+      // Setup.
+      Initialize;
+      ItemNo := DropShipmentPrepare(PurchaseHeader,SalesHeader);
+
+      ModifyForPartialInvoice(SalesHeader);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      WITH PurchaseHeader DO BEGIN
+        GET("Document Type","No.");
+        VALIDATE("Vendor Invoice No.",LibraryUtility.GenerateGUID);
+        MODIFY;
+      END;
+
+      // Exercise.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify.
+      VerifyItemCategoryCode(ItemNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(RefreshPickedConfirmHandler)]
+    PROCEDURE ProdOrderRefreshedAfterConfirmationWhenComponentsArePicked@32();
+    VAR
+      ProductionOrder@1003 : Record 5405;
+      ProdOrderLine@1006 : Record 5406;
+    BEGIN
+      // [FEATURE] [Manufacturing] [Refresh Production Order] [Pick]
+      // [SCENARIO 364487] User receives a confirmation request when refreshing a production order with picked components. On 'Yes' answer prod. order is refreshed
+      Initialize;
+
+      // [GIVEN] Create and refresh a production order
+      CreateAndRefreshProdOrderWithTwoComponents(ProductionOrder,1,1);
+
+      // [GIVEN] Pick components for the production order
+      // Mock components picking
+      SetQuantityPickedOnProdOrderComponent(ProductionOrder.Status,ProductionOrder."No.",LibraryRandom.RandInt(10));
+
+      // [GIVEN] Set quantity in the production order header to "X"
+      ProductionOrder.VALIDATE(Quantity,LibraryRandom.RandIntInRange(5,10));
+      ProductionOrder.MODIFY(FALSE);
+
+      // [WHEN] Refresh production order
+      // [THEN] Confirmation request is shown
+      // [WHEN] Accept the confirmation request
+      LibraryVariableStorage.Enqueue(ProductionOrder."No.");
+      LibraryVariableStorage.Enqueue(TRUE);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,FALSE,TRUE,FALSE);
+
+      // [THEN] Quantity in the production order line is "X"
+      FindProductionOrderLine(ProdOrderLine,ProductionOrder);
+      ProdOrderLine.TESTFIELD(Quantity,ProductionOrder.Quantity);
+      // [THEN] "Picked Qty." in the component line is 0
+      VerifyProductionOrderComponentPickedQuantity(ProductionOrder.Status,ProductionOrder."No.",0);
+    END;
+
+    [Test]
+    [HandlerFunctions(RefreshPickedConfirmHandler)]
+    PROCEDURE ProdOrderNotRefreshedAfterConfirmationCancelledWhenComponentsArePicked@42();
+    VAR
+      ProductionOrder@1003 : Record 5405;
+      PickedQty@1006 : Integer;
+    BEGIN
+      // [FEATURE] [Manufacturing] [Refresh Production Order] [Pick]
+      // [SCENARIO 364487] User receives a confirmation request when refreshing a production order with picked components. On 'No' answer "Qty. Picked" is not changed
+      Initialize;
+
+      // [GIVEN] Create and refresh a production order
+      CreateAndRefreshProdOrderWithTwoComponents(ProductionOrder,1,1);
+
+      // [GIVEN] Pick "X" components for the production order
+      // Mock components picking
+      PickedQty := LibraryRandom.RandInt(10);
+      SetQuantityPickedOnProdOrderComponent(ProductionOrder.Status,ProductionOrder."No.",PickedQty);
+
+      // [WHEN] Refresh production order
+      // [THEN] Confirmation request is shown
+      // [WHEN] Cancel the action
+      LibraryVariableStorage.Enqueue(ProductionOrder."No.");
+      LibraryVariableStorage.Enqueue(FALSE);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,FALSE,TRUE,FALSE);
+
+      // [THEN] "Qty. Picked" in the components lines is "X"
+      VerifyProductionOrderComponentPickedQuantity(ProductionOrder.Status,ProductionOrder."No.",PickedQty);
+    END;
+
+    [Test]
+    PROCEDURE NoConfirmationRequestIfProdOrderRefreshedWithoutRecalcLinesAndComponentsArePicked@37();
+    VAR
+      ProductionOrder@1003 : Record 5405;
+      PickedQty@1006 : Integer;
+    BEGIN
+      // [FEATURE] [Manufacturing] [Refresh Production Order] [Pick]
+      // [SCENARIO 364487] Confirmation request should not be shown when refreshing a production order with picked component if "Calculate Lines" option is not selected
+      Initialize;
+
+      // [GIVEN] Create and refresh a production order
+      CreateAndRefreshProdOrderWithTwoComponents(ProductionOrder,1,1);
+
+      // [GIVEN] Pick "X" components for the production order
+      // Mock components picking
+      PickedQty := LibraryRandom.RandInt(10);
+      SetQuantityPickedOnProdOrderComponent(ProductionOrder.Status,ProductionOrder."No.",PickedQty);
+
+      // [WHEN] Refresh production order without "Calculate Lines" option
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,FALSE,FALSE,FALSE,FALSE);
+
+      // [THEN] "Qty. Picked" in the components lines is "X"
+      VerifyProductionOrderComponentPickedQuantity(ProductionOrder.Status,ProductionOrder."No.",PickedQty);
+    END;
+
+    [Test]
+    PROCEDURE RequisitionWorksheetDropShipmentProdItem@43();
+    VAR
+      Item@1002 : Record 27;
+      RequisitionWkshName@1001 : Record 245;
+      SalesHeader@1007 : Record 36;
+      SalesOrderNo@1003 : Code[20];
+      ReqWorksheetName@1005 : Code[10];
+    BEGIN
+      // [FEATURE] [Replenishment Prod. Order] [Drop Shipment] [Requisition Worksheet]
+      // [SCENARIO] Requisition Worksheet can process drop shipment Sales Order even if Item Replenishment System = "Prod. Order".
+      Initialize;
+
+      // [GIVEN] Drop Shipment Sales Order with Item "I" ("Replenishment System" = "Prod. Order") of Quantity = "Q".
+      SalesOrderNo :=
+        CreateSalesDocumentSetup(
+          Item."Replenishment System"::"Prod. Order",SalesHeader."Document Type"::Order);
+
+      // [WHEN] "Get Sales Orders" in Requisition Worksheet.
+      CreateRequisitionWorksheetName(RequisitionWkshName);
+      ReqWorksheetName := RequisitionWkshName.Name;
+      CreateReqLineDropShipment(RequisitionWkshName,SalesOrderNo);
+
+      // [THEN] Requisition line created with "I" and "Q"
+      VerifyNewBatchRequisitionLine(ReqWorksheetName,SalesOrderNo);
+    END;
+
+    [Test]
+    PROCEDURE MultiLevelProdOrderStructureDeletedWhenDeletingSingleDemand@11();
+    VAR
+      Item@1002 : Record 27;
+      ProductionBOMHeader@1001 : Record 99000771;
+      ProductionOrder@1004 : Record 5405;
+      ProdOrderLine@1005 : Record 5406;
+      ItemNo@1000 : ARRAY [5] OF Code[20];
+      I@1006 : Integer;
+    BEGIN
+      // [FEATURE] [Production Order] [Make-to-Order] [Production BOM]
+      // [SCENARIO 201734] When deleting a production order line that includes the same component in different positions, lines on lower planning levels should also be deleted
+
+      Initialize;
+
+      // [GIVEN] All items are created with "Make-to-Order" manufacturing policy
+      // [GIVEN] Item "I1" is a component of a production BOM for item "I2", "I2" - component of "I3"
+      ItemNo[1] := LibraryInventory.CreateItemNo;
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ItemNo[1],1);
+      ItemNo[2] := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ItemNo[2],1);
+      ItemNo[3] := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+
+      // [GIVEN] Item "I4" is included in a production BOM for item "I4" in 2 positions. There are 2 production BOM lines with the same item.
+      Item.GET(ItemNo[3]);
+      CreateProductionBOMWithComponentInTwoPositions(ProductionBOMHeader,Item."Base Unit of Measure",ItemNo[3],1);
+      ItemNo[4] := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+
+      // [GIVEN] Item "I4" is a component of the top-level item "I5"
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ItemNo[4],1);
+      ItemNo[5] := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+
+      // [GIVEN] Create and refresh a production order for item "I5". Multi-level production order is created with lines for items from "I5" to "I2"
+      CreateAndRefreshRelProdOrder(ProductionOrder,ItemNo[5]);
+
+      // [WHEN] Delete production order line with item "I4"
+      DeleteProdOrderLineWithItem(ProductionOrder."No.",ItemNo[4]);
+
+      // [THEN] Order lines for items "I3" and "I2" are also deleted. Only the top-level item "I5" remains.
+      ProdOrderLine.SETRANGE("Item No.",ItemNo[5]);
+      Assert.RecordCount(ProdOrderLine,1);
+
+      ProdOrderLine.INIT;
+      FOR I := 1 TO ARRAYLEN(ItemNo) - 1 DO BEGIN
+        ProdOrderLine.SETRANGE("Item No.",ItemNo[I]);
+        Assert.RecordIsEmpty(ProdOrderLine);
+      END;
+    END;
+
+    [Test]
+    PROCEDURE MultiLevelProdOrderStructureNotDeletedWhenDemandRemains@47();
+    VAR
+      Item@1002 : Record 27;
+      ProductionBOMHeader@1001 : Record 99000771;
+      ProductionOrder@1004 : Record 5405;
+      ProdOrderLine@1005 : Record 5406;
+      ItemNo@1000 : ARRAY [5] OF Code[20];
+    BEGIN
+      // [FEATURE] [Production Order] [Make-to-Order] [Production BOM]
+      // [SCENARIO 201734] When deleting a production order line that includes the same component in different positions, line for the lower-level component is not deleted is the component is included in other BOM's
+
+      Initialize;
+
+      // [GIVEN] All items are created with "Make-to-Order" manufacturing policy
+      // [GIVEN] Item "I1" is a component of a production BOM for item "I2", "I2" - component of "I3"
+      ItemNo[1] := LibraryInventory.CreateItemNo;
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ItemNo[1],1);
+      ItemNo[2] := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ItemNo[2],1);
+      ItemNo[3] := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+
+      // [GIVEN] Item "I4" is included in a production BOM for item "I4" in 2 positions. There are 2 production BOM lines with the same item.
+      Item.GET(ItemNo[3]);
+      CreateProductionBOMWithComponentInTwoPositions(ProductionBOMHeader,Item."Base Unit of Measure",ItemNo[3],1);
+      ItemNo[4] := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+
+      // [GIVEN] Top-level component item "I5" includes two items: "I3" and "I4".
+      LibraryManufacturing.CreateCertifProdBOMWithTwoComp(ProductionBOMHeader,ItemNo[3],ItemNo[4],1);
+      ItemNo[5] := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+
+      // [GIVEN] Create and refresh a production order for item "I5". Multi-level production order is created with lines for items from "I5" to "I2"
+      CreateAndRefreshRelProdOrder(ProductionOrder,ItemNo[5]);
+
+      // [WHEN] Delete production order line with item "I4"
+      DeleteProdOrderLineWithItem(ProductionOrder."No.",ItemNo[4]);
+
+      // [THEN] Order line for items "I3" is not deleted, since "I3" is also a component of "I5".
+      // [THEN] Quantity in the prod. order line for the item "I3" is updated. New quantity is 1.
+      ProdOrderLine.SETRANGE("Item No.",ItemNo[3]);
+      ProdOrderLine.FINDFIRST;
+      ProdOrderLine.TESTFIELD(Quantity,1);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1004 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      LibrarySetupStorage.Restore;
+
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibrarySetupStorage.Save(DATABASE::"Sales & Receivables Setup");
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshProdOrderWithTwoComponents@54(VAR ProductionOrder@1003 : Record 5405;ComponentQtyPer@1005 : Decimal;Quantity@1004 : Decimal);
+    VAR
+      ChildItem1@1000 : Record 27;
+      ChildItem2@1001 : Record 27;
+      ProductionBOMHeader@1002 : Record 99000771;
+      ParentItemNo@1006 : Code[20];
+    BEGIN
+      LibraryInventory.CreateItem(ChildItem1);
+      LibraryInventory.CreateItem(ChildItem2);
+      LibraryManufacturing.CreateCertifProdBOMWithTwoComp(
+        ProductionBOMHeader,ChildItem1."No.",ChildItem2."No.",ComponentQtyPer);
+      ParentItemNo := CreateItemWithProductionBOM(ProductionBOMHeader."No.");
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ParentItemNo,Quantity);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,FALSE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocumentSetup@6(ItemReplenishmentSystem@1004 : Option;DocumentType@1003 : Option) : Code[20];
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Replenishment System",ItemReplenishmentSystem);
+      Item.MODIFY(TRUE);
+      CreateSalesDocument(SalesHeader,SalesLine,DocumentType,Item."No.");
+      IF DocumentType = SalesHeader."Document Type"::Order THEN
+        LibraryInventory.UpdateSalesLine(SalesLine,SalesLine.FIELDNO("Drop Shipment"),TRUE);
+      EXIT(SalesHeader."No.");
+    END;
+
+    LOCAL PROCEDURE DeleteProdOrderLineWithItem@53(ProdOrderNo@1001 : Code[20];ItemNo@1002 : Code[20]);
+    VAR
+      ProdOrderLine@1000 : Record 5406;
+    BEGIN
+      WITH ProdOrderLine DO BEGIN
+        SETRANGE("Prod. Order No.",ProdOrderNo);
+        SETRANGE("Item No.",ItemNo);
+        FINDFIRST;
+        DELETE(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE DropShipmentPrepare@52(VAR PurchaseHeader@1006 : Record 38;VAR SalesHeader@1000 : Record 36) ItemNo : Code[20];
+    VAR
+      SalesLine@1003 : Record 37;
+      Purchasing@1004 : Record 5721;
+    BEGIN
+      // Setup: Create Item with New Category Code and create Sales Order with Drop Shipment.
+      Initialize;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+
+      ItemNo := CreateItemWithCategory;
+      CreateSalesDocument(SalesHeader,SalesLine,SalesHeader."Document Type"::Order,ItemNo);
+
+      // Update Sales Lines with Purchasing Code for Drop Shipment.
+      Purchasing.SETRANGE("Drop Shipment",TRUE);
+      Purchasing.FINDFIRST;
+      LibraryInventory.UpdateSalesLine(SalesLine,SalesLine.FIELDNO("Purchasing Code"),Purchasing.Code);
+
+      // Create Purchase Order from Drop Shipment - Get Sales Order.
+      CreatePurchOrderDropShipment(PurchaseHeader,SalesLine);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocument@18(VAR SalesHeader@1001 : Record 36;VAR SalesLine@1000 : Record 37;DocumentType@1002 : Option;ItemNo@1003 : Code[20]);
+    BEGIN
+      // Random Values not important.
+      LibrarySales.CreateSalesDocumentWithItem(
+        SalesHeader,SalesLine,DocumentType,'',ItemNo,LibraryRandom.RandInt(10),'',0D);
+    END;
+
+    LOCAL PROCEDURE CreateRequisitionWorksheetName@7(VAR RequisitionWkshName@1002 : Record 245);
+    VAR
+      ReqWkshTemplate@1000 : Record 244;
+    BEGIN
+      ReqWkshTemplate.SETRANGE(Type,ReqWkshTemplate.Type::"Req.");
+      ReqWkshTemplate.FINDFIRST;
+      LibraryPlanning.CreateRequisitionWkshName(RequisitionWkshName,ReqWkshTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE CreateReqLineDropShipment@76(RequisitionWkshName@1002 : Record 245;No@1000 : Code[20]);
+    VAR
+      RequisitionLine@1001 : Record 246;
+    BEGIN
+      RequisitionLine.INIT;
+      RequisitionLine.VALIDATE("Worksheet Template Name",RequisitionWkshName."Worksheet Template Name");
+      RequisitionLine.VALIDATE("Journal Batch Name",RequisitionWkshName.Name);
+      GetSalesOrder(RequisitionLine,No);
+    END;
+
+    LOCAL PROCEDURE GetSalesOrder@74(RequisitionLine@1004 : Record 246;DocumentNo@1000 : Code[20]);
+    VAR
+      SalesLine@1003 : Record 37;
+      GetSalesOrders@1002 : Report 698;
+      NewRetrieveDimensionsFrom@1001 : 'Item,Sales Line';
+    BEGIN
+      // Execute Get Sales Order report to populate Requisition line.
+      FindSalesLine(SalesLine,SalesLine."Document Type"::Order,DocumentNo);
+      GetSalesOrders.SetReqWkshLine(RequisitionLine,0);
+      GetSalesOrders.SETTABLEVIEW(SalesLine);
+      GetSalesOrders.InitializeRequest(NewRetrieveDimensionsFrom::Item);
+      GetSalesOrders.USEREQUESTPAGE(FALSE);
+      GetSalesOrders.RUN;
+    END;
+
+    LOCAL PROCEDURE FindSalesLine@40(VAR SalesLine@1000 : Record 37;DocumentType@1001 : Option;DocumentNo@1002 : Code[20]);
+    BEGIN
+      SalesLine.SETRANGE("Document Type",DocumentType);
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderFromBlanket@14(No@1001 : Code[20]);
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::"Blanket Order");
+      SalesHeader.SETRANGE("No.",No);
+      SalesHeader.FINDFIRST;
+      CODEUNIT.RUN(CODEUNIT::"Blnkt Sales Ord. to Ord. (Y/N)",SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateProductionBOMLineInSpecifiedPosition@26(VAR ProductionBOMHeader@1000 : Record 99000771;VAR ProductionBOMLine@1001 : Record 99000772;ItemNo@1002 : Code[20];QuantityPer@1003 : Decimal;ItemPosition@1004 : Code[10]);
+    BEGIN
+      LibraryManufacturing.CreateProductionBOMLine(
+        ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,ItemNo,QuantityPer);
+      ProductionBOMLine.VALIDATE(Position,ItemPosition);
+      ProductionBOMLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateProductionBOMWithComponentInTwoPositions@44(VAR ProductionBOMHeader@1000 : Record 99000771;UoMCode@1001 : Code[10];ComponentItemNo@1003 : Code[20];QtyPer@1004 : Decimal);
+    VAR
+      ProductionBOMLine@1002 : Record 99000772;
+    BEGIN
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,UoMCode);
+      CreateProductionBOMLineInSpecifiedPosition(
+        ProductionBOMHeader,ProductionBOMLine,ComponentItemNo,QtyPer,LibraryUtility.GenerateGUID);
+      CreateProductionBOMLineInSpecifiedPosition(
+        ProductionBOMHeader,ProductionBOMLine,ComponentItemNo,QtyPer,LibraryUtility.GenerateGUID);
+      LibraryManufacturing.UpdateProductionBOMStatus(ProductionBOMHeader,ProductionBOMHeader.Status::Certified);
+    END;
+
+    LOCAL PROCEDURE CreatePurchOrderDropShipment@25(VAR PurchaseHeader@1000 : Record 38;SalesLine@1002 : Record 37);
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      CreatePurchaseHeader(PurchaseHeader,SalesLine."Sell-to Customer No.");
+      CreatePurchLineFromSalesLine(PurchaseLine,SalesLine,PurchaseHeader."No.");
+      LibraryInventory.UpdateSalesLine(SalesLine,SalesLine.FIELDNO("Unit Cost (LCY)"),PurchaseLine."Unit Cost (LCY)");
+      LibraryInventory.UpdateSalesLine(SalesLine,SalesLine.FIELDNO("Purchase Order No."),PurchaseLine."Document No.");
+      LibraryInventory.UpdateSalesLine(SalesLine,SalesLine.FIELDNO("Purch. Order Line No."),PurchaseLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeader@16(VAR PurchaseHeader@1000 : Record 38;SellToCustomerNo@1001 : Code[20]);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      PurchaseHeader.VALIDATE("Sell-to Customer No.",SellToCustomerNo);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchLineFromSalesLine@9(VAR PurchaseLine@1000 : Record 39;SalesLine@1003 : Record 37;DocumentNo@1001 : Code[20]);
+    VAR
+      CopyDocumentMgt@1002 : Codeunit 6620;
+    BEGIN
+      PurchaseLine.INIT;
+      PurchaseLine.VALIDATE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.VALIDATE("Document No.",DocumentNo);
+      PurchaseLine.VALIDATE("Line No.",SalesLine."Line No.");
+      CopyDocumentMgt.TransfldsFromSalesToPurchLine(SalesLine,PurchaseLine);
+      PurchaseLine.VALIDATE("Sales Order No.",SalesLine."Document No.");
+      PurchaseLine.VALIDATE("Sales Order Line No.",SalesLine."Line No.");
+      PurchaseLine.VALIDATE("Drop Shipment",TRUE);
+      PurchaseLine.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithCategory@21() : Code[20];
+    VAR
+      Item@1000 : Record 27;
+      ItemCategory@1001 : Record 5722;
+    BEGIN
+      LibraryInventory.CreateItemCategory(ItemCategory);
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Item Category Code",ItemCategory.Code);
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemWithDimension@31() : Code[20];
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      AddDimensionToItem(Item."No.",FALSE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemWithProductionBOM@24(ProductionBOMNo@1000 : Code[20]) : Code[20];
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      // Random values not important.
+      LibraryManufacturing.CreateItemManufacturing(
+        Item,Item."Costing Method"::FIFO,LibraryRandom.RandInt(10),Item."Reordering Policy",
+        Item."Flushing Method"::Manual,'',ProductionBOMNo);
+      Item.VALIDATE("Manufacturing Policy",Item."Manufacturing Policy"::"Make-to-Order");
+      Item.VALIDATE("Replenishment System",Item."Replenishment System"::"Prod. Order");
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE AddDimensionToItem@23(ItemNo@1000 : Code[20];DifferentValue@1004 : Boolean);
+    VAR
+      Dimension@1003 : Record 348;
+      DimensionValue@1002 : Record 349;
+      DefaultDimension@1001 : Record 352;
+    BEGIN
+      LibraryDimension.FindDimension(Dimension);
+      LibraryDimension.FindDimensionValue(DimensionValue,Dimension.Code);
+      IF DifferentValue THEN
+        DimensionValue.Code := LibraryDimension.FindDifferentDimensionValue(Dimension.Code,DimensionValue.Code);
+      LibraryDimension.CreateDefaultDimensionItem(DefaultDimension,ItemNo,Dimension.Code,DimensionValue.Code);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshRelProdOrder@58(VAR ProductionOrder@1000 : Record 5405;SourceNo@1002 : Code[20]);
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,SourceNo,1);  // Value important.
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE UpdateProductionOrderDimension@29(ProductionOrderNo@1000 : Code[20];OldDimSetID@1001 : Integer) DimensionSetID : Integer;
+    VAR
+      ProductionOrder@1005 : Record 5405;
+    BEGIN
+      // Select New Dimension Set Id.
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      DimensionSetID := SelectNewDimSetID(OldDimSetID);
+
+      // Update Production Order Dimension with New Dimension Set Id.
+      ProductionOrder.VALIDATE("Dimension Set ID",DimensionSetID);
+      ProductionOrder.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectNewDimSetID@34(OldDimSetID@1002 : Integer) : Integer;
+    VAR
+      Dimension@1001 : Record 348;
+      DimensionValue@1000 : Record 349;
+    BEGIN
+      LibraryDimension.FindDimension(Dimension);
+      Dimension.NEXT;
+      LibraryDimension.FindDimensionValue(DimensionValue,Dimension.Code);
+      EXIT(LibraryDimension.CreateDimSet(OldDimSetID,Dimension.Code,DimensionValue.Code));
+    END;
+
+    LOCAL PROCEDURE SetQuantityPickedOnProdOrderComponent@48(ProdOrderStatus@1001 : Option;ProdOrderNo@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ProdOrderComponent@1000 : Record 5407;
+    BEGIN
+      ProdOrderComponent.SETRANGE(Status,ProdOrderStatus);
+      ProdOrderComponent.SETRANGE("Prod. Order No.",ProdOrderNo);
+      ProdOrderComponent.MODIFYALL("Qty. Picked",Quantity);
+    END;
+
+    LOCAL PROCEDURE FindProductionOrderLine@45(VAR ProdOrderLine@1000 : Record 5406;ProductionOrder@1001 : Record 5405);
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreateNewDimSetID@12(OldDimSetID@1003 : Integer) : Integer;
+    VAR
+      Dimension@1001 : Record 348;
+      DimensionValue@1000 : Record 349;
+    BEGIN
+      LibraryDimension.CreateDimension(Dimension);
+      LibraryDimension.CreateDimensionValue(DimensionValue,Dimension.Code);
+      EXIT(LibraryDimension.CreateDimSet(OldDimSetID,Dimension.Code,DimensionValue.Code));
+    END;
+
+    LOCAL PROCEDURE UpdateProdOrderLinesDimension@19(ProductionOrderNo@1000 : Code[20];OldDimSetID@1001 : Integer;DimensionSetID@1005 : Integer);
+    VAR
+      ProdOrderLine@1002 : Record 5406;
+      DimensionManagement@1004 : Codeunit 408;
+    BEGIN
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrderNo);
+      ProdOrderLine.FINDSET;
+      REPEAT
+        DimensionSetID := DimensionManagement.GetDeltaDimSetID(ProdOrderLine."Dimension Set ID",DimensionSetID,OldDimSetID);
+        IF ProdOrderLine."Dimension Set ID" <> DimensionSetID THEN BEGIN
+          ProdOrderLine.VALIDATE("Dimension Set ID",DimensionSetID);
+          DimensionManagement.UpdateGlobalDimFromDimSetID(
+            ProdOrderLine."Dimension Set ID",ProdOrderLine."Shortcut Dimension 1 Code",ProdOrderLine."Shortcut Dimension 2 Code");
+          ProdOrderLine.MODIFY(TRUE);
+        END;
+      UNTIL ProdOrderLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateProductionOrderDimensionSetId@59(VAR ProductionOrder@1000 : Record 5405;DimensionSetID@1001 : Integer);
+    BEGIN
+      ProductionOrder.VALIDATE("Dimension Set ID",DimensionSetID);
+      ProductionOrder.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ModifyForPartialInvoice@64(VAR SalesHeader@1000 : Record 36);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      WITH SalesLine DO BEGIN
+        SETRANGE("Document Type",SalesHeader."Document Type");
+        SETRANGE("Document No.",SalesHeader."No.");
+        FINDFIRST;
+        VALIDATE("Qty. to Invoice",Quantity / 2);
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyNewBatchRequisitionLine@8(JournalBatchName@1000 : Code[10];DocumentNo@1001 : Code[20]);
+    VAR
+      ReqWkshTemplate@1003 : Record 244;
+      RequisitionLine@1004 : Record 246;
+      SalesLine@1005 : Record 37;
+    BEGIN
+      ReqWkshTemplate.SETRANGE(Type,ReqWkshTemplate.Type::"Req.");
+      ReqWkshTemplate.FINDFIRST;
+      RequisitionLine.SETRANGE("Worksheet Template Name",ReqWkshTemplate.Name);
+      RequisitionLine.SETRANGE("Journal Batch Name",JournalBatchName);
+      RequisitionLine.FINDFIRST;
+      FindSalesLine(SalesLine,SalesLine."Document Type"::Order,DocumentNo);
+      RequisitionLine.TESTFIELD(Type,SalesLine.Type);
+      RequisitionLine.TESTFIELD("No.",SalesLine."No.");
+      RequisitionLine.TESTFIELD(Quantity,SalesLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifySalesBlanketOrder@10(SalesOrderNo@1001 : Code[20];DocumentNo@1000 : Code[20]);
+    VAR
+      SalesLine@1002 : Record 37;
+      PurchaseLine@1003 : Record 39;
+    BEGIN
+      // Check the Sales Blanket Order for the Quantity Shipped field.
+      FindSalesLine(SalesLine,SalesLine."Document Type"::"Blanket Order",SalesOrderNo);
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",DocumentNo);
+      PurchaseLine.FINDFIRST;
+      SalesLine.TESTFIELD("Quantity Shipped",PurchaseLine."Quantity Received");
+    END;
+
+    LOCAL PROCEDURE VerifyItemCategoryCode@27(ItemNo@1000 : Code[20]);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+      Item@1002 : Record 27;
+    BEGIN
+      Item.GET(ItemNo);
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+
+      // Check for Entry Type - Purchase.
+      ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::Purchase);
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.TESTFIELD("Item Category Code",Item."Item Category Code");
+
+      // Check for Entry Type - Sale.
+      ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::Sale);
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.TESTFIELD("Item Category Code",Item."Item Category Code");
+    END;
+
+    LOCAL PROCEDURE VerifyLineDimension@22(ProductionOrderNo@1000 : Code[20]);
+    VAR
+      ProductionOrder@1001 : Record 5405;
+      DimensionSetEntry@1002 : Record 480;
+      ProdOrderLine@1003 : Record 5406;
+      Assert@1006 : Codeunit 130000;
+      DimensionCode@1004 : Code[20];
+      ExpectedDimValueCode@1005 : Code[20];
+    BEGIN
+      ProductionOrder.GET(ProductionOrder.Status::Released,ProductionOrderNo);
+      DimensionSetEntry.SETRANGE("Dimension Set ID",ProductionOrder."Dimension Set ID");
+      DimensionSetEntry.FINDFIRST;
+      DimensionCode := DimensionSetEntry."Dimension Code";
+      ExpectedDimValueCode := DimensionSetEntry."Dimension Value Code";
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrderNo);
+      ProdOrderLine.FINDSET;
+      REPEAT
+        DimensionSetEntry.SETRANGE("Dimension Set ID",ProdOrderLine."Dimension Set ID");
+        DimensionSetEntry.SETRANGE("Dimension Code",DimensionCode);
+        DimensionSetEntry.FINDFIRST;
+        Assert.AreEqual(ExpectedDimValueCode,DimensionSetEntry."Dimension Value Code",ErrMsgDimension);
+      UNTIL ProdOrderLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyProductionOrderComponentDimension@49(ProductionOrder@1001 : Record 5405;DimensionSetId@1003 : Integer;ProdOrderLineNo@1004 : Integer);
+    VAR
+      ProdOrderComponent@1002 : Record 5407;
+    BEGIN
+      ProdOrderComponent.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderComponent.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderComponent.SETRANGE("Prod. Order Line No.",ProdOrderLineNo);
+      ProdOrderComponent.FINDFIRST;
+      ProdOrderComponent.TESTFIELD("Dimension Set ID",DimensionSetId);
+    END;
+
+    LOCAL PROCEDURE VerifyProductionOrderComponentPickedQuantity@38(ProdOrderStatus@1000 : Option;ProdOrderNo@1001 : Code[20];ExpectedQty@1003 : Decimal);
+    VAR
+      ProdOrderComponent@1002 : Record 5407;
+    BEGIN
+      ProdOrderComponent.SETRANGE(Status,ProdOrderStatus);
+      ProdOrderComponent.SETRANGE("Prod. Order No.",ProdOrderNo);
+      ProdOrderComponent.FINDSET;
+      REPEAT
+        ProdOrderComponent.TESTFIELD("Qty. Picked",ExpectedQty);
+      UNTIL ProdOrderComponent.NEXT = 0;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MsgHandler@1(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@3(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE RefreshPickedConfirmHandler@36(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.ExpectedMessage(STRSUBSTNO(DeletePickedLinesQst,LibraryVariableStorage.DequeueText),Question);
+      Reply := LibraryVariableStorage.DequeueBoolean;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [SCM]
+      Test for PS Bugs - II:
+        1. Check Requisition Worksheet lines created in their own Batch.
+        2. Check Sales Blanket Order updated with Quantity Shipped correctly when using Drop Shipment.
+        3. Check Item Category code is available in Item Ledger Entry for both Sale and Purchase Entry type after Posting.
+        4. Check Dimensions for Production Order Lines get updated after updating Dimensions for Production Order document.
+        5. Verify Production Line and Component Dimesions after refreshing Production Order.
+        6. Verify Production Order Component Dimesions when Dimension on Production Order is Deleted.
+        7. Verify Production Line and Component Dimesions when New Dimension created on Production Order.
+        8. Verify Production Order Component Dimesions when Production Order Line Dimension is Deleted.
+        9. Verify drop shipment Purchase Order can be posted if corresponding Sales Order invoiced twice.
+       10. Requisition Worksheet can process drop shipment Sales Order even if Item Replenishment System = "Prod. Order".
+
+        Covers Test cases:
+        -----------------------------------------------------------------------------------------------------------------------
+        Test Function Name                TFS ID
+        -----------------------------------------------------------------------------------------------------------------------
+        RequisitionWorksheetBatch         24160
+        SalesBlanketOrderQtyShipped       24193
+        ItemLedgerItemCategoryCode        24226
+        ProdOrderLinesDimension           24285
+
+        Covers Test cases for Bug Id: 333664
+        -----------------------------------------------------------------------------------------------------------------------
+        Test Function Name                TFS ID
+        -----------------------------------------------------------------------------------------------------------------------
+        ProdOrderLineDimensionsAfterRefresh
+        ComponentDimensionsAfterDeletingDimOnProdOrder
+        ComponentDimensionsAfterCreatingNewDimOnProdOrder
+        ComponentDimensionsAfterDeletingDimOnProdLines
+
+        Covers Test cases for Bug Id: 106305
+        -----------------------------------------------------------------------------------------------------------------------
+        Test Function Name                TFS ID
+        -----------------------------------------------------------------------------------------------------------------------
+        PostDropShptPurchOrderForSalesOrderInvoicedTwice                                                              106305
+
+        Covers Test cases for Bug Id: 106305
+        -----------------------------------------------------------------------------------------------------------------------
+        Test Function Name                TFS ID
+        -----------------------------------------------------------------------------------------------------------------------
+        RequisitionWorksheetDropShipmentProdItem                                                                      106305
+    }
+    END.
+  }
+}
+

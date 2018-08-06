@@ -1,0 +1,1939 @@
+OBJECT Codeunit 137285 SCM Inventory Batch Jobs
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1002 : Codeunit 130000;
+      LibraryCosting@1022 : Codeunit 132200;
+      LibraryERM@1011 : Codeunit 131300;
+      LibraryInventory@1004 : Codeunit 132201;
+      LibraryPurchase@1019 : Codeunit 130512;
+      LibrarySales@1020 : Codeunit 130509;
+      LibraryService@1029 : Codeunit 131902;
+      LibraryUtility@1012 : Codeunit 131000;
+      LibraryVariableStorage@1007 : Codeunit 131004;
+      LibraryWarehouse@1006 : Codeunit 132204;
+      LibraryRandom@1003 : Codeunit 130440;
+      LibrarySetupStorage@1016 : Codeunit 131009;
+      isInitialized@1000 : Boolean;
+      ChangeExpectedCostPostingToGL@1014 : TextConst 'ENU=If you change the Expected Cost Posting to G/L, the program must update table Post Value Entry to G/L.';
+      ExpectedMessage@1010 : TextConst 'ENU=Expected Cost Posting to G/L has been changed';
+      ExpectedError@1008 : TextConst 'ENU=You must not use Item No. Filter and Item Category Filter at the same time.';
+      Cost@1013 : TextConst 'ENU=Cost';
+      ValidationError@1001 : TextConst '@@@=%1:Field1,%2:Value1;ENU=%1 must be %2.';
+      UndoShipment@1009 : TextConst 'ENU=Do you want to undo the selected shipment line(s)?';
+      UndoConsumption@1015 : TextConst 'ENU=Do you want to undo consumption of the selected shipment line(s)?';
+      InvValueZeroErr@1005 : TextConst 'ENU=%1 must be equal to ''%2''';
+
+    [Test]
+    PROCEDURE TFS360566_CalcRevaluationJnlWithInventoryValueZero@19();
+    VAR
+      Item@1001 : Record 27;
+      ItemJnlLine@1002 : Record 83;
+      ItemNo@1000 : Code[20];
+    BEGIN
+      // [SCENARIO 360566] Revaluation of Item with "Inventory Value Zero" = Yes is not allowed
+      Initialize;
+
+      // [GIVEN] Create Item "X" With 'Inventory Value Zero'=Yes
+      ItemNo := CreateItemWithInventoryValueZero(TRUE);
+      // [GIVEN] Create Revaluation Item Jnl Line
+      ItemJnlLine."Value Entry Type" := ItemJnlLine."Value Entry Type"::Revaluation;
+
+      // [WHEN] Set "Item No." to "X" in Revaluation Item Jnl Line
+      ASSERTERROR ItemJnlLine.VALIDATE("Item No.",ItemNo);
+
+      // [THEN] Error message: "Inventory Value Zero must be equal to No"
+      Assert.ExpectedError(STRSUBSTNO(InvValueZeroErr,Item.FIELDCAPTION("Inventory Value Zero"),FALSE));
+    END;
+
+    [Test]
+    PROCEDURE AppliedEntriesUsingAdjustCostItemEntries@1();
+    VAR
+      Item@1002 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+      PurchaseLine@1015 : Record 39;
+      PurchaseLine2@1003 : Record 39;
+      ServiceHeader@1014 : Record 5900;
+      ServiceLine@1012 : Record 5902;
+    BEGIN
+      // Verify Item Ledger Entry after running Adjust Cost Item Entries.
+
+      // Setup: Update Sales and Receivables Setup, Ship a Service Order.
+      Initialize;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+      CreateServiceDocumentAndUpdateServiceLine(
+        ServiceLine,CreateItem('',Item."Costing Method"::FIFO),CreateCustomer,LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // Receive a Purchase Order, Receive and Invoice another Purchase Order with different cost.
+      CreateAndPostPurchaseDocument(PurchaseLine,ServiceLine."No.",ServiceLine.Quantity,FALSE);  // False for Invoice.
+      CreatePurchaseOrder(PurchaseLine2,PurchaseLine."Buy-from Vendor No.",PurchaseLine."No.",PurchaseLine.Quantity);
+      PurchaseLine2.VALIDATE("Direct Unit Cost",PurchaseLine."Direct Unit Cost" + 10);  // Fixed value is taken for greater value of Direct unit Cost.
+      PurchaseLine2.MODIFY;
+      PostPurchaseDocument(PurchaseLine2,TRUE);
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine2."No.",'');
+
+      // Verify.
+      VerifyItemLedgerEntry(
+        ItemJournalLine."Entry Type"::Purchase,PurchaseLine."No.",PurchaseLine.Quantity * PurchaseLine."Direct Unit Cost",0,0,FALSE,
+        TRUE);
+      VerifyItemLedgerEntry(
+        ItemJournalLine."Entry Type"::Purchase,PurchaseLine2."No.",0,PurchaseLine2.Quantity,
+        PurchaseLine2.Quantity * PurchaseLine2."Direct Unit Cost",TRUE,FALSE);
+      VerifyItemLedgerEntry(
+        ItemJournalLine."Entry Type"::Sale,ServiceLine."No.",-PurchaseLine.Quantity * PurchaseLine."Direct Unit Cost",0,0,FALSE,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostInventoryCostToGLWithPostMethodPerEntry@53();
+    VAR
+      PurchaseLine@1015 : Record 39;
+      PostMethod@1000 : 'per Posting Group,per Entry';
+    BEGIN
+      // Verify Value Entry after running Post Inventory Cost To G/L batch job using Post Method 'Per Entry'.
+
+      // Setup: Update Sales and Receivables Setup, Ship a Service Order, Receive a Purchase Order and Receive and Invoice another Purchase Order.
+      Initialize;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+      CreateServiceAndPurchaseOrder(PurchaseLine);
+      PostPurchaseDocument(PurchaseLine,TRUE);
+
+      // Exercise: Run Post Inventory Cost To G/L batch job.
+      PostInventoryCostToGL(PostMethod::"per Entry",PurchaseLine."No.",'');
+
+      // Verify: Verify Item Ledger Entry after running Adjust Cost Item Entries.
+      VerifyValueEntryCost(PurchaseLine."No.");
+    END;
+
+    [Test]
+    PROCEDURE PostInventoryCostToGLWithPerPostingGroup@14();
+    VAR
+      PurchaseLine@1015 : Record 39;
+      PostMethod@1002 : 'per Posting Group,per Entry';
+    BEGIN
+      // Verify Value Entry after running Post Invt Cost To G/L batch job using Post Method 'Per Posting Group'.
+
+      // Setup: Update Sales and Receivables, Ship a Service Order, Receive a Purchase Order and Receive and Invoice another Purchase Order.
+      Initialize;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+      CreateServiceAndPurchaseOrder(PurchaseLine);
+      PostPurchaseDocument(PurchaseLine,TRUE);
+
+      // Exercise: Run Post Inventory Cost To G/L batch job.
+      PostInventoryCostToGL(PostMethod::"per Posting Group",PurchaseLine."No.",PurchaseLine."No.");
+
+      // Verify: Verify Item Ledger Entry after running Adjust Cost Item Entries.
+      VerifyValueEntryCost(PurchaseLine."No.");
+    END;
+
+    [Test]
+    PROCEDURE PostInvtCostToGLTestUsingPostMethodPerEntry@10();
+    VAR
+      PurchaseLine@1015 : Record 39;
+      PostMethod@1002 : 'per Posting Group,per Entry';
+    BEGIN
+      // Verify Value Entry after running Post Inventory Cost To G/L - Test batch job using Post Method 'Per Entry'.
+
+      // Setup: Update Sales and Receivables Setup, Ship a Service Order, Receive a Purchase Order and Receive and Invoice another Purchase Order.
+      Initialize;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+      CreateServiceAndPurchaseOrder(PurchaseLine);
+      PostPurchaseDocument(PurchaseLine,TRUE);
+
+      // Exercise: Run Post Invt. Cost To G/L - Test batch job.
+      LibraryCosting.PostInvtCostToGLTest(PostMethod::"per Entry",PurchaseLine."No.",'',FALSE,FALSE);
+
+      // Verify: Verify Item Ledger Entry after running Adjust Cost Item Entries.
+      VerifyValueEntryCost(PurchaseLine."No.");
+    END;
+
+    [Test]
+    PROCEDURE PostInvtCostToGLTestUsingPerPostingGroup@8();
+    VAR
+      PurchaseLine@1015 : Record 39;
+      PostMethod@1019 : 'per Posting Group,per Entry';
+    BEGIN
+      // Verify Value Entry after running Post Inventory Cost To G/L - Test batch job using Post Method 'Per Posting Group'.
+
+      // Setup: Update Sales and Receivables Setup, Ship a Service Order, Receive a Purchase Order and Receive and Invoice another Purchase Order.
+      Initialize;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+      CreateServiceAndPurchaseOrder(PurchaseLine);
+      PostPurchaseDocument(PurchaseLine,TRUE);
+
+      // Exercise: Run Post Invt. Cost To G/L - Test batch job.
+      LibraryCosting.PostInvtCostToGLTest(PostMethod::"per Posting Group",PurchaseLine."No.",PurchaseLine."No.",FALSE,FALSE);
+
+      // Verify: Verify Item Ledger Entry after running Adjust Cost Item Entries.
+      VerifyValueEntryCost(PurchaseLine."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,ExpectedMessageHandler)]
+    PROCEDURE PostInventoryCostToGLUsingExpectedCostToGLTrue@34();
+    VAR
+      InventorySetup@1003 : Record 313;
+      InventorySetup2@1000 : Record 313;
+      PurchaseLine@1015 : Record 39;
+      PostMethod@1019 : 'per Posting Group,per Entry';
+    BEGIN
+      // Verify Warning after running Post Inventory Cost To G/L - Test batch job Using Expected Cost Posting To G/L True.
+
+      // Setup: Update Sales and Receivables Setup, Ship a Service Order, Receive a Purchase Order and Receive and Invoice another Purchase Order.
+      Initialize;
+      InventorySetup.GET;
+      LibraryVariableStorage.Enqueue(ChangeExpectedCostPostingToGL);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup2,FALSE,TRUE,InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type"::Item,
+        InventorySetup."Average Cost Period"::Day);
+      CreateServiceAndPurchaseOrder(PurchaseLine);
+      PostPurchaseDocument(PurchaseLine,TRUE);
+
+      // Exercise: Run Post Invt. Cost To G/L - Test batch job.
+      PostInventoryCostToGL(PostMethod::"per Entry",PurchaseLine."No.",'');
+
+      // Verify: Verify Confirmation Warning and message, Verifyication done in 'ConfirmHandler' and 'MessageHandler'.
+
+      // Tear Down: Rollback Sales & Receivables Setup and Inventory Setup.
+      LibraryVariableStorage.Enqueue(ChangeExpectedCostPostingToGL);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup2,InventorySetup."Automatic Cost Posting",InventorySetup."Expected Cost Posting to G/L",
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE AdjustCostItemEntriesUsingItemCategoryCode@2();
+    VAR
+      Item@1005 : Record 27;
+      InventorySetup@1000 : Record 313;
+      InventorySetup2@1001 : Record 313;
+      ItemCategory@1002 : Record 5722;
+      PurchaseLine@1015 : Record 39;
+      ServiceHeader@1014 : Record 5900;
+      ServiceLine@1012 : Record 5902;
+    BEGIN
+      // Verify Item Category Code on Item Ledger Entry and Value Entry for Average costing after running Adjust Cost Item Entries.
+
+      // Setup: Update Inventory Setup, Ship a Service Order.
+      Initialize;
+      InventorySetup.GET;
+      LibraryVariableStorage.Enqueue(ChangeExpectedCostPostingToGL);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup2,TRUE,TRUE,InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type"::Item,
+        InventorySetup."Average Cost Period"::Day);
+      LibraryInventory.CreateItemCategory(ItemCategory);
+      CreateServiceDocumentAndUpdateServiceLine(
+        ServiceLine,CreateItem(ItemCategory.Code,Item."Costing Method"::Average),CreateCustomer,LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      CreateAndPostPurchaseDocument(PurchaseLine,ServiceLine."No.",ServiceLine.Quantity,FALSE);  // False for Invoice.
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries('',ItemCategory.Code);
+
+      // Verify: Verify Adjusted Cost Amount in Value Entry.
+      VerifyValueByAverageValueEntry(ServiceLine."No.",-PurchaseLine.Quantity,TRUE);  // Using TRUE for Valued By Average Cost.
+      VerifyItemCategoryOnItemLedger(ServiceLine."No.",ItemCategory.Code);
+
+      // Tear Down: Rollback Inventory Setup.
+      LibraryVariableStorage.Enqueue(ChangeExpectedCostPostingToGL);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup2,InventorySetup."Automatic Cost Posting",InventorySetup."Expected Cost Posting to G/L",
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE ErrorWithItemNoFilterAndItemCategoryFilter@69();
+    VAR
+      Item@1005 : Record 27;
+      ItemCategory@1002 : Record 5722;
+      InventorySetup@1007 : Record 313;
+      InventorySetup2@1000 : Record 313;
+      PurchaseLine@1015 : Record 39;
+      ServiceHeader@1014 : Record 5900;
+      ServiceLine@1012 : Record 5902;
+    BEGIN
+      // Verify Error message while running Adjust Cost Item Entries batch job with both Item No. Filter and Item Category Filter.
+
+      // Setup: Update Inventory Setup, Ship a Service Order.
+      Initialize;
+      InventorySetup.GET;
+      LibraryVariableStorage.Enqueue(ChangeExpectedCostPostingToGL);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup2,TRUE,TRUE,InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type"::Item,
+        InventorySetup."Average Cost Period"::Day);
+      LibraryInventory.CreateItemCategory(ItemCategory);
+      CreateServiceDocumentAndUpdateServiceLine(
+        ServiceLine,CreateItem(ItemCategory.Code,Item."Costing Method"::Average),CreateCustomer,LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      CreateAndPostPurchaseDocument(PurchaseLine,ServiceLine."No.",ServiceLine.Quantity,FALSE);  // False for Invoice.
+
+      // Exercise: Run Adjust Cost Item Entries.
+      ASSERTERROR LibraryCosting.AdjustCostItemEntries(ServiceLine."No.",ItemCategory.Code);
+
+      // Verify.
+      Assert.ExpectedError(ExpectedError);
+
+      // Tear Down: Rollback Inventory Setup.
+      LibraryVariableStorage.Enqueue(ChangeExpectedCostPostingToGL);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup2,InventorySetup."Automatic Cost Posting",InventorySetup."Expected Cost Posting to G/L",
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE VarianceInValueEntryUsingItemWithStandardCost@82();
+    VAR
+      Item@1005 : Record 27;
+      ItemCategory@1002 : Record 5722;
+      InventorySetup@1007 : Record 313;
+      InventorySetup2@1000 : Record 313;
+      ItemVariant@1010 : Record 5401;
+      PurchaseLine@1015 : Record 39;
+      ServiceHeader@1014 : Record 5900;
+      ServiceLine@1012 : Record 5902;
+      ValueEntry@1008 : Record 5802;
+    BEGIN
+      // Verify Variant Code and Valued Quantity on Value Entry for Standard costing after running Adjust Cost Item Entries.
+
+      // Setup: Update Inventory Setup, Ship a Service Order and Receive and Invoice a Purchase Order with Variant Code and Standard Item.
+      Initialize;
+      InventorySetup.GET;
+      LibraryVariableStorage.Enqueue(ChangeExpectedCostPostingToGL);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup2,TRUE,TRUE,InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type"::Item,
+        InventorySetup."Average Cost Period"::Day);
+      LibraryInventory.CreateItemCategory(ItemCategory);
+      CreateServiceDocumentAndUpdateServiceLine(
+        ServiceLine,CreateItem(ItemCategory.Code,Item."Costing Method"::Standard),CreateCustomer,LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+      ServiceLine.VALIDATE("Variant Code",LibraryInventory.CreateItemVariant(ItemVariant,ServiceLine."No."));
+      ServiceLine.MODIFY(TRUE);
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      CreatePurchaseOrder(PurchaseLine,CreateVendor,ServiceLine."No.",ServiceLine.Quantity);
+      PurchaseLine.VALIDATE("Variant Code",ServiceLine."Variant Code");
+      PurchaseLine.MODIFY(TRUE);
+      PostPurchaseDocument(PurchaseLine,TRUE);
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries('',ItemCategory.Code);
+
+      // Verify: Verify Variant Code for Variance from Value Entry.
+      FindValueEntry(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Purchase,ValueEntry."Entry Type"::Variance,ServiceLine."No.",FALSE,'');
+      ValueEntry.TESTFIELD("Variant Code",PurchaseLine."Variant Code");
+      ValueEntry.TESTFIELD("Valued Quantity",PurchaseLine.Quantity);
+
+      // Tear Down: Rollback Sales and Receivables Setup.
+      LibraryVariableStorage.Enqueue(ChangeExpectedCostPostingToGL);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup2,InventorySetup."Automatic Cost Posting",InventorySetup."Expected Cost Posting to G/L",
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    PROCEDURE AdjustCostItemEntriesUsingAverageCost@139();
+    VAR
+      Item@1005 : Record 27;
+      PurchaseHeader@1018 : Record 38;
+      PurchaseLine@1011 : Record 39;
+      PurchaseLine2@1015 : Record 39;
+      ServiceHeader@1014 : Record 5900;
+      ServiceLine@1012 : Record 5902;
+      ValueEntry@1008 : Record 5802;
+      DocumentNo@1013 : Code[20];
+      ItemChargeNo@1000 : Code[20];
+    BEGIN
+      // Verify Chage Item, Adjustment and Valued By Average Cost field in Value Entry after running Adjust Cost Item Entries.
+
+      // Setup: Ship a Service Order and Receive a Purchase Order and Post Purchase Invoice using Item Charge Assignment.
+      Initialize;
+      CreateServiceDocumentAndUpdateServiceLine(
+        ServiceLine,CreateItem('',Item."Costing Method"::Average),CreateCustomer,LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      CreatePurchaseOrder(PurchaseLine,CreateVendor,ServiceLine."No.",LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      PostPurchaseDocument(PurchaseLine,FALSE);
+
+      // Post Charge Item.
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      ItemChargeNo := LibraryInventory.CreateItemChargeNo;
+      DocumentNo :=
+        CreateAndPostChargeItemPurchaseDocument(
+          PurchaseLine2,PurchaseHeader."Buy-from Vendor No.",PurchaseHeader."No.",PurchaseLine."No.",
+          ItemChargeNo);
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');
+
+      // Verify: Verify Adjustment entry for Valued By Average Cost Item Charge in  Value Entry.
+      ValueEntry.SETRANGE("Document No.",DocumentNo);
+      ValueEntry.SETRANGE("Item Charge No.",ItemChargeNo);
+      ValueEntry.FINDFIRST;
+      ValueEntry.TESTFIELD("Valued Quantity",PurchaseLine.Quantity);
+      VerifyValueByAverageValueEntry(PurchaseLine."No.",-ServiceLine.Quantity,TRUE);  // Using TRUE for Valued By Average Cost.
+    END;
+
+    [Test]
+    PROCEDURE AdjustAppliedFromEntries@3();
+    VAR
+      Item@1001 : Record 27;
+      ItemLedgerEntry@1003 : Record 32;
+      PurchaseLine@1000 : Record 39;
+      PurchaseLine2@1007 : Record 39;
+      SalesLine@1002 : Record 37;
+      ValueEntry@1006 : Record 5802;
+      CostPerUnit@1005 : Decimal;
+    BEGIN
+      // Verify Value Entry for applied and Invoiced Sales Order after running Adjust Cost Item Entries.
+
+      // Setup: Create and Post Purchase Order. Create, apply and Post Sales Order. Create and Post Purchase Invoice for Charge Item.
+      Initialize;
+      CreateAndPostPurchaseDocument(PurchaseLine,CreateItem('',Item."Costing Method"::FIFO),LibraryRandom.RandDec(10,2),TRUE);  // True for Invoice and Random value for Quantity.
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::Purchase,PurchaseLine."No.",TRUE);
+      CreateAndPostSalesDocument(SalesLine,PurchaseLine."No.",PurchaseLine.Quantity,ItemLedgerEntry."Entry No.",TRUE);
+      CreateAndPostChargeItemPurchaseDocument(
+        PurchaseLine2,PurchaseLine."Buy-from Vendor No.",PurchaseLine."Document No.",PurchaseLine."No.",
+        LibraryInventory.CreateItemChargeNo);
+      CostPerUnit := PurchaseLine2."Line Amount" / PurchaseLine.Quantity;
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Cost Amount Actual on Value Entry.
+      VerifyCostAmountActual(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Entry Type"::"Direct Cost",PurchaseLine."No.",TRUE,'',
+        -ROUND(SalesLine.Quantity * CostPerUnit));
+    END;
+
+    [Test]
+    PROCEDURE AdjustmentOfInvoicedAndExpectedNegativeEntries@9();
+    VAR
+      Item@1001 : Record 27;
+      ItemLedgerEntry@1003 : Record 32;
+      PurchaseLine@1000 : Record 39;
+      SalesLine@1002 : Record 37;
+      ValueEntry@1006 : Record 5802;
+    BEGIN
+      // Verify Value Entry for applied but not Invoiced Sales Order.
+
+      // Setup: Create and post Purchase Order.
+      Initialize;
+      CreateAndPostPurchaseDocument(PurchaseLine,CreateItem('',Item."Costing Method"::FIFO),LibraryRandom.RandDec(10,2),TRUE);  // True for Invoice and Random value for Quantity.
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::Purchase,PurchaseLine."No.",TRUE);
+
+      // Exercise: Create, apply and Ship Sales Order.
+      CreateAndPostSalesDocument(SalesLine,PurchaseLine."No.",PurchaseLine.Quantity,ItemLedgerEntry."Entry No.",FALSE);
+
+      // Verify: Verify Cost Amount Expected on Value Entry.
+      FindValueEntry(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Entry Type"::"Direct Cost",PurchaseLine."No.",FALSE,'');
+      ValueEntry.TESTFIELD("Expected Cost",TRUE);
+      ValueEntry.TESTFIELD("Cost Amount (Expected)",-ROUND(PurchaseLine."Direct Unit Cost" * SalesLine.Quantity));
+    END;
+
+    [Test]
+    PROCEDURE AdjustmentForRevaluation@5();
+    VAR
+      Item@1001 : Record 27;
+      ItemLedgerEntry@1003 : Record 32;
+      PurchaseLine@1000 : Record 39;
+      SalesLine@1002 : Record 37;
+      ValueEntry@1006 : Record 5802;
+      CostPerUnit@1004 : Decimal;
+    BEGIN
+      // Verify Value Entry after posting Revaluation Journal and running Adjust Cost Item Entries.
+
+      // Setup: Create and Post Purchase Order. Create, apply and Post Sales Order. Create and Post Revaluation Journal.
+      Initialize;
+      CreateAndPostPurchaseDocument(
+        PurchaseLine,CreateItem('',Item."Costing Method"::FIFO),10 + LibraryRandom.RandDec(10,2),TRUE);  // True for Invoice and Random value for Quantity.
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::Purchase,PurchaseLine."No.",TRUE);
+      CreateAndPostSalesDocument(SalesLine,PurchaseLine."No.",LibraryRandom.RandDec(10,2),ItemLedgerEntry."Entry No.",TRUE);  // Use Random value for Quantity.
+      CostPerUnit :=
+        CreateAndPostRevaluationJournal(PurchaseLine."No.",ItemLedgerEntry."Entry No.",LibraryRandom.RandDec(100,2),0);  // Use Random value for Inventory Value Revalued and 0 for Unit Cost Revalued.
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Cost Amount Actual on Value Entry.
+      VerifyCostAmountActual(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Entry Type"::"Direct Cost",PurchaseLine."No.",TRUE,'',
+        -ROUND(SalesLine.Quantity * CostPerUnit));
+    END;
+
+    [Test]
+    PROCEDURE AdjustmentForPartialRevaluation@6();
+    VAR
+      Item@1000 : Record 27;
+      ItemJournalLine@1008 : Record 83;
+      ItemLedgerEntry@1003 : Record 32;
+      SalesLine@1001 : Record 37;
+      ValueEntry@1006 : Record 5802;
+      CostPerUnit@1004 : Decimal;
+      CostAmountActual@1002 : Decimal;
+      CostAmountActual2@1007 : Decimal;
+      UnitCost@1005 : Decimal;
+    BEGIN
+      // Verify Value Entry after posting Revaluation Journal for remaining Quantity and running Adjust Cost Item Entries.
+
+      // Setup: Create and Post Item Journal for Positive Adjustment. Create, apply and Post Negative Adjustment. Create and Post Revaluation Journal. Use Random values for Quantity and Unit Cost.
+      Initialize;
+      UnitCost := LibraryRandom.RandDec(100,2);
+
+      // Create and Post Item Journal Line for Positive/Negative Adjustment.
+      CreateAndPostItemJournal(
+        ItemJournalLine,ItemJournalLine."Entry Type"::"Positive Adjmt.",CreateItem('',Item."Costing Method"::FIFO),
+        2 * LibraryRandom.RandDec(10,2),'',UnitCost,0);
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::"Positive Adjmt.",ItemJournalLine."Item No.",TRUE);
+      CreateAndPostItemJournal(
+        ItemJournalLine,ItemJournalLine."Entry Type"::"Negative Adjmt.",ItemJournalLine."Item No.",ItemJournalLine.Quantity / 2,'',
+        Item."Last Direct Cost",ItemLedgerEntry."Entry No.");
+      CreateItemJournalForRevaluation(ItemJournalLine."Item No.");
+
+      // Post Sales Document for Same Item and Quantiity and Apply  with Previous posted entries.
+      CreateAndPostSalesDocument(SalesLine,ItemJournalLine."Item No.",ItemJournalLine.Quantity,ItemLedgerEntry."Entry No.",TRUE);
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::"Positive Adjmt.",ItemJournalLine."Item No.",FALSE);
+      ItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)");
+      CostPerUnit := ItemLedgerEntry."Cost Amount (Actual)" / ItemLedgerEntry.Quantity;
+      CostAmountActual := -ROUND(SalesLine.Quantity * CostPerUnit);
+      Item.GET(ItemJournalLine."Item No.");
+      CostAmountActual2 := -ROUND(SalesLine.Quantity * (CostPerUnit - UnitCost));
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(ItemJournalLine."Item No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Cost Amount Actual on Value Entries.
+      FindValueEntry(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Entry Type"::"Direct Cost",ItemJournalLine."Item No.",FALSE,
+        '');
+      Assert.AreNearlyEqual(
+        CostAmountActual,ValueEntry."Cost Amount (Actual)",LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationError,ItemLedgerEntry.FIELDCAPTION("Cost Amount (Actual)"),CostAmountActual));
+      FindValueEntry(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Entry Type"::"Direct Cost",ItemJournalLine."Item No.",TRUE,
+        '');
+      Assert.AreNearlyEqual(
+        CostAmountActual2,ValueEntry."Cost Amount (Actual)",LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationError,ItemLedgerEntry.FIELDCAPTION("Cost Amount (Actual)"),CostAmountActual2));
+    END;
+
+    [Test]
+    PROCEDURE InsertionOfRoundingEntries@12();
+    VAR
+      ItemLedgerEntry@1003 : Record 32;
+      PurchaseLine@1000 : Record 39;
+      ValueEntry@1006 : Record 5802;
+      CostAmountForRounding@1009 : Decimal;
+    BEGIN
+      // Verify Value Entry for Rounding after running Adjust Cost Item Entries.
+
+      // Setup: Create and Post Purchase Order. Create, apply and Post Sales Order.
+      Initialize;
+      CreateAndPostPurchaseOrderWithLineAmount(PurchaseLine);
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::Purchase,PurchaseLine."No.",TRUE);
+      CreateAndPostSalesOrderWithMultiLine(PurchaseLine."No.",PurchaseLine.Quantity,ItemLedgerEntry."Entry No.");
+      CostAmountForRounding :=
+        PurchaseLine."Line Amount" - (PurchaseLine.Quantity * ROUND(PurchaseLine."Line Amount" / PurchaseLine.Quantity));
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Cost Amount Actual on Value Entry.
+      VerifyCostAmountActual(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Purchase,ValueEntry."Entry Type"::Rounding,PurchaseLine."No.",FALSE,'',
+        -CostAmountForRounding);
+    END;
+
+    [Test]
+    PROCEDURE AdjustmentWithQuantityShippedNotApplied@13();
+    VAR
+      Item@1001 : Record 27;
+      ItemLedgerEntry@1003 : Record 32;
+      PurchaseLine@1000 : Record 39;
+      PurchaseLine2@1007 : Record 39;
+      SalesLine@1002 : Record 37;
+      ValueEntry@1006 : Record 5802;
+    BEGIN
+      // Verify Value Entry for unapplied Invoiced Sales Order after running Adjust Cost Item Entries.
+
+      // Setup: Create and Post Purchase Order. Create and Post Sales Order. Create and post Purchase Invoice for Charge Item.
+      Initialize;
+      CreateAndPostPurchaseDocument(
+        PurchaseLine,CreateItem('',Item."Costing Method"::FIFO),10 + LibraryRandom.RandDec(10,2),TRUE);  // True for Invoice and Random value for Quantity.
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::Purchase,PurchaseLine."No.",TRUE);
+      CreateAndPostSalesDocument(SalesLine,PurchaseLine."No.",PurchaseLine.Quantity,0,TRUE);
+      CreateAndPostChargeItemPurchaseDocument(
+        PurchaseLine2,PurchaseLine."Buy-from Vendor No.",PurchaseLine."Document No.",PurchaseLine."No.",
+        LibraryInventory.CreateItemChargeNo);
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Cost Amount Actual on Value Entries.
+      VerifyCostAmountActual(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Entry Type"::"Direct Cost",PurchaseLine."No.",FALSE,'',
+        -ROUND(SalesLine.Quantity * PurchaseLine."Direct Unit Cost"));
+      VerifyCostAmountActual(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Entry Type"::"Direct Cost",PurchaseLine."No.",TRUE,'',
+        -PurchaseLine2."Direct Unit Cost");
+    END;
+
+    [Test]
+    PROCEDURE AdjustTransferredFromEntries@20();
+    VAR
+      Item@1000 : Record 27;
+      ItemJournalLine@1008 : Record 83;
+      ItemLedgerEntry@1003 : Record 32;
+      Location@1009 : Record 14;
+      TransferHeader@1004 : Record 5740;
+      ValueEntry@1006 : Record 5802;
+      CostPerUnit@1002 : Decimal;
+      UnitCost@1001 : Decimal;
+      CostAmountActual@1005 : Decimal;
+    BEGIN
+      // Verify Value Entry after creating Transfer Order,posting Revaluation Journal and running Adjust Cost Item Entries.
+
+      // Setup: Create and Post Item Journal for Positive Adjustment. Create and Post Transfer Order. Create and Post Revaluation Journal. Use Random values for Quantity and Unit Cost.
+      Initialize;
+      UnitCost := LibraryRandom.RandDec(100,2);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      CreateAndPostItemJournal(
+        ItemJournalLine,ItemJournalLine."Entry Type"::"Positive Adjmt.",CreateItem('',Item."Costing Method"::FIFO),
+        LibraryRandom.RandDec(10,2),Location.Code,UnitCost,0);
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::"Positive Adjmt.",ItemJournalLine."Item No.",TRUE);
+      CreateAndPostTransferOrder(TransferHeader,ItemJournalLine."Item No.",Location.Code,ItemJournalLine.Quantity);
+      CostPerUnit :=
+        CreateAndPostRevaluationJournal(
+          ItemJournalLine."Item No.",ItemLedgerEntry."Entry No.",0,UnitCost + LibraryRandom.RandDec(100,2));  // Use 0 for Inventory Value Revalued and Random value for Unit Cost Revalued.
+      CostAmountActual := ItemJournalLine.Quantity * CostPerUnit;
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(ItemJournalLine."Item No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Cost Amount Actual on Value Entries for Transfer Receipt.
+      ValueEntry.SETRANGE("Document Type",ValueEntry."Document Type"::"Transfer Receipt");
+      VerifyCostAmountActual(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Transfer,ValueEntry."Entry Type"::"Direct Cost",ItemJournalLine."Item No.",
+        TRUE,TransferHeader."Transfer-to Code",CostAmountActual);
+      FindValueEntry(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Transfer,ValueEntry."Entry Type"::"Direct Cost",ItemJournalLine."Item No.",
+        TRUE,TransferHeader."In-Transit Code");
+      Assert.AreNearlyEqual(
+        -ItemJournalLine.Quantity * CostPerUnit,ValueEntry."Cost Amount (Actual)",LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationError,ValueEntry.FIELDCAPTION("Cost Amount (Actual)"),CostAmountActual));
+    END;
+
+    [Test]
+    PROCEDURE AdjustFixedApplications@26();
+    VAR
+      Item@1001 : Record 27;
+      ItemLedgerEntry@1003 : Record 32;
+      ItemLedgerEntry2@1009 : Record 32;
+      PurchaseLine@1000 : Record 39;
+      PurchaseLine2@1007 : Record 39;
+      SalesLine@1002 : Record 37;
+      ValueEntry@1006 : Record 5802;
+    BEGIN
+      // Verify Value Entry for fixed application after running Adjust Cost Item Entries.
+
+      // Setup: Create and Post Purchase Order. Create, apply and Post Sales Order and Sales Return Order. Create and Post Purchase Invoice for Charge Item.
+      Initialize;
+      CreateAndPostPurchaseDocument(PurchaseLine,CreateItem('',Item."Costing Method"::FIFO),LibraryRandom.RandDec(10,2),TRUE);  // True for Invoice and Random value for Quantity.
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::Purchase,PurchaseLine."No.",TRUE);
+      CreateAndPostSalesDocument(SalesLine,PurchaseLine."No.",PurchaseLine.Quantity,ItemLedgerEntry."Entry No.",TRUE);
+      FindItemLedgerEntry(ItemLedgerEntry2,ItemLedgerEntry."Entry Type"::Sale,PurchaseLine."No.",FALSE);
+      CreateAndPostSalesReturnOrder(SalesLine,PurchaseLine."No.",PurchaseLine.Quantity,ItemLedgerEntry2."Entry No.");
+      CreateAndPostChargeItemPurchaseDocument(
+        PurchaseLine2,PurchaseLine."Buy-from Vendor No.",PurchaseLine."Document No.",PurchaseLine."No.",
+        LibraryInventory.CreateItemChargeNo);
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Cost Amount Actual on Value Entries.
+      VerifyCostAmountActual(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Entry Type"::"Direct Cost",PurchaseLine."No.",TRUE,'',
+        -PurchaseLine2."Direct Unit Cost");
+      VerifyValueEntryForItemCharge(PurchaseLine."No.",PurchaseLine2."No.",PurchaseLine2."Direct Unit Cost");
+    END;
+
+    [Test]
+    PROCEDURE UnitCostUsingCalcInvDisc@59();
+    BEGIN
+      // Check the Item cost when CalcInvDiscount is true and InventoryValueZero is false.
+      Initialize;
+      AdjustCostItemEntries(TRUE,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE UnitCostUsingCalcInvDiscAndSetInvValueZero@30();
+    BEGIN
+      // Check the Item cost when CalcInvDiscount is true and InventoryValueZero is true.
+      Initialize;
+      AdjustCostItemEntries(TRUE,FALSE);
+      AdjustCostItemEntries(TRUE,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE UnitCostUsingSetInvValueZero@58();
+    BEGIN
+      // Check the Item cost when CalcInvDiscount is false and InventoryValueZero is true.
+      Initialize;
+      AdjustCostItemEntries(TRUE,TRUE);
+      AdjustCostItemEntries(FALSE,TRUE);
+    END;
+
+    LOCAL PROCEDURE AdjustCostItemEntries@55(CalcInvDiscount@1001 : Boolean;InventoryValueZero@1005 : Boolean);
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      PurchInvLine@1010 : Record 123;
+      DocumentNo@1011 : Code[20];
+    BEGIN
+      // Setup: Update Purchases and Payables Setup, create and post Purchase Order.
+      LibraryPurchase.SetCalcInvDiscount(CalcInvDiscount);
+      CreatePurchaseOrderAndModifyLine(PurchaseLine,InventoryValueZero);
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      PurchInvLine.SETRANGE("Document No.",DocumentNo);
+      PurchInvLine.FINDFIRST;
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');
+
+      // Verify: Verify Unit Cost on Item after Adjustment.
+      Item.GET(PurchaseLine."No.");
+      IF Item."Inventory Value Zero" THEN
+        Item.TESTFIELD("Unit Cost",0)
+      ELSE
+        Item.TESTFIELD("Unit Cost",PurchInvLine."Unit Cost");
+      Item.TESTFIELD("Cost is Adjusted",TRUE);
+    END;
+
+    [Test]
+    PROCEDURE PstdServInvStatisticsUsingServOrder@39();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1005 : Record 5902;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order.
+
+      // Setup: Create Item, create and post Purchase Order, create Service Order.
+      Initialize;
+      CreatePurchaseOrder(
+        PurchaseLine,CreateVendor,CreateItem('',Item."Costing Method"::Standard),LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      PostPurchaseDocument(PurchaseLine,TRUE);
+      CreateServiceDocumentAndUpdateServiceLine(ServiceLine,PurchaseLine."No.",CreateCustomer,LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+
+      // Exercise: Post Service Order as ship and invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceInvStatistics(
+        ServiceLine."Document No.",'',PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PstdServInvStatisticsWithRevAndAdjmt@28();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1005 : Record 5902;
+      ItemLedgerEntry@1006 : Record 32;
+      UnitCostRevalued@1007 : Decimal;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Revaluation Journal and running Adjust Cost Item Entries.
+
+      // Setup: Create Item, create and post Purchase Order, Service Order and Revaluation Journal.
+      CreatePurchaseOrder(
+        PurchaseLine,CreateVendor,CreateItem('',Item."Costing Method"::Standard),LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      PostPurchaseDocument(PurchaseLine,TRUE);
+      CreateServiceDocumentAndUpdateServiceLine(ServiceLine,PurchaseLine."No.",CreateCustomer,PurchaseLine.Quantity / 2);  // Take Partial Quantity.
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::Purchase,PurchaseLine."No.",TRUE);
+      UnitCostRevalued := PurchaseLine."Unit Cost (LCY)" + LibraryRandom.RandDec(10,2);  // Add random value to Unit Cost to make positive Revaluation.
+      CreateAndPostRevaluationJournal(
+        PurchaseLine."No.",ItemLedgerEntry."Entry No.",LibraryRandom.RandDec(100,2),UnitCostRevalued);  // Use Random value for Inventory Value Revalued and 0 for Unit Cost Revalued.
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceInvStatistics(
+        ServiceLine."Document No.",'',PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,UnitCostRevalued * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PstdServCrMemoStatisticsWithAdjmt@110();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1005 : Record 5902;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Credit Memo Statistics after posting Service Credit Memo and running Adjust Cost Item Entries.
+
+      // Setup: Create Item, create and post Purchase Order, Service Credit Memo.
+      Initialize;
+      CreatePurchaseOrder(
+        PurchaseLine,CreateVendor,CreateItem('',Item."Costing Method"::Standard),LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      PostPurchaseDocument(PurchaseLine,TRUE);
+      CreateAndPostServiceCreditMemo(ServiceLine,PurchaseLine."No.",LibrarySales.CreateCustomerNo);
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceCrMemoStatistics(
+        ServiceLine."Document No.",PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PstdServInvStatisticsUsingServOrderWithLineDisc@51();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1005 : Record 5902;
+      SalesLineDiscount@1006 : Record 7004;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order When Line Discount is defined for Item.
+
+      // Setup: Create Item with Sales Line Discount, create and post Purchase Order, create Service Order.
+      Initialize;
+      CreateItemWithSalesLineDiscount(SalesLineDiscount);
+      CreateAndPostPurchaseDocument(PurchaseLine,SalesLineDiscount.Code,LibraryRandom.RandDec(10,2),TRUE);  // Use TRUE for Invoice and Random value for Quantity.
+      CreateServiceDocumentAndUpdateServiceLine(
+        ServiceLine,SalesLineDiscount.Code,SalesLineDiscount."Sales Code",LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+
+      // Exercise: Post Service Order as ship and invoice.
+      PostServiceOrder(ServiceLine,TRUE,FALSE);
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceInvStatistics(
+        ServiceLine."Document No.",'',PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PstdServInvStatisticsWithRevAndWithoutAdjmt@73();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1005 : Record 5902;
+      SalesLineDiscount@1008 : Record 7004;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Revaluation Journal When Line Discount is defined for Item.
+
+      // Setup: Create Item with Sales Line Discount, create and post Purchase Order, Service Order and Revaluation Journal.
+      Initialize;
+      CreateItemWithSalesLineDiscount(SalesLineDiscount);
+      CreateAndPostPurchaseDocument(PurchaseLine,SalesLineDiscount.Code,LibraryRandom.RandDec(10,2),TRUE);  // Use TRUE for Invoice and Random value for Quantity.
+      CreateServiceDocumentAndUpdateServiceLine(
+        ServiceLine,SalesLineDiscount.Code,SalesLineDiscount."Sales Code",PurchaseLine.Quantity - 1);  // Take less Quantity than Purchase Line.
+      PostServiceOrder(ServiceLine,TRUE,FALSE);
+
+      // Exercise: Create and post Revaluation Journal.
+      CreateItemJournalForRevaluation(SalesLineDiscount.Code);
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceInvStatistics(
+        ServiceLine."Document No.",'',PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PstdServCrMemoStatisticsWithoutAdjmt@67();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1005 : Record 5902;
+      SalesLineDiscount@1004 : Record 7004;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Credit Memo Statistics after posting Service Credit Memo When Line Discount is defined for Item..
+
+      // Setup: Create Item with Sales Line Discount, create and post Purchase Order, Service Credit Memo.
+      Initialize;
+      CreateItemWithSalesLineDiscount(SalesLineDiscount);
+      CreateAndPostPurchaseDocument(PurchaseLine,SalesLineDiscount.Code,LibraryRandom.RandDec(10,2),TRUE);  // Use TRUE for Invoice and Random value for Quantity.
+
+      // Exercise: Create and post Service Credit Memo.
+      CreateAndPostServiceCreditMemo(ServiceLine,SalesLineDiscount.Code,SalesLineDiscount."Sales Code");
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceCrMemoStatistics(
+        ServiceLine."Document No.",PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderStatisticsPageHandler)]
+    PROCEDURE ServOrderStatisticsPostingServOrderAsShip@90();
+    VAR
+      Item@1004 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on Services Order Statistics after posting Service Order as Ship.
+
+      // Setup: Create Item, create and post Purchase Order, Create Service Order.
+      Initialize;
+      CreateAndPostPurchaseDocument(PurchaseLine,CreateItem('',Item."Costing Method"::FIFO),LibraryRandom.RandDec(10,2),TRUE);  // Use TRUE for Invoice and Random value for Quantity.
+      CreateServiceDocumentAndUpdateServiceLine(ServiceLine,PurchaseLine."No.",CreateCustomer,LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+
+      // Exercise: Post Service Order as ship.
+      PostServiceOrder(ServiceLine,FALSE,FALSE);
+
+      // Verify: Verify Original Cost and Adjusted Cost on Services Order Statistics.
+      VerifyServiceOrderStatistics(
+        ServiceLine."Document No.",PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderStatisticsPageHandler)]
+    PROCEDURE ServOrderStatisticsPostingServOrderAsShipWithAdjmt@124();
+    VAR
+      Item@1004 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1001 : Record 5902;
+      DirectUnitCost@1006 : Decimal;
+      AdjustedCost@1007 : Decimal;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on Services Order Statistics after posting Service Order as Ship and running Adjust Cost Item Entries.
+
+      // Setup: Create Item, create and post Purchase Order, Service Order.
+      Initialize;
+      CreatePurchaseOrder(PurchaseLine,CreateVendor,CreateItem('',Item."Costing Method"::FIFO),LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      DirectUnitCost := PurchaseLine."Direct Unit Cost";
+      PostPartialPurchLineWithUpdate(PurchaseLine);
+      AdjustedCost :=
+        PurchaseLine."Quantity Invoiced" * DirectUnitCost + PurchaseLine."Qty. to Invoice" * PurchaseLine."Direct Unit Cost";
+      PostPurchaseDocument(PurchaseLine,TRUE);
+      CreateServiceDocumentAndUpdateServiceLine(ServiceLine,PurchaseLine."No.",CreateCustomer,PurchaseLine.Quantity);
+      PostServiceOrder(ServiceLine,FALSE,FALSE);
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Original Cost and Adjusted Cost on Services Order Statistics.
+      VerifyServiceOrderStatistics(ServiceLine."Document No.",DirectUnitCost * ServiceLine.Quantity,AdjustedCost);
+    END;
+
+    [Test]
+    [HandlerFunctions(ShipmentLinePageHandler)]
+    PROCEDURE PstdServInvStatisticsUsingGetShipmentLines@91();
+    VAR
+      Item@1004 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order using Get Service Shipment Lines.
+
+      // Setup: Create Item, create and post Purchase Order, create Service Invoice using Get Shipment Lines.
+      Initialize;
+      CreateAndPostPurchaseDocument(PurchaseLine,CreateItem('',Item."Costing Method"::FIFO),LibraryRandom.RandDec(10,2),TRUE);  // Use TRUE for Invoice and Random value for Quantity.
+      CreateServiceDocumentAndUpdateServiceLine(ServiceLine,PurchaseLine."No.",CreateCustomer,LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      PostServiceOrder(ServiceLine,FALSE,FALSE);
+      LibraryVariableStorage.Enqueue(ServiceLine."Document No.");  // Enqueue value for 'ShipmentLinePageHandler'.
+      CreateServiceInvoiceFromGetShipmentLines(ServiceLine,ServiceLine."Customer No.");
+
+      // Exercise: Post Service Invoice.
+      PostServiceOrder(ServiceLine,TRUE,FALSE);
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceInvStatistics(
+        '',ServiceLine."Document No.",PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ServiceOrderStatisticsPageHandler)]
+    PROCEDURE ServOrderStatisticsPostingServOrderAsConsume@74();
+    VAR
+      Item@1004 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on Services Order Statistics after posting Service Order as ship and consume.
+
+      // Setup: Create Item, create and post Purchase Order, Service Order.
+      Initialize;
+      CreateAndPostPurchaseDocument(
+        PurchaseLine,CreateItem('',Item."Costing Method"::Standard),LibraryRandom.RandDec(10,2),TRUE);  // Use TRUE for Invoice and Random value for Quantity.
+      CreateServiceDocumentAndUpdateServiceLine(ServiceLine,PurchaseLine."No.",CreateCustomer,LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      UpdateQtyToConsumeOnServiceLine(ServiceLine,ServiceLine."Qty. to Ship" * LibraryUtility.GenerateRandomFraction);
+
+      // Exercise: Post Service Order as ship and consume.
+      PostServiceOrder(ServiceLine,FALSE,TRUE);
+
+      // Verify: Verify Original Cost and Adjusted Cost on Services Order Statistics.
+      VerifyServiceOrderStatistics(
+        ServiceLine."Document No.",PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,ServiceOrderStatisticsPageHandler)]
+    PROCEDURE ServOrderStatisticsAfterUndoShipmentWithAdjmt@33();
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on Services Order Statistics when undo Shipment Lines and running Adjust Cost Item Entries.
+      ServiceOrderStatisticsAfterUndoShipmentLine(0,FALSE);  // 0 for Quantity To Consume and FALSE for Consume.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,ServiceOrderStatisticsPageHandler)]
+    PROCEDURE ServOrderStatisticsAfterUndoConsumptionWithAdjmt@36();
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on Services Order Statistics when undo consumption Line and running Adjust Cost Item Entries.
+      ServiceOrderStatisticsAfterUndoShipmentLine(LibraryRandom.RandInt(10),TRUE);  // Use random for Quantity to Consume and TRUE for Consume.
+    END;
+
+    LOCAL PROCEDURE ServiceOrderStatisticsAfterUndoShipmentLine@83(Quantity@1003 : Decimal;Consume@1000 : Boolean);
+    VAR
+      Item@1004 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Setup: Create Item, create and post Purchase Order, Service Order and undo Shipment Line.
+      Initialize;
+      CreateAndPostPurchaseDocument(
+        PurchaseLine,CreateItem('',Item."Costing Method"::FIFO),Quantity + LibraryRandom.RandInt(10),TRUE);  // Use TRUE for Invoice and Random value for Quantity.
+      CreateServiceDocumentAndUpdateServiceLine(
+        ServiceLine,PurchaseLine."No.",CreateCustomer,Quantity + LibraryRandom.RandInt(10));  // Use Random Quantity greater than Quantity To Consume.
+      UpdateQtyToConsumeOnServiceLine(ServiceLine,Quantity);
+      PostServiceOrder(ServiceLine,FALSE,Consume);
+      IF Consume THEN
+        UndoServiceConsumptionLine(ServiceLine."Document No.")
+      ELSE
+        UndoServiceShipmentLine(ServiceLine."Document No.");
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(ServiceLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Original Cost and Adjusted Cost on Services Order Statistics.
+      VerifyServiceOrderStatistics(
+        ServiceLine."Document No.",PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PstdServInvStatisticsWithChargeAssignment@60();
+    VAR
+      PurchaseLine@1000 : Record 39;
+      ServiceLine@1006 : Record 5902;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order and Purchase Order with Charge Assignment.
+
+      // Setup: Create and post Purchase Order with charge Assignment, create Service Order.
+      Initialize;
+      PostChargeOnPurchaseDocument(PurchaseLine);
+      CreateServiceDocumentAndUpdateServiceLine(ServiceLine,PurchaseLine."No.",CreateCustomer,LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+
+      // Exercise: Post Service Order as ship.
+      PostServiceOrder(ServiceLine,TRUE,FALSE);
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceInvStatistics(
+        ServiceLine."Document No.",'',PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PstdServCrMemoStatisticsWithChargeAssignment@76();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Credit Memo Statistics after posting Service Credit Memo and Purchase Order with Charge Assignment.
+
+      // Setup: Create and post Purchase Order with charge Assignment.
+      Initialize;
+      PostChargeOnPurchaseDocument(PurchaseLine);
+
+      // Exercise: Create and post Service Credit Memo.
+      CreateAndPostServiceCreditMemo(ServiceLine,PurchaseLine."No.",CreateCustomer);
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Credit Memo Statistics
+      VerifyCostOnPostedServiceCrMemoStatistics(
+        ServiceLine."Document No.",PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ShipmentLinePageHandler)]
+    PROCEDURE PstdServInvStatisticsUsingGetShipmentLinesWithChrgAssgnt@78();
+    VAR
+      PurchaseLine@1003 : Record 39;
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on on posted Services Invoice Statistics after posting Service Invoice using Get Service Shipment Lines and Purchase Order with Charge Assignment.
+
+      // Setup: Create and post Purchase Order with charge Assignment, create Service Invoice using Get Shipment Lines.
+      Initialize;
+      PostChargeOnPurchaseDocument(PurchaseLine);
+      CreateServiceDocumentAndUpdateServiceLine(ServiceLine,PurchaseLine."No.",CreateCustomer,LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      PostServiceOrder(ServiceLine,FALSE,FALSE);
+      LibraryVariableStorage.Enqueue(ServiceLine."Document No.");  // Enqueue value for 'ShipmentLinePageHandler'.
+      CreateServiceInvoiceFromGetShipmentLines(ServiceLine,ServiceLine."Customer No.");
+
+      // Exercise: Post Service Invoice.
+      PostServiceOrder(ServiceLine,TRUE,FALSE);
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceInvStatistics(
+        '',ServiceLine."Document No.",PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PstdServInvStatisticsWithChargeAssignmentWithAdjmt@122();
+    VAR
+      Item@1002 : Record 27;
+      PurchaseLine@1000 : Record 39;
+      PurchaseLine2@1004 : Record 39;
+      ServiceLine@1006 : Record 5902;
+    BEGIN
+      // Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order and Purchase Invoice with Charge Assignment, running Adjust Cost Item Entries.
+
+      // Setup: Create and post Purchase Order.
+      Initialize;
+      CreatePurchaseOrder(
+        PurchaseLine,CreateVendor,CreateItem('',Item."Costing Method"::Standard),LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      PostPurchaseDocument(PurchaseLine,FALSE);
+
+      // Create Purchase Invoice for Charge Item and assign it to previous Posted Receipt, create and post Service Order.
+      CreateAndPostChargeItemPurchaseDocument(
+        PurchaseLine2,PurchaseLine."Buy-from Vendor No.",PurchaseLine."Document No.",PurchaseLine."No.",
+        LibraryInventory.CreateItemChargeNo);
+      CreateServiceDocumentAndUpdateServiceLine(ServiceLine,PurchaseLine."No.",CreateCustomer,LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      PostServiceOrder(ServiceLine,TRUE,FALSE);
+
+      // Exercise: Run Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(PurchaseLine."No.",'');  // Blank value for Item Category.
+
+      // Verify: Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics.
+      VerifyCostOnPostedServiceInvStatistics(
+        ServiceLine."Document No.",'',PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity,
+        PurchaseLine."Unit Cost (LCY)" * ServiceLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE AdjustCostOnTransitLocation@81();
+    VAR
+      Location@1001 : Record 14;
+      ItemJournalLine@1002 : Record 83;
+      Item@1003 : Record 27;
+      ValueEntry@1004 : Record 5802;
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [In-Transit Location]
+      // [SCENARIO 379431] Cost Adjustment should process non-transfer Item Ledger Entries on Transit Location.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+
+      // [GIVEN] Location with "Use As In-Transit" flag unchecked.
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+
+      // [GIVEN] Posted positive and negative Item entries with different unit costs.
+      CreateAndPostItemJournal(
+        ItemJournalLine,ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",
+        LibraryRandom.RandIntInRange(10,20),Location.Code,LibraryRandom.RandDecInRange(11,20,2),0);
+      CreateAndPostItemJournal(
+        ItemJournalLine,ItemJournalLine."Entry Type"::"Negative Adjmt.",Item."No.",
+        LibraryRandom.RandInt(10),Location.Code,LibraryRandom.RandDec(10,2),0);
+
+      // [GIVEN] "Use As In-Transit" field in Location is set to TRUE.
+      Location.VALIDATE("Use As In-Transit",TRUE);
+      Location.MODIFY(TRUE);
+
+      // [WHEN] Run "Adjust Cost - Item Entries" batch job.
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // [THEN] Value Entry for cost adjustment is created.
+      FindValueEntry(
+        ValueEntry,ValueEntry."Item Ledger Entry Type"::"Negative Adjmt.",ValueEntry."Entry Type"::"Direct Cost",
+        Item."No.",TRUE,Location.Code);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1003 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      LibrarySetupStorage.Restore;
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibrarySetupStorage.Save(DATABASE::"Sales & Receivables Setup");
+      LibrarySetupStorage.Save(DATABASE::"Purchases & Payables Setup");
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateAndApplySalesLine@24(VAR SalesLine@1003 : Record 37;SalesHeader@1004 : Record 36;No@1002 : Code[20];Quantity@1001 : Decimal;ApplToItemEntry@1000 : Integer);
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,No,Quantity);
+      SalesLine.VALIDATE("Appl.-to Item Entry",ApplToItemEntry);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournal@23(VAR ItemJournalLine@1001 : Record 83;EntryType@1006 : Option;ItemNo@1003 : Code[20];Quantity@1004 : Decimal;LocationCode@1008 : Code[10];UnitAmount@1007 : Decimal;AppliesToEntry@1005 : Integer);
+    VAR
+      ItemJournalBatch@1002 : Record 233;
+      ItemJournalTemplate@1000 : Record 82;
+    BEGIN
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Item);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,EntryType,ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.VALIDATE("Unit Amount",UnitAmount);
+      ItemJournalLine.VALIDATE("Applies-to Entry",AppliesToEntry);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseDocument@87(VAR PurchaseLine@1004 : Record 39;No@1012 : Code[20];Quantity@1002 : Decimal;Invoice@1000 : Boolean);
+    BEGIN
+      CreatePurchaseOrder(PurchaseLine,CreateVendor,No,Quantity);
+      PostPurchaseDocument(PurchaseLine,Invoice);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrderWithLineAmount@52(VAR PurchaseLine@1000 : Record 39);
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      CreatePurchaseOrder(PurchaseLine,CreateVendor,CreateItem('',Item."Costing Method"::FIFO),1 + LibraryRandom.RandInt(5));  // Take more than 1 Random integer Quantity to create Rounding Entry.
+      PurchaseLine.VALIDATE("Line Amount",PurchaseLine."Line Amount" + LibraryRandom.RandDec(100,2));  // Increase Line Amount using Random value.
+      PurchaseLine.MODIFY(TRUE);
+      PostPurchaseDocument(PurchaseLine,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostChargeItemPurchaseDocument@21(VAR PurchaseLine@1003 : Record 39;VendorNo@1001 : Code[20];PurchaseOdrerNo@1004 : Code[20];ItemNo@1005 : Code[20];ItemChargeNo@1008 : Code[20]) PostedPurchInvoiceNo : Code[20];
+    VAR
+      PurchaseHeader@1002 : Record 38;
+    BEGIN
+      CreatePurchaseHeader(PurchaseHeader,PurchaseHeader."Document Type"::Invoice,VendorNo);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::"Charge (Item)",ItemChargeNo,1);  // Taking 1 for Item Charge.
+      CreateItemChargeAssignment(PurchaseLine,PurchaseOdrerNo,ItemNo);
+      PostedPurchInvoiceNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostRevaluationJournal@46(ItemNo@1000 : Code[20];AppliesToEntry@1001 : Integer;InventoryValueRevalued@1005 : Decimal;UnitCostRevalued@1006 : Decimal) : Decimal;
+    VAR
+      ItemJournalBatch@1002 : Record 233;
+      ItemJournalLine@1003 : Record 83;
+      ItemJournalTemplate@1004 : Record 82;
+    BEGIN
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Revaluation);
+      ItemJournalLine.VALIDATE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.VALIDATE("Journal Batch Name",ItemJournalBatch.Name);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,ItemJournalLine."Entry Type"::Purchase,ItemNo,
+        -1);
+      ItemJournalLine.VALIDATE("Value Entry Type",ItemJournalLine."Value Entry Type"::Revaluation);
+      ItemJournalLine.VALIDATE("Applies-to Entry",AppliesToEntry);
+      ItemJournalLine.VALIDATE("Inventory Value (Revalued)",InventoryValueRevalued);
+      ItemJournalLine.VALIDATE("Unit Cost (Revalued)",UnitCostRevalued);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      EXIT((ItemJournalLine."Inventory Value (Revalued)" - ItemJournalLine."Inventory Value (Calculated)") / ItemJournalLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesDocument@16(VAR SalesLine@1004 : Record 37;No@1012 : Code[20];Quantity@1002 : Decimal;ApplToItemEntry@1000 : Integer;Invoice@1003 : Boolean);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CreateCustomer);
+      CreateAndApplySalesLine(SalesLine,SalesHeader,No,Quantity,ApplToItemEntry);
+      PostSalesDocument(SalesLine,Invoice);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesOrderWithMultiLine@54(ItemNo@1000 : Code[20];TotalCount@1001 : Integer;EntryNo@1005 : Integer);
+    VAR
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+      Count@1004 : Integer;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CreateCustomer);
+      FOR Count := 1 TO TotalCount DO
+        CreateAndApplySalesLine(SalesLine,SalesHeader,ItemNo,1,EntryNo);  // 1 is for Single Line Quantity.
+      PostSalesDocument(SalesLine,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesReturnOrder@25(VAR SalesLine@1004 : Record 37;No@1012 : Code[20];Quantity@1002 : Decimal;ApplFromItemEntry@1000 : Integer);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",CreateCustomer);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,No,Quantity);
+      SalesLine.VALIDATE("Appl.-from Item Entry",ApplFromItemEntry);
+      SalesLine.MODIFY(TRUE);
+      PostSalesDocument(SalesLine,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostServiceCreditMemo@103(VAR ServiceLine@1000 : Record 5902;ItemNo@1001 : Code[20];CustomerNo@1003 : Code[20]);
+    VAR
+      ServiceHeader@1002 : Record 5900;
+    BEGIN
+      CreateServiceDocument(
+        ServiceLine,ServiceHeader."Document Type"::"Credit Memo",CustomerNo,ItemNo,LibraryRandom.RandDec(100,2));  // Use random value for Quantity.
+      PostServiceOrder(ServiceLine,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostTransferOrder@38(VAR TransferHeader@1003 : Record 5740;ItemNo@1002 : Code[20];LocationCode@1000 : Code[10];Quantity@1001 : Decimal);
+    VAR
+      InTransitLocation@1005 : Record 14;
+      Location@1006 : Record 14;
+      TransferLine@1004 : Record 5741;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      LibraryWarehouse.CreateInTransitLocation(InTransitLocation);
+      LibraryWarehouse.CreateTransferHeader(TransferHeader,LocationCode,Location.Code,InTransitLocation.Code);
+      LibraryWarehouse.CreateTransferLine(TransferHeader,TransferLine,ItemNo,Quantity);
+      LibraryWarehouse.PostTransferOrder(TransferHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@18() : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItem@95(ItemCategoryCode@1003 : Code[10];CostingMethod@1002 : Option) : Code[20];
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Item Category Code",ItemCategoryCode);
+      Item.VALIDATE("Costing Method",CostingMethod);
+      Item.VALIDATE("Unit Price",LibraryRandom.RandDec(10,2));  // Using Random value for Unit Price.
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemChargeAssignment@15(VAR PurchaseLine@1005 : Record 39;PurchaseOrderNo@1003 : Code[20];ItemNo@1004 : Code[20]);
+    VAR
+      ItemChargeAssignmentPurch@1001 : Record 5805;
+      PurchRcptLine@1000 : Record 121;
+    BEGIN
+      FindPurchaseReceiptLine(PurchRcptLine,PurchaseOrderNo,ItemNo);
+      LibraryInventory.CreateItemChargeAssignPurchase(
+        ItemChargeAssignmentPurch,PurchaseLine,ItemChargeAssignmentPurch."Applies-to Doc. Type"::Receipt,
+        PurchRcptLine."Document No.",PurchRcptLine."Line No.",PurchRcptLine."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemWithSalesLineDiscount@80(VAR SalesLineDiscount@1000 : Record 7004);
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      // Use Random value for Minimum Quantity and Discount Percentage.
+      LibraryERM.CreateLineDiscForCustomer(
+        SalesLineDiscount,SalesLineDiscount.Type::Item,CreateItem('',Item."Costing Method"::Standard),
+        SalesLineDiscount."Sales Type"::Customer,CreateCustomer,WORKDATE,'','','',LibraryRandom.RandDec(10,2));
+      SalesLineDiscount.VALIDATE("Line Discount %",LibraryRandom.RandDec(10,2));
+      SalesLineDiscount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalBatch@32(VAR ItemJournalBatch@1002 : Record 233;ItemJournalTemplateType@1000 : Option);
+    VAR
+      ItemJournalTemplate@1001 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplateType);
+      LibraryInventory.CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Name);
+      LibraryUtility.GenerateGUID;  // To rectify Item Journal Batch error.
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalForRevaluation@11(ItemNo@1000 : Code[20]);
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalBatch@1002 : Record 233;
+      ItemJournalLine@1001 : Record 83;
+      ItemJournalTemplate@1006 : Record 82;
+      CalculatePer@1005 : 'Item Ledger Entry,Item';
+      CalcBase@1004 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      Item.SETRANGE("No.",ItemNo);
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Revaluation);
+      LibraryCosting.CreateRevaluationJournal(
+        ItemJournalBatch,Item,WORKDATE,LibraryUtility.GenerateGUID,CalculatePer::"Item Ledger Entry",FALSE,FALSE,FALSE,CalcBase::" ",
+        FALSE);
+      ItemJournalLine.SETRANGE("Value Entry Type",ItemJournalLine."Value Entry Type"::Revaluation);
+      ItemJournalLine.SETRANGE("Item No.",ItemNo);
+      ItemJournalLine.FINDFIRST;
+      ItemJournalLine.VALIDATE("Unit Cost (Revalued)",ItemJournalLine."Unit Cost (Calculated)" + LibraryRandom.RandDec(10,2));  // Use Random value for Unit Cost Revalued.
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithInventoryValueZero@50(InventoryValueZero@1000 : Boolean) : Code[20];
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Inventory Value Zero",InventoryValueZero);
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateVendorInvoiceDisc@49(VendorCode@1002 : Code[20]) : Code[20];
+    VAR
+      VendorInvoiceDisc@1000 : Record 24;
+    BEGIN
+      LibraryERM.CreateInvDiscForVendor(VendorInvoiceDisc,VendorCode,'',LibraryRandom.RandInt(10));  // Using Random value for Minimum amount
+      VendorInvoiceDisc.VALIDATE("Discount %",LibraryRandom.RandInt(10));   // Using random value Random Disocunt %
+      VendorInvoiceDisc.MODIFY(TRUE);
+      EXIT(VendorInvoiceDisc.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderAndModifyLine@45(VAR PurchaseLine@1002 : Record 39;InventoryValueZero@1000 : Boolean);
+    BEGIN
+      CreatePurchaseOrder(
+        PurchaseLine,CreateVendorWithInvoiceDiscount,CreateItemWithInventoryValueZero(InventoryValueZero),
+        LibraryRandom.RandInt(10));  // Using Random value for Quantity.
+      PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandInt(50));  // Using Random value for Direct Unit Cost.
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@99(VAR PurchaseLine@1002 : Record 39;BuyFromVendorNo@1004 : Code[20];ItemNo@1005 : Code[20];Quantity@1000 : Decimal);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+    BEGIN
+      CreatePurchaseHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,BuyFromVendorNo);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeader@96(VAR PurchaseHeader@1003 : Record 38;DocumentType@1000 : Option;BuyFromVendorNo@1002 : Code[20]);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocumentType,BuyFromVendorNo);
+      PurchaseHeader.VALIDATE("Vendor Cr. Memo No.",PurchaseHeader."No.");
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@41(VAR PurchaseLine@1005 : Record 39;PurchaseHeader@1000 : Record 38;Type@1003 : Option;No@1004 : Code[20];Quantity@1001 : Decimal);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,Type,No,Quantity);
+      PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(10,2));  // Using Random value for Direct Unit Cost.
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceDocument@92(VAR ServiceLine@1000 : Record 5902;DocumentType@1002 : Option;CustomerNo@1001 : Code[20];No@1003 : Code[20];Quantity@1005 : Decimal);
+    VAR
+      ServiceHeader@1006 : Record 5900;
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,DocumentType,CustomerNo);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,No);
+      ServiceLine.VALIDATE(Quantity,Quantity);
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceAndPurchaseOrder@31(VAR PurchaseLine2@1003 : Record 39);
+    VAR
+      Item@1000 : Record 27;
+      PurchaseLine@1001 : Record 39;
+      ServiceHeader@1014 : Record 5900;
+      ServiceLine@1012 : Record 5902;
+    BEGIN
+      // Ship a Service Order, Receive a Purchase Order and Receive and Invoice another Purchase Order.
+      CreateServiceDocumentAndUpdateServiceLine(
+        ServiceLine,CreateItem('',Item."Costing Method"::FIFO),CreateCustomer,LibraryRandom.RandDec(10,2));  // Using Random value for Quantity.
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      CreateAndPostPurchaseDocument(PurchaseLine,ServiceLine."No.",ServiceLine.Quantity,FALSE);  // False for Invoice.
+
+      // Create another Purchase Order and Post as Receive and Invoice with Direct Unit Cost greater than above Purchase Order's Direct Unit Cost.
+      CreatePurchaseOrder(PurchaseLine2,PurchaseLine."Buy-from Vendor No.",PurchaseLine."No.",PurchaseLine.Quantity);
+      PurchaseLine2.VALIDATE("Direct Unit Cost",PurchaseLine."Direct Unit Cost" + 10);
+      PurchaseLine2.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CreateServiceDocumentAndUpdateServiceLine@94(VAR ServiceLine@1000 : Record 5902;ItemNo@1004 : Code[20];CustomerNo@1001 : Code[20];Quantity@1006 : Decimal);
+    VAR
+      ServiceHeader@1003 : Record 5900;
+      ServiceItem@1002 : Record 5940;
+      ServiceItemLine@1005 : Record 5901;
+    BEGIN
+      CreateServiceDocument(ServiceLine,ServiceHeader."Document Type"::Order,CustomerNo,ItemNo,Quantity);
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceInvoiceFromGetShipmentLines@66(VAR ServiceLine@1001 : Record 5902;CustomerNo@1003 : Code[20]);
+    VAR
+      ServiceHeader@1000 : Record 5900;
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,CustomerNo);
+      ServiceLine.VALIDATE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.VALIDATE("Document No.",ServiceHeader."No.");
+      CODEUNIT.RUN(CODEUNIT::"Service-Get Shipment",ServiceLine);
+    END;
+
+    LOCAL PROCEDURE CreateVendor@85() : Code[20];
+    VAR
+      Vendor@1000 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      EXIT(Vendor."No.");
+    END;
+
+    LOCAL PROCEDURE CreateVendorWithInvoiceDiscount@44() : Code[20];
+    VAR
+      Vendor@1000 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("Invoice Disc. Code",CreateVendorInvoiceDisc(Vendor."No."));
+      Vendor.MODIFY(TRUE);
+      EXIT(Vendor."No.");
+    END;
+
+    LOCAL PROCEDURE FindValueEntry@63(VAR ValueEntry@1000 : Record 5802;ItemLedgerEntryType@1004 : Option;EntryType@1003 : Option;ItemNo@1001 : Code[20];Adjustment@1002 : Boolean;LocationCode@1005 : Code[10]);
+    BEGIN
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ItemLedgerEntryType);
+      ValueEntry.SETRANGE("Entry Type",EntryType);
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.SETRANGE(Adjustment,Adjustment);
+      ValueEntry.SETRANGE("Location Code",LocationCode);
+      ValueEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindItemLedgerEntry@64(VAR ItemLedgerEntry@1000 : Record 32;EntryType@1001 : Option;ItemNo@1002 : Code[20];Open@1003 : Boolean);
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Entry Type",EntryType);
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.SETRANGE(Open,Open);
+      ItemLedgerEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindPurchaseReceiptLine@22(VAR PurchRcptLine@1000 : Record 121;OrderNo@1003 : Code[20];ItemNo@1004 : Code[20]);
+    BEGIN
+      PurchRcptLine.SETRANGE("Order No.",OrderNo);
+      PurchRcptLine.SETRANGE("No.",ItemNo);
+      PurchRcptLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindServiceShipmentLine@72(VAR ServiceShipmentLine@1000 : Record 5991;OrderNo@1001 : Code[20]);
+    BEGIN
+      ServiceShipmentLine.SETRANGE("Order No.",OrderNo);
+      ServiceShipmentLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE PostChargeOnPurchaseDocument@75(VAR PurchaseLine@1000 : Record 39);
+    VAR
+      Item@1005 : Record 27;
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine2@1002 : Record 39;
+      ItemChargeAssignmentPurch@1001 : Record 5805;
+    BEGIN
+      CreatePurchaseOrder(
+        PurchaseLine,CreateVendor,CreateItem('',Item."Costing Method"::Standard),LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      CreatePurchaseLine(
+        PurchaseLine2,PurchaseHeader,PurchaseLine.Type::"Charge (Item)",LibraryInventory.CreateItemChargeNo,1);  // Taking 1 for Item Charge.
+      LibraryInventory.CreateItemChargeAssignPurchase(
+        ItemChargeAssignmentPurch,PurchaseLine2,ItemChargeAssignmentPurch."Applies-to Doc. Type"::Order,PurchaseLine."Document No.",
+        PurchaseLine."Line No.",PurchaseLine."No.");
+      PostPurchaseDocument(PurchaseLine,TRUE);
+    END;
+
+    LOCAL PROCEDURE PostInventoryCostToGL@37(PostMethod@1001 : Option;ItemNo@1002 : Code[20];DocumentNo@1003 : Code[20]);
+    VAR
+      PostValueEntryToGL@1104 : Record 5811;
+      PostInventoryCostToGL@1000 : Report 1002;
+    BEGIN
+      COMMIT;
+      PostValueEntryToGL.SETRANGE("Item No.",ItemNo);
+      PostInventoryCostToGL.InitializeRequest(PostMethod,DocumentNo,TRUE);
+      PostInventoryCostToGL.SETTABLEVIEW(PostValueEntryToGL);
+      PostInventoryCostToGL.USEREQUESTPAGE(FALSE);
+    END;
+
+    LOCAL PROCEDURE PostPartialPurchLineWithUpdate@35(VAR PurchaseLine@1000 : Record 39);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+    BEGIN
+      PurchaseLine.VALIDATE("Qty. to Invoice",PurchaseLine."Qty. to Invoice" / 2);  // post partial Quantity.
+      PurchaseLine.MODIFY(TRUE);
+      PostPurchaseDocument(PurchaseLine,TRUE);
+      PurchaseLine.GET(PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.");
+      PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(10,2));  // Using Random value for Direct Unit Cost.
+      PurchaseLine.MODIFY(TRUE);
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",LibraryUtility.GenerateGUID);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE PostPurchaseDocument@42(PurchaseLine@1000 : Record 39;Invoice@1003 : Boolean);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+    BEGIN
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,Invoice);
+    END;
+
+    LOCAL PROCEDURE PostSalesDocument@43(SalesLine@1000 : Record 37;Invoice@1003 : Boolean);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,Invoice);
+    END;
+
+    LOCAL PROCEDURE PostServiceOrder@68(ServiceLine@1000 : Record 5902;Invoice@1001 : Boolean;Consume@1003 : Boolean);
+    VAR
+      ServiceHeader@1002 : Record 5900;
+    BEGIN
+      ServiceHeader.GET(ServiceLine."Document Type",ServiceLine."Document No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,Consume,Invoice);
+    END;
+
+    LOCAL PROCEDURE UndoServiceShipmentLine@70(OrderNo@1000 : Code[20]);
+    VAR
+      ServiceShipmentLine@1001 : Record 5991;
+    BEGIN
+      LibraryVariableStorage.Enqueue(UndoShipment);  // Enqueue value for Confirm handler.
+      FindServiceShipmentLine(ServiceShipmentLine,OrderNo);
+      CODEUNIT.RUN(CODEUNIT::"Undo Service Shipment Line",ServiceShipmentLine);
+    END;
+
+    LOCAL PROCEDURE UndoServiceConsumptionLine@71(OrderNo@1002 : Code[20]);
+    VAR
+      ServiceShipmentLine@1000 : Record 5991;
+    BEGIN
+      LibraryVariableStorage.Enqueue(UndoConsumption);  // Enqueue value for Confirm handler.
+      FindServiceShipmentLine(ServiceShipmentLine,OrderNo);
+      CODEUNIT.RUN(CODEUNIT::"Undo Service Consumption Line",ServiceShipmentLine);
+    END;
+
+    LOCAL PROCEDURE UpdateQtyToConsumeOnServiceLine@88(ServiceLine@1000 : Record 5902;QtyToConsume@1001 : Decimal);
+    BEGIN
+      ServiceLine.VALIDATE("Qty. to Consume",QtyToConsume);
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyCostAmountActual@27(ValueEntry@1000 : Record 5802;ItemLedgerEntryType@1002 : Option;EntryType@1003 : Option;ItemNo@1004 : Code[20];Adjustment@1006 : Boolean;LocationCode@1005 : Code[10];CostAmountActual@1001 : Decimal);
+    BEGIN
+      FindValueEntry(ValueEntry,ItemLedgerEntryType,EntryType,ItemNo,Adjustment,LocationCode);
+      Assert.AreNearlyEqual(
+        CostAmountActual,ValueEntry."Cost Amount (Actual)",LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationError,ValueEntry.FIELDCAPTION("Cost Amount (Actual)"),CostAmountActual));
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntryForItemCharge@29(ItemNo@1002 : Code[20];ItemChargeNo@1003 : Code[20];CostAmountActual@1001 : Decimal);
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::Purchase);
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.SETRANGE("Item Charge No.",ItemChargeNo);
+      ValueEntry.FINDFIRST;
+      ValueEntry.TESTFIELD("Cost Amount (Actual)",CostAmountActual);
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntry@7(EntryType@1002 : Option;ItemNo@1001 : Code[20];CostAmountExpected@1006 : Decimal;InvoicedQuantity@1004 : Decimal;CostAmountActual@1005 : Decimal;Open@1007 : Boolean;AppliedEntryToAdjust@1000 : Boolean);
+    VAR
+      ItemLedgerEntry@1003 : Record 32;
+    BEGIN
+      FindItemLedgerEntry(ItemLedgerEntry,EntryType,ItemNo,Open);
+      ItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)","Cost Amount (Expected)");
+      ItemLedgerEntry.TESTFIELD("Invoiced Quantity",InvoicedQuantity);
+      ItemLedgerEntry.TESTFIELD("Applied Entry to Adjust",AppliedEntryToAdjust);
+      Assert.AreNearlyEqual(
+        CostAmountActual,ItemLedgerEntry."Cost Amount (Actual)",LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationError,ItemLedgerEntry.FIELDCAPTION("Cost Amount (Actual)"),CostAmountActual));
+      Assert.AreNearlyEqual(
+        CostAmountExpected,ItemLedgerEntry."Cost Amount (Expected)",LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationError,ItemLedgerEntry.FIELDCAPTION("Cost Amount (Expected)"),CostAmountExpected));
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntryCost@17(ItemNo@1000 : Code[20]);
+    VAR
+      ValueEntry@1001 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::Purchase);
+      FindValueEntry(ValueEntry,ValueEntry."Item Ledger Entry Type"::Purchase,ValueEntry."Entry Type"::"Direct Cost",ItemNo,FALSE,'');
+      ValueEntry.TESTFIELD("Cost Posted to G/L",ValueEntry."Invoiced Quantity" * ValueEntry."Cost per Unit");
+    END;
+
+    LOCAL PROCEDURE VerifyValueByAverageValueEntry@62(ItemNo@1000 : Code[20];Quantity@1001 : Decimal;ValuedByAverageCost@1003 : Boolean);
+    VAR
+      ValueEntry@1002 : Record 5802;
+    BEGIN
+      FindValueEntry(ValueEntry,ValueEntry."Item Ledger Entry Type"::Sale,ValueEntry."Entry Type"::"Direct Cost",ItemNo,TRUE,'');
+      ValueEntry.TESTFIELD("Valued By Average Cost",ValuedByAverageCost);
+      ValueEntry.TESTFIELD("Valued Quantity",Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyItemCategoryOnItemLedger@65(ItemNo@1001 : Code[20];ItemCategoryCode@1002 : Code[10]);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      FindItemLedgerEntry(ItemLedgerEntry,ItemLedgerEntry."Entry Type"::Sale,ItemNo,FALSE);
+      ItemLedgerEntry.TESTFIELD("Item Category Code",ItemCategoryCode);
+    END;
+
+    LOCAL PROCEDURE VerifyCostOnPostedServiceInvStatistics@166(OrderNo@1000 : Code[20];PreAssignedNo@1006 : Code[20];CostLCY@1001 : Decimal;TotalAdjCostLCY@1005 : Decimal);
+    VAR
+      ServiceInvHeader@1002 : Record 5992;
+      PostedServiceInvoice@1004 : TestPage 5978;
+      ServiceInvStatistics@1003 : TestPage 6033;
+    BEGIN
+      ServiceInvHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceInvHeader.FINDFIRST;
+      ServiceInvStatistics.TRAP;
+      PostedServiceInvoice.OPENVIEW;
+      PostedServiceInvoice.GOTORECORD(ServiceInvHeader);
+      PostedServiceInvoice.Statistics.INVOKE;
+      Assert.AreNearlyEqual(
+        CostLCY,ServiceInvStatistics.CostLCY.ASDECIMAL,LibraryERM.GetAmountRoundingPrecision,STRSUBSTNO(ValidationError,Cost,CostLCY));
+      Assert.AreNearlyEqual(
+        TotalAdjCostLCY,ServiceInvStatistics.TotalAdjCostLCY.ASDECIMAL,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationError,Cost,TotalAdjCostLCY));
+    END;
+
+    LOCAL PROCEDURE VerifyCostOnPostedServiceCrMemoStatistics@47(ServiceDocNo@1000 : Code[20];CostLCY@1001 : Decimal;TotalAdjCostLCY@1005 : Decimal);
+    VAR
+      ServiceCrMemoHeader@1002 : Record 5994;
+      PostedServiceCreditMemo@1004 : TestPage 5972;
+      ServiceCreditMemoStatistics@1003 : TestPage 6034;
+    BEGIN
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",ServiceDocNo);
+      ServiceCrMemoHeader.FINDFIRST;
+      ServiceCreditMemoStatistics.TRAP;
+      PostedServiceCreditMemo.OPENVIEW;
+      PostedServiceCreditMemo.GOTORECORD(ServiceCrMemoHeader);
+      PostedServiceCreditMemo.Statistics.INVOKE;
+      ServiceCreditMemoStatistics.CostLCY.ASSERTEQUALS(CostLCY);
+      ServiceCreditMemoStatistics.TotalAdjCostLCY.ASSERTEQUALS(TotalAdjCostLCY);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceOrderStatistics@107(No@1000 : Code[20];OriginalCost@1001 : Decimal;AdjustedCost@1002 : Decimal);
+    VAR
+      ServiceOrder@1003 : TestPage 5900;
+    BEGIN
+      // Enqueue values for 'ServiceOrderStatisticsPageHandler' and verification done in 'ServiceOrderStatisticsPageHandler'.
+      LibraryVariableStorage.Enqueue(OriginalCost);
+      LibraryVariableStorage.Enqueue(AdjustedCost);
+      ServiceOrder.OPENVIEW;
+      ServiceOrder.FILTER.SETFILTER("No.",No);
+      ServiceOrder.Statistics.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE ExpectedMessageHandler@61(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,ExpectedMessage) > 0,Message);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@57(ConfirmMessage@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    VAR
+      ExpectedMessage@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ExpectedMessage);  // Dequeue Variable.
+      Assert.IsTrue(STRPOS(ConfirmMessage,ExpectedMessage) > 0,ConfirmMessage);
+      Reply := TRUE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ShipmentLinePageHandler@79(VAR GetServiceShipmentLines@1000 : Page 5994;VAR Response@1001 : Action);
+    VAR
+      ServiceShipmentHeader@1002 : Record 5990;
+      ServiceShipmentLine@1003 : Record 5991;
+      OrderNo@1004 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(OrderNo);
+      ServiceShipmentHeader.SETRANGE("Order No.",OrderNo);
+      ServiceShipmentHeader.FINDFIRST;
+      ServiceShipmentLine.SETRANGE("Document No.",ServiceShipmentHeader."No.");
+      ServiceShipmentLine.FINDFIRST;
+
+      GetServiceShipmentLines.SETRECORD(ServiceShipmentLine);
+      GetServiceShipmentLines.GetShipmentLines;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ServiceOrderStatisticsPageHandler@77(VAR ServiceOrderStatistics@1000 : TestPage 5914);
+    VAR
+      CostLCY@1002 : Variant;
+      TotalAdjCostLCY@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(CostLCY);
+      LibraryVariableStorage.Dequeue(TotalAdjCostLCY);
+      Assert.AreNearlyEqual(
+        CostLCY,ServiceOrderStatistics.OriginalCostLCY.ASDECIMAL,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationError,Cost,CostLCY));
+      Assert.AreNearlyEqual(
+        TotalAdjCostLCY,ServiceOrderStatistics.AdjustedCostLCY.ASDECIMAL,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationError,Cost,TotalAdjCostLCY));
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@56(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Adjust Cost Item Entries] [SCM]
+      Test for Costing Batch Jobs:
+       1. Verify Item Ledger Entry after running Adjust Cost Item Entries.
+       2. Verify Value Entry after running Post Inventory Cost To G/L batch job using Post Method 'Per Entry'.
+       3. Verify Value Entry after running Post Invt Cost To G/L batch job using Post Method 'Per Posting Group'.
+       4. Verify Value Entry after running Post Inventory Cost To G/L - Test batch job using Post Method 'Per Entry'.
+       5. Verify Value Entry after running Post Inventory Cost To G/L - Test batch job using Post Method 'Per Posting Group'.
+       6. Verify Warning after running Post Inventory Cost To G/L - Test batch job Using Expected Cost Posting To G/L True.
+       7. Verify Item Category Code on Item Ledger Entry and Value Entry for Average costing after running Adjust Cost Item Entries.
+       8. Verify Error message while running Adjust Cost Item Entries batch job with both Item No. Filter and Item Category Filter.
+       9. Verify Variant Code and Valued Quantity on Value Entry for Standard costing after running Adjust Cost Item Entries.
+      10. Verify Chage Item, Adjustment and Valued By Average Cost field in Value Entry after running Adjust Cost Item Entries.
+      11. Verify Value Entry for applied and Invoiced Sales Order after running Adjust Cost Item Entries.
+      12. Verify Value Entry for applied but not Invoiced Sales Order.
+      13. Verify Value Entry after posting Revaluation Journal and running Adjust Cost Item Entries.
+      14. Verify Value Entry after posting Revaluation Journal for remaining Quantity and running Adjust Cost Item Entries.
+      15. Verify Value Entry for Rounding after running Adjust Cost Item Entries.
+      16. Verify Value Entry for unapplied Invoiced Sales Order after running Adjust Cost Item Entries.
+      17. Verify Value Entry after creating Transfer Order,posting Revaluation Journal and running Adjust Cost Item Entries.
+      18. Verify Value Entry for fixed application after running Adjust Cost Item Entries.
+      19. Check the Item cost when CalcInvDiscount is true and InventoryValueZero is false.
+      20. Check the Item cost when CalcInvDiscount is true and InventoryValueZero is true.
+      21. Check the Item cost when CalcInvDiscount is false and InventoryValueZero is true.
+      22. Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order.
+      23. Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Revaluation Journal and running Adjust Cost Item Entries.
+      24. Verify Original Cost and Adjusted Cost on posted Services Credit Memo Statistics after posting Service Credit Memo and running Adjust Cost Item Entries.
+      25. Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order When Line Discount is defined for Item.
+      26. Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Revaluation Journal When Line Discount is defined for Item.
+      27. Verify Original Cost and Adjusted Cost on posted Services Credit Memo Statistics after posting Service Credit Memo When Line Discount is defined for Item.
+      28. Verify Original Cost and Adjusted Cost on Services Order Statistics after posting Service Order as Ship.
+      29. Verify Original Cost and Adjusted Cost on Services Order Statistics after posting Service Order as Ship and running Adjust Cost Item Entries.
+      30. Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order using Get Service Shipment Lines.
+      31. Verify Original Cost and Adjusted Cost on Services Order Statistics after posting Service Order as ship and consume.
+      32. Verify Original Cost and Adjusted Cost on Services Order Statistics when undo Shipment Line and running Adjust Cost Item Entries.
+      33. Verify Original Cost and Adjusted Cost on Services Order Statistics when undo consumption Line and running Adjust Cost Item Entries.
+      34. Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order and Purchase Order with Charge Assignment.
+      35. Verify Original Cost and Adjusted Cost on posted Services Credit Memo Statistics after posting Service Credit Memo and Purchase Order with Charge Assignment.
+      36. Verify Original Cost and Adjusted Cost on on posted Services Invoice Statistics after posting Service Invoice using Get Service Shipment Lines and Purchase Order with Charge Assignment.
+      37. Verify Original Cost and Adjusted Cost on posted Services Invoice Statistics after posting Service Order and Purchase Order with Charge Assignment, running Adjust Cost Item Entries.
+
+      TFS_TS_ID = 290213
+      Cover Test cases:
+      ----------------------------------------------------------------------------------------------
+      Test Function Name                                                                     TFS ID
+      ----------------------------------------------------------------------------------------------
+      AppliedEntriesUsingAdjustCostItemEntries                                               128042
+      PostInventoryCostToGLWithPostMethodPerEntry                                            128043
+      PostInventoryCostToGLWithPerPostingGroup                                               128043
+      PostInvtCostToGLTestUsingPostMethodPerEntry                                            128044
+      PostInvtCostToGLTestUsingPerPostingGroup                                               128044
+      PostInventoryCostToGLUsingExpectedCostToGLTrue                                         128044
+
+      TFS_TS_ID = 290214
+      Cover Test cases:
+      ----------------------------------------------------------------------------------------------
+      Test Function Name                                                                     TFS ID
+      ----------------------------------------------------------------------------------------------
+      AdjustCostItemEntriesUsingItemCategoryCode, ErrorWithItemNoFilterAndItemCategoryFilter 128095
+      VarianceInValueEntryUsingItemWithStandardCost, AdjustCostItemEntriesUsingAverageCost   128096
+
+      TFS_TS_ID = 295131
+      Cover Test cases:
+      ----------------------------------------------------------------------------------------------
+      Test Function Name                                                                     TFS ID
+      ----------------------------------------------------------------------------------------------
+      AdjustAppliedFromEntries, AdjustmentOfInvoicedAndExpectedNegativeEntries
+      AdjustmentForRevaluation, AdjustmentForPartialRevaluation, InsertionOfRoundingEntries
+      AdjustmentWithQuantityShippedNotApplied
+      AdjustTransferredFromEntries, AdjustFixedApplications                                  127976
+
+      TFS_TS_ID = 295047
+      Cover Test cases:
+      ----------------------------------------------------------------------------------------------
+      Test Function Name                                                                     TFS ID
+      ----------------------------------------------------------------------------------------------
+      UnitCostUsingCalcInvDisc, UnitCostUsingCalcInvDiscAndSetInvValueZero,
+      UnitCostUsingSetInvValueZero                                                           227396
+
+      TFS_TS_ID = 295205
+      Cover Test cases:
+      ----------------------------------------------------------------------------------------------
+      Test Function Name                                                                     TFS ID
+      ----------------------------------------------------------------------------------------------
+      PstdServInvStatisticsUsingServOrder, PstdServInvStatisticsWithRevAndAdjmt,
+      PstdServCrMemoStatisticsWithAdjmt                                                      128088
+
+      TFS_TS_ID = 295206
+      Cover Test cases:
+      -----------------------------------------------------------------------------------------------------
+      Test Function Name                                                                             TFS ID
+      -----------------------------------------------------------------------------------------------------
+      PstdServInvStatisticsUsingServOrderWithLineDisc, PstdServInvStatisticsWithRevAndWithoutAdjmt,
+      PstdServCrMemoStatisticsWithoutAdjmt                                                           128089
+      ServOrderStatisticsPostingServOrderAsShip, ServOrderStatisticsPostingServOrderAsShipWithAdjmt,
+      PstdServInvStatisticsUsingGetShipmentLines                                                     128091
+
+      TFS_TS_ID = 295207
+      Cover Test cases:
+      -----------------------------------------------------------------------------------------------------
+      Test Function Name                                                                             TFS ID
+      -----------------------------------------------------------------------------------------------------                                                                             TFS ID
+      ServOrderStatisticsPostingServOrderAsConsume, ServOrderStatisticsAfterUndoShipmentWithAdjmt,
+      ServOrderStatisticsAfterUndoConsumptionWithAdjmt                                               128093
+
+      TFS_TS_ID = 294955
+      Cover Test cases:
+      ------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                             TFS ID
+      ------------------------------------------------------------------------------------------------------
+      PstdServInvStatisticsWithChargeAssignment, PstdServCrMemoStatisticsWithChargeAssignment,
+      PstdServInvStatisticsUsingGetShipmentLinesWithChrgAssgnt,
+      PstdServInvStatisticsWithChargeAssignmentWithAdjmt                                             128090
+    }
+    END.
+  }
+}
+

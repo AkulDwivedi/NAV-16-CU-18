@@ -1,0 +1,529 @@
+OBJECT Codeunit 16510 Subcontracting Post Batch
+{
+  OBJECT-PROPERTIES
+  {
+    Date=24-04-16;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00.45778;
+  }
+  PROPERTIES
+  {
+    TableNo=13713;
+    OnRun=BEGIN
+            IF "No." = '' THEN
+              EXIT;
+            TESTFIELD("Posting Date");
+            BuyfromVendorNo := "Subcontractor No.";
+            CheckQuantitytoSendReceive("No.",TRUE);
+            CreateDeliveryChallanHeader("Posting Date");
+            PurchLine2.RESET;
+            PurchLine2.SETRANGE("Document Type",PurchLine2."Document Type"::Order);
+            PurchLine2.SETRANGE("Buy-from Vendor No.","Subcontractor No.");
+            PurchLine2.SETRANGE("Applies-to ID (Delivery)","No.");
+            PurchLine2.SETRANGE(Subcontracting,TRUE);
+            IF PurchLine2.FINDSET THEN BEGIN
+              REPEAT
+                PurchLine2.SubConSend := TRUE;
+                SubOrderComponentList.RESET;
+                SubOrderComponentList.SETRANGE("Document No.",PurchLine2."Document No.");
+                SubOrderComponentList.SETRANGE("Document Line No.",PurchLine2."Line No.");
+                SubOrderComponentList.SETRANGE("Parent Item No.",PurchLine2."No.");
+                CreateDeliveryChallan(SubOrderComponentList,PurchLine2);
+                SubOrderComponentList.FINDSET;
+                REPEAT
+                  SubOrderComponentList.TESTFIELD("Job Work Return Period");
+                  IF SubOrderComponentList."Quantity To Send" <> 0 THEN BEGIN
+                    FillSendCompItemJnlLineAndPost(SubOrderComponentList);
+                    SubOrderComponentList."Quantity To Send" := 0;
+                  END;
+                  IF SubOrderComponentList."Qty. for Rework" <> 0 THEN BEGIN
+                    RecieveBackCompRW(SubOrderComponentList);
+                    SendAgain(SubOrderComponentList);
+                    SubOrderComponentList."Qty. for Rework" := 0;
+                  END;
+                  UpdateExciseInChallan(DeliveryChallanHeader,PurchLine2."Document No.",PurchLine2."Line No.");
+                  SubOrderComponentList.MODIFY;
+                UNTIL SubOrderComponentList.NEXT = 0;
+                PurchLine2."Qty. to Reject (Rework)" := 0;
+                PurchLine2."Deliver Comp. For" := 0;
+                PurchLine2."Applies-to ID (Delivery)" := '';
+                PurchLine2.MODIFY;
+              UNTIL PurchLine2.NEXT = 0;
+              MODIFY;
+              MESSAGE(Text005,DeliveryChallanHeader."No.");
+              "Posting Date" := 0D;
+              MODIFY;
+            END ELSE
+              ERROR(Text001);
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SubOrderComponentList@1280000 : Record 16321;
+      ItemJnlLine@1280002 : Record 83;
+      SourceCodeSetup@1280003 : Record 242;
+      DeliveryChallanHeader@1500014 : Record 16323;
+      PurchLine2@1500006 : Record 39;
+      Vendor@1500002 : Record 23;
+      ItemJnlPostLine@1280004 : Codeunit 22;
+      SubcontractingPost@1500008 : Codeunit 16360;
+      DeliveryChallanNo@1280005 : Code[20];
+      Text000@1280006 : TextConst 'ENU=Not Enough Inventory Available at Vendor Location for this order;ENN=Not Enough Inventory Available at Vendor Location for this order';
+      Text001@1280010 : TextConst 'ENU=Nothing to Send;ENN=Nothing to Send';
+      Text002@1500000 : TextConst 'ENU=Do you want to Post the Receipt and Report the Consumption on the Received Material;ENN=Do you want to Post the Receipt and Report the Consumption on the Received Material';
+      BuyfromVendorNo@1500001 : Code[20];
+      NextlineNo@1500003 : Integer;
+      Text003@1500004 : TextConst 'ENU="There is nothing to send in Document Type=%1, Document No.=%2 and Line No.=%3.";ENN="There is nothing to send in Document Type=%1, Document No.=%2 and Line No.=%3."';
+      Text004@1500005 : TextConst 'ENU=Nothing to receive.;ENN=Nothing to receive.';
+      Text005@1500007 : TextConst 'ENU="Items sent against Delivery Challan No. = %1.";ENN="Items sent against Delivery Challan No. = %1."';
+      Text006@1500009 : TextConst 'ENU=The %1 does not match the quantity defined in item tracking.;ENN=The %1 does not match the quantity defined in item tracking.';
+      SubconOrderNo@1500025 : Code[20];
+
+    PROCEDURE FillSendCompItemJnlLineAndPost@1280000(SubOrderCompList@1280000 : Record 16321);
+    VAR
+      ItemJnlLine@1280001 : Record 83;
+      ItemJnlPostLine@1280002 : Codeunit 22;
+      Item@1280003 : Record 27;
+      ExciseInsertRGRegister@1500000 : Codeunit 13701;
+      Inbound@1500006 : Boolean;
+      SNRequired@1500005 : Boolean;
+      LotRequired@1500004 : Boolean;
+      SNInfoRequired@1500003 : Boolean;
+      LotInfoReguired@15000015 : Boolean;
+      ItemTrackingCode@1500007 : Record 6502;
+      ItemTrackingManagement@1500008 : Codeunit 6500;
+      CheckTrackingLine@1500009 : Boolean;
+      TrackingQtyHandled@1500011 : Decimal;
+      TrackingQtyToHandle@1500010 : Decimal;
+      QuantitySent@1500012 : Decimal;
+    BEGIN
+      WITH SubOrderCompList DO BEGIN
+        ItemJnlLine.INIT;
+        ItemJnlLine."Posting Date" := DeliveryChallanHeader."Challan Date";
+        ItemJnlLine."Document Date" := DeliveryChallanHeader."Challan Date";
+        ItemJnlLine."Source Type" := ItemJnlLine."Source Type"::Item;
+        ItemJnlLine."Document No." := "Production Order No.";
+        ItemJnlLine."External Document No." := DeliveryChallanNo;
+        ItemJnlLine."Subcon Order No." := SubconOrderNo;
+        ItemJnlLine."Order Type" := ItemJnlLine."Order Type"::Production;
+        ItemJnlLine."Order No." := "Production Order No.";
+        ItemJnlLine."Order Line No." := "Production Order Line No.";
+        ItemJnlLine."Prod. Order Comp. Line No." := "Line No.";
+        ItemJnlLine."Location Code" := "Company Location" ;
+        ItemJnlLine."New Location Code" := "Vendor Location";
+        ItemJnlLine."Entry Type" := ItemJnlLine."Entry Type"::Transfer;
+        ItemJnlLine."Item No." := "Item No.";
+        ItemJnlLine.Description := Description;
+        ItemJnlLine."Gen. Prod. Posting Group" := "Gen. Prod. Posting Group";
+        ItemJnlLine.Quantity := "Quantity To Send";
+        ItemJnlLine."Unit of Measure Code" := "Unit of Measure Code";
+        ItemJnlLine."Qty. per Unit of Measure" := "Quantity per";
+        ItemJnlLine."Invoiced Quantity" := "Quantity To Send";
+        ItemJnlLine."Unit of Measure Code" := "Unit of Measure Code";
+        ItemJnlLine."Qty. per Unit of Measure" := "Qty. per Unit of Measure";
+        ItemJnlLine."Quantity (Base)" := "Quantity To Send (Base)";
+        ItemJnlLine."Invoiced Qty. (Base)" := "Quantity To Send (Base)";
+        ItemJnlLine.Subcontracting := TRUE;
+        IF "Applies-to Entry (Sending)" <> 0 THEN
+          ItemJnlLine."Applies-to Entry" := "Applies-to Entry (Sending)";
+        Item.GET("Item No.");
+        ItemJnlLine."Variant Code" := "Variant Code";
+        ItemJnlLine."Item Category Code" := Item."Item Category Code";
+        ItemJnlLine."Product Group Code" := Item."Product Group Code";
+        ItemJnlLine."Inventory Posting Group" := Item."Inventory Posting Group";
+        ItemJnlLine."Gen. Prod. Posting Group" := "Gen. Prod. Posting Group";
+        ItemJnlLine."Dimension Set ID" := "Dimension Set ID";
+
+        IF Item."Excise Accounting Type" = Item."Excise Accounting Type"::"With CENVAT" THEN
+          IF Item."Excise Prod. Posting Group" <> '' THEN
+            IF Item."Capital Item" THEN
+              ExciseInsertRGRegister.InsertRG23CPartISubCon(ItemJnlLine,0)
+            ELSE
+              ExciseInsertRGRegister.InsertRG23APartISubCon(ItemJnlLine,0);
+
+        IF Item."Item Tracking Code" <> '' THEN BEGIN
+          Inbound := FALSE;
+          ItemTrackingCode.Code := Item."Item Tracking Code";
+          ItemTrackingManagement.GetItemTrackingSettings(ItemTrackingCode,
+            ItemJnlLine."Entry Type"::Transfer,
+            Inbound,
+            SNRequired,
+            LotRequired,
+            SNInfoRequired,
+            LotInfoReguired);
+          CheckTrackingLine := (SNRequired = FALSE) AND (LotRequired = FALSE);
+          QuantitySent := 0;
+          IF CheckTrackingLine THEN
+            CheckTrackingLine := SubcontractingPost.GetTrackingQuantities(SubOrderCompList,0,"Quantity To Send",QuantitySent);
+        END ELSE
+          CheckTrackingLine := FALSE;
+
+        TrackingQtyToHandle := 0;
+        TrackingQtyHandled := 0;
+
+        IF CheckTrackingLine THEN BEGIN
+          SubcontractingPost.GetTrackingQuantities(SubOrderCompList,1,TrackingQtyToHandle,TrackingQtyHandled);
+          IF ((TrackingQtyHandled + TrackingQtyToHandle) <> "Quantity To Send") OR
+             (TrackingQtyToHandle <> "Quantity To Send")
+          THEN
+            ERROR(STRSUBSTNO(Text006,FIELDCAPTION("Quantity To Send")));
+        END;
+        IF Item."Item Tracking Code" <> '' THEN
+          SubcontractingPost.TransferTrackingToItemJnlLine(SubOrderCompList,ItemJnlLine,"Quantity To Send",0);
+
+        ItemJnlPostLine.SetSubcon(TRUE);
+        ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+        ItemJnlPostLine.SetSubcon(FALSE);
+      END;
+    END;
+
+    PROCEDURE PostPurchOrder@1280016(MultiSubOrderDet@1280000 : Record 13713);
+    VAR
+      PurchPost@1280001 : Codeunit 90;
+      PurchHeader@1280002 : Record 38;
+      PurchLine@1500000 : Record 39;
+      PurchLine2@1500001 : Record 39;
+    BEGIN
+      IF NOT CONFIRM(Text002) THEN
+        ERROR('');
+
+      PurchLine.RESET;
+      PurchLine.SETCURRENTKEY("Document Type","Buy-from Vendor No.",Subcontracting,"Applies-to ID (Receipt)");
+      PurchLine.SETRANGE("Document Type",PurchLine."Document Type"::Order);
+      PurchLine.SETRANGE("Buy-from Vendor No.",MultiSubOrderDet."Subcontractor No.");
+      PurchLine.SETRANGE("Applies-to ID (Receipt)",MultiSubOrderDet."No.");
+      PurchLine.SETRANGE(Subcontracting,TRUE);
+      IF PurchLine.FINDSET THEN
+        REPEAT
+          PurchLine.VALIDATE("Posting Date",MultiSubOrderDet."Posting Date");
+          PurchLine.VALIDATE("Vendor Shipment No.",MultiSubOrderDet."Vendor Shipment No.");
+          PurchLine.SubConSend := TRUE;
+          PurchLine.MODIFY;
+        UNTIL PurchLine.NEXT = 0;
+
+      PurchLine.RESET;
+      PurchLine.SETCURRENTKEY("Document Type","Buy-from Vendor No.",Subcontracting,"Applies-to ID (Receipt)");
+      PurchLine.SETRANGE("Document Type",PurchLine."Document Type"::Order);
+      PurchLine.SETRANGE("Buy-from Vendor No.",MultiSubOrderDet."Subcontractor No.");
+      PurchLine.SETRANGE("Applies-to ID (Receipt)",MultiSubOrderDet."No.");
+      PurchLine.SETRANGE(Subcontracting,TRUE);
+      IF PurchLine.FINDSET THEN BEGIN
+        REPEAT
+          PurchHeader.SETRANGE("Document Type",PurchLine."Document Type");
+          PurchHeader.SETRANGE("No.",PurchLine."Document No.");
+          PurchHeader.FINDFIRST;
+          PurchHeader."Vendor Shipment No." := MultiSubOrderDet."Vendor Shipment No.";
+          PurchHeader.Receive := TRUE;
+          PurchHeader.Invoice := FALSE;
+          PurchHeader.SubConPostLine := PurchLine."Line No.";
+          PurchPost.RUN(PurchHeader);
+          PurchHeader.SubConPostLine := 0;
+          PurchHeader.MODIFY;
+          PurchLine2.GET(PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.");
+          PurchLine2."Applies-to ID (Receipt)" := '';
+          PurchLine2.MODIFY;
+        UNTIL PurchLine.NEXT = 0;
+      END ELSE
+        ERROR(Text004);
+    END;
+
+    PROCEDURE CreateDeliveryChallan@1280001(VAR SubOrderComponentList@1280000 : Record 16321;PurchLine@1280002 : Record 39);
+    VAR
+      DeliveryChallanLine@1280003 : Record 16324;
+      Item@1280005 : Record 27;
+      TotalQty@1500001 : Decimal;
+      SubOrderCompListCheck@1500000 : Record 16321;
+    BEGIN
+      SubOrderCompListCheck.COPY(SubOrderComponentList);
+      SubOrderCompListCheck.FINDSET;
+      REPEAT
+        TotalQty += SubOrderCompListCheck."Quantity To Send" + SubOrderCompListCheck."Qty. for Rework";
+      UNTIL SubOrderCompListCheck.NEXT = 0;
+
+      IF TotalQty = 0 THEN
+        ERROR(Text003,PurchLine."Document Type",PurchLine."Document No.",PurchLine."Line No.");
+
+      SubOrderComponentList.FINDSET;
+
+      DeliveryChallanHeader."Quantity for rework" += PurchLine."Qty. to Reject (Rework)";
+      REPEAT
+        DeliveryChallanLine.RESET;
+        DeliveryChallanLine.SETRANGE("Deliver Challan No.",DeliveryChallanHeader."No.");
+        IF DeliveryChallanLine.FINDLAST THEN
+          NextlineNo += 10000
+        ELSE
+          NextlineNo := 10000;
+        DeliveryChallanLine.INIT;
+
+        DeliveryChallanLine."Deliver Challan No." := DeliveryChallanHeader."No.";
+        DeliveryChallanLine."Document No." := PurchLine."Document No.";
+        SubconOrderNo := DeliveryChallanLine."Document No.";
+        DeliveryChallanLine."Document Line No." := PurchLine."Line No.";
+        DeliveryChallanLine."Posting Date" := DeliveryChallanHeader."Challan Date";
+        DeliveryChallanLine."Line No." := NextlineNo;
+        WITH SubOrderComponentList DO BEGIN
+          DeliveryChallanLine."Vendor No." := PurchLine."Buy-from Vendor No.";
+          DeliveryChallanLine."Parent Item No." := "Parent Item No.";
+          DeliveryChallanLine."Item No." := "Item No.";
+          DeliveryChallanLine."Unit of Measure" := "Unit of Measure Code";
+          DeliveryChallanLine.Description := Description;
+          DeliveryChallanLine."Scrap %" := "Scrap %";
+          DeliveryChallanLine."Variant Code" := "Variant Code";
+          DeliveryChallanLine."Quantity per" := "Quantity per";
+          DeliveryChallanLine."Company Location" := "Company Location";
+          DeliveryChallanLine."Vendor Location" := "Vendor Location";
+          DeliveryChallanLine."Production Order No." := "Production Order No.";
+          DeliveryChallanLine."Production Order Line No." := "Production Order Line No.";
+          DeliveryChallanLine."Line Type" := "Line Type";
+          DeliveryChallanLine."Gen. Prod. Posting Group" := "Gen. Prod. Posting Group";
+          DeliveryChallanLine."Total Scrap Quantity" := "Total Scrap Quantity";
+          DeliveryChallanLine.Quantity := "Quantity To Send";
+          DeliveryChallanLine."Components in Rework Qty." := "Qty. for Rework";
+          DeliveryChallanLine."Prod. BOM Quantity" := "Prod. Order Qty.";
+          DeliveryChallanLine."Excise Bus. Posting Group" := PurchLine."Excise Bus. Posting Group";
+          DeliveryChallanLine."Excise Prod. Posting Group" := PurchLine."Excise Prod. Posting Group";
+          DeliveryChallanLine."Process Description" := PurchLine.Description;
+          DeliveryChallanLine."Prod. Order Comp. Line No." := "Line No.";
+          DeliveryChallanLine."Job Work Return Period" := "Job Work Return Period";
+          DeliveryChallanLine."Last Date" := DeliveryChallanLine."Posting Date" + DeliveryChallanLine."Job Work Return Period" - 1;
+          DeliveryChallanLine."Identification Mark" := "Identification Mark";
+          DeliveryChallanLine."Dimension Set ID" := "Dimension Set ID";
+          Item.GET(DeliveryChallanLine."Item No.");
+          IF Item."Excise Prod. Posting Group" <> '' THEN
+            Vendor.TESTFIELD("Commissioner's Permission No.");
+          DeliveryChallanLine.SSI := Vendor.SSI;
+        END;
+        DeliveryChallanLine.INSERT(TRUE);
+      UNTIL SubOrderComponentList.NEXT = 0;
+    END;
+
+    PROCEDURE RecieveBackCompRW@1280006(SubOrderCompList@1280000 : Record 16321);
+    VAR
+      CompItem@1280011 : Record 27;
+      ILE@1280009 : Record 32;
+      RemQtytoPost@1280008 : Decimal;
+      TotalQtyToPost@1280007 : Decimal;
+      Completed@1280006 : Boolean;
+      TempILE@1280005 : Record 32;
+      AvailableQty@1280004 : Decimal;
+      SubOrderCompVend@1280001 : Record 16322;
+    BEGIN
+      SubOrderCompVend.RESET;
+      SubOrderCompVend.SETRANGE("Production Order No.",SubOrderComponentList."Production Order No.");
+      SubOrderCompVend.SETRANGE("Production Order Line No.",SubOrderComponentList."Production Order Line No.");
+      SubOrderCompVend.SETRANGE("Line No.",SubOrderComponentList."Line No.");
+      SubOrderCompVend.FINDFIRST;
+
+      SourceCodeSetup.GET;
+      CompItem.GET(SubOrderComponentList."Item No.");
+      CompItem.TESTFIELD("Rounding Precision");
+
+      TotalQtyToPost := ROUND(SubOrderComponentList."Qty. for Rework" * SubOrderComponentList."Qty. per Unit of Measure",0.00001);
+      TotalQtyToPost := ROUND(TotalQtyToPost,CompItem."Rounding Precision",'>');
+
+      RemQtytoPost := TotalQtyToPost;
+
+      ILE.RESET;
+      ILE.SETCURRENTKEY("Order Type","Order No.","Order Line No.","Prod. Order Comp. Line No.","Entry Type","Location Code");
+      ILE.SETRANGE("Order Type",ILE."Order Type"::Production);
+      ILE.SETRANGE("Order No.",SubOrderComponentList."Production Order No.");
+      ILE.SETRANGE("Order Line No.",SubOrderComponentList."Production Order Line No.");
+      ILE.SETRANGE("Prod. Order Comp. Line No.",SubOrderComponentList."Line No.");
+      ILE.SETRANGE("Entry Type",ILE."Entry Type"::Transfer);
+      ILE.SETRANGE("Location Code",SubOrderComponentList."Vendor Location");
+
+      TempILE.COPY(ILE);
+      IF TempILE.FINDSET THEN
+        REPEAT
+          AvailableQty += TempILE."Remaining Quantity";
+        UNTIL TempILE.NEXT = 0;
+
+      IF AvailableQty < TotalQtyToPost THEN
+        ERROR(Text000);
+
+      IF ILE.FINDSET THEN
+        REPEAT
+          WITH ItemJnlLine DO BEGIN
+            INIT;
+            "Entry Type" := "Entry Type"::Transfer;
+            VALIDATE("Posting Date",DeliveryChallanHeader."Challan Date");
+            "Document No." := SubOrderComponentList."Production Order No.";
+            "Source Type" := "Source Type"::Item;
+            "Source No." := SubOrderComponentList."Item No.";
+            "Order Type" := "Order Type"::Production;
+            "Order No." := SubOrderComponentList."Production Order No.";
+            "Order Line No." := SubOrderComponentList."Production Order Line No.";
+            VALIDATE("Prod. Order Comp. Line No.",SubOrderComponentList."Line No.");
+            VALIDATE("Item No.",SubOrderComponentList."Item No.");
+            VALIDATE("Unit of Measure Code",SubOrderComponentList."Unit of Measure Code");
+            Description := SubOrderComponentList.Description;
+            IF ILE."Remaining Quantity" <> 0 THEN BEGIN
+              IF RemQtytoPost > ILE."Remaining Quantity" THEN BEGIN
+                RemQtytoPost -= ILE."Remaining Quantity";
+                VALIDATE(Quantity,ILE."Remaining Quantity");
+              END ELSE BEGIN
+                VALIDATE(Quantity,RemQtytoPost);
+                Completed := TRUE;
+              END;
+              VALIDATE("Applies-to Entry",ILE."Entry No.");
+              "Location Code" := SubOrderComponentList."Vendor Location";
+              "New Location Code" := SubOrderComponentList."Company Location";
+              "Variant Code" := SubOrderComponentList."Variant Code";
+              "Gen. Prod. Posting Group" := CompItem."Gen. Prod. Posting Group";
+              "Item Category Code" := CompItem."Item Category Code";
+              "Product Group Code" := CompItem."Product Group Code";
+              "Inventory Posting Group" := CompItem."Inventory Posting Group";
+              IF CompItem."Excise Prod. Posting Group" <> '' THEN
+                IF ILE."Posting Date" + 180 >= "Posting Date" THEN
+                  SubcontractingPost.AdjustExcise(ILE,ItemJnlLine,Quantity,1,SubOrderCompVend);
+              ItemJnlPostLine.SetSubcon(TRUE);
+              ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+              ItemJnlPostLine.SetSubcon(FALSE);
+            END;
+          END;
+        UNTIL (ILE.NEXT = 0) OR Completed;
+    END;
+
+    PROCEDURE SendAgain@1280008(SubOrderCompList@1280000 : Record 16321);
+    VAR
+      CompItem@1280011 : Record 27;
+      ILE@1280009 : Record 32;
+      RemQtytoPost@1280008 : Decimal;
+      TotalQtyToPost@1280007 : Decimal;
+      Completed@1280006 : Boolean;
+    BEGIN
+      SourceCodeSetup.GET;
+      CompItem.GET(SubOrderComponentList."Item No.");
+      CompItem.TESTFIELD("Rounding Precision");
+      TotalQtyToPost := ROUND(SubOrderComponentList."Qty. for Rework" * SubOrderComponentList."Qty. per Unit of Measure",0.00001);
+      TotalQtyToPost := ROUND(TotalQtyToPost,CompItem."Rounding Precision",'>');
+
+      RemQtytoPost := TotalQtyToPost;
+
+      ILE.RESET;
+      ILE.SETCURRENTKEY("Order Type","Order No.","Order Line No.","Prod. Order Comp. Line No.","Entry Type","Location Code");
+      ILE.SETRANGE("Order Type",ILE."Order Type"::Production);
+      ILE.SETRANGE("Order No.",SubOrderComponentList."Production Order No.");
+      ILE.SETRANGE("Order Line No.",SubOrderComponentList."Production Order Line No.");
+      ILE.SETRANGE("Prod. Order Comp. Line No.",SubOrderComponentList."Line No.");
+      ILE.SETRANGE("Entry Type",ILE."Entry Type"::Transfer);
+      ILE.SETRANGE("Location Code",SubOrderComponentList."Company Location");
+      ILE.SETCURRENTKEY("Entry No.");
+      ILE.ASCENDING := TRUE;
+
+      IF ILE.FIND('+') THEN
+        REPEAT
+          WITH ItemJnlLine DO BEGIN
+            INIT;
+            "Entry Type" := "Entry Type"::Transfer;
+            VALIDATE("Posting Date",DeliveryChallanHeader."Challan Date");
+            "Document No." := SubOrderComponentList."Production Order No.";
+            "Source Type" := "Source Type"::Item;
+            "Source No." := SubOrderComponentList."Item No.";
+            "Order Type" := "Order Type"::Production;
+            "Order No." := SubOrderComponentList."Production Order No.";
+            "Order Line No." := SubOrderComponentList."Production Order Line No.";
+            "External Document No." := DeliveryChallanNo;
+            VALIDATE("Prod. Order Comp. Line No.",SubOrderComponentList."Line No.");
+            VALIDATE("Item No.",SubOrderComponentList."Item No.");
+            VALIDATE("Unit of Measure Code",SubOrderComponentList."Unit of Measure Code");
+            Description := SubOrderComponentList.Description;
+            IF ILE."Remaining Quantity" <> 0 THEN BEGIN
+              IF RemQtytoPost > ILE."Remaining Quantity" THEN BEGIN
+                RemQtytoPost -= ILE."Remaining Quantity";
+                VALIDATE(Quantity,ILE."Remaining Quantity");
+              END ELSE BEGIN
+                VALIDATE(Quantity,RemQtytoPost);
+                Completed := TRUE;
+              END;
+              VALIDATE("Applies-to Entry",ILE."Entry No.");
+              "Location Code" := SubOrderComponentList."Company Location";
+              "New Location Code" := SubOrderComponentList."Vendor Location";
+              "Variant Code" := SubOrderComponentList."Variant Code";
+              "Gen. Prod. Posting Group" := CompItem."Gen. Prod. Posting Group";
+              "Item Category Code" := CompItem."Item Category Code";
+              "Product Group Code" := CompItem."Product Group Code";
+              "Inventory Posting Group" := CompItem."Inventory Posting Group";
+              "Dimension Set ID" := SubOrderComponentList."Dimension Set ID";
+              ItemJnlPostLine.SetSubcon(TRUE);
+              ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+              ItemJnlPostLine.SetSubcon(FALSE);
+            END;
+          END;
+        UNTIL (ILE.NEXT = 0) OR Completed;
+    END;
+
+    PROCEDURE UpdateExciseInChallan@1280004(DeliveryChallanHeader@1280001 : Record 16323;DocNo@1500000 : Code[20];LineNo@1500001 : Integer);
+    VAR
+      ItemLedgerEntry@1280000 : Record 32;
+      DeliveryChallanLine@1280002 : Record 16324;
+    BEGIN
+      DeliveryChallanLine.RESET;
+      DeliveryChallanLine.SETRANGE("Deliver Challan No.",DeliveryChallanHeader."No.");
+      DeliveryChallanLine.SETRANGE("Document No.",DocNo);
+      DeliveryChallanLine.SETRANGE("Document Line No.",LineNo);
+      IF DeliveryChallanLine.FINDSET THEN
+        REPEAT
+          ItemLedgerEntry.SETCURRENTKEY("Entry Type","Location Code","External Document No.","Item No.");
+          ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::Transfer);
+          ItemLedgerEntry.SETRANGE("Location Code",DeliveryChallanLine."Vendor Location");
+          ItemLedgerEntry.SETRANGE("External Document No.",DeliveryChallanLine."Deliver Challan No.");
+          ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Production);
+          ItemLedgerEntry.SETRANGE("Order No.",DeliveryChallanLine."Production Order No.");
+          ItemLedgerEntry.SETRANGE("Order Line No.",DeliveryChallanLine."Production Order Line No.");
+          ItemLedgerEntry.SETRANGE("Item No.",DeliveryChallanLine."Item No.");
+          IF ItemLedgerEntry.FINDSET THEN
+            REPEAT
+              DeliveryChallanLine.UpdateExciseAmount(ItemLedgerEntry);
+              DeliveryChallanLine.UpdateChallanLine(DeliveryChallanLine);
+            UNTIL ItemLedgerEntry.NEXT = 0;
+        UNTIL DeliveryChallanLine.NEXT = 0;
+    END;
+
+    PROCEDURE CreateDeliveryChallanHeader@1500000(PostingDate@1500000 : Date);
+    BEGIN
+      DeliveryChallanHeader.INIT;
+      DeliveryChallanHeader."No." := '';
+      DeliveryChallanHeader."Challan Date" := PostingDate;
+      DeliveryChallanHeader."Posting Date" := PostingDate;
+      DeliveryChallanHeader."Vendor No." := BuyfromVendorNo;
+      Vendor.GET(DeliveryChallanHeader."Vendor No.");
+      DeliveryChallanHeader."Commissioner's Permission No." := Vendor."Commissioner's Permission No.";
+      DeliveryChallanHeader.INSERT(TRUE);
+      DeliveryChallanNo := DeliveryChallanHeader."No.";
+    END;
+
+    PROCEDURE CheckQuantitytoSendReceive@1500002(SubconHeaderNo@1500001 : Code[20];Delivery@1500003 : Boolean);
+    VAR
+      PurchLine@1500000 : Record 39;
+      TotalQty@1500002 : Decimal;
+    BEGIN
+      PurchLine.RESET;
+      PurchLine.SETCURRENTKEY("Document Type","Buy-from Vendor No.",Subcontracting,"Applies-to ID (Delivery)");
+      PurchLine.SETRANGE("Document Type",PurchLine."Document Type"::Order);
+      PurchLine.SETRANGE("Buy-from Vendor No.",BuyfromVendorNo);
+      IF Delivery THEN
+        PurchLine.SETRANGE("Applies-to ID (Delivery)",SubconHeaderNo)
+      ELSE
+        PurchLine.SETRANGE("Applies-to ID (Receipt)",SubconHeaderNo);
+      PurchLine.SETRANGE(Subcontracting,TRUE);
+      IF Delivery THEN BEGIN
+        PurchLine.CALCSUMS("Deliver Comp. For");
+        TotalQty := PurchLine."Deliver Comp. For";
+        IF TotalQty = 0 THEN
+          ERROR(Text001)
+      END ELSE BEGIN
+        PurchLine.CALCSUMS("Qty. to Receive");
+        TotalQty := PurchLine."Qty. to Receive";
+        IF TotalQty = 0 THEN
+          ERROR(Text004)
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

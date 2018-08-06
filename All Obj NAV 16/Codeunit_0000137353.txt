@@ -1,0 +1,1320 @@
+OBJECT Codeunit 137353 SCM Inventory Valuation - WIP
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1001 : Codeunit 130000;
+      LibraryERM@1003 : Codeunit 131300;
+      LibraryCosting@1007 : Codeunit 132200;
+      LibraryInventory@1006 : Codeunit 132201;
+      LibraryManufacturing@1009 : Codeunit 132202;
+      LibraryPurchase@1011 : Codeunit 130512;
+      LibraryReportDataset@1028 : Codeunit 131007;
+      LibraryPatterns@1008 : Codeunit 132212;
+      LibrarySetupStorage@1010 : Codeunit 131009;
+      LibraryVariableStorage@1025 : Codeunit 131004;
+      LibraryRandom@1002 : Codeunit 130440;
+      CalcStandardCost@1005 : Codeunit 5812;
+      isInitialized@1000 : Boolean;
+      OriginalWorkDate@1004 : Date;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS288092@5();
+    VAR
+      ParentItem@1000 : Record 27;
+      ChildItem@1001 : Record 27;
+      PurchaseHeader@1003 : Record 38;
+      PurchaseHeaderInv@1005 : Record 38;
+      ProductionOrder@1004 : Record 5405;
+      ProdOrderLine@1007 : Record 5406;
+      PurchRcptLine@1008 : Record 121;
+      Vendor@1009 : Record 23;
+      Qty@1011 : Decimal;
+      QtyPer@1012 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup.
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      LibraryERM.SetAllowPostingFromTo(WORKDATE - 30,WORKDATE);
+      SetupInventoryForReport(ParentItem,ChildItem,PurchaseHeader,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::FIFO,
+        ChildItem."Costing Method"::FIFO,TRUE,Qty,QtyPer,WORKDATE);
+
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,WORKDATE,0);
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Invoice a purchase charge to the component item.
+      PurchRcptLine.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchRcptLine.FINDFIRST;
+      Vendor.GET(PurchaseHeader."Buy-from Vendor No.");
+      LibraryPurchase.CreatePurchHeader(PurchaseHeaderInv,PurchaseHeaderInv."Document Type"::Invoice,Vendor."No.");
+      LibraryPatterns.ASSIGNPurchChargeToPurchRcptLine(PurchaseHeaderInv,PurchRcptLine,1,LibraryRandom.RandDec(10,2));
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeaderInv,TRUE,TRUE);
+
+      // Exercise. Adjust and run Inventory Valuation - WIP report.
+      LibraryERM.SetAllowPostingFromTo(WORKDATE + 1,WORKDATE + 30);
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+
+      // Verify.
+      RunInventoryValuationWIPReport(ProductionOrder."No.",WORKDATE - 30,WORKDATE);
+      VerifyInventoryValuationWIPReport(ProductionOrder,WORKDATE - 30,WORKDATE,FALSE);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",WORKDATE + 1,WORKDATE + 30);
+      VerifyInventoryValuationWIPReport(ProductionOrder,WORKDATE + 1,WORKDATE + 30,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS311446@1();
+    VAR
+      ParentItem@1000 : Record 27;
+      ChildItem@1001 : Record 27;
+      ProductionOrder@1004 : Record 5405;
+      ProdOrderLine@1007 : Record 5406;
+      CalculatePer@1017 : 'Item Ledger Entry,Item';
+      EndingDate@1014 : Date;
+      Qty@1011 : Decimal;
+      QtyPer@1012 : Decimal;
+    BEGIN
+      Initialize;
+      Qty := LibraryRandom.RandDecInRange(10,100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      EndingDate := WORKDATE + LibraryRandom.RandInt(10);
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::FIFO,
+        ChildItem."Costing Method"::FIFO,FALSE,Qty,QtyPer,WORKDATE);
+
+      LibraryPatterns.POSTOutput(ProdOrderLine,LibraryRandom.RandDecInDecimalRange(1,Qty,2),WORKDATE,0);
+      PostExplodedOutput(ProdOrderLine,EndingDate,ProdOrderLine.Quantity,0);
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Exercise. Adjust, revalue and run Inventory Valuation - WIP report.
+      AdjustAndRevalueParent(ParentItem,ChildItem,EndingDate,CalculatePer::"Item Ledger Entry");
+      RunInventoryValuationWIPReport(ProductionOrder."No.",WORKDATE,EndingDate);
+
+      // Verify. Inventory Valuation - WIP report.
+      VerifyInventoryValuationWIPReport(ProductionOrder,WORKDATE,EndingDate,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS315987@7();
+    VAR
+      ParentItem@1000 : Record 27;
+      ChildItem@1001 : Record 27;
+      PurchaseHeader@1003 : Record 38;
+      ProductionOrder@1004 : Record 5405;
+      ProdOrderLine@1007 : Record 5406;
+      CalcStandardCost@1013 : Codeunit 5812;
+      CalculatePer@1018 : 'Item Ledger Entry,Item';
+      OutputDate@1014 : Date;
+      InvoiceDate@1015 : Date;
+      RevalDate@1016 : Date;
+      Qty@1011 : Decimal;
+      QtyPer@1012 : Decimal;
+    BEGIN
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      OutputDate := WORKDATE + LibraryRandom.RandInt(5);
+      InvoiceDate := OutputDate + LibraryRandom.RandInt(5);
+      RevalDate := InvoiceDate + LibraryRandom.RandInt(5);
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReport(ParentItem,ChildItem,PurchaseHeader,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::Standard,
+        ChildItem."Costing Method"::FIFO,FALSE,Qty,QtyPer,WORKDATE);
+      CalcStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,WORKDATE,0);
+      PostExplodedOutput(ProdOrderLine,OutputDate,ProdOrderLine.Quantity,0);
+
+      // Invoice the purchase with a different cost.
+      InvoiceDiffPurchaseCost(PurchaseHeader,InvoiceDate);
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Exercise. Adjust, revalue and run Inventory Valuation - WIP report.
+      AdjustAndRevalueParent(ParentItem,ChildItem,RevalDate,CalculatePer::Item);
+
+      // Verify.
+      RunInventoryValuationWIPReport(ProductionOrder."No.",WORKDATE,InvoiceDate + 1);
+      VerifyInventoryValuationWIPReport(ProductionOrder,WORKDATE,InvoiceDate + 1,FALSE);
+
+      RunInventoryValuationWIPReport(ProductionOrder."No.",InvoiceDate + 1,RevalDate + 1);
+      VerifyInventoryValuationWIPReport(ProductionOrder,InvoiceDate + 1,RevalDate + 1,FALSE);
+
+      RunInventoryValuationWIPReport(ProductionOrder."No.",RevalDate + 1,RevalDate + 30);
+      VerifyInventoryValuationWIPReport(ProductionOrder,RevalDate + 1,RevalDate + 30,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MsgHandler,ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS252682@2();
+    VAR
+      InventorySetup@1005 : Record 313;
+      ParentItem@1000 : Record 27;
+      ChildItem@1001 : Record 27;
+      ProductionOrder@1004 : Record 5405;
+      ProdOrderLine@1007 : Record 5406;
+      Qty@1008 : Decimal;
+      QtyPer@1009 : Decimal;
+    BEGIN
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      ExecuteUIHandlers;
+      LibraryERM.SetAllowPostingFromTo(0D,0D);
+      LibraryERM.SetUseLegacyGLEntryLocking(TRUE);
+      LibraryInventory.UpdateInventorySetup(InventorySetup,TRUE,TRUE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::FIFO,
+        ChildItem."Costing Method"::FIFO,FALSE,Qty,QtyPer,WORKDATE);
+
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,WORKDATE,0);
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+
+      // Exercise. Adjust, revalue and run Inventory Valuation - WIP report.
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+      RunInventoryValuationWIPReport(ProductionOrder."No.",WORKDATE - 30,WORKDATE);
+
+      // Verify. Inventory Valuation - WIP report.
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,WORKDATE - 30,WORKDATE,TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Tear down.
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,FALSE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,MsgHandler,ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS340491A@6();
+    VAR
+      InventorySetup@1000 : Record 313;
+      PurchaseHeader@1003 : Record 38;
+      ParentItem@1002 : Record 27;
+      ChildItem@1001 : Record 27;
+      ProductionOrder@1005 : Record 5405;
+      ProdOrderLine@1004 : Record 5406;
+      RoutingHeader@1009 : Record 99000763;
+      CalcStandardCost@1008 : Codeunit 5812;
+      Qty@1007 : Decimal;
+      QtyPer@1006 : Decimal;
+      DirectUnitCost@1010 : Decimal;
+      InvoiceDate@1011 : Date;
+      TempDate@1012 : Date;
+    BEGIN
+      // Also for SICILY 46166, 48268
+      Initialize;
+      LibraryERM.SetAllowPostingFromTo(0D,0D);
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      DirectUnitCost := LibraryRandom.RandDec(5,2);
+      LibraryInventory.UpdateInventorySetup(InventorySetup,TRUE,TRUE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReport(ParentItem,ChildItem,PurchaseHeader,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::Standard,
+        ChildItem."Costing Method"::FIFO,FALSE,Qty,QtyPer,WORKDATE);
+      LibraryPatterns.MAKERouting(RoutingHeader,ParentItem,'',DirectUnitCost);
+      CalcStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      // Setup. Finish production order.
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,TRUE);
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,WORKDATE,ChildItem."Unit Cost");
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Exercise. Adjust, change G/L Setup and invoice the purchase at a different cost.
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+      InvoiceDate := CALCDATE('<+2M>',WORKDATE);
+      TempDate := CALCDATE('<-CM>',InvoiceDate);
+      LibraryERM.SetAllowPostingFromTo(TempDate,CALCDATE('<CM>',TempDate));
+      InvoiceDiffPurchaseCost(PurchaseHeader,InvoiceDate);
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the prod. order output.
+      TempDate := CALCDATE('<-CM>',WORKDATE);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueOfOutput',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month between the prod. output and the purchase invoicing.
+      TempDate := CALCDATE('<CM-1M>',WORKDATE);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the purchase invoicing.
+      TempDate := CALCDATE('<-CM>',InvoiceDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueOfOutput',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month after the purchase invoicing.
+      TempDate := CALCDATE('<+1M>',CALCDATE('<+1M>',InvoiceDate));
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+
+      // Tear down.
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,FALSE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,MsgHandler,ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS340491B@8();
+    VAR
+      InventorySetup@1009 : Record 313;
+      ParentItem@1007 : Record 27;
+      ChildItem@1006 : Record 27;
+      ProductionOrder@1005 : Record 5405;
+      ProdOrderLine@1004 : Record 5406;
+      CalcStandardCost@1002 : Codeunit 5812;
+      CalculatePer@1012 : 'Item Ledger Entry,Item';
+      Qty@1001 : Decimal;
+      QtyPer@1000 : Decimal;
+      FinishDate@1011 : Date;
+      TempDate@1010 : Date;
+    BEGIN
+      // Also for SICILY 46166, 48268
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      LibraryInventory.UpdateInventorySetup(InventorySetup,TRUE,TRUE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,
+        ParentItem."Costing Method"::Standard,ChildItem."Costing Method"::FIFO,TRUE,Qty,QtyPer,WORKDATE);
+      CalcStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      // Setup. Adjust, Revalue unit cost of comp.
+      AdjustAndRevalueChild(ParentItem,ChildItem,WORKDATE,CalculatePer::"Item Ledger Entry");
+
+      // Setup. Post consumption & output for production order.
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,WORKDATE,ChildItem."Unit Cost");
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the purchase and revaluation.
+      TempDate := CALCDATE('<-CM>',WORKDATE);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('Row should be found.',42868);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month after.
+      TempDate := CALCDATE('<-CM>',CALCDATE('<+1M>',WORKDATE));
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',42868);
+      END;
+
+      // Setup. Finish production order, change G/L Setup and adjust cost.
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+      FinishDate := CALCDATE('<+2M>',WORKDATE);
+      TempDate := CALCDATE('<-CM>',FinishDate);
+      LibraryERM.SetAllowPostingFromTo(TempDate,CALCDATE('<CM>',TempDate));
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month before the production finishing.
+      TempDate := CALCDATE('<-CM>',CALCDATE('<-1M>',FinishDate));
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueOfOutput',42868);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the production finishing.
+      TempDate := CALCDATE('<-CM>',FinishDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueOfOutput',42868);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month after.
+      TempDate := CALCDATE('<+1M>',CALCDATE('<+1M>',FinishDate));
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+
+      // Tear down.
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,FALSE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,MsgHandler,ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS326574@12();
+    VAR
+      InventorySetup@1012 : Record 313;
+      PurchaseHeader@1011 : Record 38;
+      ParentItem@1010 : Record 27;
+      ChildItem@1009 : Record 27;
+      ProductionOrder@1008 : Record 5405;
+      ProdOrderLine@1007 : Record 5406;
+      RoutingHeader@1006 : Record 99000763;
+      CalcStandardCost@1005 : Codeunit 5812;
+      Qty@1004 : Decimal;
+      QtyPer@1003 : Decimal;
+      DirectUnitCost@1002 : Decimal;
+      CalculatePer@1013 : 'Item Ledger Entry,Item';
+      InvoiceDate@1001 : Date;
+      TempDate@1000 : Date;
+    BEGIN
+      // Also for VSTF 329005
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      DirectUnitCost := LibraryRandom.RandDec(5,2);
+      LibraryInventory.UpdateInventorySetup(InventorySetup,TRUE,TRUE,
+        InventorySetup."Automatic Cost Adjustment"::Always,InventorySetup."Average Cost Calc. Type",
+        InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReport(ParentItem,ChildItem,PurchaseHeader,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::Standard,
+        ChildItem."Costing Method"::FIFO,FALSE,Qty,QtyPer,WORKDATE);
+      LibraryPatterns.MAKERouting(RoutingHeader,ParentItem,'',DirectUnitCost);
+      CalcStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      // Setup. Refresh production order
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,TRUE);
+
+      // Setup. Change work date to next months, penultimate date
+      TempDate := CALCDATE('<CM+1M-1D>',WORKDATE);
+
+      // Setup. Post production order.
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,TempDate,ChildItem."Unit Cost");
+      PostExplodedOutput(ProdOrderLine,TempDate,ProdOrderLine.Quantity,0);
+
+      // Setup. Re-valuate the production item.
+      TempDate := CALCDATE('<CM>',WORKDATE); // last date of the month
+      AdjustAndRevalueParent(ParentItem,ChildItem,TempDate,CalculatePer::Item);
+
+      // Setup. Invoice purchase order after changing the cost.
+      InvoiceDate := TempDate; // same as revaluation date
+      InvoiceDiffPurchaseCost(PurchaseHeader,InvoiceDate);
+
+      // Setup. Set Allow posting from
+      TempDate := CALCDATE('<1D>',InvoiceDate);
+      LibraryERM.SetAllowPostingFromTo(TempDate,CALCDATE('<CM>',TempDate));
+
+      // Setup. Finish the released production order
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the prod. order output.
+      TempDate := CALCDATE('<-1M>',TempDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month between the prod. output and the purchase invoicing.
+      TempDate := CALCDATE('<1M>',TempDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueOfOutput',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the purchase invoicing.
+      TempDate := CALCDATE('<1M>',TempDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+
+      // Tear down.
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,FALSE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,MsgHandler,ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS291431@10();
+    VAR
+      InventorySetup@1013 : Record 313;
+      ParentItem@1011 : Record 27;
+      ChildItem@1010 : Record 27;
+      ProductionOrder@1009 : Record 5405;
+      ProdOrderLine@1008 : Record 5406;
+      RoutingHeader@1007 : Record 99000763;
+      ItemLedgerEntry@1014 : Record 32;
+      CalcStandardCost@1006 : Codeunit 5812;
+      Qty@1005 : Decimal;
+      QtyPer@1004 : Decimal;
+      DirectUnitCost@1003 : Decimal;
+      CalculatePer@1002 : 'Item Ledger Entry,Item';
+      TempDate@1000 : Date;
+    BEGIN
+      // Also for 285890
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      DirectUnitCost := LibraryRandom.RandDec(5,2);
+      LibraryInventory.UpdateInventorySetup(InventorySetup,TRUE,TRUE,
+        InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type",
+        InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::Standard,
+        ChildItem."Costing Method"::FIFO,TRUE,Qty,QtyPer,WORKDATE);
+      LibraryPatterns.MAKERouting(RoutingHeader,ParentItem,'',DirectUnitCost);
+      CalcStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      // Setup. Post production order.
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,WORKDATE,ChildItem."Unit Cost");
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+
+      // Setup. Post additional outputs (positive extra and then negative to undo it)
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+      ItemLedgerEntry.SETRANGE("Item No.",ParentItem."No.");
+      ItemLedgerEntry.FINDLAST;
+      PostExplodedOutput(ProdOrderLine,WORKDATE,-ProdOrderLine.Quantity,ItemLedgerEntry."Entry No.");
+
+      // Setup. Finish the released production order
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Setup. Adjust and Revalue 2nd output
+      AdjustAndRevalueParentAppliesTo(ParentItem,ChildItem,WORKDATE,CalculatePer::"Item Ledger Entry",ItemLedgerEntry."Entry No.");
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the prod. order output.
+      TempDate := CALCDATE('<-1M>',WORKDATE);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Tear down.
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,FALSE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,MsgHandler,ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS336376@13();
+    VAR
+      InventorySetup@1014 : Record 313;
+      ParentItem@1012 : Record 27;
+      ChildItem@1011 : Record 27;
+      ProductionOrder@1010 : Record 5405;
+      ProdOrderLine@1009 : Record 5406;
+      CalcStandardCost@1006 : Codeunit 5812;
+      Qty@1005 : Decimal;
+      QtyPer@1004 : Decimal;
+      TempDate@1000 : Date;
+      OrigWorkDate@1007 : Date;
+    BEGIN
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      LibraryInventory.UpdateInventorySetup(InventorySetup,TRUE,TRUE,
+        InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type",
+        InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::Standard,
+        ChildItem."Costing Method"::FIFO,TRUE,Qty,QtyPer,WORKDATE);
+      CalcStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      // Setup. Post production order.
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,WORKDATE,ChildItem."Unit Cost");
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+
+      // Setup. Finish the released production order
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Setup. Change G/L Setup
+      OrigWorkDate := WORKDATE;
+      TempDate := CALCDATE('<5W>',WORKDATE);
+      WORKDATE := TempDate;
+      LibraryERM.SetAllowPostingFromTo(TempDate,CALCDATE('<CM>',TempDate));
+
+      // Setup. Adjust cost
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the prod. order output.
+      TempDate := CALCDATE('<-CM>',OrigWorkDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the next month.
+      TempDate := CALCDATE('<1M>',TempDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the next month.
+      TempDate := CALCDATE('<1M>',TempDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Tear Down.
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,FALSE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,MsgHandler,ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS330586@15();
+    VAR
+      InventorySetup@1014 : Record 313;
+      ParentItem@1012 : Record 27;
+      ChildItem@1011 : Record 27;
+      ProductionOrder@1010 : Record 5405;
+      ProdOrderLine@1009 : Record 5406;
+      CalcStandardCost@1007 : Codeunit 5812;
+      Qty@1006 : Decimal;
+      QtyPer@1005 : Decimal;
+      CalculatePer@1003 : 'Item Ledger Entry,Item';
+      TempDate@1001 : Date;
+    BEGIN
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      LibraryInventory.UpdateInventorySetup(InventorySetup,TRUE,TRUE,
+        InventorySetup."Automatic Cost Adjustment"::Always,InventorySetup."Average Cost Calc. Type",
+        InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::Standard,
+        ChildItem."Costing Method"::FIFO,FALSE,Qty,QtyPer,WORKDATE);
+      CalcStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      // Setup. Post production order.
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,WORKDATE,ChildItem."Unit Cost");
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+
+      // Setup. Revaluate parent Per Item
+      AdjustAndRevalueParent(ParentItem,ChildItem,WORKDATE + 2,CalculatePer::Item);
+
+      // Setup. Finish the released production order
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the prod. order output.
+      TempDate := CALCDATE('<-CM>',WORKDATE);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the next month.
+      TempDate := CALCDATE('<1M>',TempDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Tear Down.
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,FALSE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,ConfirmHandler,MsgHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS341917@16();
+    VAR
+      InventorySetup@1010 : Record 313;
+      ParentItem@1008 : Record 27;
+      ChildItem@1007 : Record 27;
+      ProductionOrder@1006 : Record 5405;
+      ProdOrderLine@1005 : Record 5406;
+      CalcStandardCost@1004 : Codeunit 5812;
+      Qty@1003 : Decimal;
+      QtyPer@1002 : Decimal;
+      FirstOutputQty@1011 : Decimal;
+      FirstOutputDate@1012 : Date;
+      TempDate@1000 : Date;
+    BEGIN
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,TRUE,
+        InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type",
+        InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::Standard,
+        ChildItem."Costing Method"::FIFO,TRUE,Qty,QtyPer,WORKDATE);
+      CalcStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      // Setup. Post output 3 months from WORKDATE.
+      TempDate := CALCDATE('<3M>',WORKDATE);
+      FirstOutputQty := LibraryRandom.RandDec(ROUND(Qty,1),2);
+      FirstOutputDate := TempDate;
+      PostExplodedOutput(ProdOrderLine,TempDate,FirstOutputQty,0);
+
+      // Setup. Post consumption 3 months + 3D from WORKDATE.
+      TempDate := CALCDATE('<3M+3D>',WORKDATE);
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,TempDate,ChildItem."Unit Cost");
+
+      // Setup. Move workdate to 1 monh and 2 weeks after consumption posting
+      WORKDATE := CALCDATE('<1M+2W>',TempDate);
+
+      // Setup. Post remaining output.
+      PostExplodedOutput(ProdOrderLine,WORKDATE,Qty - FirstOutputQty,0);
+
+      // Setup. Finish the released production order
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Setup. Change G/L Setup
+      TempDate := CALCDATE('<CM+1D>',WORKDATE);
+      LibraryERM.SetAllowPostingFromTo(TempDate,0D);
+
+      // Setup. Adjust cost.
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+
+      // Setup. Revert change in GL Setup
+      LibraryERM.SetAllowPostingFromTo(0D,0D);
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the FirstOutputDate.
+      TempDate := CALCDATE('<-CM>',FirstOutputDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the next month
+      TempDate := CALCDATE('<CM+1D>',TempDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the next month
+      TempDate := CALCDATE('<CM+1D>',TempDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the next month
+      TempDate := CALCDATE('<CM+1D>',TempDate);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Tear Down.
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,FALSE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MsgHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE TFS260910@17();
+    VAR
+      InventorySetup@1011 : Record 313;
+      ParentItem@1009 : Record 27;
+      ChildItem@1008 : Record 27;
+      ProductionOrder@1007 : Record 5405;
+      ProdOrderLine@1006 : Record 5406;
+      Qty@1004 : Decimal;
+      QtyPer@1003 : Decimal;
+      TempDate@1000 : Date;
+    BEGIN
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      LibraryInventory.UpdateInventorySetup(InventorySetup,TRUE,TRUE,
+        InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type",
+        InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::Standard,
+        ChildItem."Costing Method"::Standard,TRUE,Qty,QtyPer,WORKDATE);
+
+      // Setup. Post production order on WORKDATE.
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,WORKDATE,ChildItem."Unit Cost");
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the output.
+      TempDate := CALCDATE('<-CM>',WORKDATE);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Setup. Adjust cost.
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+
+      // Exercise. Verify Inventory Valuation - WIP report for the month containing the output.
+      TempDate := CALCDATE('<-CM>',WORKDATE);
+      RunInventoryValuationWIPReport(ProductionOrder."No.",TempDate,CALCDATE('<CM>',TempDate));
+      ASSERTERROR BEGIN
+        VerifyInventoryValuationWIPReport(ProductionOrder,TempDate,CALCDATE('<CM>',TempDate),TRUE);
+        Assert.KnownFailure('ValueEntryCostPostedToGL',48268);
+      END;
+
+      // Tear Down.
+      LibraryInventory.UpdateInventorySetup(InventorySetup,FALSE,FALSE,
+        InventorySetup."Automatic Cost Adjustment",InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,ConfirmHandler,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE PartialOutputInFirstAndThirdPeriodButInvoicedInForthPeriod@18();
+    VAR
+      InventorySetup@1010 : Record 313;
+      ParentItem@1008 : Record 27;
+      ChildItem@1007 : Record 27;
+      ProductionOrder@1006 : Record 5405;
+      ProdOrderLine@1005 : Record 5406;
+      Qty@1003 : Decimal;
+      QtyPer@1002 : Decimal;
+      FirstOutputQty@1011 : Decimal;
+      Output@1013 : Decimal;
+      Consumption@1014 : Decimal;
+      ExpectedOpenningBalance@1015 : Decimal;
+      FirstOutputDate@1001 : Date;
+      ConsumptionDate@1000 : Date;
+    BEGIN
+      // For bug 49838 on Sicily.
+
+      // Verify the Openning Balance on period 3 on Inventory Valuation - WIP Report after making output on period 1 & 3 but invoicing on period 4.
+      Initialize;
+      Qty := LibraryRandom.RandDec(100,2);
+      QtyPer := LibraryRandom.RandDec(5,2);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+
+      // Setup. Make BOM structure.
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,
+        ParentItem."Costing Method"::Standard,ChildItem."Costing Method"::FIFO,TRUE,Qty,QtyPer,WORKDATE);
+      CalcStandardCost.CalcItem(ParentItem."No.",FALSE);
+
+      // Post output 3M from WORKDATE.
+      FirstOutputQty := LibraryRandom.RandDec(ROUND(Qty,1),2);
+      FirstOutputDate := CALCDATE('<3M>',WORKDATE); // Value Not important for test(Period 1).
+      LibraryPatterns.POSTOutput(ProdOrderLine,FirstOutputQty,FirstOutputDate,ParentItem."Standard Cost");
+
+      // Post consumption 3M+3D from WORKDATE.
+      ConsumptionDate := CALCDATE('<3M+3D>',WORKDATE); // Value Not important for test - but need to the same period of FirstOutPutDate(Period 1).
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty * QtyPer,ConsumptionDate,ChildItem."Unit Cost");
+
+      // Move workdate to 2M after consumption posting.
+      WORKDATE := CALCDATE('<2M>',ConsumptionDate); // Value Not important for test - but need to the different period of FirstOutPutDate(Period 3).
+
+      // Post remaining output in Period 3.
+      LibraryPatterns.POSTOutput(ProdOrderLine,Qty - FirstOutputQty,WORKDATE,ParentItem."Standard Cost");
+
+      // Finish the released production order
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Change G/L Setup.
+      LibraryERM.SetAllowPostingFromTo(CALCDATE('<CM+1D>',WORKDATE),0D); // Value Not important for test - but need to the different period of outputing the remaining output(Period 4).
+
+      // Adjust cost.
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+
+      // Revert change in GL Setup.
+      LibraryERM.SetAllowPostingFromTo(0D,0D);
+
+      Output := -GetExpectedWIPCostAmount(ProductionOrder."No.",FirstOutputDate);
+      Consumption := -GetExpectedWIPCostAmount(ProductionOrder."No.",ConsumptionDate);
+      ExpectedOpenningBalance := Output + Consumption;
+
+      // Exercise. Run Inventory Valuation - WIP Report for the period 3.
+      RunInventoryValuationWIPReport(ProductionOrder."No.",CALCDATE('<-CM>',WORKDATE),CALCDATE('<CM>',WORKDATE));
+
+      // Verify. Verify the Opening Balance of the period 3 on Inventory Valuation - WIP report.
+      VerifyOpenningBalanceOnInventoryValuationWIPReport(ProductionOrder."No.",ExpectedOpenningBalance);
+
+      // Tear Down.
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment",
+        InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE InvtValuationReportForNotCompletelyInvoicedFinishedPO@23();
+    VAR
+      ParentItem@1009 : Record 27;
+      ChildItem@1008 : Record 27;
+      ProductionOrder@1005 : Record 5405;
+      ProdOrderLine@1004 : Record 5406;
+      Qty@1000 : Decimal;
+    BEGIN
+      // [FEATURE] [Production Order] [Inventory Valuation Report]
+      // [SCENARIO 376048] The Inventory Valuation Report should show balance for Finished Production Orders that are not Completely Invoiced
+      Initialize;
+
+      // [GIVEN] Not Completely Invoiced Finished Production Order for Item with "Unit Cost" = "X" and Quantity = "Y"
+      Qty := LibraryRandom.RandInt(100);
+      LibraryERM.SetAllowPostingFromTo(WORKDATE - 30,WORKDATE);
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::FIFO,
+        ChildItem."Costing Method"::FIFO,TRUE,Qty,1,WORKDATE);
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty,WORKDATE,0);
+      PostExplodedOutput(ProdOrderLine,WORKDATE,ProdOrderLine.Quantity,0);
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // [WHEN] Run Inventory Valuation Report
+      RunInventoryValuationWIPReport(ProductionOrder."No.",CALCDATE('<+1M>',WORKDATE),CALCDATE('<+2M>',WORKDATE));
+
+      // [THEN] Inventory Valuetion Report is created with Expected Openning Balance = - "X" * "Y"
+      VerifyOpenningBalanceOnInventoryValuationWIPReport(ProductionOrder."No.",-ParentItem."Unit Cost" * Qty);
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE InvValuationWIPShowsOpeningBalanceWhenNoEntriesWithinPeriod@25();
+    VAR
+      ParentItem@1000 : Record 27;
+      ChildItem@1001 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      ProdOrderLine@1004 : Record 5406;
+      Qty@1002 : Integer;
+    BEGIN
+      // [SCENARIO] Report "Inventory Valuation - WIP" should show opening balance when there are consumption entries posted before the reporting period, and no value entries posted within the period
+
+      Initialize;
+
+      // [GIVEN] Create a manufactured item with one component.
+      // [GIVEN] Purchase component with unit cost = "X"
+      // [GIVEN] Create a released production order "PO"
+      Qty := LibraryRandom.RandInt(100);
+      SetupInventoryForReportWithoutPurchOrder(
+        ParentItem,ChildItem,ProductionOrder,ProdOrderLine,ParentItem."Costing Method"::FIFO,
+        ChildItem."Costing Method"::FIFO,TRUE,Qty,1,WORKDATE);
+
+      // [GIVEN] Post consumption of "Y" items from "PO", posting date is 25.01
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ChildItem,'','',Qty,WORKDATE,0);
+      // [GIVEN] Post output from "PO", posting date is 27.01
+      PostProdOrderOutput(ProductionOrder,ParentItem."No.",WORKDATE + 2);
+
+      // [GIVEN] Finish the production order
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE + 2,TRUE);
+
+      // [GIVEN] Adjust cost of both component and manufactured items
+      LibraryCosting.AdjustCostItemEntries(STRSUBSTNO('%1|%2',ChildItem."No.",ParentItem."No."),'');
+
+      // [WHEN] Run the report "Inventory Valuation - WIP" with date filter on 26.01
+      RunInventoryValuationWIPReport(ProductionOrder."No.",WORKDATE + 1,WORKDATE + 1);
+
+      // [THEN] Opening balance in the report is "X" * "Y"
+      ParentItem.FIND;
+      VerifyOpenningBalanceOnInventoryValuationWIPReport(ProductionOrder."No.",ParentItem."Unit Cost" * Qty);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1020 : Codeunit 131305;
+    BEGIN
+      LibrarySetupStorage.Restore;
+      LibraryVariableStorage.Clear;
+
+      // Lazy Setup.
+      IF isInitialized THEN BEGIN
+        WORKDATE := OriginalWorkDate;
+        EXIT;
+      END;
+
+      OriginalWorkDate := WORKDATE;
+      LibraryERM.SetUseLegacyGLEntryLocking(FALSE);
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryPatterns.SETNoSeries;
+      isInitialized := TRUE;
+      COMMIT;
+      LibrarySetupStorage.Save(DATABASE::"General Ledger Setup");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AdjustAndRevalueParent@11(ParentItem@1000 : Record 27;ChildItem@1002 : Record 27;RevalDate@1003 : Date;CalculatePer@1006 : Option);
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+      CalculationBase@1004 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+      LibraryPatterns.CalculateInventoryValueRun(
+        ItemJournalBatch,ParentItem,RevalDate,CalculatePer,FALSE,FALSE,FALSE,CalculationBase::" ",FALSE,'','');
+      LibraryPatterns.ModifyPostRevaluation(ItemJournalBatch,LibraryRandom.RandIntInRange(3,10));
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AdjustAndRevalueParentAppliesTo@31(ParentItem@1000 : Record 27;ChildItem@1002 : Record 27;RevalDate@1003 : Date;CalculatePer@1006 : Option;AppliesToEntry@1005 : Integer);
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+      CalculationBase@1004 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+      LibraryPatterns.CalculateInventoryValueRun(
+        ItemJournalBatch,ParentItem,RevalDate,CalculatePer,FALSE,FALSE,FALSE,CalculationBase::" ",FALSE,'','');
+      LibraryPatterns.ModifyAppliesToPostRevaluation(ItemJournalBatch,LibraryRandom.RandIntInRange(3,10),AppliesToEntry);
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AdjustAndRevalueChild@71(ParentItem@1000 : Record 27;ChildItem@1002 : Record 27;RevalDate@1003 : Date;CalculatePer@1006 : Option);
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+      CalculationBase@1004 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+      LibraryPatterns.CalculateInventoryValueRun(
+        ItemJournalBatch,ChildItem,RevalDate,CalculatePer,FALSE,FALSE,FALSE,CalculationBase::" ",FALSE,'','');
+      LibraryPatterns.ModifyPostRevaluation(ItemJournalBatch,LibraryRandom.RandIntInRange(3,10));
+      LibraryCosting.AdjustCostItemEntries(ParentItem."No." + '|' + ChildItem."No.",'');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE InvoiceDiffPurchaseCost@19(PurchaseHeader@1000 : Record 38;InvoiceDate@1003 : Date);
+    VAR
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      PurchaseHeader.GET(PurchaseHeader."Document Type",PurchaseHeader."No.");
+      LibraryPurchase.ReopenPurchaseDocument(PurchaseHeader);
+      PurchaseLine.SETRANGE("Document Type",PurchaseHeader."Document Type");
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchaseLine.FINDFIRST;
+      PurchaseLine.VALIDATE("Direct Unit Cost",
+        PurchaseLine."Direct Unit Cost" + LibraryRandom.RandDec(10,2));
+      PurchaseLine.MODIFY;
+      PurchaseHeader.VALIDATE("Posting Date",InvoiceDate);
+      PurchaseHeader.MODIFY;
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE PostExplodedOutput@3(ProdOrderLine@1001 : Record 5406;PostingDate@1002 : Date;OutputQty@1005 : Decimal;AppliesToEntry@1006 : Integer);
+    VAR
+      ItemJournalBatch@1000 : Record 233;
+      ItemJournalLine@1003 : Record 83;
+      ProdOrderRoutingLine@1004 : Record 5409;
+    BEGIN
+      LibraryManufacturing.OutputJournalExplodeOrderLineRouting(ItemJournalBatch,ProdOrderLine,PostingDate);
+      WITH ItemJournalLine DO BEGIN
+        SETRANGE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+        SETRANGE("Journal Batch Name",ItemJournalBatch.Name);
+        SETRANGE("Entry Type","Entry Type"::Output);
+        SETRANGE("Order Type","Order Type"::Production);
+        SETRANGE("Order No.",ProdOrderLine."Prod. Order No.");
+        SETRANGE("Order Line No.",ProdOrderLine."Line No.");
+        IF FINDSET THEN
+          REPEAT
+            ProdOrderRoutingLine.SETRANGE(Status,ProdOrderLine.Status);
+            ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+            ProdOrderRoutingLine.SETRANGE("Operation No.","Operation No.");
+            IF ProdOrderRoutingLine.FINDFIRST THEN BEGIN
+              VALIDATE("Setup Time",ProdOrderRoutingLine."Setup Time");
+              VALIDATE("Run Time",ProdOrderRoutingLine."Run Time");
+              VALIDATE("Output Quantity",OutputQty);
+              IF OutputQty < 0 THEN
+                VALIDATE("Applies-to Entry",AppliesToEntry);
+              MODIFY;
+            END;
+          UNTIL NEXT = 0;
+      END;
+      LibraryInventory.PostItemJournalBatch(ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE PostProdOrderOutput@27(ProductionOrder@1003 : Record 5405;ItemNo@1004 : Code[20];PostingDate@1005 : Date);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+      ItemJournalTemplate@1001 : Record 82;
+      ItemJournalBatch@1002 : Record 233;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Output);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      LibraryManufacturing.CreateOutputJournal(ItemJournalLine,ItemJournalTemplate,ItemJournalBatch,ItemNo,ProductionOrder."No.");
+
+      ItemJournalLine.VALIDATE("Output Quantity",ProductionOrder.Quantity);
+      ItemJournalLine.VALIDATE("Posting Date",PostingDate);
+      ItemJournalLine.MODIFY(TRUE);
+
+      LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE GetExpectedWIPDistribution@40(VAR BOPCostPostedToGL@1017 : Decimal;VAR BOP@1008 : Decimal;VAR Output@1007 : Decimal;VAR Consumption@1006 : Decimal;VAR Capacity@1009 : Decimal;VAR EOP@1005 : Decimal;VAR ConsumptionPostedToGL@1012 : Decimal;VAR OutputPostedToGL@1011 : Decimal;VAR CapacityPostedToGL@1004 : Decimal;VAR Visible@1010 : Boolean;ProductionOrder@1000 : Record 5405;StartDate@1001 : Date;EndDate@1002 : Date);
+    VAR
+      ValueEntry@1003 : Record 5802;
+      BOPConsumptionPostedToGL@1016 : Decimal;
+      BOPOutputPostedToGL@1015 : Decimal;
+      BOPCapacityPostedToGL@1014 : Decimal;
+      Sign@1013 : Integer;
+    BEGIN
+      ValueEntry.SETRANGE("Order Type",ValueEntry."Order Type"::Production);
+      ValueEntry.SETRANGE("Order No.",ProductionOrder."No.");
+      ValueEntry.SETFILTER("Posting Date",'<%1',StartDate);
+      ValueEntry.SETRANGE("Variance Type",ValueEntry."Variance Type"::" ");
+
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::Output);
+      ValueEntry.CALCSUMS("Cost Posted to G/L","Expected Cost Posted to G/L");
+      BOPOutputPostedToGL := ValueEntry."Cost Posted to G/L" + ValueEntry."Expected Cost Posted to G/L";
+
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::" ");
+      ValueEntry.CALCSUMS("Cost Posted to G/L","Expected Cost Posted to G/L");
+      BOPCapacityPostedToGL := ValueEntry."Cost Posted to G/L" + ValueEntry."Expected Cost Posted to G/L";
+
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::Consumption);
+      ValueEntry.CALCSUMS("Cost Posted to G/L","Expected Cost Posted to G/L");
+      BOPConsumptionPostedToGL := ValueEntry."Cost Posted to G/L" + ValueEntry."Expected Cost Posted to G/L";
+
+      BOPCostPostedToGL := CalculateNetCost(0,BOPConsumptionPostedToGL,BOPOutputPostedToGL,BOPCapacityPostedToGL);
+
+      ValueEntry.SETRANGE("Item Ledger Entry Type");
+      ValueEntry.SETRANGE("Posting Date",StartDate,EndDate);
+      IF ValueEntry.ISEMPTY AND ProductionOrder.GET(ProductionOrder.Status::Finished,ProductionOrder."No.") THEN
+        EXIT;
+
+      Visible := TRUE;
+
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::Output);
+      IF ValueEntry.COUNT = 1 THEN BEGIN
+        ValueEntry.SETRANGE("Entry Type",ValueEntry."Entry Type"::Revaluation);
+        IF ValueEntry.COUNT = 1 THEN // If revaluation entry is the only output value entry.
+          ValueEntry.SETFILTER("Entry Type",'<>%1',ValueEntry."Entry Type"::Revaluation)
+        ELSE
+          ValueEntry.SETRANGE("Entry Type");
+      END;
+      ValueEntry.CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)","Cost Posted to G/L","Expected Cost Posted to G/L");
+      OutputPostedToGL := ValueEntry."Cost Posted to G/L" + ValueEntry."Expected Cost Posted to G/L";
+      Output := ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)";
+      ValueEntry.SETRANGE("Entry Type");
+
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::" ");
+      ValueEntry.CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)","Cost Posted to G/L","Expected Cost Posted to G/L");
+      CapacityPostedToGL := ValueEntry."Cost Posted to G/L" + ValueEntry."Expected Cost Posted to G/L";
+      Capacity := ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)";
+
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::Consumption);
+      ValueEntry.CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)","Cost Posted to G/L","Expected Cost Posted to G/L");
+      ConsumptionPostedToGL := ValueEntry."Cost Posted to G/L" + ValueEntry."Expected Cost Posted to G/L";
+      Consumption := ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)";
+
+      ValueEntry.SETFILTER("Posting Date",'<%1',StartDate);
+      ValueEntry.SETRANGE("Item Ledger Entry Type");
+      IF ValueEntry.FINDSET THEN
+        REPEAT
+          IF ValueEntry."Item Ledger Entry Type" = ValueEntry."Item Ledger Entry Type"::" " THEN
+            Sign := -1 // negating the capacity cost.
+          ELSE
+            Sign := 1;
+          BOP += Sign * (ValueEntry."Cost Amount (Actual)" + ValueEntry."Cost Amount (Expected)");
+        UNTIL ValueEntry.NEXT = 0;
+
+      EOP := CalculateNetCost(BOP,Consumption,Output,Capacity);
+    END;
+
+    LOCAL PROCEDURE GetExpectedWIPCostAmount@22(OrderNo@1002 : Code[20];PostingDate@1003 : Date) : Decimal;
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      WITH ValueEntry DO BEGIN
+        SETRANGE("Order No.",OrderNo);
+        SETRANGE("Posting Date",PostingDate);
+        FINDFIRST;
+        IF "Item Ledger Entry Type" = "Item Ledger Entry Type"::Output THEN
+          EXIT("Cost Amount (Expected)");
+        EXIT("Cost Amount (Actual)");
+      END;
+    END;
+
+    LOCAL PROCEDURE CalculateNetCost@9(BOP@1003 : Decimal;Consumption@1002 : Decimal;Output@1001 : Decimal;Capacity@1000 : Decimal) : Decimal;
+    BEGIN
+      EXIT(BOP + Consumption + Output - Capacity);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SetupInventoryForReport@24(VAR ParentItem@1000 : Record 27;VAR ChildItem@1001 : Record 27;VAR PurchaseHeader@1010 : Record 38;VAR ProductionOrder@1011 : Record 5405;VAR ProdOrderLine@1005 : Record 5406;ParentCostingMethod@1002 : Option;ChildCostingMethod@1003 : Option;Invoice@1008 : Boolean;Qty@1013 : Decimal;QtyPer@1004 : Decimal;ReceiptDate@1007 : Date);
+    VAR
+      ProductionBOMHeader@1009 : Record 99000771;
+    BEGIN
+      // Make BOM structure.
+      LibraryPatterns.MAKEItemSimple(ParentItem,ParentCostingMethod,LibraryRandom.RandDec(100,2));
+      ParentItem.VALIDATE("Replenishment System",ParentItem."Replenishment System"::"Prod. Order");
+      ParentItem.MODIFY;
+      LibraryPatterns.MAKEItemSimple(ChildItem,ChildCostingMethod,LibraryRandom.RandDec(100,2));
+      LibraryPatterns.MAKEProductionBOM(ProductionBOMHeader,ParentItem,ChildItem,QtyPer,'');
+
+      // Receive and invoice component.
+      LibraryPatterns.POSTPurchaseOrder(PurchaseHeader,ChildItem,'','',Qty * QtyPer,ReceiptDate,
+        LibraryRandom.RandDec(100,2),TRUE,Invoice);
+
+      // Make prod order.
+      LibraryPatterns.MAKEProductionOrder(ProductionOrder,ProductionOrder.Status::Released,ParentItem,'','',
+        Qty,ReceiptDate);
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SetupInventoryForReportWithoutPurchOrder@26(VAR ParentItem@1010 : Record 27;VAR ChildItem@1009 : Record 27;VAR ProductionOrder@1007 : Record 5405;VAR ProdOrderLine@1006 : Record 5406;ParentCostingMethod@1005 : Option;ChildCostingMethod@1004 : Option;Invoice@1003 : Boolean;Qty@1002 : Decimal;QtyPer@1001 : Decimal;ReceiptDate@1000 : Date);
+    VAR
+      PurchaseHeader@1008 : Record 38;
+    BEGIN
+      SetupInventoryForReport(
+        ParentItem,ChildItem,PurchaseHeader,ProductionOrder,ProdOrderLine,
+        ParentCostingMethod,ChildCostingMethod,Invoice,Qty,QtyPer,ReceiptDate);
+    END;
+
+    LOCAL PROCEDURE RunInventoryValuationWIPReport@175(ProductionOrderNo@1000 : Code[20];StartDate@1002 : Date;EndDate@1003 : Date);
+    VAR
+      ProductionOrder@1001 : Record 5405;
+    BEGIN
+      LibraryVariableStorage.Enqueue(StartDate);
+      LibraryVariableStorage.Enqueue(EndDate);
+      COMMIT;
+
+      ProductionOrder.SETRANGE("No.",ProductionOrderNo);
+      REPORT.RUN(REPORT::"Inventory Valuation - WIP",TRUE,FALSE,ProductionOrder);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInventoryValuationWIPReport@37(ProductionOrder@1000 : Record 5405;StartDate@1005 : Date;EndDate@1006 : Date;CostPosting@1010 : Boolean);
+    VAR
+      BOPCostPostedToGL@1013 : Decimal;
+      BOP@1001 : Decimal;
+      EOP@1002 : Decimal;
+      Output@1003 : Decimal;
+      Consumption@1004 : Decimal;
+      Capacity@1009 : Decimal;
+      ConsumptionPostedToGL@1012 : Decimal;
+      OutputPostedToGL@1008 : Decimal;
+      CapacityPostedToGL@1011 : Decimal;
+      Visible@1007 : Boolean;
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('No_ProductionOrder',ProductionOrder."No.");
+
+      GetExpectedWIPDistribution(BOPCostPostedToGL,BOP,Output,Consumption,Capacity,EOP,
+        ConsumptionPostedToGL,OutputPostedToGL,CapacityPostedToGL,
+        Visible,ProductionOrder,StartDate,EndDate);
+
+      IF Visible THEN BEGIN
+        Assert.IsTrue(LibraryReportDataset.GetNextRow,'Row should be found.');
+        LibraryReportDataset.AssertCurrentRowValue('LastWIP',-BOP);
+        LibraryReportDataset.AssertCurrentRowValue('LastOutput',-Output);
+        LibraryReportDataset.AssertCurrentRowValue('ValueOfCap',Capacity);
+        LibraryReportDataset.AssertCurrentRowValue('ValueOfMatConsump',-Consumption);
+        LibraryReportDataset.AssertCurrentRowValue('AtLastDate',-EOP);
+
+        // Verify expected and actual cost posted to GL are included in the report (if any).
+        IF CostPosting THEN BEGIN
+          LibraryReportDataset.AssertCurrentRowValue('ValueOfOutput',-OutputPostedToGL);
+          LibraryReportDataset.AssertCurrentRowValue('ValueEntryCostPostedtoGL',
+            -CalculateNetCost(BOPCostPostedToGL,ConsumptionPostedToGL,OutputPostedToGL,CapacityPostedToGL));
+        END;
+      END ELSE
+        Assert.IsFalse(LibraryReportDataset.GetNextRow,'Report should be empty.')
+    END;
+
+    LOCAL PROCEDURE VerifyOpenningBalanceOnInventoryValuationWIPReport@21(ProductionOrderNo@1000 : Code[20];ExpectedOpenningBalance@1001 : Decimal);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('No_ProductionOrder',ProductionOrderNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('LastWIP',ExpectedOpenningBalance);
+    END;
+
+    LOCAL PROCEDURE ExecuteUIHandlers@1033();
+    BEGIN
+      // Generate Dummy message. Required for executing the test case successfully.
+      MESSAGE('');
+      IF CONFIRM('') THEN;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryValuationWIPRequestPageHandler@138(VAR InventoryValuationWIP@1000 : TestRequestPage 5802);
+    VAR
+      StartDate@1001 : Variant;
+      EndDate@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(StartDate);
+      LibraryVariableStorage.Dequeue(EndDate);
+
+      InventoryValuationWIP.StartingDate.SETVALUE(StartDate);
+      InventoryValuationWIP.EndingDate.SETVALUE(EndDate);
+
+      InventoryValuationWIP.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@20(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;  // finish prod order confirmation.
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE StrMenuHandler@29(Options@1000 : Text[1024];VAR Choice@1001 : Integer;Instructions@1002 : Text[1024]);
+    BEGIN
+      Choice := 2; // Calc standard cost on all levels.
+    END;
+
+    [MessageHandler]
+    PROCEDURE MsgHandler@14(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Inventory Valuation - WIP] [SCM]
+      Test for Inventory Valuation - WIP:
+      1. Verify the Openning Balance on period 3 on Inventory Valuation - WIP Report after making output on period 1 & 3 but invoicing on period 4.
+
+      Covers Test cases for Sicily bug:
+      -----------------------------------------------------------------------------------------------
+      Test Function Name                                                                       TFS ID
+      -----------------------------------------------------------------------------------------------
+      PartialOutputInFirstAndThirdPeriodButInvoicedInForthPeriod                                49838
+    }
+    END.
+  }
+}
+

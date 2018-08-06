@@ -1,0 +1,2686 @@
+OBJECT Codeunit 137287 SCM Inventory Costing II
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1002 : Codeunit 130000;
+      LibraryERM@1001 : Codeunit 131300;
+      LibraryInventory@1004 : Codeunit 132201;
+      LibraryPatterns@1010 : Codeunit 132212;
+      LibraryPurchase@1019 : Codeunit 130512;
+      LibrarySales@1020 : Codeunit 130509;
+      LibraryUtility@1170000000 : Codeunit 131000;
+      LibraryVariableStorage@1006 : Codeunit 131004;
+      LibrarySetupStorage@1021 : Codeunit 131009;
+      LibraryRandom@1003 : Codeunit 130440;
+      isInitialized@1000 : Boolean;
+      AssignmentErr@1007 : TextConst 'ENU=You cannot assign more than 1 units';
+      NegativeAmountErr@1013 : TextConst 'ENU=Amount must be negative in Gen. Journal Line';
+      PositiveAmountErr@1014 : TextConst 'ENU=Amount must be positive in Gen. Journal Line';
+      UnexpMsg@1009 : TextConst 'ENU=Value Mismatch.';
+      InvalidatedAssignmentErr@1005 : TextConst 'ENU=The order line that the item charge was originally assigned to has been fully posted. You must reassign the item charge to the posted receipt or shipment.';
+      PartialAssignmentMsg@1011 : TextConst 'ENU=The Rem. to Assign amount is';
+      AssignableAmountErr@1015 : TextConst 'ENU=Assignable Amount is not correct.';
+      DuplicateJournalQst@1016 : TextConst 'ENU=Duplicate Revaluation Journals will be generated';
+      ItemJnlLineCountErr@1012 : TextConst '@@@={Locked};ENU=There should be %1 Item Journal Line(s) for Item %2.';
+      PostedSalesDocType@1008 : 'Quote,Blanket Order,Order,Invoice,Return Order,Credit Memo,Posted Shipment,Posted Invoice,Posted Return Receipt,Posted Credit Memo';
+      CostAmountNonInvtblErr@1017 : TextConst 'ENU=Function NonInvtblCostAmt returned wrong value.';
+      PostedPurchaseDocType@1018 : 'Quote,Blanket Order,Order,Invoice,Return Order,Credit Memo,Posted Receipt,Posted Invoice,Posted Return Shipment,Posted Credit Memo';
+      ActualCostErr@1022 : TextConst 'ENU=Incorrect Actual Cost LCY';
+
+    [Test]
+    PROCEDURE ChargeAssignmentUsingPurchaseInvoice@5();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      // Verify Item Charge Assignment(Purch.) using Sales Order and Purchase Invoice.
+      Initialize;
+      ChargeAssignmentUsingPurchaseDocument(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE ChargeAssignmentUsingPurchaseCreditMemo@118();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      // Verify Item Charge Assignment(Purch.) using Sales Order and Purchase Credit Memo.
+      Initialize;
+      ChargeAssignmentUsingPurchaseDocument(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE ChargeAssignmentUsingPurchaseReturnOrder@78();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      // Verify Item Charge Assignment(Purch.) using Sales Order and Purchase Return Order.
+      Initialize;
+      ChargeAssignmentUsingPurchaseDocument(PurchaseHeader."Document Type"::"Return Order");
+    END;
+
+    LOCAL PROCEDURE ChargeAssignmentUsingPurchaseDocument@3(PurchaseDocumentType@1004 : Option);
+    VAR
+      ItemChargeAssignmentPurch@1000 : Record 5805;
+      PurchaseLine@1015 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Setup: Create and post as Sales Order and create Purchase Invoice with Charge Item with Random value.
+      CreateAndPostSalesOrder(SalesLine,SalesHeader."Document Type"::Order);
+      CreatePurchaseDocumentUsingChargeItem(PurchaseLine,PurchaseDocumentType,LibraryRandom.RandDec(10,2));
+
+      // Exercise.
+      CreateItemChargeAssignmentUsingShipmentLine(ItemChargeAssignmentPurch,PurchaseLine,SalesLine."Document No.",SalesLine."No.");
+
+      // Verify: Verify values on Item Charge Assignment.
+      ItemChargeAssignmentPurch.TESTFIELD("Amount to Assign",PurchaseLine.Amount);
+      ItemChargeAssignmentPurch.TESTFIELD("Qty. to Assign",1);  // Using 1 because only one Quantity of Charge Item is assigned.
+    END;
+
+    [Test]
+    PROCEDURE PostPurchaseInvoiceWithChargeAssignment@53();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      // Verify Value Entry for Charge Item with Non Inventoriable for Purchase Invoice.
+      Initialize;
+      PostPurchaseDocumentWithChargeAssignment(PurchaseHeader."Document Type"::Invoice,-1);
+    END;
+
+    [Test]
+    PROCEDURE PostPurchaseReturnOrderWithChargeAssignment@103();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      // Verify Value Entry for Charge Item with Non Inventoriable for Purchase Return Order.
+      Initialize;
+      PostPurchaseDocumentWithChargeAssignment(PurchaseHeader."Document Type"::"Return Order",1);
+    END;
+
+    [Test]
+    PROCEDURE PostPurchaseCreditMemoWithChargeAssignment@117();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      // Verify Value Entry for Charge Item with Non Inventoriable for Purchase Credit Memo.
+      Initialize;
+      PostPurchaseDocumentWithChargeAssignment(PurchaseHeader."Document Type"::"Credit Memo",1);
+    END;
+
+    LOCAL PROCEDURE PostPurchaseDocumentWithChargeAssignment@33(PurchaseDocumentType@1000 : Option;AmountSignFactor@1005 : Integer);
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      PurchaseLine@1015 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+      DocumentNo@1001 : Code[20];
+    BEGIN
+      // Setup: Create and post as Sales Order and create Purchase Invoice with Charge Item.
+      CreateAndPostSalesOrder(SalesLine,SalesHeader."Document Type"::Order);
+      CreatePurchaseDocumentAndAssignCharge(
+        PurchaseLine,PurchaseDocumentType,SalesLine."Document No.",SalesLine."No.",SalesLine.Quantity);
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+
+      // Exercise.
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify Value Entry for Charge Item with Non Inventoriable.
+      VerifyValueEntryForChargeItem(DocumentNo,PurchaseLine."No.",-PurchaseLine.Quantity * PurchaseLine."Direct Unit Cost",FALSE);
+
+      // Verify: Verify Value Entry for Charge Item with Non Inventoriable Cost.
+      VerifyNonInventoriableCost(
+        DocumentNo,PurchaseLine."No.",-PurchaseLine.Quantity * PurchaseLine."Direct Unit Cost",
+        AmountSignFactor * PurchaseLine.Quantity * PurchaseLine."Direct Unit Cost");
+    END;
+
+    [Test]
+    PROCEDURE ChargeAssignmentUsingPurchaseInvoiceWithMultipleLines@100();
+    VAR
+      PurchaseLine@1015 : Record 39;
+      GlobalItemNo@1000 : Variant;
+    BEGIN
+      // Verify Item Charge Assignment for both Shipment lines.
+
+      // Setup.
+      Initialize;
+
+      // Exercise.
+      ChargeAssignmentUsingShipmentLines(PurchaseLine,1);  // Taking 1 for Charge Item Amount to Assign.
+      LibraryVariableStorage.Dequeue(GlobalItemNo);
+      LibraryVariableStorage.Dequeue(GlobalItemNo);
+
+      // Verify: Verify Item Charge Assignment for both Shipment lines.
+      VerifyChargeItemAssignment(GlobalItemNo,PurchaseLine.Amount);
+      VerifyChargeItemAssignment(GlobalItemNo,PurchaseLine.Amount);
+    END;
+
+    [Test]
+    PROCEDURE PostInvoiceWithMultipleLinesChargeAssignmentError@20();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      PurchaseLine@1015 : Record 39;
+    BEGIN
+      // Verify error message while posting Purchase Invoice with Qty. to Assign more than Purchase Invoice Quantity.
+
+      // Setup: Create and post as Sales Order with two line using different Item.
+      Initialize;
+      ChargeAssignmentUsingShipmentLines(PurchaseLine,1);  // Taking 1 for Charge Item
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+
+      // Exercise: Create and post a Purchase Invoice and create Charge Item Assignment for all the Shipment lines.
+      ASSERTERROR LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify error message while posting Purchase Invoice with Qty. to Assign more than Purchase Invoice Quantity.
+      Assert.ExpectedError(STRSUBSTNO(AssignmentErr));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE PostPurchaseInvoiceWithMultipleLinesWithChargeAssignment@73();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      PurchaseLine@1015 : Record 39;
+      ItemChargeNo@1005 : Code[20];
+      DocumentNo@1003 : Code[20];
+    BEGIN
+      // Verify Inventoriable and values in Value Entry.
+
+      // Setup: Create and post as Sales Order with two line using different Items. Create Purchase Invoice and create Charge Item Assignment for all the Shipment lines.
+      Initialize;
+      LibraryVariableStorage.Enqueue(1);  // Enqueue option value for ItemChargeAssignMenuHandler.
+      ItemChargeNo := ChargeAssignmentUsingShipmentLines(PurchaseLine,1);
+      PurchaseLine.ShowItemChargeAssgnt;
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+
+      // Exercise.
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify Value Entry for Charge Item with Non Inventoriable.
+      VerifyValueEntryForChargeItem(DocumentNo,ItemChargeNo,-PurchaseLine.Quantity,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE SalesShipmentWithNegativeAmountUsingChargeAssignment@113();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      // Verify error message while posting Purchase Invoice with Negative Quantity.
+
+      // Setup: Create Purchase Invoice with negative Direct Unit Cost using Charge Item.
+      Initialize;
+      PostSalesAndPurchaseDocumentForChargeItem(
+        PurchaseHeader,PurchaseHeader."Document Type"::Invoice,SalesHeader."Document Type"::Order);
+
+      // Exercise.
+      ASSERTERROR LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify error message while posting Purchase Invoice.
+      Assert.ExpectedError(STRSUBSTNO(NegativeAmountErr));
+    END;
+
+    [Test]
+    PROCEDURE PostPurchaseCreditMemoWithNegativeDirectUnitCost@126();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      // Verify error message while posting Purchase Credit Memo with Negative Amount.
+
+      // Setup: Create Purchase Credit Memo with Charge Item.
+      Initialize;
+      PostSalesAndPurchaseDocumentForChargeItem(
+        PurchaseHeader,PurchaseHeader."Document Type"::"Credit Memo",SalesHeader."Document Type"::Order);
+
+      // Exercise.
+      ASSERTERROR LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify error message while posting Purchase Credit Memo.
+      Assert.ExpectedError(STRSUBSTNO(PositiveAmountErr));
+    END;
+
+    [Test]
+    PROCEDURE AssgntUsingSalesRetOrderAndPurchInvoice@6();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      // Verify Item Charge Assignment(Purch.) using Sales Return Order and Purchase Invoice.
+      Initialize;
+      ChgAssgntUsingSalesRetOrder(PurchaseHeader."Document Type"::Invoice,SalesHeader."Document Type"::"Return Order");
+    END;
+
+    [Test]
+    PROCEDURE AssgntUsingSalesRetOrderAndPurchRetOrder@97();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      // Verify Item Charge Assignment(Purch.) using Sales Return Order and Purchase Return Order.
+      Initialize;
+      ChgAssgntUsingSalesRetOrder(PurchaseHeader."Document Type"::"Return Order",SalesHeader."Document Type"::"Return Order");
+    END;
+
+    [Test]
+    PROCEDURE AssgntUsingSalesRetOrderAndPurchCrMemo@98();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      // Verify Item Charge Assignment(Purch.) using Sales Return Order and Purchase Credit Memo.
+      Initialize;
+      ChgAssgntUsingSalesRetOrder(PurchaseHeader."Document Type"::"Credit Memo",SalesHeader."Document Type"::"Return Order");
+    END;
+
+    LOCAL PROCEDURE ChgAssgntUsingSalesRetOrder@2(PurchaseDocumentType@1004 : Option;SalesDocumentType@1005 : Option);
+    VAR
+      ItemChargeAssignmentPurch@1000 : Record 5805;
+      PurchaseLine@1015 : Record 39;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Setup: Create and post as Sales Return Order and create Purchase Document with Charge Item with Random value.
+      CreateAndPostSalesOrder(SalesLine,SalesDocumentType);
+      CreatePurchaseDocumentUsingChargeItem(PurchaseLine,PurchaseDocumentType,LibraryRandom.RandDec(10,2));
+
+      // Exercise.
+      CreateItemChargeAssignmentUsingReceiptLine(ItemChargeAssignmentPurch,PurchaseLine,SalesLine."Document No.",SalesLine."No.");
+
+      // Verify: Verify values on Item Charge Assignment.
+      ItemChargeAssignmentPurch.TESTFIELD("Amount to Assign",PurchaseLine.Amount);
+      ItemChargeAssignmentPurch.TESTFIELD("Qty. to Assign",1);  // Using 1 because only one Quantity of Charge Item is assigned.
+    END;
+
+    [Test]
+    PROCEDURE PostPurchInvoiceWithChgItemUsingSalesRetOrder@123();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      // Verify Value Entry for Charge Item with Inventoriable for Purchase Invoice.
+      Initialize;
+      PostAndVerifyPurchDocWithChgAssignt(PurchaseHeader."Document Type"::Invoice)
+    END;
+
+    [Test]
+    PROCEDURE PostPurchRetOrderWithChgItemUsingSalesRetOrder@115();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      // Verify Value Entry for Charge Item with Inventoriable for Purchase Return Order.
+      Initialize;
+      PostAndVerifyPurchDocWithChgAssignt(PurchaseHeader."Document Type"::"Return Order")
+    END;
+
+    [Test]
+    PROCEDURE PostPurchCrMemoWithChgItemUsingSalesRetOrder@114();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      // Verify Value Entry for Charge Item with Inventoriable for Purchase Credit Memo.
+      Initialize;
+      PostAndVerifyPurchDocWithChgAssignt(PurchaseHeader."Document Type"::"Credit Memo")
+    END;
+
+    LOCAL PROCEDURE PostAndVerifyPurchDocWithChgAssignt@112(PurchaseDocumentType@1000 : Option);
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      PurchaseLine@1015 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+      DocumentNo@1001 : Code[20];
+    BEGIN
+      // Setup: Create and post as Sales Return Order and create Purchase Document with Charge Item.
+      CreateAndPostSalesOrder(SalesLine,SalesHeader."Document Type"::"Return Order");
+      CreatePurchaseDocumentWithChargeAssignment(
+        PurchaseLine,PurchaseDocumentType,SalesLine."Document No.",SalesLine."No.",SalesLine.Quantity);
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+
+      // Exercise.
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify Value Entry for Charge Item with Inventoriable.
+      VerifyValueEntryForChargeItem(DocumentNo,PurchaseLine."No.",PurchaseLine.Quantity * PurchaseLine."Direct Unit Cost",TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE PostChgAssigntWithMultipleLineUsingSalesRetOrder@189();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      PurchaseLine@1015 : Record 39;
+      ItemChargeNo@1005 : Code[20];
+      DocumentNo@1003 : Code[20];
+    BEGIN
+      // Verify Inventoriable and values in Value Entry.
+
+      // Setup: Create and post as Sales Return Order with multiple line and create Charge Item Assignment using Receipt Lines.
+      Initialize;
+      ItemChargeNo := ChargeAssignmentUsingReceiptLines(PurchaseLine,1);
+      LibraryVariableStorage.Enqueue(1);  // Enqueue option value for ItemChargeAssignMenuHandler.
+      PurchaseLine.ShowItemChargeAssgnt;
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+
+      // Exercise.
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify Value Entry for Charge Item with Inventoriable.
+      VerifyValueEntryForChargeItem(DocumentNo,ItemChargeNo,PurchaseLine.Quantity,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE PostInvoiceUsingSalesRetOrderError@109();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      PurchaseLine@1015 : Record 39;
+    BEGIN
+      // Verify error message while posting Purchase Invoice using Sales Return Order with Qty. to Assign more than Purchase Invoice Quantity.
+
+      // Setup: Create and post as Sales Return Order with multiple line.
+      Initialize;
+      ChargeAssignmentUsingReceiptLines(PurchaseLine,1);
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+
+      // Exercise.
+      ASSERTERROR LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify error message while posting Purchase Invoice with Qty. to Assign more than Purchase Invoice Quantity.
+      Assert.ExpectedError(STRSUBSTNO(AssignmentErr));
+    END;
+
+    [Test]
+    PROCEDURE NegativeAmountErrorUsingSalesRetOrder@10();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      // Verify error message while posting Purchase Invoice with Negative Direct Unit Cost.
+
+      // Setup.
+      Initialize;
+
+      // Exercise: Create Purchase Invoice with negative Direct Unit Cost using Charge Item and Post.
+      PostPurchaseDocumentUsingSalesReturnOrder(
+        PurchaseHeader,PurchaseHeader."Document Type"::Invoice,SalesHeader."Document Type"::"Return Order");
+      ASSERTERROR LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify error message while posting Purchase Invoice.
+      Assert.ExpectedError(STRSUBSTNO(NegativeAmountErr));
+    END;
+
+    [Test]
+    PROCEDURE PositiveAmountErrorUsingSalesRetOrder@7();
+    VAR
+      PurchaseHeader@1018 : Record 38;
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      // Verify error message while posting Purchase Credit Memo with Negative value.
+
+      // Setup.
+      Initialize;
+
+      // Exercise: Create Purchase Credit Memo with Charge Item and Post.
+      PostPurchaseDocumentUsingSalesReturnOrder(
+        PurchaseHeader,PurchaseHeader."Document Type"::"Credit Memo",SalesHeader."Document Type"::"Return Order");
+      ASSERTERROR LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify error message while posting Purchase Credit Memo.
+      Assert.ExpectedError(STRSUBSTNO(PositiveAmountErr));
+    END;
+
+    [Test]
+    PROCEDURE PurchOrderWithPositiveChgAssigntToPurchRcpt@24();
+    VAR
+      PurchaseHeader@1005 : Record 38;
+    BEGIN
+      // Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Charge to Purchase Receipt.
+      Initialize;
+      PurchDocWithChgAssigntToPurchRcpt(PurchaseHeader."Document Type"::Order,1,1,-1);  // Respective SignFactors for Quantity, Cost and Amount.
+    END;
+
+    [Test]
+    PROCEDURE PurchOrderWithNegativeChgAssigntToPurchRcpt@19();
+    VAR
+      PurchaseHeader@1005 : Record 38;
+    BEGIN
+      // Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Negative Charge to Purchase Receipt.
+      Initialize;
+      PurchDocWithChgAssigntToPurchRcpt(PurchaseHeader."Document Type"::Order,-1,1,-1);  // Respective SignFactors for Quantity, Cost and Amount.
+    END;
+
+    [Test]
+    PROCEDURE PurchRetOrderWithChgAssigntToPurchRcpt@16();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      // Verify Non-inventoriable Cost on Value Entry for Posted Purchase Credit Memo after assigning Charge to Purchase Receipt.
+      Initialize;
+      PurchDocWithChgAssigntToPurchRcpt(PurchaseHeader."Document Type"::"Return Order",1,1,1);  // Respective SignFactors for Quantity, Cost and Amount.
+    END;
+
+    [Test]
+    PROCEDURE PurchCrMemoWithNegtiveCostChgAssigntToPurchRcpt@28();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      // Verify Non-inventoriable Cost on Value Entry for Posted Purchase Credit Memo after assigning Charge with negative Cost to Purchase Receipt.
+      Initialize;
+      PurchDocWithChgAssigntToPurchRcpt(PurchaseHeader."Document Type"::"Credit Memo",1,-1,1);  // Respective SignFactors for Quantity, Cost and Amount.
+    END;
+
+    LOCAL PROCEDURE PurchDocWithChgAssigntToPurchRcpt@18(DocumentType@1002 : Option;QuantitySignFactor@1006 : Integer;CostSignFactor@1008 : Integer;AmountSignFactor@1009 : Integer);
+    VAR
+      ItemChargeAssignmentPurch@1005 : Record 5805;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      PurchaseLine2@1001 : Record 39;
+      PurchRcptLine@1004 : Record 121;
+      DocumentNo@1007 : Code[20];
+    BEGIN
+      // Setup: Create Purchase Order with negative Quantity.
+      CreateAndPostPurchaseDocument(PurchaseLine,PurchaseHeader."Document Type"::Order,-1);  // -1 for Quantity SignFactor.
+      FindReceiptLine(PurchRcptLine,PurchaseLine."Document No.",PurchaseLine."No.");
+
+      // Create Purchase Document for Charge Item and assign to Receipt.
+      CreatePurchaseDocumentWithChargeItemAndItem(
+        PurchaseLine2,DocumentType,PurchaseLine."Buy-from Vendor No.",QuantitySignFactor,CostSignFactor);
+      LibraryInventory.CreateItemChargeAssignPurchase(
+        ItemChargeAssignmentPurch,PurchaseLine2,ItemChargeAssignmentPurch."Applies-to Doc. Type"::Receipt,
+        PurchRcptLine."Document No.",PurchRcptLine."Line No.",PurchRcptLine."No.");
+      PurchaseHeader.GET(PurchaseLine2."Document Type",PurchaseLine2."Document No.");
+
+      // Exercise: Post Purchase Document.
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify Value Entry for Charge Item.
+      VerifyNonInventoriableCost(
+        DocumentNo,PurchaseLine2."No.",PurchaseLine.Quantity,
+        AmountSignFactor * PurchaseLine2.Quantity * PurchaseLine2."Direct Unit Cost");
+    END;
+
+    [Test]
+    PROCEDURE PurchOrderWithChgAssigntToPurchRetShpt@14();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      // Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Charge to Return Shipment.
+      Initialize;
+      PurchDocWithChgAssgntToPurchRetShipt(PurchaseHeader."Document Type"::Order,1,1,1);  // Respective SignFactors for Quantity, Cost and Amount.
+    END;
+
+    [Test]
+    PROCEDURE PurchOrderWithNegtiveCostChgAssigntToPurchRetShpt@27();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      // Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Charge with negative Cost to Return Shipment.
+      Initialize;
+      PurchDocWithChgAssgntToPurchRetShipt(PurchaseHeader."Document Type"::Order,1,-1,1);  // Respective SignFactors for Quantity, Cost and Amount.
+    END;
+
+    [Test]
+    PROCEDURE PurchRetOrderWithChgAssigntToPurchRetShpt@17();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      // Verify Non-inventoriable Cost on Value Entry for Posted Purchase Credit Memo after assigning Charge to Purchase Return Shipment.
+      Initialize;
+      PurchDocWithChgAssgntToPurchRetShipt(PurchaseHeader."Document Type"::"Return Order",1,1,-1); // Respective SignFactors for Quantity, Cost and Amount.
+    END;
+
+    [Test]
+    PROCEDURE PurchCrMemoWithNegQtyAndCostChgAssgntToPurchRetShipt@25();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      // Verify Non-inventoriable Cost on Value Entry for Posted Purchase Credit Memo after assigning negative Charge with negative Cost to Purchase Return Shipment.
+      Initialize;
+      PurchDocWithChgAssgntToPurchRetShipt(PurchaseHeader."Document Type"::"Credit Memo",-1,-1,-1); // Respective SignFactors for Quantity, Cost and Amount.
+    END;
+
+    LOCAL PROCEDURE PurchDocWithChgAssgntToPurchRetShipt@23(DocumentType@1004 : Option;QuantitySignFactor@1006 : Integer;CostSignFactor@1008 : Integer;AmountSignFactor@1009 : Integer);
+    VAR
+      ItemChargeAssignmentPurch@1005 : Record 5805;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      PurchaseLine2@1001 : Record 39;
+      ReturnShipmentLine@1002 : Record 6651;
+      DocumentNo@1007 : Code[20];
+    BEGIN
+      // Setup: Create Purchase Return Order.
+      CreateAndPostPurchaseDocument(PurchaseLine,PurchaseHeader."Document Type"::"Return Order",1);  // 1 for Quantity SignFactor.
+      FindReturnShipmentLine(ReturnShipmentLine,PurchaseLine."Document No.",PurchaseLine."No.");
+
+      // Create Purchase Document for Charge Item and assign to Return Shipment.
+      CreatePurchaseDocumentWithChargeItemAndItem(
+        PurchaseLine2,DocumentType,PurchaseLine."Buy-from Vendor No.",QuantitySignFactor,CostSignFactor);
+      LibraryInventory.CreateItemChargeAssignPurchase(
+        ItemChargeAssignmentPurch,PurchaseLine2,ItemChargeAssignmentPurch."Applies-to Doc. Type"::"Return Shipment",
+        ReturnShipmentLine."Document No.",ReturnShipmentLine."Line No.",ReturnShipmentLine."No.");
+      PurchaseHeader.GET(PurchaseLine2."Document Type",PurchaseLine2."Document No.");
+
+      // Exercise: Post Purchase Document.
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify Value Entry for Charge Item.
+      VerifyNonInventoriableCost(
+        DocumentNo,PurchaseLine2."No.",-PurchaseLine.Quantity,
+        AmountSignFactor * PurchaseLine2.Quantity * PurchaseLine2."Direct Unit Cost");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentMultipleLinePageHandler,ReturnShipmentLinesPageHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE SplitOfItemCharge@35();
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      PurchaseLine2@1002 : Record 39;
+      PurchaseLine3@1006 : Record 39;
+      ReturnShipmentLine@1001 : Record 6651;
+      DocumentNo@1000 : Code[20];
+    BEGIN
+      // Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Charge to Purchase Return Shipment and Purchase Line.
+
+      // Setup: Create Purchase Return Order.
+      CreateAndPostPurchaseDocument(PurchaseLine,PurchaseHeader."Document Type"::"Return Order",1);  // 1 for Quantity SignFactor.
+      FindReturnShipmentLine(ReturnShipmentLine,PurchaseLine."Document No.",PurchaseLine."No.");
+      LibraryVariableStorage.Enqueue(PurchaseLine."No.");  // Enqueue for ItemChargeAssignmentMultipleLinePageHandler.
+
+      // Create Purchase Document for Charge Item and assign to Return Shipment.
+      CreatePurchaseHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,PurchaseLine."Buy-from Vendor No.");
+      CreatePurchaseLine(
+        PurchaseLine2,PurchaseHeader,PurchaseLine.Type::Item,CreateItem,-2 * PurchaseLine.Quantity,PurchaseLine."Direct Unit Cost");
+      CreatePurchaseLine(
+        PurchaseLine3,PurchaseHeader,PurchaseLine2.Type::"Charge (Item)",LibraryInventory.CreateItemChargeNo,
+        2 * PurchaseLine.Quantity,100 + PurchaseLine."Direct Unit Cost");
+      LibraryVariableStorage.Enqueue(2);  // Enqueue option value for ItemChargeAssignMenuHandler.
+      PurchaseLine3.ShowItemChargeAssgnt;
+      PurchaseHeader.GET(PurchaseLine3."Document Type",PurchaseLine3."Document No.");
+
+      // Exercise: Post Purchase Document.
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify Value Entry for Charge Item.
+      VerifyNonInventoriableCost(
+        DocumentNo,PurchaseLine3."No.",-PurchaseLine.Quantity,
+        PurchaseLine.Quantity * PurchaseLine3.Amount / (PurchaseLine.Quantity + -PurchaseLine2.Quantity));
+      VerifyNonInventoriableCost(
+        DocumentNo,PurchaseLine3."No.",PurchaseLine2.Quantity,
+        -PurchaseLine2.Quantity * PurchaseLine3.Amount / (PurchaseLine.Quantity + -PurchaseLine2.Quantity));
+    END;
+
+    [Test]
+    [HandlerFunctions(ImplementStandardCostChangesHandler,MessageHandler)]
+    PROCEDURE AdjustedProfitOnStandardCost@50();
+    BEGIN
+      // Verify Customer Ledger Entry, Customer Statistic and Posted Sales Invoice Statistic post Sales Order with Implement New Stanadard Cost on Items which is less than Unit Price on Sales Order.
+      OriginalAndAdjustedProfitOnStandardCost(
+        LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(10,2) + LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(10,2) + LibraryRandom.RandDec(10,2) / 2);  // Standard Cost reuired less than Unit Price.
+    END;
+
+    [Test]
+    [HandlerFunctions(ImplementStandardCostChangesHandler,MessageHandler)]
+    PROCEDURE NegativeAdjustedProfitOnStandardCost@44();
+    BEGIN
+      // Verify Customer Ledger Entry, Customer Statistic and Posted Sales Invoice Statistic after post Sales Order with Implement New Stanadard Cost on Items which is more than Unit Price on Sales Order.
+      OriginalAndAdjustedProfitOnStandardCost(
+        LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(10,2) + LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(10,2) + LibraryRandom.RandDec(10,2) + LibraryRandom.RandDec(10,2));  // Standard Cost reuired more than Unit Price.
+    END;
+
+    LOCAL PROCEDURE OriginalAndAdjustedProfitOnStandardCost@55(StandardCost@1000 : Decimal;UnitPrice@1001 : Decimal;NewStandardCost@1003 : Decimal);
+    VAR
+      Item@1004 : Record 27;
+      SalesHeader@1005 : Record 36;
+      PurchaseHeader@1008 : Record 38;
+      PurchaseLine@1009 : Record 39;
+      Quantity@1002 : Decimal;
+    BEGIN
+      // Setup: Create Item, create Sales Order with Unit Price more than Standard Cost.
+      Initialize;
+      Item.GET(CreateAndModifyItem(StandardCost));
+      Quantity := LibraryRandom.RandDec(10,2);  // Using Random value for Quantity.
+      CreateSalesOrder(SalesHeader,SalesHeader."Document Type"::Order,Item."No.",CreateCustomer,UnitPrice,Quantity);
+
+      // Create Standard Cost Worksheet and Implement New Stanadard Cost on Item, create and post Purchase Order with Direct Unit Cost same as New Standard Cost.
+      ImplementStandardCostChanges(Item,NewStandardCost);
+      CreatePurchaseHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,CreateVendor);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",Quantity,NewStandardCost);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Exercise.
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // Verify: Verify Customer Ledger Entry, Customer Statistic and Posted Sales Invoice Statistic after post Sales Order.
+      VerifyCustomerLedgerEntry(
+        SalesHeader."Last Posting No.",SalesHeader."Sell-to Customer No.",(UnitPrice - Item."Standard Cost") * Quantity);
+      VerifyCustomerStatistic(SalesHeader."Sell-to Customer No.",(UnitPrice - NewStandardCost) * Quantity);
+      VerifyPostedSalesInvoiceStatistic(SalesHeader."Last Posting No.",(UnitPrice - NewStandardCost) * Quantity);
+    END;
+
+    [Test]
+    PROCEDURE PurchOrderWithInvalidatedChgAssignt@63();
+    VAR
+      PurchLine@1000 : Record 39;
+    BEGIN
+      // Verify invalidated Item Charge Assignment cannot be posted in Purchase Order
+      Initialize;
+      PurchDocWithInvalidatedChgAssignt(PurchLine."Document Type"::Order);
+    END;
+
+    [Test]
+    PROCEDURE PurchReturnOrderWithInvalidatedChgAssignt@67();
+    VAR
+      PurchLine@1000 : Record 39;
+    BEGIN
+      // Verify invalidated Item Charge Assignment cannot be posted in Purchase Return Order
+      Initialize;
+      PurchDocWithInvalidatedChgAssignt(PurchLine."Document Type"::"Return Order");
+    END;
+
+    LOCAL PROCEDURE PurchDocWithInvalidatedChgAssignt@48(DocumentType@1000 : Option);
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      PurchaseLine2@1003 : Record 39;
+    BEGIN
+      // Setup: Create Purchase Document with Item Line and Charge Item Line
+      CreatePurchaseHeader(PurchaseHeader,DocumentType,CreateVendor);
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,CreateItem,LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(100,2));
+
+      CASE DocumentType OF
+        PurchaseLine."Document Type"::Order:
+          LibraryPatterns.ASSIGNPurchChargeToPurchaseLine(PurchaseHeader,PurchaseLine,
+            LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(100,2));
+        PurchaseLine."Document Type"::"Return Order":
+          LibraryPatterns.ASSIGNPurchChargeToPurchReturnLine(PurchaseHeader,PurchaseLine,
+            LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(100,2));
+      END;
+
+      // Get the item charge line
+      PurchaseLine2.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchaseLine2.SETRANGE(Type,PurchaseLine.Type::"Charge (Item)");
+      PurchaseLine2.FINDFIRST;
+
+      // Set the "Qty. to Invoice" of Charge Item Line to 0 and Post the document
+      // After the post, "Qty. to Invoice" of Charge Item Line will be set to "Qty. Rcd. Not Invoiced" automatically
+      IF DocumentType = PurchaseLine."Document Type"::"Return Order" THEN
+        PurchaseLine2.VALIDATE("Return Qty. to Ship",0)
+      ELSE
+        PurchaseLine2.VALIDATE("Qty. to Invoice",0);
+      PurchaseLine2.MODIFY(TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      PurchaseHeader.GET(PurchaseHeader."Document Type",PurchaseHeader."No.");
+
+      // Update Vendor Invoice No. and Vendor Cr. Memo No.
+      UpdatePurchaseHeader(PurchaseHeader);
+
+      // Exercise: Post Invoice for the invalidated item charge assignment
+      ASSERTERROR LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Post failed
+      Assert.ExpectedError(STRSUBSTNO(InvalidatedAssignmentErr));
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithInvalidatedChgAssignt@64();
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      // Verify invalidated Item Charge Assignment cannot be posted in Sales Order
+      Initialize;
+      SalesDocWithInvalidatedChgAssignt(SalesLine."Document Type"::Order);
+    END;
+
+    [Test]
+    PROCEDURE SalesReturnOrderWithInvalidatedChgAssignt@71();
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      // Verify invalidated Item Charge Assignment cannot be posted in Sales Return Order
+      Initialize;
+      SalesDocWithInvalidatedChgAssignt(SalesLine."Document Type"::"Return Order");
+    END;
+
+    LOCAL PROCEDURE SalesDocWithInvalidatedChgAssignt@77(DocumentType@1000 : Option);
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1001 : Record 37;
+      SalesLine2@1003 : Record 37;
+    BEGIN
+      // Setup: Create Sales Document with Item Line and Charge Item Line
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,CreateCustomer);
+      CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::Item,CreateItem,LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(100,2));
+
+      // Assign item charge to current document
+      CASE DocumentType OF
+        SalesLine."Document Type"::Order:
+          LibraryPatterns.ASSIGNSalesChargeToSalesLine(SalesHeader,SalesLine,
+            LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(100,2));
+        SalesLine."Document Type"::"Return Order":
+          LibraryPatterns.ASSIGNSalesChargeToSalesReturnLine(SalesHeader,SalesLine,
+            LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(100,2));
+      END;
+
+      // Get the item charge line
+      SalesLine2.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine2.SETRANGE(Type,SalesLine.Type::"Charge (Item)");
+      SalesLine2.FINDFIRST;
+
+      // Set the "Qty. to Invoice" of Charge Item Line to 0 and Post the document
+      // After the post, "Qty. to Invoice" of Charge Item Line will be set to "Qty. Rcd. Not Invoiced" automatically
+      IF DocumentType = SalesLine."Document Type"::Order THEN
+        SalesLine2.VALIDATE("Qty. to Ship",0)
+      ELSE
+        SalesLine2.VALIDATE("Qty. to Invoice",0);
+      SalesLine2.MODIFY(TRUE);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // Exercise: Post Invoice for the invalidated item charge assignment
+      ASSERTERROR LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // Verify: Post failed
+      Assert.ExpectedError(STRSUBSTNO(InvalidatedAssignmentErr));
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntPurchHandler,ItemChargeAssignMenuHandler,ReportPurchaseDocumentTestHandler)]
+    PROCEDURE PurchInvoiceWithoutInvDiscAndLnDiscAndPricesIncludingVATUnChecked@74();
+    VAR
+      VendInvoiceDisc@1003 : Record 24;
+      PurchaseLine@1002 : Record 39;
+      PurchaseHeader@1001 : Record 38;
+      ExpdAssignableAmount@1006 : Variant;
+      VendorNo@1004 : Code[20];
+    BEGIN
+      // Verify Assignable Amount & Rem. Amount To Assign is correct without Line Discount & Invoice Discount & Currency
+      // and Prices Including VAT is unchecked.
+
+      // Setup: Create Vendor with Invoice Discount.
+      // Create purchase invoice with Item and Charge Item without line discount & invoice discount & Currency.
+      Initialize;
+      VendorNo := CreateVendorWithInvoiceDiscount(VendInvoiceDisc,'',LibraryRandom.RandDec(10,5));
+      CreatePurchaseDocumentWithMultipleLinesWithItemCharge(
+        PurchaseLine,PurchaseHeader."Document Type"::Invoice,VendorNo,'',FALSE,0,
+        LibraryRandom.RandDec(1000,5),LibraryRandom.RandDec(2000,5)); // Prices Including VAT is unchecked.
+      ExpdAssignableAmount := PurchaseLine."Line Amount";
+
+      // Exercise: Assign the Item Charge. Running Suggest Item Charge Assignment.
+      // Enqueue Assignable Amount and option = Amount for ItemChargeAssignMenuHandler.
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      PurchaseLine.ShowItemChargeAssgnt;
+
+      // Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntPurchHandler before running report.
+
+      // Exercise: Run report Purchase Document - Test.
+      // No need run Suggest Item Charge Assignment. Just show Item Charge Assignment.
+      RunPurchaseReportAndAssignItemChargeWithoutSuggest(ExpdAssignableAmount);
+      PurchaseLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntPurchHandler after running report.
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntPurchHandler,ItemChargeAssignMenuHandler,ReportPurchaseDocumentTestHandler)]
+    PROCEDURE PurchInvoiceWithCurrencyAndPricesIncludingVATChecked@66();
+    VAR
+      VendInvoiceDisc@1003 : Record 24;
+      Currency@1000 : Record 4;
+      PurchaseLine@1002 : Record 39;
+      ExpdAssignableAmount@1006 : Variant;
+      VendorNo@1004 : Code[20];
+      VATPct@1005 : Decimal;
+    BEGIN
+      // Verify Assignable Amount & Rem. Amount To Assign is correct with Line Discount & Invoice Discount & Currency
+      // and Prices Including VAT is checked.
+
+      // Setup: Create Vendor with Invoice Discount.
+      // Create Purchase invoice with Item and Charge Item with line discount & invoice discount & Currency.
+      Initialize;
+      CreateCurrency(Currency);
+      VendorNo := CreateVendorWithInvoiceDiscount(VendInvoiceDisc,Currency.Code,LibraryRandom.RandDec(10,5));
+      VATPct :=
+        CreatePurchaseDocumentWithItemChargeAndCalcInvDisc(
+          PurchaseLine,VendorNo,Currency.Code,TRUE,LibraryRandom.RandDec(100,5),
+          LibraryRandom.RandDec(10000,5),LibraryRandom.RandDec(20000,5)); // Prices Including VAT is checked.
+      ExpdAssignableAmount := ROUND((PurchaseLine."Line Amount" - PurchaseLine."Inv. Discount Amount") / (1 + VATPct / 100));
+
+      // Exercise: Assign the Item Charge. Running Suggest Item Charge Assignment.
+      // Enqueue Assignable Amount and option = Amount for ItemChargeAssignMenuHandler.
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      PurchaseLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntPurchHandler before running report.
+
+      // Exercise: Run report Purchase Document - Test.
+      // No need run Suggest Item Charge Assignment. Just show Item Charge Assignment.
+      RunPurchaseReportAndAssignItemChargeWithoutSuggest(ExpdAssignableAmount);
+      PurchaseLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntPurchHandler after running report.
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntPurchHandler,ItemChargeAssignMenuHandler,ReportPurchaseDocumentTestHandler)]
+    PROCEDURE PurchInvoiceWithoutCurrencyAndPricesIncludingVATUnChecked@83();
+    VAR
+      VendInvoiceDisc@1003 : Record 24;
+      PurchaseLine@1002 : Record 39;
+      ExpdAssignableAmount@1006 : Variant;
+      VendorNo@1004 : Code[20];
+    BEGIN
+      // Verify Assignable Amount & Rem. Amount To Assign is correct with Line Discount & Invoice Discount without Currency
+      // and Prices Including VAT is unchecked.
+
+      // Setup: Create Vendor with Invoice Discount.
+      // Create Purchase invoice with Item and Charge Item with line discount & invoice discount without currency
+      Initialize;
+      VendorNo := CreateVendorWithInvoiceDiscount(VendInvoiceDisc,'',LibraryRandom.RandDec(10,5));
+      CreatePurchaseDocumentWithItemChargeAndCalcInvDisc(
+        PurchaseLine,VendorNo,'',FALSE,LibraryRandom.RandDec(100,5),
+        LibraryRandom.RandDec(3000,5),LibraryRandom.RandDec(4000,5)); // Prices Including VAT is unchecked.
+      ExpdAssignableAmount := PurchaseLine."Line Amount" - PurchaseLine."Inv. Discount Amount";
+
+      // Exercise: Assign the Item Charge. Running Suggest Item Charge Assignment.
+      // Enqueue Assignable Amount and option = Equally for ItemChargeAssignMenuHandler.
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,1);
+      PurchaseLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntPurchHandler before running report.
+
+      // Exercise: Run report Purchase Document - Test.
+      // No need run Suggest Item Charge Assignment. Just show Item Charge Assignment.
+      RunPurchaseReportAndAssignItemChargeWithoutSuggest(ExpdAssignableAmount);
+      PurchaseLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntPurchHandler after running report.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentPurchHandler,ConfirmHandler)]
+    PROCEDURE ConfirmMessagePopupWhenPartialAssignItemChargeForPurchaseInvoice@47();
+    VAR
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      VendInvoiceDisc@1005 : Record 24;
+      VendorNo@1004 : Code[20];
+    BEGIN
+      // Verify the confirm message pops up with assign item charge partially for Purchase.
+
+      // Setup: Create Vendor with Invoice Discount.
+      // Create Purchase invoice with Item and Charge Item without line discount & invoice discount without currency
+      Initialize;
+      VendorNo := CreateVendorWithInvoiceDiscount(VendInvoiceDisc,'',LibraryRandom.RandDec(10,5));
+      CreatePurchaseDocumentWithMultipleLinesWithItemCharge(
+        PurchaseLine,PurchaseHeader."Document Type"::Invoice,VendorNo,'',FALSE,0,
+        LibraryRandom.RandDec(5000,5),LibraryRandom.RandDec(6000,5)); // Prices Including VAT is unchecked.
+
+      // Exercise: Partial Assign the Item Charge in ItemChargeAssignmentPartialPurchHandler.
+      LibraryVariableStorage.Enqueue(LibraryRandom.RandInt(5)); // Partial assign quantity.
+      LibraryVariableStorage.Enqueue(PartialAssignmentMsg);
+      PurchaseLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify the confirm message pops up when Rem Amount To Assign has value after
+      // partially assign item charge for Purchase in ConfirmHandler.
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntSalesHandler,ItemChargeAssignMenuHandler,ReportSalesDocumentTestHandler)]
+    PROCEDURE SalesInvoiceWithoutInvDiscAndLnDiscAndPricesIncludingVATUnChecked@4();
+    VAR
+      CustInvoiceDisc@1003 : Record 19;
+      SalesLine@1002 : Record 37;
+      SalesHeader@1001 : Record 36;
+      ExpdAssignableAmount@1006 : Decimal;
+      CustomerNo@1004 : Code[20];
+    BEGIN
+      // Verify Assignable Amount & Rem. Amount To Assign is correct without Line Discount & Invoice Discount & Currency
+      // and Prices Including VAT is unchecked.
+
+      // Setup: Create Customer with Invoice Discount.
+      // Create sales invoice with Item and Charge Item without line discount & invoice discount & currency.
+      Initialize;
+      CustomerNo := CreateCustomerWithInvoiceDiscount(CustInvoiceDisc,'',LibraryRandom.RandDec(10,5));
+      CreateSalesDocumentWithMultipleLinesWithItemCharge(
+        SalesLine,SalesHeader."Document Type"::Invoice,CustomerNo,'',FALSE,0,
+        LibraryRandom.RandDec(7000,5),LibraryRandom.RandDec(8000,5)); // Prices Including VAT is unchecked.
+      ExpdAssignableAmount := SalesLine."Line Amount";
+
+      // Exercise: Assign the Item Charge. Running Suggest Item Charge Assignment.
+      // Enqueue Assignable Amount and option = Equally for ItemChargeAssignMenuHandler.
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,1);
+      SalesLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntSalesHandler before running report.
+
+      // Exercise: Run report Sales Document - Test
+      // No need run Suggest Item Charge Assignment. Just show Item Charge Assignment.
+      RunSalesReportAndAssignItemChargeWithoutSuggest(ExpdAssignableAmount);
+      SalesLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntSalesHandler after running report.
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntSalesHandler,ItemChargeAssignMenuHandler,ReportSalesDocumentTestHandler)]
+    PROCEDURE SalesInvoiceWithoutCurrencyAndPricesIncludingVATChecked@120();
+    VAR
+      CustInvoiceDisc@1003 : Record 19;
+      SalesLine@1002 : Record 37;
+      ExpdAssignableAmount@1006 : Decimal;
+      CustomerNo@1004 : Code[20];
+      VATPct@1005 : Decimal;
+    BEGIN
+      // Verify Assignable Amount & Rem. Amount To Assign is correct with Line Discount & Invoice Discount without Currency
+      // and Prices Including VAT is checked.
+
+      // Setup: Create Customer with Invoice Discount.
+      // Create sales invoice with Item and Charge Item with line discount & invoice discount without currency.
+      Initialize;
+      CustomerNo := CreateCustomerWithInvoiceDiscount(CustInvoiceDisc,'',LibraryRandom.RandDec(10,5));
+      VATPct :=
+        CreateSalesDocumentWithItemChargeAndCalcInvDisc(
+          SalesLine,CustomerNo,'',TRUE,LibraryRandom.RandDec(100,5),
+          LibraryRandom.RandDec(300,5),LibraryRandom.RandDec(400,5)); // Prices Including VAT is checked.
+      ExpdAssignableAmount := ROUND((SalesLine."Line Amount" - SalesLine."Inv. Discount Amount") / (1 + VATPct / 100));
+
+      // Exercise: Assign the Item Charge. Running Suggest Item Charge Assignment.
+      // Enqueue Assignable Amount and option = Equally for ItemChargeAssignMenuHandler.
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,1);
+      SalesLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntSalesHandler before running report.
+
+      // Exercise: Run Report Sales Document - Test.
+      // No need run Suggest Item Charge Assignment. Just show Item Charge Assignment.
+      RunSalesReportAndAssignItemChargeWithoutSuggest(ExpdAssignableAmount);
+      SalesLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntSalesHandler after running report.
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntSalesHandler,ItemChargeAssignMenuHandler,ReportSalesDocumentTestHandler)]
+    PROCEDURE SalesInvoiceWithCurrencyAndPricesIncludingVATUnChecked@68();
+    VAR
+      CustInvoiceDisc@1003 : Record 19;
+      Currency@1000 : Record 4;
+      SalesLine@1002 : Record 37;
+      ExpdAssignableAmount@1006 : Decimal;
+      CustomerNo@1004 : Code[20];
+    BEGIN
+      // Verify Assignable Amount & Rem. Amount To Assign is correct without Line Discount with Invoice Discount with Currency
+      // and Prices Including VAT is unchecked.
+
+      // Setup: Create sales invoice with multilple lines with currency
+      Initialize;
+      CreateCurrency(Currency);
+      CustomerNo := CreateCustomerWithInvoiceDiscount(CustInvoiceDisc,Currency.Code,LibraryRandom.RandDec(10,5));
+      CreateSalesDocumentWithItemChargeAndCalcInvDisc(
+        SalesLine,CustomerNo,Currency.Code,FALSE,0,LibraryRandom.RandDec(500,5),
+        LibraryRandom.RandDec(600,5)); // Prices Including VAT is unchecked.
+      ExpdAssignableAmount := SalesLine."Line Amount" - SalesLine."Inv. Discount Amount";
+
+      // Exercise: Assign the Item Charge. Running Suggest Item Charge Assignment.
+      // Enqueue Assignable Amount and option = Amount for ItemChargeAssignMenuHandler.
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      SalesLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntSalesHandler before running report.
+
+      // Exercise: Run Report Sales Document - Test.
+      // No need run Suggest Item Charge Assignment. Just show Item Charge Assignment.
+      RunSalesReportAndAssignItemChargeWithoutSuggest(ExpdAssignableAmount);
+      SalesLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Assignable Amount & Rem. Amount To Assign is correct
+      // in SuggstItemChargeAssgntSalesHandler after running report.
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ImplementStandardCostChangesHandler,ConfirmHandler)]
+    PROCEDURE DuplicateRevaluationJournalConfirmYes@56();
+    BEGIN
+      // Verify Confirm message pops up to indcate duplicate Revaluation Jounal generated from Std Cost Worksheet,
+      // then click Yes and verify the duplicate journal line generated.
+      Initialize;
+      DuplicateRevaluationJournalConfirmMessage(2); // 2 revaluation journal lines will be generated
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ImplementStandardCostChangesHandler,ConfirmHandlerFalse)]
+    PROCEDURE DuplicateRevaluationJournalConfirmNo@121();
+    BEGIN
+      // Verify no duplicate journal line generated after clicking No on confirm message indcating duplicate Revaluation Jounal generated from Std Cost Worksheet.
+      Initialize;
+      DuplicateRevaluationJournalConfirmMessage(1); // Only 1 revaluation journal line will be generated
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntPurchHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE PurchOrderPartialAssignItemCharge@106();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ExpdAssignableAmount@1005 : Decimal;
+    BEGIN
+      // Verify that partial assignment of Item Charge is correct.
+
+      // Setup.
+      Initialize;
+      ExpdAssignableAmount := PurchOrderPartItemCharge(PurchaseLine,0,2,1);
+      PreparePartialReceiptInvoice(PurchaseLine,1,1);
+
+      // Exercise & Verify: Assignable Amount & Rem. Amount To Assign are verified to be correct
+      // in SuggstItemChargeAssgntPurchHandler.
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      PurchaseLine.ShowItemChargeAssgnt;
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntPurchHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE PurchOrderPartialAssignItemChargeTwice@107();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ExpdAssignableAmount@1000 : Decimal;
+    BEGIN
+      // Verify that partial assignment of Item Charge is correct: first assign, then post, then assign again.
+
+      // Setup.
+      Initialize;
+      ExpdAssignableAmount := PurchOrderPartItemCharge(PurchaseLine,0,2,1);
+
+      // Exercise & Verify: Assignable Amount & Rem. Amount To Assign are verified to be correct
+      // in SuggstItemChargeAssgntPurchHandler.
+      PreparePartialReceiptInvoice(PurchaseLine,1,1);
+      PostPurchasePartialReceiptWithChargeAssignment(PurchaseLine,ExpdAssignableAmount,2,TRUE,TRUE);
+
+      PreparePartialReceiptInvoice(PurchaseLine,1,1);
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      PurchaseLine.ShowItemChargeAssgnt;
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntPurchHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE PurchOrderPartialAssignItemChargeReceiveFirst@108();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ExpdAssignableAmount@1006 : Decimal;
+    BEGIN
+      // Verify that partial assignment of Item Charge is correct: first assign, then receive, then assign again, then invoice, then assign again.
+
+      // Setup.
+      Initialize;
+      ExpdAssignableAmount := PurchOrderPartItemCharge(PurchaseLine,0,2,1);
+
+      // Exercise & Verify: Assignable Amount & Rem. Amount To Assign are verified to be correct
+      // in SuggstItemChargeAssgntPurchHandler.
+      PreparePartialReceiptInvoice(PurchaseLine,1,1);
+      PostPurchasePartialReceiptWithChargeAssignment(PurchaseLine,ExpdAssignableAmount,2,TRUE,FALSE);
+      PreparePartialReceiptInvoice(PurchaseLine,1,1);
+      PostPurchasePartialReceiptWithChargeAssignment(PurchaseLine,ExpdAssignableAmount,2,FALSE,TRUE);
+      PurchaseLine.FIND;
+
+      PreparePartialReceiptInvoice(PurchaseLine,1,1);
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      PurchaseLine.ShowItemChargeAssgnt;
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntPurchHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE PurchOrderPartialAssignItemChargeReceiveInvoiceTwice@116();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ExpdAssignableAmount@1006 : Variant;
+    BEGIN
+      // Verify that partial assignment of Item Charge is correct: first assign, then receive full/invoice part, then assign again.
+
+      // Setup.
+      Initialize;
+      ExpdAssignableAmount := PurchOrderPartItemCharge(PurchaseLine,0,2,1);
+
+      // Exercise & Verify: Assignable Amount & Rem. Amount To Assign are verified to be correct
+      // in SuggstItemChargeAssgntPurchHandler.
+      PreparePartialReceiptInvoice(PurchaseLine,2,1);
+      PostPurchasePartialReceiptWithChargeAssignment(PurchaseLine,ExpdAssignableAmount,2,TRUE,TRUE);
+
+      PreparePartialReceiptInvoice(PurchaseLine,0,1);
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      PurchaseLine.ShowItemChargeAssgnt;
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntPurchHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE PurchOrderPartialAssignItemChargeTwiceReceiveFirst@124();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ExpdAssignableAmount@1006 : Variant;
+    BEGIN
+      // Verify that partial assignment of Item Charge is correct: check that assign for zero 'Qty To Invoice' is zero,
+      // then partially receive, then assign, then partial invoice, then assign.
+
+      // Setup.
+      Initialize;
+      ExpdAssignableAmount := PurchOrderPartItemCharge(PurchaseLine,0,2,1);
+
+      // Exercise & Verify: Assignable Amount & Rem. Amount To Assign are verified to be correct
+      // in SuggstItemChargeAssgntPurchHandler.
+      PreparePartialReceiptInvoice(PurchaseLine,1,0);
+      PostPurchasePartialReceiptWithChargeAssignment(PurchaseLine,0,2,TRUE,FALSE);
+
+      PreparePartialReceiptInvoice(PurchaseLine,0,1);
+      PostPurchasePartialReceiptWithChargeAssignment(PurchaseLine,ExpdAssignableAmount,2,FALSE,TRUE);
+
+      PreparePartialReceiptInvoice(PurchaseLine,1,1);
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      PurchaseLine.ShowItemChargeAssgnt;
+    END;
+
+    LOCAL PROCEDURE PurchOrderPartItemCharge@144(VAR PurchaseLine@1011 : Record 39;InvoiceDiscount@1007 : Decimal;ItemChargeQty@1009 : Decimal;QtyToInvoice@1010 : Decimal) ExpdAssignableAmount : Decimal;
+    VAR
+      VendInvoiceDisc@1003 : Record 24;
+      PurchaseHeader@1001 : Record 38;
+      VendorNo@1004 : Code[20];
+    BEGIN
+      // Setup: Create Vendor.
+      // Create Purchase Order with two Item lines and one Charge Item line
+      VendorNo := CreateVendorWithInvoiceDiscount(VendInvoiceDisc,'',InvoiceDiscount);
+      CreatePurchaseDocumentWithMultipleLinesWithItemCharge(
+        PurchaseLine,PurchaseHeader."Document Type"::Order,VendorNo,'',FALSE,0,
+        ItemChargeQty,LibraryRandom.RandDecInDecimalRange(100,1000,2));
+      ExpdAssignableAmount := PurchaseLine."Line Amount" * (QtyToInvoice / 2);
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntSalesHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE SalesOrderPartialAssignItemCharge@132();
+    VAR
+      SalesLine@1002 : Record 37;
+      ExpdAssignableAmount@1005 : Decimal;
+    BEGIN
+      // Sales Side, Verify that partial assignment of Item Charge is correct.
+
+      // Setup.
+      Initialize;
+      ExpdAssignableAmount := SalesOrderPartItemCharge(SalesLine,0,2,1);
+      PreparePartialShipInvoice(SalesLine,1,1);
+
+      // Exercise & Verify : Assignable Amount & Rem. Amount To Assign are verified to be
+      // correct in SuggstItemChargeAssgntSalesHandler.
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      SalesLine.ShowItemChargeAssgnt;
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntSalesHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE SalesOrderPartialAssignItemChargeTwice@131();
+    VAR
+      SalesLine@1002 : Record 37;
+      ExpdAssignableAmount@1000 : Decimal;
+    BEGIN
+      // Sales Side, Verify that partial assignment of Item Charge is correct: first assign, then post, then assign again.
+
+      // Setup.
+      Initialize;
+      LibrarySales.SetInvoiceRounding(FALSE);
+      ExpdAssignableAmount := SalesOrderPartItemCharge(SalesLine,0,2,1);
+
+      // Exercise & Verify : Assignable Amount & Rem. Amount To Assign are verified to be
+      // correct in SuggstItemChargeAssgntSalesHandler.
+      PreparePartialShipInvoice(SalesLine,1,1);
+      PostSalesPartialShipmentWithChargeAssignment(SalesLine,ExpdAssignableAmount,2,TRUE,TRUE);
+
+      PreparePartialShipInvoice(SalesLine,1,1);
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      SalesLine.ShowItemChargeAssgnt;
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntSalesHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE SalesOrderPartialAssignItemChargeReceiveFirst@130();
+    VAR
+      SalesLine@1002 : Record 37;
+      ExpdAssignableAmount@1006 : Decimal;
+    BEGIN
+      // Sales Side, Verify that partial assignment of Item Charge is correct: first assign, then ship, then assign again, then invoice, then assign again.
+
+      // Setup.
+      Initialize;
+      LibrarySales.SetInvoiceRounding(FALSE);
+      ExpdAssignableAmount := SalesOrderPartItemCharge(SalesLine,0,2,1);
+
+      // Exercise & Verify : Assignable Amount & Rem. Amount To Assign are verified to be
+      // correct in SuggstItemChargeAssgntSalesHandler.
+      PreparePartialShipInvoice(SalesLine,1,1);
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      SalesLine.ShowItemChargeAssgnt;
+
+      PostSalesDocument(SalesLine."Document Type",SalesLine."Document No.",TRUE,FALSE);
+      SalesLine.FIND;
+
+      PreparePartialShipInvoice(SalesLine,1,1);
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      SalesLine.ShowItemChargeAssgnt;
+
+      PostSalesDocument(SalesLine."Document Type",SalesLine."Document No.",FALSE,TRUE);
+
+      SalesLine.FIND;
+      PreparePartialShipInvoice(SalesLine,1,1);
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      SalesLine.ShowItemChargeAssgnt;
+    END;
+
+    [Test]
+    [HandlerFunctions(SuggstItemChargeAssgntSalesHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE SalesOrderPartialAssignItemChargeReceiveInvoiceTwice@129();
+    VAR
+      SalesLine@1002 : Record 37;
+      ExpdAssignableAmount@1006 : Variant;
+    BEGIN
+      // Sales Side, Verify that partial assignment of Item Charge is correct: first assign, then ship full/invoice part, then assign again.
+
+      // Setup.
+      Initialize;
+      LibrarySales.SetInvoiceRounding(FALSE);
+      ExpdAssignableAmount := SalesOrderPartItemCharge(SalesLine,0,2,1);
+
+      // Exercise & Verify : Assignable Amount & Rem. Amount To Assign are verified to be
+      // correct in SuggstItemChargeAssgntSalesHandler.
+      PreparePartialShipInvoice(SalesLine,2,1);
+      PostSalesPartialShipmentWithChargeAssignment(SalesLine,ExpdAssignableAmount,2,TRUE,TRUE);
+
+      PreparePartialShipInvoice(SalesLine,0,1);
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,2);
+      SalesLine.ShowItemChargeAssgnt;
+    END;
+
+    LOCAL PROCEDURE SalesOrderPartItemCharge@81(VAR SalesLine@1011 : Record 37;InvoiceDiscount@1007 : Decimal;ItemChargeQty@1009 : Decimal;QtyToInvoice@1010 : Decimal) ExpdAssignableAmount : Decimal;
+    VAR
+      CustInvoiceDisc@1003 : Record 19;
+      SalesHeader@1001 : Record 36;
+      CustomerNo@1004 : Code[20];
+    BEGIN
+      // Setup: Create Customer.
+      // Create Purchase Order with two Item lines and one Charge Item line
+      CustomerNo := CreateCustomerWithInvoiceDiscount(CustInvoiceDisc,'',InvoiceDiscount);
+      CreateSalesDocumentWithMultipleLinesWithItemCharge(
+        SalesLine,SalesHeader."Document Type"::Order,CustomerNo,'',FALSE,0,
+        ItemChargeQty,LibraryRandom.RandDecInDecimalRange(100,1000,2));
+      ExpdAssignableAmount := SalesLine."Line Amount" * (QtyToInvoice / 2);
+    END;
+
+    [Test]
+    [HandlerFunctions(CopySalesDocumentRequestPageHandler)]
+    PROCEDURE SalesCreditMemoWithServiceItem@119();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1001 : Record 36;
+      SalesHeader2@1004 : Record 36;
+      CopySalesDocument@1005 : Report 292;
+      CustomerNo@1003 : Code[20];
+      PostedDocNo@1006 : Code[20];
+      Quantity@1002 : Decimal;
+    BEGIN
+      // [FEATURE] [Sales] [Service Item] [Exact Cost Reversing Mandatory]
+      // [SCENARIO] Sales Side, verify that credit memo contains correct non-inventoriable cost when exact cost reversing used.
+
+      // [GIVEN] Exact cost reversing mandatory.
+      Initialize;
+      UpdateExactCostReversingMandatory(TRUE);
+
+      // [GIVEN] Sale Item of type Service.
+      CustomerNo := CreateCustomer;
+      Item.GET(CreateServiceItem);
+      Quantity := LibraryRandom.RandDec(10,2);  // Using Random value for Quantity.
+      CreateSalesOrder(SalesHeader,SalesHeader."Document Type"::Order,Item."No.",CustomerNo,Item."Unit Price",Quantity);
+      PostedDocNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      COMMIT;
+
+      LibrarySales.CreateSalesHeader(SalesHeader2,SalesHeader."Document Type"::"Credit Memo",CustomerNo);
+      LibraryVariableStorage.Enqueue(PostedSalesDocType::"Posted Invoice"); // Used in Copy Sales Document handler
+      LibraryVariableStorage.Enqueue(PostedDocNo); // Used in Copy Sales Document handler
+      COMMIT;
+
+      // [WHEN] Copy posted sales invoice line to newly created Sales Credit Memo.
+      CopySalesDocument.SetSalesHeader(SalesHeader2);
+      CopySalesDocument.RUNMODAL;
+      SalesHeader2.GET(SalesHeader2."Document Type",SalesHeader2."No.");
+
+      // [THEN] Verify that non-inventoriable cost amount equals to COGS.
+      VerifyNonInventoriableCost(
+        LibrarySales.PostSalesDocument(SalesHeader2,TRUE,TRUE),'',Quantity,Item."Unit Cost" * Quantity);
+    END;
+
+    [Test]
+    PROCEDURE ItemLedgerEntryFilterDimRight@134();
+    VAR
+      Customer@1001 : Record 18;
+      CostCalculationManagement@1002 : Codeunit 5836;
+      DimValue1@1004 : Code[20];
+      DimValue2@1005 : Code[20];
+      ActualResult@1003 : Decimal;
+      ExpectedResult@1009 : Decimal;
+    BEGIN
+      // [FEATURE] [Cost Calculation] [Dimensions]
+      // [SCENARIO 122874] Check correct filtering of Item Ledger Entry by dimensions
+      LightInit;
+      DimValue1 := LibraryUtility.GenerateGUID;
+      DimValue2 := LibraryUtility.GenerateGUID;
+      Customer."No." := LibraryUtility.GenerateRandomCode(Customer.FIELDNO("No."),DATABASE::Customer);
+      // [GIVEN] Item Ledger Entries: "Cost Amount (Non-Invtbl.)" = 10; Dims = "TOYOTA"
+      ExpectedResult := MockItemLedgerEntryWithDim(Customer."No.",DimValue1,DimValue2);
+      // [GIVEN] Item Ledger Entries: "Cost Amount (Non-Invtbl.)" = 7; Dims = "MERSEDES"
+      MockItemLedgerEntryWithDim(Customer."No.",DimValue2,DimValue1);
+      // [WHEN] Call NonInvtblCostAmt of CU 5836 "Cost Calculation Amount" with filter "TOYOTA"
+      Customer.SETFILTER("Global Dimension 1 Filter",DimValue1);
+      Customer.SETFILTER("Global Dimension 2 Filter",DimValue2);
+      ActualResult := CostCalculationManagement.NonInvtblCostAmt(Customer);
+      // [THEN] ActualResult must be equal 10
+      Assert.AreEqual(ExpectedResult,ActualResult,CostAmountNonInvtblErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(CopyPurchaseDocumentRequestPageHandler)]
+    PROCEDURE PurchCreditMemoWithServiceItem@145();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1008 : Record 39;
+      ReasonCode@1004 : Record 231;
+      CopyPurchaseDocument@1005 : Report 492;
+      VendorNo@1003 : Code[20];
+      PostedDocNo@1006 : Code[20];
+      Quantity@1002 : Decimal;
+    BEGIN
+      // [FEATURE] [Purchase] [Service Item] [Exact Cost Reversing Mandatory]
+      // [SCENARIO] Service Item can be returned by Purchase Credit Memo without fixed application even though "Exact Cost Reversing Manatory" is on.
+
+      // [GIVEN] Exact cost reversing mandatory.
+      Initialize;
+      UpdateExactCostReversingMandatory(TRUE);
+
+      // [GIVEN] Purchase Item of type Service.
+      VendorNo := CreateVendor;
+      Item.GET(CreateServiceItem);
+      Quantity := LibraryRandom.RandDec(10,2);  // Using Random value for Quantity.
+      CreatePurchaseHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,VendorNo);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",Quantity,Item."Unit Price");
+      PostedDocNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      CreatePurchaseHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Credit Memo",VendorNo);
+      LibraryVariableStorage.Enqueue(PostedPurchaseDocType::"Posted Invoice"); // Used in Copy Purchase Document handler
+      LibraryVariableStorage.Enqueue(PostedDocNo); // Used in Copy Purhcase Document handler
+      COMMIT;
+
+      // [GIVEN] Copy posted purchase invoice line to newly created Purchase Credit Memo.
+      CopyPurchaseDocument.SetPurchHeader(PurchaseHeader);
+      CopyPurchaseDocument.RUNMODAL;
+
+      LibraryERM.CreateReasonCode(ReasonCode);
+      WITH PurchaseHeader DO BEGIN
+        FIND;
+        VALIDATE("Reason Code",ReasonCode.Code);
+        MODIFY(TRUE);
+      END;
+
+      // [WHEN] Post Purchase Credit Memo
+      PostedDocNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [THEN] Verify that non-inventoriable cost amount equals to purchased cost amount.
+      VerifyNonInventoriableCost(PostedDocNo,'',-Quantity,-Item."Unit Price" * Quantity);
+    END;
+
+    [Test]
+    PROCEDURE SalesCreditMemoWithServiceItemNoFixApplication@143();
+    VAR
+      Item@1007 : Record 27;
+      SalesHeader@1006 : Record 36;
+      SalesLine@1005 : Record 37;
+      PostedCreditMemoNo@1002 : Code[20];
+      Quantity@1001 : Decimal;
+    BEGIN
+      // [FEATURE] [Sales] [Service Item] [Exact Cost Reversing Mandatory]
+      // [SCENARIO 363246] Sales Side, verify that for service item credit memo can be posted without fixed application when exact cost reversing used.
+
+      // [GIVEN] Exact cost reversing mandatory.
+      Initialize;
+      UpdateExactCostReversingMandatory(TRUE);
+
+      // [GIVEN] Create Item of type Service.
+      Item.GET(CreateServiceItem);
+
+      // [GIVEN] Create Credit Memo.
+      Quantity := LibraryRandom.RandDec(10,2);  // Using Random value for Quantity.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Credit Memo",CreateCustomer);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",Quantity);
+
+      // [WHEN] Post Credit Memo.
+      PostedCreditMemoNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [THEN] Verify that non-inventoriable cost amount equals to COGS.
+      VerifyNonInventoriableCost(PostedCreditMemoNo,'',Quantity,Item."Unit Cost" * Quantity);
+    END;
+
+    [Test]
+    PROCEDURE CalcCustActualCostLCYForResource@79();
+    VAR
+      ResLedgerEntry@1001 : Record 203;
+      Customer@1002 : Record 18;
+      CostCalculationManagement@1000 : Codeunit 5836;
+      ActualCostLCY@1003 : Decimal;
+    BEGIN
+      // [FEATURE] [Customer] [Statistics] [Resource]
+      // [SCENARIO 378115] Resource Ledger Entries should be included in the Customer Statistics
+      Initialize;
+
+      // [GIVEN] Resource Ledger Entry for Customer with "Total Cost" = "X"
+      LibrarySales.CreateCustomer(Customer);
+      MockResourceLedgerEntry(ResLedgerEntry,Customer."No.");
+
+      // [WHEN] Calculate Customer Actual Cost LCY
+      ActualCostLCY := CostCalculationManagement.CalcCustActualCostLCY(Customer);
+
+      // [THEN] Actual Cost LCY is "X"
+      Assert.AreEqual(ResLedgerEntry."Total Cost",ActualCostLCY,ActualCostErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ImplementStandardCostChangesHandler)]
+    PROCEDURE UnitAmountIsRoundedOnRevalJnlGeneratedFromStdCostWksht@133();
+    VAR
+      GLSetup@1004 : Record 98;
+      Item@1000 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      ItemJournalLine@1003 : Record 83;
+      NewStandardCost@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Standard Cost Worksheet] [Revaluation Journal] [Rounding]
+      // [SCENARIO 381147] When Revaluation Journal Line is generated from Standard Cost Worksheet, Inventory Value (Revalued) should be equal to Quantity multiplied by Unit Amount rounded to Unit-Amount Rounding Precision.
+      Initialize;
+
+      // [GIVEN] Unit-Amount Rounded Precision is changed to "P" decimal digits (i.e. "P" = 3, precision = 0.001).
+      GLSetup.GET;
+      GLSetup.VALIDATE("Unit-Amount Rounding Precision",0.001);
+      GLSetup.MODIFY(TRUE);
+
+      // [GIVEN] Item with Standard Cost "X" (i.e. 16.28).
+      // [GIVEN] Posted Purchase Order with Item. Quantity = "Q" (i.e. 196), Unit Cost = "X".
+      Item.GET(CreateAndModifyItem(LibraryRandom.RandDecInRange(20,50,3)));
+      CreatePurchaseHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,CreateVendor);
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",LibraryRandom.RandIntInRange(300,500),Item."Standard Cost");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [WHEN] Generate Revaluation Journal Line from Standard Cost Worksheet with new Standard Cost "Y", which has more than "P" decimal digits (i.e. "Y" = 15.1268).
+      NewStandardCost := LibraryRandom.RandDecInRange(20,50,3) + LibraryRandom.RandInt(9) / 10000; // make sure there is 4 decimal digits
+      ImplementStandardCostChanges(Item,NewStandardCost);
+
+      // [THEN] Inventory Value (Revalued) in Revaluation Journal is equal to "Q" * ("Y" rounded to "P" digits) (i.e. 196 * 15.127 = 2964.89).
+      WITH ItemJournalLine DO BEGIN
+        SETRANGE("Item No.",Item."No.");
+        FINDFIRST;
+        TESTFIELD(
+          "Inventory Value (Revalued)",
+          ROUND(ROUND(NewStandardCost,GLSetup."Unit-Amount Rounding Precision") * Quantity,GLSetup."Amount Rounding Precision"));
+      END;
+    END;
+
+    LOCAL PROCEDURE Initialize@58();
+    VAR
+      InventorySetup@1000 : Record 313;
+      LibraryERMCountryData@1002 : Codeunit 131305;
+    BEGIN
+      LightInit;
+      LibrarySetupStorage.Restore;
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryInventory.NoSeriesSetup(InventorySetup);
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      isInitialized := TRUE;
+      COMMIT;
+
+      LibrarySetupStorage.Save(DATABASE::"Sales & Receivables Setup");
+      LibrarySetupStorage.Save(DATABASE::"General Ledger Setup");
+    END;
+
+    LOCAL PROCEDURE LightInit@142();
+    BEGIN
+      LibraryVariableStorage.Clear;
+    END;
+
+    LOCAL PROCEDURE PreparePartialReceiptInvoice@173(VAR PurchaseLine@1000 : Record 39;QtyToReceive@1001 : Decimal;QtyToInvoice@1002 : Decimal);
+    VAR
+      QtyToReceiveCoeff@1004 : Decimal;
+      QtyToInvoiceCoeff@1005 : Decimal;
+    BEGIN
+      WITH PurchaseLine DO BEGIN
+        SETRANGE("Document Type","Document Type");
+        SETRANGE("Document No.","Document No.");
+        QtyToReceiveCoeff := QtyToReceive / Quantity;
+        QtyToInvoiceCoeff := QtyToInvoice / Quantity;
+        FINDSET;
+        REPEAT
+          VALIDATE("Qty. to Receive",Quantity * QtyToReceiveCoeff);
+          VALIDATE("Qty. to Invoice",Quantity * QtyToInvoiceCoeff);
+          MODIFY(TRUE);
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE PreparePartialShipInvoice@174(VAR SalesLine@1000 : Record 37;QtyToShip@1001 : Decimal;QtyToInvoice@1002 : Decimal);
+    VAR
+      QtyToShipCoeff@1004 : Decimal;
+      QtyToInvoiceCoeff@1005 : Decimal;
+    BEGIN
+      WITH SalesLine DO BEGIN
+        SETRANGE("Document Type","Document Type");
+        SETRANGE("Document No.","Document No.");
+        QtyToShipCoeff := QtyToShip / Quantity;
+        QtyToInvoiceCoeff := QtyToInvoice / Quantity;
+        FINDSET;
+        REPEAT
+          VALIDATE("Qty. to Ship",Quantity * QtyToShipCoeff);
+          VALIDATE("Qty. to Invoice",Quantity * QtyToInvoiceCoeff);
+          MODIFY(TRUE);
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseDocument@29(VAR PurchaseLine@1000 : Record 39;DocumentType@1001 : Option;SignFactor@1003 : Integer);
+    VAR
+      PurchaseHeader@1002 : Record 38;
+    BEGIN
+      // Use Random value for Quantity and Direct Unit Cost.
+      CreatePurchaseHeader(PurchaseHeader,DocumentType,CreateVendor);
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,CreateItem,LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(100,2));
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,CreateItem,SignFactor * PurchaseLine.Quantity,
+        PurchaseLine."Direct Unit Cost");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesOrder@1(VAR SalesLine@1000 : Record 37;DocumentType@1002 : Option);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,CreateCustomer);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,CreateItem,LibraryRandom.RandDec(10,2));  // Using Random value for Quantity.
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndModifyItem@52(StandardCost@1000 : Decimal) : Code[20];
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.GET(CreateItem);
+      Item.VALIDATE("Costing Method",Item."Costing Method"::Standard);
+      Item.VALIDATE("Standard Cost",StandardCost);
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemChargeAssignmentUsingShipmentLine@15(VAR ItemChargeAssignmentPurch@1001 : Record 5805;PurchaseLine@1005 : Record 39;PurchaseOrderNo@1003 : Code[20];ItemNo@1004 : Code[20]);
+    VAR
+      SalesShipmentLine@1000 : Record 111;
+    BEGIN
+      FindShipmentLine(SalesShipmentLine,PurchaseOrderNo,ItemNo);
+      LibraryInventory.CreateItemChargeAssignPurchase(
+        ItemChargeAssignmentPurch,PurchaseLine,ItemChargeAssignmentPurch."Applies-to Doc. Type"::"Sales Shipment",
+        SalesShipmentLine."Document No.",SalesShipmentLine."Line No.",SalesShipmentLine."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemChargeAssignmentUsingReceiptLine@38(VAR ItemChargeAssignmentPurch@1001 : Record 5805;PurchaseLine@1005 : Record 39;OrderNo@1003 : Code[20];ItemNo@1004 : Code[20]);
+    VAR
+      ReturnReceiptLine@1000 : Record 6661;
+    BEGIN
+      FindReturnReceiptLine(ReturnReceiptLine,OrderNo,ItemNo);
+      LibraryInventory.CreateItemChargeAssignPurchase(
+        ItemChargeAssignmentPurch,PurchaseLine,ItemChargeAssignmentPurch."Applies-to Doc. Type"::"Return Receipt",
+        ReturnReceiptLine."Document No.",ReturnReceiptLine."Line No.",ReturnReceiptLine."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItem@95() : Code[20];
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Unit Price",LibraryRandom.RandDec(10,2));  // Using Random value for Unit Price.
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateServiceItem@136() : Code[20];
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      WITH Item DO BEGIN
+        VALIDATE(Type,Type::Service);
+        VALIDATE("Unit Cost",LibraryRandom.RandDec(10,2));  // Using Random value for Unit Cost
+        VALIDATE("Unit Price","Unit Cost" * 2);
+        MODIFY(TRUE);
+        EXIT("No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@13() : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseDocumentWithChargeAssignment@125(VAR PurchaseLine@1006 : Record 39;DocumentType@1007 : Option;OdrerNo@1004 : Code[20];ItemNo@1005 : Code[20];DirectUnitCost@1000 : Decimal);
+    VAR
+      ItemChargeAssignmentPurch@1002 : Record 5805;
+    BEGIN
+      CreatePurchaseDocumentUsingChargeItem(PurchaseLine,DocumentType,DirectUnitCost);
+      CreateItemChargeAssignmentUsingReceiptLine(ItemChargeAssignmentPurch,PurchaseLine,OdrerNo,ItemNo);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeader@96(VAR PurchaseHeader@1003 : Record 38;DocumentType@1000 : Option;BuyFromVendorNo@1002 : Code[20]);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocumentType,BuyFromVendorNo);
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",PurchaseHeader."No.");
+      PurchaseHeader.VALIDATE("Vendor Cr. Memo No.",PurchaseHeader."No.");
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@41(VAR PurchaseLine@1005 : Record 39;PurchaseHeader@1000 : Record 38;Type@1003 : Option;No@1004 : Code[20];Quantity@1001 : Decimal;DirectUnitCost@1002 : Decimal);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,Type,No,Quantity);
+      PurchaseLine.VALIDATE("Direct Unit Cost",DirectUnitCost);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseDocumentAndAssignCharge@21(VAR PurchaseLine@1006 : Record 39;DocumentType@1007 : Option;PurchaseOdrerNo@1004 : Code[20];ItemNo@1005 : Code[20];DirectUnitCost@1000 : Decimal);
+    VAR
+      ItemChargeAssignmentPurch@1002 : Record 5805;
+    BEGIN
+      CreatePurchaseDocumentUsingChargeItem(PurchaseLine,DocumentType,DirectUnitCost);
+      CreateItemChargeAssignmentUsingShipmentLine(ItemChargeAssignmentPurch,PurchaseLine,PurchaseOdrerNo,ItemNo);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseDocumentUsingChargeItem@59(VAR PurchaseLine@1006 : Record 39;DocumentType@1004 : Option;DirectUnitCost@1005 : Decimal) : Code[20];
+    VAR
+      PurchaseHeader@1018 : Record 38;
+    BEGIN
+      CreatePurchaseHeader(PurchaseHeader,DocumentType,CreateVendor);
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::"Charge (Item)",
+        LibraryInventory.CreateItemChargeNo,1,DirectUnitCost);  // Taking 1 for Item Charge.
+      EXIT(PurchaseLine."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseDocumentWithChargeItemAndItem@12(VAR PurchaseLine@1006 : Record 39;DocumentType@1007 : Option;VendorNo@1001 : Code[20];QuantitySignFactor@1000 : Integer;CostSignFactor@1004 : Integer);
+    VAR
+      PurchaseHeader@1003 : Record 38;
+    BEGIN
+      // Use Random value for Quantity and Direct Unit Cost.
+      CreatePurchaseHeader(PurchaseHeader,DocumentType,VendorNo);
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,CreateItem,LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(100,2));
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::"Charge (Item)",LibraryInventory.CreateItemChargeNo,
+        QuantitySignFactor * PurchaseLine.Quantity,CostSignFactor * PurchaseLine."Direct Unit Cost");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseDocumentWithMultipleLinesWithItemCharge@80(VAR PurchaseLine2@1011 : Record 39;DocumentType@1004 : Option;VendorNo@1002 : Code[20];CurrencyCode@1000 : Code[10];PricesIncludingVAT@1005 : Boolean;LineDiscountPct@1012 : Decimal;Quantity@1007 : Decimal;DirectUnitCost@1008 : Decimal) : Decimal;
+    VAR
+      PurchaseHeader@1006 : Record 38;
+      PurchaseLine@1009 : Record 39;
+      ItemCharge@1001 : Record 5800;
+      VATPostingSetup@1003 : Record 325;
+      Item@1013 : Record 27;
+    BEGIN
+      CreateVATPostingSetup(VATPostingSetup);
+      UpdateItem(Item,VATPostingSetup."VAT Prod. Posting Group");
+      UpdateItemCharge(ItemCharge,VATPostingSetup."VAT Prod. Posting Group");
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocumentType,VendorNo);
+      WITH PurchaseHeader DO BEGIN
+        VALIDATE("Currency Code",CurrencyCode);
+        VALIDATE("Prices Including VAT",PricesIncludingVAT);
+        VALIDATE("VAT Bus. Posting Group",VATPostingSetup."VAT Bus. Posting Group");
+        MODIFY(TRUE);
+      END;
+
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",
+        LibraryRandom.RandDec(1000,5),LibraryRandom.RandDec(1000,5));
+      PurchaseLine.VALIDATE("Line Discount %",LibraryRandom.RandDec(100,5)); // Random discount is not important.
+      PurchaseLine.MODIFY(TRUE);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",
+        LibraryRandom.RandDec(2000,5),LibraryRandom.RandDec(2000,5));
+      CreatePurchaseLine(PurchaseLine2,PurchaseHeader,PurchaseLine2.Type::"Charge (Item)",
+        ItemCharge."No.",Quantity,DirectUnitCost);
+      PurchaseLine2.VALIDATE("Line Discount %",LineDiscountPct); // Random discount is not important.
+      PurchaseLine2.VALIDATE("Allow Invoice Disc.",TRUE);
+      PurchaseLine2.MODIFY(TRUE);
+      EXIT(VATPostingSetup."VAT %");
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@61(VAR SalesHeader@1000 : Record 36;DocumentType@1002 : Option;ItemNo@1005 : Code[20];CustomerNo@1006 : Code[20];UnitPrice@1004 : Decimal;Quantity@1007 : Decimal);
+    VAR
+      SalesLine@1001 : Record 37;
+      SalespersonPurchaser@1003 : Record 13;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,CustomerNo);
+      LibrarySales.CreateSalesperson(SalespersonPurchaser);
+      SalesHeader.VALIDATE("Salesperson Code",SalespersonPurchaser.Code);
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Unit Price",UnitPrice);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocument@9(VAR SalesHeader@1003 : Record 36;DocumentType@1007 : Option;ItemNo@1000 : Code[20];ItemNo2@1001 : Code[20];Quantity@1008 : Decimal);
+    VAR
+      SalesLine@1006 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,CreateCustomer);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo2,LibraryRandom.RandDec(10,2));  // Using Random value for Quantity.
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@54(VAR SalesLine@1005 : Record 37;SalesHeader@1000 : Record 36;Type@1003 : Option;No@1004 : Code[20];Quantity@1001 : Decimal;UnitPrice@1002 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,Type,No,Quantity);
+      SalesLine.VALIDATE("Unit Price",UnitPrice);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocumentWithMultipleLinesWithItemCharge@88(VAR SalesLine2@1001 : Record 37;DocumentType@1000 : Option;CustomerNo@1004 : Code[20];CurrencyCode@1002 : Code[10];PricesIncludingVAT@1010 : Boolean;LineDiscountPct@1012 : Decimal;Quantity@1005 : Decimal;UnitPrice@1006 : Decimal) : Decimal;
+    VAR
+      VATPostingSetup@1003 : Record 325;
+      ItemCharge@1008 : Record 5800;
+      SalesHeader@1007 : Record 36;
+      SalesLine@1011 : Record 37;
+      Item@1013 : Record 27;
+    BEGIN
+      CreateVATPostingSetup(VATPostingSetup);
+      UpdateItem(Item,VATPostingSetup."VAT Prod. Posting Group");
+      UpdateItemCharge(ItemCharge,VATPostingSetup."VAT Prod. Posting Group");
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,CustomerNo);
+      WITH SalesHeader DO BEGIN
+        VALIDATE("Currency Code",CurrencyCode);
+        VALIDATE("Prices Including VAT",PricesIncludingVAT);
+        VALIDATE("VAT Bus. Posting Group",VATPostingSetup."VAT Bus. Posting Group");
+        MODIFY(TRUE);
+      END;
+
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(1000,5),
+        LibraryRandom.RandDec(1000,5));
+      SalesLine.VALIDATE("Line Discount %",LibraryRandom.RandDec(100,5)); // Random discount is not important.
+      SalesLine.MODIFY(TRUE);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(2000,5),
+        LibraryRandom.RandDec(2000,5));
+      CreateSalesLine(SalesLine2,SalesHeader,SalesLine2.Type::"Charge (Item)",ItemCharge."No.",Quantity,UnitPrice);
+      SalesLine2.VALIDATE("Line Discount %",LineDiscountPct); // Random discount is not important.
+      SalesLine2.VALIDATE("Allow Invoice Disc.",TRUE);
+      SalesLine2.MODIFY(TRUE);
+      EXIT(VATPostingSetup."VAT %");
+    END;
+
+    LOCAL PROCEDURE CreateStandardCostWorksheet@43(VAR StandardCostWorksheet@1000 : TestPage 5841;ItemNo@1001 : Code[20];StandardCost@1002 : Decimal;NewStandardCost@1003 : Decimal);
+    BEGIN
+      StandardCostWorksheet."No.".SETVALUE(ItemNo);
+      StandardCostWorksheet."Standard Cost".SETVALUE(StandardCost);
+      StandardCostWorksheet."New Standard Cost".SETVALUE(NewStandardCost);
+      StandardCostWorksheet.NEXT;
+    END;
+
+    LOCAL PROCEDURE CreateVendor@85() : Code[20];
+    VAR
+      Vendor@1000 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      EXIT(Vendor."No.");
+    END;
+
+    LOCAL PROCEDURE CreateVendorWithInvoiceDiscount@288(VAR VendInvoiceDisc@1000 : Record 24;CurrencyCode@1001 : Code[10];InvoiceDiscPct@1003 : Decimal) : Code[20];
+    VAR
+      Vendor@1002 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryERM.CreateInvDiscForVendor(VendInvoiceDisc,Vendor."No.",CurrencyCode,0);
+      VendInvoiceDisc.VALIDATE("Discount %",InvoiceDiscPct);
+      VendInvoiceDisc.MODIFY(TRUE);
+      EXIT(Vendor."No.");
+    END;
+
+    LOCAL PROCEDURE CreateCustomerWithInvoiceDiscount@101(VAR CustInvoiceDisc@1002 : Record 19;CurrencyCode@1003 : Code[10];InvoiceDiscPct@1004 : Decimal) : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateInvDiscForCustomer(CustInvoiceDisc,Customer."No.",CurrencyCode,0);
+      CustInvoiceDisc.VALIDATE("Discount %",InvoiceDiscPct);
+      CustInvoiceDisc.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateVATPostingSetup@92(VAR VATPostingSetup@1003 : Record 325);
+    VAR
+      VATProductPostingGroup@1000 : Record 324;
+      VATBusinessPostingGroup@1001 : Record 323;
+      GLAccount@1002 : Record 15;
+      GLAccount2@1004 : Record 15;
+    BEGIN
+      LibraryERM.CreateGLAccount(GLAccount);
+      LibraryERM.CreateGLAccount(GLAccount2);
+      LibraryERM.CreateVATBusinessPostingGroup(VATBusinessPostingGroup);
+      LibraryERM.CreateVATProductPostingGroup(VATProductPostingGroup);
+      LibraryERM.CreateVATPostingSetup(VATPostingSetup,VATBusinessPostingGroup.Code,VATProductPostingGroup.Code);
+      WITH VATPostingSetup DO BEGIN
+        VALIDATE("VAT %",LibraryRandom.RandInt(10));  // Use Random VAT % because value is not important.
+        VALIDATE("VAT Calculation Type","VAT Calculation Type"::"Normal VAT");
+        VALIDATE("Purchase VAT Account",GLAccount."No.");
+        VALIDATE("Purch. VAT Unreal. Account",GLAccount."No.");
+        VALIDATE("Sales VAT Account",GLAccount2."No.");
+        VALIDATE("Sales VAT Unreal. Account",GLAccount2."No.");
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateCurrency@76(VAR Currency@1000 : Record 4);
+    BEGIN
+      LibraryERM.CreateCurrency(Currency);
+      LibraryERM.CreateRandomExchangeRate(Currency.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseDocumentWithItemChargeAndCalcInvDisc@51(VAR PurchaseLine@1000 : Record 39;VendorNo@1002 : Code[20];CurrencyCode@1003 : Code[10];PricesIncludingVAT@1004 : Boolean;LineDiscountPct@1007 : Decimal;Quantity@1005 : Decimal;DirectUnitCost@1006 : Decimal) VATPct : Decimal;
+    VAR
+      PurchaseHeader@1001 : Record 38;
+    BEGIN
+      VATPct :=
+        CreatePurchaseDocumentWithMultipleLinesWithItemCharge(
+          PurchaseLine,PurchaseHeader."Document Type"::Invoice,VendorNo,CurrencyCode,
+          PricesIncludingVAT,LineDiscountPct,Quantity,DirectUnitCost);
+
+      // Calculate Invoice Discount and find Purchase Line with Charge Item.
+      CalcInvoiceDiscountAndFindPurchaseLine(PurchaseLine,PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocumentWithItemChargeAndCalcInvDisc@69(VAR SalesLine@1007 : Record 37;CustomerNo@1005 : Code[20];CurrencyCode@1004 : Code[10];PricesIncludingVAT@1003 : Boolean;LineDiscountPct@1002 : Decimal;Quantity@1001 : Decimal;UnitPrice@1000 : Decimal) VATPct : Decimal;
+    VAR
+      SalesHeader@1008 : Record 36;
+    BEGIN
+      VATPct :=
+        CreateSalesDocumentWithMultipleLinesWithItemCharge(
+          SalesLine,SalesHeader."Document Type"::Invoice,CustomerNo,CurrencyCode,
+          PricesIncludingVAT,LineDiscountPct,Quantity,UnitPrice); // Prices Including VAT is unchecked.
+
+      // Calculate Invoice Discount and find sales line with Charge Item.
+      CalcInvoiceDiscountAndFindSalesLine(SalesLine,SalesHeader);
+    END;
+
+    LOCAL PROCEDURE ChargeAssignmentUsingShipmentLines@32(VAR PurchaseLine@1004 : Record 39;Quantity@1008 : Decimal) : Code[20];
+    VAR
+      ItemChargeAssignmentPurch@1000 : Record 5805;
+      PurchaseHeader@1005 : Record 38;
+      SalesHeader@1002 : Record 36;
+      ItemChargeNo@1007 : Code[20];
+      ItemNo@1006 : Code[20];
+      ItemNo2@1001 : Code[20];
+    BEGIN
+      ItemNo := CreateItem;
+      ItemNo2 := CreateItem;
+      CreateSalesDocument(SalesHeader,SalesHeader."Document Type"::Order,ItemNo,ItemNo2,Quantity);
+      LibraryVariableStorage.Enqueue(ItemNo);
+      LibraryVariableStorage.Enqueue(ItemNo2);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      ItemChargeNo :=
+        CreatePurchaseDocumentUsingChargeItem(
+          PurchaseLine,PurchaseHeader."Document Type"::Invoice,LibraryRandom.RandDec(10,2));  // Using Random value for Direct Unit Cost.
+      CreateItemChargeAssignmentUsingShipmentLine(ItemChargeAssignmentPurch,PurchaseLine,SalesHeader."No.",ItemNo);
+      CreateItemChargeAssignmentUsingShipmentLine(ItemChargeAssignmentPurch,PurchaseLine,SalesHeader."No.",ItemNo2);
+      EXIT(ItemChargeNo);
+    END;
+
+    LOCAL PROCEDURE ChargeAssignmentUsingReceiptLines@178(VAR PurchaseLine@1004 : Record 39;Quantity@1008 : Decimal) : Code[20];
+    VAR
+      ItemChargeAssignmentPurch@1000 : Record 5805;
+      PurchaseHeader@1005 : Record 38;
+      SalesHeader@1002 : Record 36;
+      ItemChargeNo@1009 : Code[20];
+      ItemNo@1006 : Code[20];
+      ItemNo2@1001 : Code[20];
+    BEGIN
+      ItemNo := CreateItem;
+      ItemNo2 := CreateItem;
+      CreateSalesDocument(SalesHeader,SalesHeader."Document Type"::"Return Order",ItemNo,ItemNo2,Quantity);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      ItemChargeNo :=
+        CreatePurchaseDocumentUsingChargeItem(
+          PurchaseLine,PurchaseHeader."Document Type"::Invoice,LibraryRandom.RandDec(10,2));  // Using Random value for Direct Unit Cost.
+      CreateItemChargeAssignmentUsingReceiptLine(ItemChargeAssignmentPurch,PurchaseLine,SalesHeader."No.",ItemNo);
+      CreateItemChargeAssignmentUsingReceiptLine(ItemChargeAssignmentPurch,PurchaseLine,SalesHeader."No.",ItemNo2);
+      EXIT(ItemChargeNo);
+    END;
+
+    LOCAL PROCEDURE CalcInvoiceDiscountAndFindPurchaseLine@99(VAR PurchaseLine@1000 : Record 39;VAR PurchaseHeader@1001 : Record 38);
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"Purch.-Calc.Discount",PurchaseLine);
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchaseLine.SETRANGE(Type,PurchaseLine.Type::"Charge (Item)");
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CalcInvoiceDiscountAndFindSalesLine@84(VAR SalesLine@1000 : Record 37;VAR SalesHeader@1001 : Record 36);
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"Sales-Calc. Discount",SalesLine);
+      SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE(Type,SalesLine.Type::"Charge (Item)");
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE DuplicateRevaluationJournalConfirmMessage@94(LineCount@1000 : Integer);
+    VAR
+      ItemNo@1005 : Code[20];
+    BEGIN
+      // Setup: Create Item, post purchase order for it. Adjust standard cost for the item from standard cost worksheet and implement cost changes.
+      // One revaluation journal line will be generated for the item.
+      ItemNo := PostPurchOrderAndImplementStdCostChanges;
+
+      // Exercise: Click Implement Standard Cost Changes button from page, a confirm message will pop up to indicate duplicate revaluation journal.
+      // Click Yes or No on confirm message
+      ImplementStdCostChangesFromPage;
+
+      // Verify: Verify the count of revaluation journal lines generated.
+      VerifyItemJnlLineCount(ItemNo,LineCount);
+    END;
+
+    LOCAL PROCEDURE FindReceiptLine@31(VAR PurchRcptLine@1000 : Record 121;OrderNo@1003 : Code[20];ItemNo@1004 : Code[20]);
+    BEGIN
+      PurchRcptLine.SETRANGE("Order No.",OrderNo);
+      PurchRcptLine.SETRANGE("No.",ItemNo);
+      PurchRcptLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindShipmentLine@22(VAR SalesShipmentLine@1000 : Record 111;OrderNo@1003 : Code[20];No@1004 : Code[20]);
+    BEGIN
+      SalesShipmentLine.SETRANGE("Order No.",OrderNo);
+      SalesShipmentLine.SETRANGE("No.",No);
+      SalesShipmentLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindReturnReceiptLine@42(VAR ReturnReceiptLine@1000 : Record 6661;ReturnOrderNo@1003 : Code[20];No@1004 : Code[20]);
+    BEGIN
+      ReturnReceiptLine.SETRANGE("Return Order No.",ReturnOrderNo);
+      ReturnReceiptLine.SETRANGE("No.",No);
+      ReturnReceiptLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindReturnShipmentLine@11(VAR ReturnShipmentLine@1000 : Record 6651;ReturnOrderNo@1003 : Code[20];ItemNo@1004 : Code[20]);
+    BEGIN
+      ReturnShipmentLine.SETRANGE("Return Order No.",ReturnOrderNo);
+      ReturnShipmentLine.SETRANGE("No.",ItemNo);
+      ReturnShipmentLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindValueEntry@40(VAR ValueEntry@1000 : Record 5802;DocumentNo@1001 : Code[20];ItemChargeNo@1002 : Code[20];ValuedQuantity@1003 : Decimal);
+    BEGIN
+      ValueEntry.SETRANGE("Document No.",DocumentNo);
+      ValueEntry.SETRANGE("Item Charge No.",ItemChargeNo);
+      ValueEntry.SETRANGE("Valued Quantity",ValuedQuantity);
+      ValueEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE ImplementStandardCostChanges@90(Item@1002 : Record 27;NewStandardCost@1004 : Decimal);
+    VAR
+      StandardCostWorksheet@1000 : Record 5841;
+      StandardCostWorksheetPage@1032 : TestPage 5841;
+    BEGIN
+      StandardCostWorksheet.DELETEALL;
+      StandardCostWorksheetPage.OPENEDIT;
+      CreateStandardCostWorksheet(StandardCostWorksheetPage,Item."No.",Item."Standard Cost",NewStandardCost);
+      COMMIT;  // Commit Required due to Run Modal.
+      StandardCostWorksheetPage.Action84.INVOKE;
+    END;
+
+    LOCAL PROCEDURE ImplementStdCostChangesFromPage@122();
+    VAR
+      StandardCostWorksheetPage@1001 : TestPage 5841;
+    BEGIN
+      StandardCostWorksheetPage.OPENEDIT;
+      LibraryVariableStorage.Enqueue(DuplicateJournalQst); // Enqueue message for Confirm Handler
+      COMMIT; // Commit Required due to Run Modal
+      StandardCostWorksheetPage.Action84.INVOKE; // Click Implement Standard Cost Changes button
+    END;
+
+    LOCAL PROCEDURE PostPurchasePartialReceiptWithChargeAssignment@139(VAR PurchaseLine@1000 : Record 39;ExpdAssignableAmount@1001 : Decimal;MenuOption@1004 : Integer;PostReceipt@1002 : Boolean;PostInvoice@1003 : Boolean);
+    BEGIN
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,MenuOption);
+      PurchaseLine.ShowItemChargeAssgnt;
+      PostPurchaseDocument(PurchaseLine."Document Type",PurchaseLine."Document No.",PostReceipt,PostInvoice);
+      PurchaseLine.FIND;
+    END;
+
+    LOCAL PROCEDURE PostSalesPartialShipmentWithChargeAssignment@141(VAR SalesLine@1000 : Record 37;ExpdAssignableAmount@1001 : Decimal;MenuOption@1004 : Integer;PostShipment@1002 : Boolean;PostInvoice@1003 : Boolean);
+    BEGIN
+      AssignItemChargeWithSuggest(ExpdAssignableAmount,MenuOption);
+      SalesLine.ShowItemChargeAssgnt;
+      PostSalesDocument(SalesLine."Document Type",SalesLine."Document No.",PostShipment,PostInvoice);
+      SalesLine.FIND;
+    END;
+
+    LOCAL PROCEDURE PostSalesAndPurchaseDocumentForChargeItem@8(VAR PurchaseHeader@1004 : Record 38;PurchaseDocumentType@1003 : Option;SalesDocumentType@1005 : Option);
+    VAR
+      PurchaseLine@1001 : Record 39;
+      SalesLine@1000 : Record 37;
+    BEGIN
+      CreateAndPostSalesOrder(SalesLine,SalesDocumentType);
+      CreatePurchaseDocumentAndAssignCharge(
+        PurchaseLine,PurchaseDocumentType,SalesLine."Document No.",SalesLine."No.",-LibraryRandom.RandDec(10,2));  // Using Random value for Direct Unit Cost.
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE PostPurchaseDocumentUsingSalesReturnOrder@26(VAR PurchaseHeader@1004 : Record 38;PurchaseDocumentType@1003 : Option;SalesDocumentType@1005 : Option);
+    VAR
+      PurchaseLine@1001 : Record 39;
+      SalesLine@1000 : Record 37;
+    BEGIN
+      CreateAndPostSalesOrder(SalesLine,SalesDocumentType);
+      CreatePurchaseDocumentWithChargeAssignment(
+        PurchaseLine,PurchaseDocumentType,SalesLine."Document No.",SalesLine."No.",-LibraryRandom.RandDec(10,2));  // Using Random value for Direct Unit Cost.
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE PostPurchOrderAndImplementStdCostChanges@110() : Code[20];
+    VAR
+      Item@1002 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      Item.GET(CreateAndModifyItem(RANDOM(10)));
+      CreatePurchaseHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,CreateVendor);
+      CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(100,2));
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      ImplementStandardCostChanges(Item,Item."Standard Cost" + RANDOM(10));
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE PostPurchaseDocument@148(DocumentType@1000 : Option;DocumentNo@1001 : Code[20];ToShipReceive@1003 : Boolean;ToInvoice@1004 : Boolean);
+    VAR
+      PurchaseHeader@1002 : Record 38;
+    BEGIN
+      PurchaseHeader.GET(DocumentType,DocumentNo);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,ToShipReceive,ToInvoice);
+    END;
+
+    LOCAL PROCEDURE PostSalesDocument@162(DocumentType@1000 : Option;DocumentNo@1001 : Code[20];ToShipReceive@1003 : Boolean;ToInvoice@1004 : Boolean);
+    VAR
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      SalesHeader.GET(DocumentType,DocumentNo);
+      LibrarySales.PostSalesDocument(SalesHeader,ToShipReceive,ToInvoice);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseHeader@1170000000(VAR PurchaseHeader@1170000000 : Record 38);
+    VAR
+      VendorNo@1170000001 : Code[10];
+    BEGIN
+      VendorNo := LibraryUtility.GenerateGUID;
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",VendorNo);
+      PurchaseHeader.VALIDATE("Vendor Cr. Memo No.",VendorNo);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItem@127(VAR Item@1001 : Record 27;VATProdPostingGroup@1002 : Code[10]);
+    BEGIN
+      Item.GET(CreateItem);
+      Item.VALIDATE("VAT Prod. Posting Group",VATProdPostingGroup);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItemCharge@128(VAR ItemCharge@1001 : Record 5800;VATProdPostingGroup@1003 : Code[10]);
+    BEGIN
+      LibraryInventory.CreateItemCharge(ItemCharge);
+      ItemCharge.VALIDATE("VAT Prod. Posting Group",VATProdPostingGroup);
+      ItemCharge.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateExactCostReversingMandatory@135(NewValue@1000 : Boolean);
+    VAR
+      SalesReceivablesSetup@1001 : Record 311;
+    BEGIN
+      WITH SalesReceivablesSetup DO BEGIN
+        GET;
+        VALIDATE("Exact Cost Reversing Mandatory",NewValue);
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE AssignItemChargeWithSuggest@75(ExpdAssignableAmount@1003 : Decimal;Menu@1001 : Integer);
+    BEGIN
+      LibraryVariableStorage.Enqueue(TRUE);
+      LibraryVariableStorage.Enqueue(ExpdAssignableAmount);
+      LibraryVariableStorage.Enqueue(Menu);
+    END;
+
+    LOCAL PROCEDURE AssignItemChargeWithoutSuggest@89(ExpdAssignableAmount@1001 : Decimal);
+    BEGIN
+      LibraryVariableStorage.Enqueue(FALSE);
+      LibraryVariableStorage.Enqueue(ExpdAssignableAmount);
+    END;
+
+    LOCAL PROCEDURE RunPurchaseReportAndAssignItemChargeWithoutSuggest@49(ExpdAssignableAmount@1002 : Decimal);
+    BEGIN
+      COMMIT;
+      REPORT.RUN(REPORT::"Purchase Document - Test");
+      AssignItemChargeWithoutSuggest(ExpdAssignableAmount);
+    END;
+
+    LOCAL PROCEDURE RunSalesReportAndAssignItemChargeWithoutSuggest@82(ExpdAssignableAmount@1002 : Decimal);
+    BEGIN
+      COMMIT;
+      REPORT.RUN(REPORT::"Sales Document - Test");
+      AssignItemChargeWithoutSuggest(ExpdAssignableAmount);
+    END;
+
+    LOCAL PROCEDURE MockItemLedgerEntryWithDim@140(CustomerNo@1004 : Code[20];DimValue1@1000 : Code[20];DimValue2@1001 : Code[20]) ExpectedResult : Decimal;
+    VAR
+      ItemLedgerEntry@1002 : Record 32;
+      RecRef@1005 : RecordRef;
+      Cnt@1003 : Integer;
+    BEGIN
+      FOR Cnt := 1 TO LibraryRandom.RandIntInRange(2,5) DO
+        WITH ItemLedgerEntry DO BEGIN
+          INIT;
+          RecRef.GETTABLE(ItemLedgerEntry);
+          "Entry No." := LibraryUtility.GetNewLineNo(RecRef,FIELDNO("Entry No."));
+          "Source Type" := "Source Type"::Customer;
+          "Source No." := CustomerNo;
+          "Global Dimension 1 Code" := DimValue1;
+          "Global Dimension 2 Code" := DimValue2;
+          INSERT;
+          ExpectedResult := ExpectedResult + MockValueEntries("Entry No.","Source Type","Source No.",DimValue1,DimValue2);
+        END;
+    END;
+
+    LOCAL PROCEDURE MockResourceLedgerEntry@180(VAR ResLedgerEntry@1000 : Record 203;CustomerNo@1001 : Code[20]);
+    BEGIN
+      WITH ResLedgerEntry DO BEGIN
+        INIT;
+        "Entry No." := LibraryUtility.GetNewRecNo(ResLedgerEntry,FIELDNO("Entry No."));
+        "Source Type" := "Source Type"::Customer;
+        "Source No." := CustomerNo;
+        "Total Cost" := LibraryRandom.RandDec(10,2);
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE MockValueEntries@138(ItemLedgerEntryNo@1002 : Integer;SourceType@1007 : Option;SourceNo@1006 : Code[20];DimValue1@1005 : Code[20];DimValue2@1004 : Code[20]) ExpectedResult : Decimal;
+    VAR
+      ValueEntry@1001 : Record 5802;
+      RecRef@1003 : RecordRef;
+      Cnt@1000 : Integer;
+    BEGIN
+      WITH ValueEntry DO
+        FOR Cnt := 1 TO LibraryRandom.RandIntInRange(2,5) DO BEGIN
+          INIT;
+          RecRef.GETTABLE(ValueEntry);
+          "Entry No." := LibraryUtility.GetNewLineNo(RecRef,FIELDNO("Entry No."));
+          "Source Type" := SourceType;
+          "Source No." := SourceNo;
+          "Global Dimension 1 Code" := DimValue1;
+          "Global Dimension 2 Code" := DimValue2;
+          "Cost Amount (Non-Invtbl.)" := LibraryRandom.RandInt(100);
+          ExpectedResult := ExpectedResult + "Cost Amount (Non-Invtbl.)";
+          "Item Ledger Entry No." := ItemLedgerEntryNo;
+          INSERT;
+        END;
+    END;
+
+    LOCAL PROCEDURE VerifyChargeItemAssignment@60(ItemNo@1006 : Code[20];AmountToAssign@1008 : Decimal);
+    VAR
+      ItemChargeAssignmentPurch@1000 : Record 5805;
+    BEGIN
+      ItemChargeAssignmentPurch.SETRANGE("Item No.",ItemNo);
+      ItemChargeAssignmentPurch.FINDFIRST;
+      ItemChargeAssignmentPurch.TESTFIELD("Amount to Assign",AmountToAssign);
+      ItemChargeAssignmentPurch.TESTFIELD("Qty. to Assign",1);  // Using 1 because only one Quantity of Charge Item is assigned.
+    END;
+
+    LOCAL PROCEDURE VerifyCustomerLedgerEntry@62(DocumentNo@1001 : Code[20];CustomerNo@1002 : Code[20];ProfitLCY@1003 : Decimal);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+      GeneralLedgerSetup@1004 : Record 98;
+    BEGIN
+      CustLedgerEntry.SETRANGE("Document Type",CustLedgerEntry."Document Type"::Invoice);
+      CustLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CustLedgerEntry.SETRANGE("Customer No.",CustomerNo);
+      CustLedgerEntry.FINDFIRST;
+      GeneralLedgerSetup.GET;
+      Assert.AreNearlyEqual(ProfitLCY,CustLedgerEntry."Profit (LCY)",GeneralLedgerSetup."Inv. Rounding Precision (LCY)",UnexpMsg);
+    END;
+
+    LOCAL PROCEDURE VerifyCustomerStatistic@87(No@1001 : Code[20];ExpAdjustedProfit@1003 : Decimal);
+    VAR
+      GeneralLedgerSetup@1000 : Record 98;
+      CustomerStatistics@1002 : TestPage 151;
+      AdjustedProfit@1004 : Decimal;
+    BEGIN
+      CustomerStatistics.OPENVIEW;
+      CustomerStatistics.FILTER.SETFILTER("No.",No);
+      EVALUATE(AdjustedProfit,CustomerStatistics.AdjCustProfit.VALUE);
+      GeneralLedgerSetup.GET;
+      Assert.AreNearlyEqual(ExpAdjustedProfit,AdjustedProfit,GeneralLedgerSetup."Inv. Rounding Precision (LCY)",UnexpMsg);
+      CustomerStatistics.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE VerifyNonInventoriableCost@34(DocumentNo@1003 : Code[20];ItemChargeNo@1001 : Code[20];ValuedQuantity@1002 : Decimal;CostAmountNonInvtbl@1004 : Decimal);
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      FindValueEntry(ValueEntry,DocumentNo,ItemChargeNo,ValuedQuantity);
+      ValueEntry.TESTFIELD("Cost Amount (Non-Invtbl.)",ROUND(CostAmountNonInvtbl,LibraryERM.GetAmountRoundingPrecision));
+      ValueEntry.TESTFIELD("Cost per Unit",0);  // Cost per Unit must be zero.
+    END;
+
+    LOCAL PROCEDURE VerifyPostedSalesInvoiceStatistic@65(No@1001 : Code[20];ExpAdjustedProfit@1003 : Decimal);
+    VAR
+      GeneralLedgerSetup@1000 : Record 98;
+      SalesInvoiceStatistics@1002 : TestPage 397;
+      AdjustedProfit@1004 : Decimal;
+    BEGIN
+      SalesInvoiceStatistics.OPENVIEW;
+      SalesInvoiceStatistics.FILTER.SETFILTER("No.",No);
+      EVALUATE(AdjustedProfit,SalesInvoiceStatistics.AdjProfitLCY.VALUE);
+      GeneralLedgerSetup.GET;
+      Assert.AreNearlyEqual(ExpAdjustedProfit,AdjustedProfit,GeneralLedgerSetup."Inv. Rounding Precision (LCY)",UnexpMsg);
+      SalesInvoiceStatistics.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntryForChargeItem@30(DocumentNo@1003 : Code[20];ItemChargeNo@1001 : Code[20];ValuedQuantity@1002 : Decimal;Inventoriable@1004 : Boolean);
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      FindValueEntry(ValueEntry,DocumentNo,ItemChargeNo,ValuedQuantity);
+      ValueEntry.TESTFIELD(Inventoriable,Inventoriable);
+    END;
+
+    LOCAL PROCEDURE VerifyItemJnlLineCount@111(ItemNo@1000 : Code[20];ExpectedCount@1001 : Integer);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      ItemJournalLine.SETRANGE("Item No.",ItemNo);
+      Assert.AreEqual(ExpectedCount,ItemJournalLine.COUNT,STRSUBSTNO(ItemJnlLineCountErr,ExpectedCount,ItemNo));
+    END;
+
+    LOCAL PROCEDURE VerifyMsgForHandler@86(ActualMsg@1001 : Text[1024]);
+    VAR
+      ExpectedMsg@1000 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ExpectedMsg);
+      Assert.IsTrue(STRPOS(ActualMsg,ExpectedMsg) > 0,ActualMsg);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemChargeAssignmentHandler@93(VAR ItemChargeAssignmentPurch@1000 : TestPage 5805);
+    BEGIN
+      ItemChargeAssignmentPurch.SuggestItemChargeAssignment.INVOKE;
+      ItemChargeAssignmentPurch.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SuggstItemChargeAssgntPurchHandler@105(VAR ItemChargeAssignmentPurch@1000 : TestPage 5805);
+    VAR
+      Suggest@1001 : Variant;
+      ExpdAssignableAmount@1003 : Variant;
+      ActualAssignableAmount@1004 : Text;
+      RequireSuggest@1002 : Boolean;
+    BEGIN
+      LibraryVariableStorage.Dequeue(Suggest);
+      LibraryVariableStorage.Dequeue(ExpdAssignableAmount);
+      ActualAssignableAmount := ItemChargeAssignmentPurch.AssgntAmount.VALUE;
+      RequireSuggest := Suggest;
+      IF RequireSuggest THEN
+        ItemChargeAssignmentPurch.SuggestItemChargeAssignment.INVOKE;
+      Assert.AreEqual(FORMAT(ExpdAssignableAmount),ActualAssignableAmount,AssignableAmountErr);
+      ItemChargeAssignmentPurch.RemAmountToAssign.ASSERTEQUALS(0);
+      ItemChargeAssignmentPurch.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemChargeAssignmentPurchHandler@57(VAR ItemChargeAssignmentPurch@1000 : TestPage 5805);
+    VAR
+      PartialQty@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(PartialQty);
+      ItemChargeAssignmentPurch."Qty. to Assign".SETVALUE(PartialQty);
+      ItemChargeAssignmentPurch.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SuggstItemChargeAssgntSalesHandler@104(VAR ItemChargeAssignmentSales@1000 : TestPage 5814);
+    VAR
+      Suggest@1002 : Variant;
+      ExpdAssignableAmount@1004 : Variant;
+      RequireSuggest@1001 : Boolean;
+      ActualAssignableAmount@1003 : Text;
+    BEGIN
+      LibraryVariableStorage.Dequeue(Suggest);
+      LibraryVariableStorage.Dequeue(ExpdAssignableAmount);
+      ActualAssignableAmount := ItemChargeAssignmentSales.AssignableAmount.VALUE;
+      RequireSuggest := Suggest;
+      IF RequireSuggest THEN
+        ItemChargeAssignmentSales.SuggestItemChargeAssignment.INVOKE;
+      Assert.AreEqual(FORMAT(ExpdAssignableAmount),ActualAssignableAmount,AssignableAmountErr);
+      ItemChargeAssignmentSales.RemAmountToAssign.ASSERTEQUALS(0);
+      ItemChargeAssignmentSales.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemChargeAssignmentMultipleLinePageHandler@46(VAR ItemChargeAssignmentPurch@1000 : TestPage 5805);
+    BEGIN
+      ItemChargeAssignmentPurch.GetReturnShipmentLines.INVOKE;
+      ItemChargeAssignmentPurch.SuggestItemChargeAssignment.INVOKE;
+      ItemChargeAssignmentPurch.OK.INVOKE;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE ItemChargeAssignMenuHandler@91(Option@1000 : Text[1024];VAR Choice@1001 : Integer;Instruction@1002 : Text[1024]);
+    VAR
+      OptionCount@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(OptionCount);  // Dequeue variable.
+      Choice := OptionCount;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReturnShipmentLinesPageHandler@36(VAR ReturnShipmentLines@1000 : TestPage 6657);
+    VAR
+      No@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(No);  // Dequeue variable.
+      ReturnShipmentLines.FILTER.SETFILTER("No.",No);
+      ReturnShipmentLines.OK.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@37(ConfirmMessage@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      VerifyMsgForHandler(ConfirmMessage);
+      Reply := TRUE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerFalse@102(ConfirmMessage@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      VerifyMsgForHandler(ConfirmMessage);
+      Reply := FALSE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ImplementStandardCostChangesHandler@45(VAR ImplementStandardCostChange@1000 : TestRequestPage 5855);
+    VAR
+      ItemJournalTemplate@1001 : Record 82;
+      ItemJournalBatch@1002 : Record 233;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Revaluation);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      ImplementStandardCostChange.ItemJournalTemplate.SETVALUE(ItemJournalTemplate.Name);
+      ImplementStandardCostChange.ItemJournalBatchName.SETVALUE(ItemJournalBatch.Name);
+      ImplementStandardCostChange.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@39(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ReportPurchaseDocumentTestHandler@72(VAR PurchaseDocumentTest@1000 : TestRequestPage 402);
+    BEGIN
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ReportSalesDocumentTestHandler@70(VAR SalesDocumentTest@1000 : TestRequestPage 202);
+    BEGIN
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CopySalesDocumentRequestPageHandler@137(VAR CopySalesDocument@1000 : TestRequestPage 292);
+    VAR
+      DocumentTypeVar@1001 : Variant;
+      DocumentNoVar@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(DocumentTypeVar);
+      LibraryVariableStorage.Dequeue(DocumentNoVar);
+
+      CopySalesDocument.DocumentType.SETVALUE(DocumentTypeVar);
+      CopySalesDocument.DocumentNo.SETVALUE(DocumentNoVar);
+      CopySalesDocument.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CopyPurchaseDocumentRequestPageHandler@152(VAR CopyPurchaseDocument@1000 : TestRequestPage 492);
+    VAR
+      DocumentTypeVar@1001 : Variant;
+      DocumentNoVar@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(DocumentTypeVar);
+      LibraryVariableStorage.Dequeue(DocumentNoVar);
+
+      CopyPurchaseDocument.DocumentType.SETVALUE(DocumentTypeVar);
+      CopyPurchaseDocument.DocumentNo.SETVALUE(DocumentNoVar);
+      CopyPurchaseDocument.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Inventory Costing] [SCM]
+      Test for Costing Inventory:
+       1. Verify Item Charge Assignment(Purch.) using Sales Order and Purchase Invoice.
+       2. Verify Item Charge Assignment(Purch.) using Sales Order and Purchase Credit Memo.
+       3. Verify Item Charge Assignment(Purch.) using Sales Order and Purchase Return Order.
+       4. Verify Value Entry for Charge Item with Non Inventoriable for Purchase Invoice.
+       5. Verify Value Entry for Charge Item with Non Inventoriable for Purchase Return Order.
+       6. Verify Value Entry for Charge Item with Non Inventoriable for Purchase Credit Memo.
+       7. Verify Item Charge Assignment for both Shipment lines.
+       8. Verify error message while posting Purchase Invoice with Qty. to Assign more than Purchase Invoice Quantity.
+       9. Verify Inventoriable and values in Value Entry.
+      10. Verify error message while posting Purchase Invoice with Negative Quantity.
+      11. Verify error message while posting Purchase Credit Memo with Negative Amount.
+      12. Verify Item Charge Assignment(Purch.) using Sales Return Order and Purchase Invoice.
+      13. Verify Item Charge Assignment(Purch.) using Sales Return Order and Purchase Return Order.
+      14. Verify Item Charge Assignment(Purch.) using Sales Return Order and Purchase Credit Memo.
+      15. Verify Value Entry for Charge Item with Inventoriable for Purchase Invoice.
+      16. Verify Value Entry for Charge Item with Inventoriable for Purchase Return Order.
+      17. Verify Value Entry for Charge Item with Inventoriable for Purchase Credit Memo.
+      18. Verify Inventoriable and values in Value Entry.
+      19. Verify error message while posting Purchase Invoice using Sales Return Order with Qty. to Assign more than Purchase Invoice Quantity.
+      20. Verify error message while posting Purchase Invoice with Negative Direct Unit Cost.
+      21. Verify error message while posting Purchase Credit Memo with Negative value.
+      22. Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Charge to Purchase Receipt.
+      23. Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Negative Charge to Purchase Receipt.
+      24. Verify Non-inventoriable Cost on Value Entry for Posted Purchase Credit Memo after assigning Charge to Purchase Receipt.
+      25. Verify Non-inventoriable Cost on Value Entry for Posted Purchase Credit Memo after assigning Charge with negative Cost to Purchase Receipt.
+      26. Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Charge to Return Shipment.
+      27. Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Charge with negative Cost to Return Shipment.
+      28. Verify Non-inventoriable Cost on Value Entry for Posted Purchase Credit Memo after assigning Charge to Purchase Return Shipment.
+      29. Verify Non-inventoriable Cost on Value Entry for Posted Purchase Credit Memo after assigning negative Charge with negative Cost to Purchase Return Shipment.
+      30. Verify Non-inventoriable Cost on Value Entry for Posted Purchase Invoice after assigning Charge to Purchase Return Shipment and Purchase Line.
+      31. Verify Customer Ledger Entry, Customer Statistic and Posted Sales Invoice Statistic post Sales Order with Implement New Stanadard Cost on Items which is less than Unit Price on Sales Order.
+      32. Verify Customer Ledger Entry, Customer Statistic and Posted Sales Invoice Statistic post Sales Order with Implement New Stanadard Cost on Items which is more than Unit Price on Sales Order.
+      33. Verify invalidated Item Charge Assignment cannot be posted in Purchase Order
+      34. Verify invalidated Item Charge Assignment cannot be posted in Purchase Return Order
+      35. Verify invalidated Item Charge Assignment cannot be posted in Sales Order
+      36. Verify invalidated Item Charge Assignment cannot be posted in Sales Return Order
+      37. Verify Assignable Amount & Rem. Amount To Assign is correct for purchase without Line Discount & Invoice Discount and Prices Including VAT is unchecked.
+      38. Verify Assignable Amount & Rem. Amount To Assign is correct for purchase with Line Discount & Invoice Discount with Currency and Prices Including VAT is checked.
+      39. Verify Assignable Amount & Rem. Amount To Assign is correct for purchase with Line Discount & Invoice Discount without Currency and Prices Including VAT is unchecked.
+      40. Verify the confirm message pops up with assign item charge partially for Purchase.
+      41. Verify Assignable Amount & Rem. Amount To Assign is correct for sales without Line Discount & Invoice Discount and Prices Including VAT is unchecked.
+      42. Verify Assignable Amount & Rem. Amount To Assign is correct for sales with Line Discount & Invoice Discount without Currency and Prices Including VAT is checked.
+      43. Verify Assignable Amount & Rem. Amount To Assign is correct for sales without Line Discount with Invoice Discount with Currency and Prices Including VAT is unchecked.
+      44. Verify Confirm message pops up to indcate duplicate Revaluation Jounal generated from Std Cost Worksheet, then click Yes and verify the duplicate journal line generated.
+      45. Verify no duplicate journal line generated after clicking No on confirm message indcating duplicate Revaluation Jounal generated from Std Cost Worksheet.
+      46. Item with Type Service, verify that credit memo contains correct non-inventoriable cost when exact cost reversing used.
+      47. Verify that partial assignment of Item Charge is correct.
+      48. Verify that partial assignment of Item Charge is correct: first assign, then post, then assign again.
+      49. Verify that partial assignment of Item Charge is correct: first assign, then receive, then assign again, then invoice, then assign again.
+      50. Verify that partial assignment of Item Charge is correct: first assign, then receive full/invoice part, then assign again.
+      51. Verify that partial assignment of Item Charge is correct: check that assign for zero 'Qty To Invoice' is zero, then partially receive, then assign, then partial invoice, then assign.
+      52. Sales side, Verify that partial assignment of Item Charge is correct.
+      53. Sales side, Verify that partial assignment of Item Charge is correct: first assign, then post, then assign again.
+      54. Sales side, Verify that partial assignment of Item Charge is correct: first assign, then receive, then assign again, then invoice, then assign again.
+      55. Sales side, Verify that partial assignment of Item Charge is correct: first assign, then receive full/invoice part, then assign again.
+      51. Service Item can be returned by Purchase Credit Memo without fixed application even though "Exact Cost Reversing Manatory" is on.
+      52. Sales Side, verify that for service item credit memo can be posted without fixed applicatgion when exact cost reversing used.
+
+      TFS_TS_ID = 295133
+      Cover Test cases:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      ChargeAssignmentUsingPurchaseInvoice, ChargeAssignmentUsingPurchaseCreditMemo, ChargeAssignmentUsingPurchaseReturnOrder                127967
+      PostPurchaseInvoiceWithChargeAssignment                                                                                          127967,58950
+      PostPurchaseReturnOrderWithChargeAssignment, PostPurchaseCreditMemoWithChargeAssignment                                          127967,56560
+      ChargeAssignmentUsingPurchaseInvoiceWithMultipleLines, PostInvoiceWithMultipleLinesChargeAssignmentError                               127967
+      PostPurchaseInvoiceWithMultipleLinesWithChargeAssignment, SalesShipmentWithNegativeAmountUsingChargeAssignment
+      PostPurchaseCreditMemoWithNegativeDirectUnitCost
+
+      TFS_TS_ID = 296733
+      Cover Test cases:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      AssgntUsingSalesRetOrderAndPurchInvoice,AssgntUsingSalesRetOrderAndPurchRetOrder
+      AssgntUsingSalesRetOrderAndPurchCrMemo,PostPurchInvoiceWithChgItemUsingSalesRetOrder
+      PostPurchRetOrderWithChgItemUsingSalesRetOrder,PostPurchCrMemoWithChgItemUsingSalesRetOrder,
+      PostChgAssigntWithMultipleLineUsingSalesRetOrder,PostInvoiceUsingSalesRetOrderError
+      NegativeAmountErrorUsingSalesRetOrder,PositiveAmountErrorUsingSalesRetOrder                                                            127967
+
+      TFS_TS_ID = 295132
+      Cover Test cases:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      PurchOrderWithPositiveChgAssigntToPurchRcpt,PurchOrderWithNegativeChgAssigntToPurchRcpt
+      PurchRetOrderWithChgAssigntToPurchRcpt,PurchCrMemoWithNegtiveCostChgAssigntToPurchRcpt                                                 127966
+      PurchOrderWithChgAssigntToPurchRetShpt,PurchOrderWithNegtiveCostChgAssigntToPurchRetShpt                                         127966,58950
+      PurchRetOrderWithChgAssigntToPurchRetShpt,PurchCrMemoWithNegQtyAndCostChgAssgntToPurchRetShipt                                   127966,56560
+      SplitOfItemCharge                                                                                                                127966,58950
+
+      TFS_TS_ID = 315205
+      Cover Test cases:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      AdjustedProfitOnStandardCost, NegativeAdjustedProfitOnStandardCost                                                                      230013
+
+      TFS_TS_ID = N/A
+      Cover Test cases for NAV7 SE Merge BUG:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      PurchOrderWithInvalidatedChgAssignt                                                                                                     333461
+      PurchReturnOrderWithInvalidatedChgAssignt                                                                                               333461
+      SalesOrderWithInvalidatedChgAssignt                                                                                                     333461
+      SalesReturnOrderWithInvalidatedChgAssignt                                                                                               333461
+
+      TFS_TS_ID = N/A
+      Cover Test cases:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      PurchInvoiceWithoutInvDiscAndLnDiscAndPricesIncludingVATUnChecked                                                                       48705
+      PurchInvoiceWithCurrencyAndPricesIncludingVATChecked                                                                                    48705
+      PurchInvoiceWithoutCurrencyAndPricesIncludingVATUnChecked                                                                               48705
+      ConfirmMessagePopupWhenPartialAssignItemChargeForPurchaseInvoice                                                                        48705
+      SalesInvoiceWithoutInvDiscAndLnDiscAndPricesIncludingVATUnChecked                                                                       48705
+      SalesInvoiceWithoutCurrencyAndPricesIncludingVATChecked                                                                                 48705
+      SalesInvoiceWithCurrencyAndPricesIncludingVATUnChecked                                                                                  48705
+
+      Cover Test cases for NAVSE Merge Bug:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      DuplicateRevaluationJournalConfirmYes                                                                                                  88544
+      DuplicateRevaluationJournalConfirmNo                                                                                                   88544
+
+      TFS_ID = 105161
+      Cover Test cases:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      PurchOrderPartialAssignItemCharge                                                                                                      105161
+      PurchOrderPartialAssignItemChargeTwice                                                                                                 105161
+      PurchOrderPartialAssignItemChargeReceiveFirst                                                                                          105161
+      PurchOrderPartialAssignItemChargeReceiveInvoiceTwice                                                                                   105161
+      PurchOrderPartialAssignItemChargeTwiceReceiveFirst                                                                                     105161
+      SalesOrderPartialAssignItemCharge                                                                                                      105161
+      SalesOrderPartialAssignItemChargeTwice                                                                                                 105161
+      SalesOrderPartialAssignItemChargeReceiveFirst                                                                                          105161
+      SalesOrderPartialAssignItemChargeReceiveInvoiceTwice                                                                                   105161
+
+      TFS_ID = 104553
+      Cover Test cases:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      SalesCreditMemoWithServiceItem                                                                                                         104553
+
+      TFS_ID = 363129
+      Cover Test cases:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      PurchCreditMemoWithServiceItem                                                                                                         362754
+
+      TFS_ID = 363246
+      Cover Test cases:
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                                                     TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------------------------
+      SalesCreditMemoWithServiceItemNoFixApplication                                                                                         363246
+      PurchCreditMemoWithServiceItem                                                                                                         363129
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,187 @@
+OBJECT Codeunit 134035 ERM Vend Date Compress Manual
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 25=rimd;
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryERM@1002 : Codeunit 131300;
+      LibraryRandom@1001 : Codeunit 130440;
+      Assert@1005 : Codeunit 130000;
+      IsInitialized@1000 : Boolean;
+      EntryError@1003 : TextConst 'ENU=Entries posted after Date Compression End Date must not be compressed.';
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE DateCompressionByWeek@4();
+    VAR
+      DateComprRegister@1001 : Record 87;
+    BEGIN
+      // Check that Entry Posted outside the Date Compression Period is not present in Vendor Ledger Entries after
+      // Running Date Compression by Week. Take One Week Difference between Entries.
+      Initialize;
+      VendorDateCompression(DateComprRegister."Period Length"::Week,'<1W>');
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE DateCompressionByMonth@24();
+    VAR
+      DateComprRegister@1001 : Record 87;
+    BEGIN
+      // Check that entry Posted outside the Date Compression Period is not present in Compressed Vendor Ledger Entries after
+      // Running Date Compression by Month. Take One Month Difference between Entries.
+      Initialize;
+      VendorDateCompression(DateComprRegister."Period Length"::Month,'<1M>');
+    END;
+
+    LOCAL PROCEDURE VendorDateCompression@7(DateCompessionPeriod@1003 : Option;PeriodDifference@1005 : Text[10]);
+    VAR
+      GenJournalLine@1007 : Record 81;
+      Vendor@1008 : Record 23;
+      LibraryPurchase@1006 : Codeunit 130512;
+      LibraryFiscalYear@1001 : Codeunit 131302;
+      PostingDate@1002 : Date;
+      Counter@1000 : Integer;
+    BEGIN
+      // Setup: Close any open Fiscal Year. Create Vendor, Post multiple Invoice and Payment Entries on different dates for Vendor
+      // and apply Payment over Invoice.
+      LibraryFiscalYear.CloseFiscalYear;
+      PostingDate := LibraryFiscalYear.GetFirstPostingDate(TRUE);
+      LibraryPurchase.CreateVendor(Vendor);
+      FOR Counter := 1 TO 1 + LibraryRandom.RandInt(2) DO BEGIN   // Using 1 + Random for creating multiple entries.
+        CreateAndPostGenJournalLines(GenJournalLine,Vendor."No.",PostingDate,PeriodDifference);
+        ApplyAndPostVendorEntry(GenJournalLine);
+        PostingDate := GenJournalLine."Posting Date";
+      END;
+
+      // Exercise: Run the Date Compress Vendor Ledger Batch Report as per the option selected.
+      DateCompressForVendor(GenJournalLine,LibraryFiscalYear.GetFirstPostingDate(TRUE),DateCompessionPeriod);
+
+      // Verify: Verify that Last Posted Entry must not be compressed.
+      VerifyVendorLedgerEntry(PostingDate);
+    END;
+
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateLocalData;
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostGenJournalLines@6(VAR GenJournalLine@1000 : Record 81;VendorNo@1001 : Code[20];PostingDate@1002 : Date;PeriodDifference@1003 : Text[10]);
+    VAR
+      GenJournalBatch@1004 : Record 232;
+    BEGIN
+      // Create Journal Lines with Random Decimal Amount and Post them. Take Invoice Value always greater than Payment.
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalBatch,GenJournalLine."Document Type"::Invoice,VendorNo,
+        PostingDate,-(1 + LibraryRandom.RandDec(50,2)));
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalBatch,GenJournalLine."Document Type"::Payment,VendorNo,
+        CALCDATE('<' + PeriodDifference + '>',GenJournalLine."Posting Date"),
+        -(GenJournalLine.Amount - LibraryRandom.RandDec(1,2)));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE ApplyAndPostVendorEntry@29(GenJournalLine@1004 : Record 81);
+    VAR
+      VendorLedgerEntry@1003 : Record 25;
+      VendorLedgerEntry2@1000 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,GenJournalLine."Document Type"::Payment,GenJournalLine."Document No.");
+      LibraryERM.SetApplyVendorEntry(VendorLedgerEntry,GenJournalLine.Amount);
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry2,GenJournalLine."Document Type"::Invoice,GenJournalLine."Document No.");
+      VendorLedgerEntry2.CALCFIELDS("Remaining Amount");
+      VendorLedgerEntry2.VALIDATE("Amount to Apply",VendorLedgerEntry2."Remaining Amount");
+      VendorLedgerEntry2.MODIFY(TRUE);
+      LibraryERM.SetAppliestoIdVendor(VendorLedgerEntry2);
+      LibraryERM.PostVendLedgerApplication(VendorLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalLine@40(VAR GenJournalLine@1005 : Record 81;GenJournalBatch@1000 : Record 232;DocumentType@1003 : Option;VendorNo@1002 : Code[20];PostingDate@1001 : Date;Amount@1004 : Decimal);
+    BEGIN
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,DocumentType,
+        GenJournalLine."Account Type"::Vendor,VendorNo,Amount);
+      GenJournalLine.VALIDATE("Posting Date",PostingDate);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE DateCompressForVendor@12(GenJournalLine@1002 : Record 81;StartingDate@1005 : Date;PeriodLength@1003 : Option);
+    VAR
+      VendorLedgerEntry@1000 : Record 25;
+      DateCompressVendorLedger@1001 : Report 398;
+    BEGIN
+      // Run the Date Compress Vendor Ledger Report. Take End Date a Day before Last Posted Entry's Posting Date.
+      VendorLedgerEntry.SETRANGE("Vendor No.",GenJournalLine."Account No.");
+      DateCompressVendorLedger.SETTABLEVIEW(VendorLedgerEntry);
+      DateCompressVendorLedger.InitializeRequest(
+        StartingDate,CALCDATE('<-1D>',GenJournalLine."Posting Date"),PeriodLength,'',FALSE,FALSE,FALSE,'');
+      DateCompressVendorLedger.USEREQUESTPAGE(FALSE);
+      DateCompressVendorLedger.RUN;
+    END;
+
+    LOCAL PROCEDURE VerifyVendorLedgerEntry@9(LastPostingDate@1000 : Date);
+    VAR
+      VendorLedgerEntry@1001 : Record 25;
+      GLRegister@1002 : Record 45;
+    BEGIN
+      GLRegister.FINDLAST;
+      VendorLedgerEntry.SETRANGE("Entry No.",GLRegister."From Entry No.",GLRegister."To Entry No.");
+      VendorLedgerEntry.FINDSET;
+      REPEAT
+        Assert.AreNotEqual(LastPostingDate,VendorLedgerEntry."Posting Date",EntryError);
+      UNTIL VendorLedgerEntry.NEXT = 0;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@15(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      // Confirm Handler for Date Compression confirmation message.
+      Reply := TRUE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Date Compression] [Purchase]
+      Unsupported version tags:
+      ES: Unable to Execute
+
+      Test Vendor Date Compression functionality for Entry posted outside Date Compression Period.
+        1. Test Date Compression for Entry posted outside Date Compression Period with Period Length: Week.
+        2. Test Date Compression for Entry posted outside Date Compression Period with Period Length: Month.
+
+      Covers test cases:
+            -------------------------------------------------------
+            Test Function Name               Test TFS ID
+            -------------------------------------------------------
+            DateCompressionByWeek            121596,125036
+            DateCompressionByMonth           121596,125037
+    }
+    END.
+  }
+}
+

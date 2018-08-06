@@ -1,0 +1,2323 @@
+OBJECT Codeunit 137099 SCM Kitting Reservation
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      WarehouseJournalTemplate@1024 : Record 7309;
+      WarehouseJournalBatch@1023 : Record 7310;
+      ItemJournalBatch@1005 : Record 233;
+      ItemJournalTemplate@1006 : Record 82;
+      LocationWhite@1021 : Record 14;
+      LibraryRandom@1000 : Codeunit 130440;
+      LibraryManufacturing@1016 : Codeunit 132202;
+      LibraryAssembly@1007 : Codeunit 132207;
+      LibraryVariableStorage@1001 : Codeunit 131004;
+      LibraryUtility@1003 : Codeunit 131000;
+      LibraryInventory@1004 : Codeunit 132201;
+      LibraryItemTracking@1009 : Codeunit 130502;
+      LibraryWarehouse@1008 : Codeunit 132204;
+      LibraryPurchase@1013 : Codeunit 130512;
+      LibrarySales@1014 : Codeunit 130509;
+      Assert@1015 : Codeunit 130000;
+      isInitialized@1002 : Boolean;
+      CannotMatchItemTracking@1010 : TextConst 'ENU=Cannot match item tracking.';
+      ReservationEntryDelete@1012 : TextConst 'ENU=%1 must be deleted.';
+      PurchaseLineOrder@1017 : TextConst 'ENU=Purchase Line, Order';
+      StartingDateError@1018 : TextConst 'ENU="You have modified the Starting Date from "';
+      ReservationEntryShouldBeBlank@1019 : TextConst 'ENU=Reservation Entry should be blank';
+      ReleasedProdOrderLine@1020 : TextConst 'ENU=Released Prod. Order Line';
+      BindingOrderToOrderError@1011 : TextConst 'ENU="You cannot state Serial No. or Lot No. on a demand when it is linked to a supply by Binding = Order-to-Order."';
+      ReservedQuantityBaseError@1025 : TextConst 'ENU="Reserved Qty. (Base) must be equal to ''%1''  in Assembly Header: Document Type=Order, No.="';
+      AvailabilityWarningsConfirmMessage@1026 : TextConst 'ENU=There are availability warnings on one or more lines.\Close the form anyway?';
+      NotAffectExistingEntriesMsg@1027 : TextConst 'ENU=The change will not affect existing entries.';
+      BeforeWorkDateMsg@1028 : TextConst 'ENU=is before work date %1 in one or more of the assembly lines';
+      ItemInPickWorksheetLinesErr@1032 : TextConst 'ENU=Item in Pick Worksheet is not correct.';
+      PickWorksheetLinesErr@1029 : TextConst 'ENU=The total lines in Pick Worksheet are not correct.';
+      ItemTrackingMode@1030 : ' ,AssignLotNo,SelectEntries,SetLotNo';
+      UndoPostedAssemblyOrderQst@1031 : TextConst 'ENU=Do you want to undo posting of the posted assembly order?';
+      RecreateAssemblyOrderQst@1033 : TextConst 'ENU=Do you want to recreate the assembly order from the posted assembly order?';
+      ReservationEntryErr@1034 : TextConst 'ENU=Reservation Entry is not correct for %1.';
+      QtyIsNotCorrectErr@1035 : TextConst 'ENU=Quantity is incorrect in Sales Invoice Line';
+      IsBeforeWorkDateMsg@1036 : TextConst 'ENU=is before work date';
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ReserveSalesOrderAgainstAssemblyOrderWithoutLot@1();
+    BEGIN
+      // Setup.
+      Initialize;
+      CreateAssemblyOrderWithoutLotAndSalesOrderWithLot(FALSE);  // Post Sales Order as FALSE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE PostAssemblyOrderAndSalesOrderWithLot@9();
+    BEGIN
+      // Setup.
+      Initialize;
+      CreateAssemblyOrderWithoutLotAndSalesOrderWithLot(TRUE);  // Post Sales Order as TRUE.
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyOrderWithoutLotAndSalesOrderWithLot@10(PostSalesOrder@1009 : Boolean);
+    VAR
+      ReservationEntry@1000 : Record 337;
+      AssemblyHeader@1007 : Record 900;
+      SalesHeader@1006 : Record 36;
+      LotNo@1004 : Code[20];
+      OldStockOutWarning@1001 : Boolean;
+    BEGIN
+      // Update Stock Out Warning on Assembly Setup. Create Assembly Order without Tracking. Create and Post Item Journal Line.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      CreateAssemblyOrderWithLotItemTracking(AssemblyHeader,FALSE);
+      LotNo := CreateAndPostItemJournalLine(AssemblyHeader."Item No.",AssemblyHeader.Quantity,TRUE);  // Use Tracking as TRUE.
+
+      // Exercise.
+      CreateSalesOrderWithReservationAndLotTracking(SalesHeader,AssemblyHeader);
+
+      // Verify.
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Item Ledger Entry",LotNo,
+        AssemblyHeader.Quantity);
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Sales Line",LotNo,
+        -AssemblyHeader.Quantity);
+
+      IF PostSalesOrder THEN BEGIN
+        // Exercise: Add Component inventory, Assign Tracking on Assembly Order and Post Assembly Order. Post Sales Order as Ship.
+        AddComponentInventoryAndPostAssemblyOrder(AssemblyHeader,AssemblyHeader.Quantity / 2,TRUE);  // Value Required for Add Component to Inventory. Use Tracking as TRUE.
+        LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);  // Ship as TRUE.
+
+        // Verify.
+        VerifyReservationEntryExists(AssemblyHeader."Item No.");
+      END;
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ReserveSalesOrderAgainstAssemblyOrderWithLot@29();
+    BEGIN
+      // Setup.
+      Initialize;
+      CreateAssemblyOrderWithLotAndSalesOrderWithLot(FALSE);  // Post Sales Order as FALSE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE PostAssemblyOrderWithoutLotAndSalesOrderWithLot@14();
+    BEGIN
+      // Setup.
+      Initialize;
+      CreateAssemblyOrderWithLotAndSalesOrderWithLot(TRUE);  // Post Sales Order as TRUE.
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyOrderWithLotAndSalesOrderWithLot@18(PostSalesOrder@1010 : Boolean);
+    VAR
+      ReservationEntry@1000 : Record 337;
+      AssemblyHeader@1008 : Record 900;
+      SalesHeader@1007 : Record 36;
+      LotNo@1004 : Code[20];
+      OldStockOutWarning@1001 : Boolean;
+    BEGIN
+      // Update Stock Out Warning on Assembly Setup. Create Assembly Order with Tracking. Create and Post Item Journal Line.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      CreateAssemblyOrderWithLotItemTracking(AssemblyHeader,TRUE);  // Use Tracking as TRUE.
+      LotNo := CreateAndPostItemJournalLine(AssemblyHeader."Item No.",AssemblyHeader.Quantity,TRUE);  // Use Tracking as TRUE.
+
+      // Exercise.
+      CreateSalesOrderWithReservationAndLotTracking(SalesHeader,AssemblyHeader);
+
+      // Verify.
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Item Ledger Entry",LotNo,
+        AssemblyHeader.Quantity);
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Sales Line",LotNo,
+        -AssemblyHeader.Quantity);
+
+      IF PostSalesOrder THEN BEGIN
+        // Exercise: Add Component Inventory and Post Assembly Order. Post Sales Order as Ship.
+        AddComponentInventoryAndPostAssemblyOrder(AssemblyHeader,AssemblyHeader.Quantity / 2,FALSE);  // Value Required for Add Component to Inventory.
+        LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);  // Ship as TRUE.
+
+        // Verify.
+        VerifyReservationEntryExists(AssemblyHeader."Item No.");
+      END;
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler)]
+    PROCEDURE ReserveSOAgainstAOAfterApplyingTrackingOnSOError@30();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveSOAgainstAOAfterApplyingTrackingOnSO(FALSE);  // Specific Reservation as FALSE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler)]
+    PROCEDURE ReserveSalesOrderAgainstAOWithSpecificReservation@11();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveSOAgainstAOAfterApplyingTrackingOnSO(TRUE);  // Specific Reservation as FALSE.
+    END;
+
+    LOCAL PROCEDURE ReserveSOAgainstAOAfterApplyingTrackingOnSO@21(SpecificReservation@1010 : Boolean);
+    VAR
+      ReservationEntry@1000 : Record 337;
+      AssemblyHeader@1008 : Record 900;
+      SalesHeader@1007 : Record 36;
+      SalesLine@1006 : Record 37;
+      LotNo@1004 : Code[20];
+      OldStockOutWarning@1001 : Boolean;
+    BEGIN
+      // Update Stock Out Warning on Assembly Setup. Create Assembly Order with Tracking. Create and Post Item Journal Line. Create Sales Order.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      CreateAssemblyOrderWithLotItemTracking(AssemblyHeader,TRUE);  // Use Tracking as TRUE.
+      LotNo := CreateAndPostItemJournalLine(AssemblyHeader."Item No.",AssemblyHeader.Quantity / 2,TRUE);  // Post Item Journal Line of Partial Quantity. Use Tracking as TRUE.
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries);  // Enqueue for ItemTrackingLinesPageHandler.
+      CreateSalesOrder(
+        SalesHeader,SalesLine,AssemblyHeader."Due Date",AssemblyHeader."Item No.",AssemblyHeader.Quantity,'',FALSE,TRUE);  // Use Tracking as TRUE.
+
+      // Exercise.
+      EnqueueValuesForHandlers(FALSE,FALSE);
+      ASSERTERROR SalesLine.ShowReservation;
+
+      // Verify.
+      Assert.ExpectedError(CannotMatchItemTracking);
+
+      IF SpecificReservation THEN BEGIN
+        // Exercise.
+        EnqueueValuesForHandlers(FALSE,TRUE);
+        SalesLine.ShowReservation;
+
+        // Verify.
+        VerifyReservationEntry(
+          ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Item Ledger Entry",LotNo,
+          AssemblyHeader.Quantity / 2);  // Verify Partial Reservation Quantity.
+        VerifyReservationEntry(
+          ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Sales Line",'',
+          -AssemblyHeader.Quantity / 2);  // Verify Partial Reservation Quantity.
+      END;
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler,ItemTrackingListPageHandler)]
+    PROCEDURE ReserveSOAgainstAOWithoutNonSpecificReservation@6();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveFromAOAfterApplyingTrackingOnSalesOrder(FALSE);  // Non Specific Reservation as FALSE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler,ItemTrackingListPageHandler)]
+    PROCEDURE ReserveSOAgainstAOWithNonSpecificReservation@19();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveFromAOAfterApplyingTrackingOnSalesOrder(TRUE);  // Non Specific Reservation as TRUE.
+    END;
+
+    LOCAL PROCEDURE ReserveFromAOAfterApplyingTrackingOnSalesOrder@7(NonSpecificReservation@1010 : Boolean);
+    VAR
+      ReservationEntry@1000 : Record 337;
+      AssemblyHeader@1008 : Record 900;
+      SalesHeader@1007 : Record 36;
+      SalesLine@1006 : Record 37;
+      LotNo@1005 : Code[20];
+      LotNo2@1004 : Code[20];
+      OldStockOutWarning@1001 : Boolean;
+    BEGIN
+      // Update Stock Out Warning on Assembly Setup. Create Assembly Order with Tracking. Create and Post Item Journal Line. Create Sales Order.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      LotNo := CreateAssemblyOrderWithLotItemTracking(AssemblyHeader,TRUE);  // Use Tracking as TRUE.
+      LotNo2 := CreateAndPostItemJournalLine(AssemblyHeader."Item No.",AssemblyHeader.Quantity / 2,TRUE);  // Post Item Journal Line of Partial Quantity. Use Tracking as TRUE.
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries);  // Enqueue for ItemTrackingLinesPageHandler.
+      CreateSalesOrder(
+        SalesHeader,SalesLine,AssemblyHeader."Due Date",AssemblyHeader."Item No.",AssemblyHeader.Quantity,'',FALSE,TRUE);  // Use Tracking as TRUE.
+
+      // Exercise.
+      EnqueueValuesForHandlers(TRUE,TRUE);
+      SalesLine.ShowReservation;
+
+      // Verify.
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Item Ledger Entry",LotNo2,
+        AssemblyHeader.Quantity / 2);  // Verify Partial Reservation Quantity.
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Sales Line",LotNo2,
+        -AssemblyHeader.Quantity / 2);  // Verify Partial Reservation Quantity.
+
+      IF NonSpecificReservation THEN BEGIN
+        // Exercise.
+        EnqueueValuesForHandlers(FALSE,FALSE);
+        SalesLine.ShowReservation;
+
+        // Verify.
+        VerifyReservationEntry(
+          ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Assembly Header",LotNo,
+          AssemblyHeader.Quantity / 2);  // Verify Partial Reservation Quantity.
+        VerifyReservationEntry(
+          ReservationEntry."Reservation Status"::Reservation,AssemblyHeader."Item No.",DATABASE::"Sales Line",'',
+          -AssemblyHeader.Quantity / 2);  // Verify Partial Reservation Quantity.
+      END;
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler)]
+    PROCEDURE PostAssemblyOrderAndSOWithSpecificReservation@42();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostAssemblyOrderAndSalesOrderWithReservation(FALSE,TRUE);  // Enqueue Confirm as FALSE, Enqueue Reservation as TRUE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler,ItemTrackingListPageHandler)]
+    PROCEDURE PostAOAndSOWithoutNonSpecificReservation@74();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostAssemblyOrderAndSalesOrderWithReservation(TRUE,TRUE);  // Enqueue Confirm as TRUE, Enqueue Reservation as TRUE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler,ItemTrackingListPageHandler)]
+    PROCEDURE PostAssemblyOrderAndSOWithNonSpecificReservation@33();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostAssemblyOrderAndSalesOrderWithReservation(TRUE,FALSE);  // Enqueue Confirm as TRUE, Enqueue Reservation as FALSE.
+    END;
+
+    LOCAL PROCEDURE PostAssemblyOrderAndSalesOrderWithReservation@79(EnqueueConfirm@1005 : Boolean;EnqueueReservation@1004 : Boolean);
+    VAR
+      AssemblyHeader@1003 : Record 900;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1001 : Record 37;
+      OldStockOutWarning@1000 : Boolean;
+    BEGIN
+      // Update Stock Out Warning on Assembly Setup. Create Initial Setup for Assembly Order. Open Reservation from Sales Line.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      CreateInitialSetupForAssemblyOrder(AssemblyHeader,SalesHeader,SalesLine);
+      EnqueueValuesForHandlers(EnqueueConfirm,EnqueueReservation);
+      SalesLine.ShowReservation;
+
+      // Exercise: Add Component Inventory and Post Assembly Order. Post Sales Order as Ship.
+      AddComponentInventoryAndPostAssemblyOrder(AssemblyHeader,AssemblyHeader.Quantity,FALSE);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);  // Ship as TRUE.
+
+      // Verify.
+      VerifyReservationEntryExists(AssemblyHeader."Item No.");
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler,ConfirmHandler)]
+    PROCEDURE ReserveFromAOAfterRefreshProductionOrder@20();
+    BEGIN
+      // Setup.
+      Initialize;
+      CreateAOAfterRefreshProdOrderWithDifferentUOM(FALSE);  // Update UOM as FALSE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,ReservationPageHandler)]
+    PROCEDURE ReserveFromAOAfterRefreshProdOrderWithDifferentUOM@38();
+    BEGIN
+      // Setup.
+      Initialize;
+      CreateAOAfterRefreshProdOrderWithDifferentUOM(TRUE);  // Update UOM as TRUE.
+    END;
+
+    LOCAL PROCEDURE CreateAOAfterRefreshProdOrderWithDifferentUOM@46(UpdateUOM@1000 : Boolean);
+    VAR
+      Item@1014 : Record 27;
+      AssemblyHeader@1013 : Record 900;
+      ItemUnitOfMeasure@1010 : Record 5404;
+      PurchaseHeader@1008 : Record 38;
+      AssemblyLine@1005 : Record 901;
+      OldStockOutWarning@1002 : Boolean;
+      ComponentItemNo@1016 : Code[20];
+      Quantity@1015 : Decimal;
+      ReservationMode@1001 : ' ,ReserveFromCurrentLine,Verify,VerifyBlank,AvailableToReserve';
+    BEGIN
+      // Create and post Item Journal Line. Create Purchase Order. Create and refresh Production Order.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      Quantity := LibraryRandom.RandDec(10,2);
+      ComponentItemNo := CreateAssemblyItemWithComponent(Item,Item."Assembly Policy"::"Assemble-to-Stock",Quantity,'','');
+      CreateItemUnitOfMeasure(ItemUnitOfMeasure,ComponentItemNo);
+      CreateAndPostItemJournalLine(ComponentItemNo,Quantity,FALSE);
+      CreatePurchaseOrder(PurchaseHeader,ComponentItemNo,Quantity,ItemUnitOfMeasure.Code,FALSE);
+      CreateAndRefreshReleasedProductionOrder(ComponentItemNo,Quantity);
+      EnqueueValuesForConfirmHandler(StartingDateError,TRUE);
+      CreateAssemblyOrder(AssemblyHeader,Item."No.",Quantity,FALSE);
+      UpdateStartingDateOnAssemblyHeader(
+        AssemblyHeader,CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',AssemblyHeader."Due Date"));
+      FindAssemblyLine(AssemblyLine,AssemblyLine."Document Type"::Order,ComponentItemNo);
+
+      // Exercise.
+      EnqueueValuesForReservationEntry(ReservationMode::Verify,Quantity,Quantity * ItemUnitOfMeasure."Qty. per Unit of Measure");  // Value required for UOM Conversion.
+      AssemblyLine.ShowReservation;
+
+      // Verify: Verification is covered in handler.
+
+      IF UpdateUOM THEN BEGIN
+        // Exercise.
+        UpdateUnitOfMeasureOnPurchaseLine(PurchaseHeader."No.",Item."Base Unit of Measure");
+
+        // Verify.
+        EnqueueValuesForReservationEntry(ReservationMode::Verify,Quantity,Quantity * ItemUnitOfMeasure."Qty. per Unit of Measure");  // Value required for UOM Conversion.
+        AssemblyLine.ShowReservation;
+      END;
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler,ConfirmHandler)]
+    PROCEDURE AvailabilityToReserveForAssemblyItem@58();
+    VAR
+      Item@1000 : Record 27;
+      AssemblyHeader@1001 : Record 900;
+      AssemblyLine@1008 : Record 901;
+      OldStockOutWarning@1011 : Boolean;
+    BEGIN
+      // Setup: Create Assembly Order. Update starting date on Assembly Header.
+      Initialize;
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      LibraryAssembly.CreateItem(Item,Item."Costing Method",Item."Replenishment System"::Assembly,'','');
+      EnqueueValuesForConfirmHandler(StartingDateError,TRUE);
+      CreateAssemblyOrder(AssemblyHeader,Item."No.",LibraryRandom.RandDec(10,2),FALSE);
+      UpdateStartingDateOnAssemblyHeader(
+        AssemblyHeader,CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',AssemblyHeader."Due Date"));
+      LibraryAssembly.CreateAssemblyLine(
+        AssemblyHeader,AssemblyLine,AssemblyLine.Type::Item,Item."No.",Item."Base Unit of Measure",LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(10,2),Item."No.");
+
+      // Exercise.
+      ShowReservationOnAssemblyLine(AssemblyLine."Document Type"::Order,Item."No.");
+
+      // Verify: Verification is done in ReservationPageHandler.
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE AssemblyOrderWithAlwaysReserveItemForSalesOrder@57();
+    VAR
+      Item@1039 : Record 27;
+      SalesLine@1035 : Record 37;
+      SalesHeader@1033 : Record 36;
+      PurchaseHeader@1000 : Record 38;
+      AssemblyLine@1026 : Record 901;
+      OldStockOutWarning@1023 : Boolean;
+      ComponentItemNo@1021 : Code[20];
+    BEGIN
+      // Setup: Create Assembly Item with components. Update Reserve as always on Item. Create Purchase Order and Sales Order.
+      Initialize;
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      ComponentItemNo := CreateInitialSetupForSalesDocument(Item,PurchaseHeader);
+      CreateSalesOrder(
+        SalesHeader,SalesLine,PurchaseHeader."Order Date",Item."No.",LibraryRandom.RandDec(10,2),'',FALSE,FALSE);
+
+      // Exercise.
+      ShowReservationOnAssemblyLine(AssemblyLine."Document Type"::Order,ComponentItemNo);
+
+      // Verify: Verification is done in ReservationPageHandler.
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE AOWithAlwaysReserveItemForBlanketSalesOrder@56();
+    VAR
+      Item@1037 : Record 27;
+      SalesHeader@1031 : Record 36;
+      PurchaseHeader@1027 : Record 38;
+      AssemblyLine@1024 : Record 901;
+      OldStockOutWarning@1021 : Boolean;
+      ComponentItemNo@1019 : Code[20];
+    BEGIN
+      // Setup: Create Assembly Item with components. Update Reserve as always on Item. Create Purchase Order and Blanket Sales Order.
+      Initialize;
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      ComponentItemNo := CreateInitialSetupForSalesDocument(Item,PurchaseHeader);
+      CreateBlanketSalesOrder(SalesHeader,Item."No.",PurchaseHeader."Order Date",LibraryRandom.RandDec(10,2));
+
+      // Exercise.
+      ShowReservationOnAssemblyLine(AssemblyLine."Document Type"::"Blanket Order",ComponentItemNo);
+
+      // Verify: Verification is done in ReservationPageHandler.
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE AssemblyOrderWithAlwaysReserveItemForSalesQuote@55();
+    VAR
+      Item@1020 : Record 27;
+      SalesHeader@1014 : Record 36;
+      PurchaseHeader@1010 : Record 38;
+      AssemblyLine@1007 : Record 901;
+      OldStockOutWarning@1004 : Boolean;
+      ComponentItemNo@1002 : Code[20];
+    BEGIN
+      // Setup: Create Assembly Item with components. Update Reserve as always on Item. Create Purchase Order and Sales Quote.
+      Initialize;
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      ComponentItemNo := CreateInitialSetupForSalesDocument(Item,PurchaseHeader);
+      CreateSalesQuote(SalesHeader,Item."No.",PurchaseHeader."Order Date",LibraryRandom.RandDec(10,2));
+
+      // Exercise.
+      ShowReservationOnAssemblyLine(AssemblyLine."Document Type"::Quote,ComponentItemNo);
+
+      // Verify: Verification is done in ReservationPageHandler.
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler,ConfirmHandler)]
+    PROCEDURE ReserveFromAOAfterCreatingPickFromSalesOrder@4();
+    VAR
+      Item@1012 : Record 27;
+      Bin@1020 : Record 7354;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1006 : Record 37;
+      SalesHeader2@1017 : Record 36;
+      ComponentItem@1021 : Record 27;
+      AssemblyLine@1003 : Record 901;
+      OldStockOutWarning@1000 : Boolean;
+      ComponentItemNo@1018 : Code[20];
+      Quantity@1019 : Decimal;
+      ReservationMode@1001 : ' ,ReserveFromCurrentLine,Verify,VerifyBlank,AvailableToReserve';
+    BEGIN
+      // Setup: Create Assembly Item with components. Update Inventory using Warehouse Journal. Create Sales Order and reserve quantity. Create Assembly Order and Update Location on Assembly Line.
+      Initialize;
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      Quantity := LibraryRandom.RandDec(10,2);
+      ComponentItemNo := CreateAssemblyItemWithComponent(Item,Item."Assembly Policy"::"Assemble-to-Order",Quantity,'','');
+      FindBinForPickZone(Bin,LocationWhite.Code);
+      ComponentItem.GET(ComponentItemNo);
+      UpdateInventoryUsingWhseJournal(Bin,ComponentItem,Quantity);
+      LibraryVariableStorage.Enqueue(TRUE);  // Enqueue for ReservationPageHandler.
+      LibraryVariableStorage.Enqueue(ReservationMode::ReserveFromCurrentLine);  // Enqueue for ReservationPageHandler.
+      CreateSalesOrder(
+        SalesHeader,SalesLine,CalculateDateUsingDefaultSafetyLeadTime,ComponentItemNo,Quantity / 4,LocationWhite.Code,TRUE,FALSE);  // Value required for Partial Reservation for Partial Quantity. Reserve as TRUE.
+      CreatePickFromSalesOrder(SalesHeader2,ComponentItemNo,Quantity / 4,LocationWhite.Code);  // Value required for Partial Reservation for Partial Quantity.
+      CreateAssemblyOrderAndUpdateLocationOnAssemblyLine(AssemblyLine,Item."No.",ComponentItem."No.",Quantity,LocationWhite.Code);
+
+      // Exercise.
+      EnqueueValuesForReservationEntry(ReservationMode::AvailableToReserve,Quantity,Quantity / 2);  // Value required for Partial Reservation.
+      AssemblyLine.ShowReservation;
+
+      // Verify: Verification is done in ReservationPageHandler.
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ConfirmHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE AssemblyOrdWithTrackedQtyLessThanReserveQty@34();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveFromAOWithTrackedQtyLessThanReserveQty(FALSE);  // Post Assembly Order as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ConfirmHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE PostAssemblyOrdWithTrackedQtyLessThanReserveQty@32();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveFromAOWithTrackedQtyLessThanReserveQty(TRUE);  // Post Assembly Order as True.
+    END;
+
+    LOCAL PROCEDURE ReserveFromAOWithTrackedQtyLessThanReserveQty@8(PostAssembly@1000 : Boolean);
+    VAR
+      ReservationEntry@1012 : Record 337;
+      AssemblyHeader@1001 : Record 900;
+      AssemblyLine@1011 : Record 901;
+      PurchaseHeader@1010 : Record 38;
+      AssemblyItem@1009 : Record 27;
+      OldStockOutWarning@1008 : Boolean;
+      Quantity@1007 : Decimal;
+      ComponentItemNo@1005 : Code[20];
+      LotNo@1003 : Code[20];
+    BEGIN
+      // Create Purchase Order. Create and post Item Journal Line. Create Assembly Order.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      Quantity := LibraryRandom.RandDec(10,2);
+      ComponentItemNo :=
+        CreateAssemblyItemWithTrackedComponentItem(AssemblyItem,AssemblyItem."Assembly Policy"::"Assemble-to-Order",Quantity);
+      UpdateNoSeriesOnItemJournalBatch(ItemJournalBatch,'');  // No. Series as blank.
+      LotNo := CreateAndPostItemJournalLine(ComponentItemNo,Quantity,TRUE);  // UseTracking as True.
+      CreatePurchaseOrder(PurchaseHeader,ComponentItemNo,Quantity,AssemblyItem."Base Unit of Measure",TRUE);  // UseTracking as True.
+      CreateAndUpdateAssemblyOrder(
+        AssemblyHeader,AssemblyLine,AssemblyItem."No.",ComponentItemNo,Quantity + LibraryRandom.RandDec(10,2));  // Value required for test.
+
+      // Exercise.
+      ApplyItemTrkgAfterReserveQuantityOnAssemblyOrder(AssemblyLine);
+
+      // Verify.
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,ComponentItemNo,DATABASE::"Item Ledger Entry",LotNo,Quantity);
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,ComponentItemNo,DATABASE::"Assembly Line",LotNo,-Quantity);
+
+      IF PostAssembly THEN BEGIN
+        PostAssemblyOrder(AssemblyHeader,AssemblyLine,Quantity);
+
+        // Verify.
+        VerifyReservationEntryExists(AssemblyItem."No.");
+      END;
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ConfirmHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE AssemblyOrdWithTrackedQtyGreaterThanReserveQty@64();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveFromAOWithTrackedQtyGreaterThanReserveQty(FALSE);  // PostAssembly as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ReservationPageHandler,ConfirmHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE PostAssemblyOrdWithTrackedQtyGreaterThanReserveQty@62();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveFromAOWithTrackedQtyGreaterThanReserveQty(TRUE);  // PostAssembly as False.
+    END;
+
+    LOCAL PROCEDURE ReserveFromAOWithTrackedQtyGreaterThanReserveQty@54(PostAssembly@1000 : Boolean);
+    VAR
+      ReservationEntry@1014 : Record 337;
+      AssemblyHeader@1013 : Record 900;
+      AssemblyLine@1012 : Record 901;
+      PurchaseHeader@1011 : Record 38;
+      AssemblyItem@1010 : Record 27;
+      OldStockOutWarning@1009 : Boolean;
+      Quantity@1008 : Decimal;
+      ComponentItemNo@1006 : Code[20];
+      LotNo@1004 : Code[20];
+      LotNo2@1001 : Code[20];
+      Quantity2@1015 : Decimal;
+    BEGIN
+      // Create Purchase Order. Create and post Item Journal Line. Create Assembly Order.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      Quantity := LibraryRandom.RandDec(10,2);
+      Quantity2 := Quantity + LibraryRandom.RandDec(10,2);
+      ComponentItemNo :=
+        CreateAssemblyItemWithTrackedComponentItem(AssemblyItem,AssemblyItem."Assembly Policy"::"Assemble-to-Order",Quantity);
+      LotNo := CreateAndPostItemJournalLine(ComponentItemNo,Quantity,TRUE);  // UseTracking as True.
+      LotNo2 := CreateAndPostItemJournalLine(ComponentItemNo,Quantity2,TRUE);  // UseTracking as True.
+      CreatePurchaseOrder(PurchaseHeader,ComponentItemNo,Quantity,AssemblyItem."Base Unit of Measure",TRUE);  // UseTracking as True.
+      CreateAndUpdateAssemblyOrder(AssemblyHeader,AssemblyLine,AssemblyItem."No.",ComponentItemNo,Quantity2);
+
+      // Exercise.
+      ApplyItemTrkgAfterReserveQuantityOnAssemblyOrder(AssemblyLine);
+
+      // Verify.
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,ComponentItemNo,DATABASE::"Item Ledger Entry",LotNo,Quantity);
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,ComponentItemNo,DATABASE::"Assembly Line",LotNo,-Quantity);
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Surplus,ComponentItemNo,DATABASE::"Assembly Line",LotNo2,
+        -(Quantity * Quantity2 - Quantity));  // Calculated value required.
+
+      IF PostAssembly THEN BEGIN
+        PostAssemblyOrder(AssemblyHeader,AssemblyLine,Quantity);
+
+        // Verify.
+        VerifyReservationEntryExists(AssemblyHeader."Item No.");
+      END;
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler,ReservationPageHandler,ItemTrackingListPageHandler)]
+    PROCEDURE ReserveFromAOAfterApplyingTrackingOnAssemblyOrder@71();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveFromAOAfterApplyingTrackingOnAssemblyOrd(FALSE);  // PostAssemblyOrder as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler,ReservationPageHandler,ItemTrackingListPageHandler)]
+    PROCEDURE PostAssemblyOrderAfterApplyingTrackingOnAO@67();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReserveFromAOAfterApplyingTrackingOnAssemblyOrd(TRUE);  // PostAssemblyOrder as True.
+    END;
+
+    LOCAL PROCEDURE ReserveFromAOAfterApplyingTrackingOnAssemblyOrd@65(PostAssembly@1013 : Boolean);
+    VAR
+      AssemblyHeader@1007 : Record 900;
+      ReservationEntry@1012 : Record 337;
+      AssemblyLine@1009 : Record 901;
+      PurchaseHeader@1006 : Record 38;
+      AssemblyItem@1004 : Record 27;
+      OldStockOutWarning@1001 : Boolean;
+      Quantity@1000 : Decimal;
+      ComponentItemNo@1003 : Code[20];
+      LotNo@1008 : Code[20];
+    BEGIN
+      // Create Purchase Order. Create and post Item Journal Line. Create Assembly Order.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      Quantity := LibraryRandom.RandDec(10,2);
+      ComponentItemNo :=
+        CreateAssemblyItemWithTrackedComponentItem(AssemblyItem,AssemblyItem."Assembly Policy"::"Assemble-to-Order",Quantity);
+      LotNo := CreateAndPostItemJournalLine(ComponentItemNo,Quantity,TRUE);  // UseTracking as True.
+      CreatePurchaseOrder(PurchaseHeader,ComponentItemNo,Quantity,AssemblyItem."Base Unit of Measure",TRUE);  // UseTracking as True.
+      CreateAndUpdateAssemblyOrder(
+        AssemblyHeader,AssemblyLine,AssemblyItem."No.",ComponentItemNo,Quantity + LibraryRandom.RandDec(10,2));
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries);  // Enqueue for ItemTrackingLinesPageHandler.
+      AssemblyLine.OpenItemTrackingLines;
+
+      // Exercise.
+      EnqueueValuesForHandlers(TRUE,FALSE);
+      AssemblyLine.ShowReservation;
+
+      // Verify.
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,ComponentItemNo,DATABASE::"Item Ledger Entry",LotNo,Quantity);
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,ComponentItemNo,DATABASE::"Assembly Line",LotNo,-Quantity);
+
+      IF PostAssembly THEN BEGIN
+        // Exercise.
+        PostAssemblyOrder(AssemblyHeader,AssemblyLine,Quantity);
+
+        // Verify.
+        VerifyReservationEntryExists(AssemblyHeader."Item No.");
+      END;
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler,ReservationPageHandler)]
+    PROCEDURE ReserveFromAOWithTrackedQtyOnPurchaseOrder@72();
+    VAR
+      AssemblyHeader@1002 : Record 900;
+      AssemblyLine@1009 : Record 901;
+      PurchaseHeader@1006 : Record 38;
+      AssemblyItem@1004 : Record 27;
+      OldStockOutWarning@1001 : Boolean;
+      Quantity@1000 : Decimal;
+      ComponentItemNo@1003 : Code[20];
+    BEGIN
+      // Setup: Create Purchase Order. Create and post Item Journal Line. Create Assembly Order.
+      Initialize;
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      Quantity := LibraryRandom.RandDec(10,2);
+      ComponentItemNo :=
+        CreateAssemblyItemWithTrackedComponentItem(AssemblyItem,AssemblyItem."Assembly Policy"::"Assemble-to-Order",Quantity / 2);
+      CreateAndPostItemJournalLine(ComponentItemNo,Quantity,TRUE);  // UseTracking as True.
+      CreatePurchaseOrder(PurchaseHeader,ComponentItemNo,Quantity,AssemblyItem."Base Unit of Measure",TRUE);  // UseTracking as True.
+      CreateAndUpdateAssemblyOrder(AssemblyHeader,AssemblyLine,AssemblyItem."No.",ComponentItemNo,Quantity / 2);
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries);  // Enqueue for ItemTrackingLinesPageHandler.
+      AssemblyLine.OpenItemTrackingLines;
+
+      // Exercise.
+      EnqueueValuesForHandlers(FALSE,FALSE);
+      ASSERTERROR AssemblyLine.ShowReservation;
+
+      // Verify.
+      Assert.ExpectedError(CannotMatchItemTracking);
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE QuantityTrackedGreaterThanReservationQuantityError@51();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostSalesOrderAfterUpdateTrackedQtyOnReservation(TRUE,FALSE);  // Quantity Tracked Greater Than Reservation as TRUE, Post Sales Order as FALSE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler)]
+    PROCEDURE PostSOWithQuantityTrackedGreaterThanReservationQty@94();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostSalesOrderAfterUpdateTrackedQtyOnReservation(TRUE,TRUE);  // Quantity Tracked Greater Than Reservation, Post Sales Order as TRUE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE QuantityTrackedLessThanReservationQuantityError@112();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostSalesOrderAfterUpdateTrackedQtyOnReservation(FALSE,FALSE);  // Quantity Tracked Greater Than Reservation, Post Sales Order as FALSE.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemTrackingSummaryPageHandler,ConfirmHandler)]
+    PROCEDURE PostSOWithQuantityTrackedLessThanReservationQty@122();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostSalesOrderAfterUpdateTrackedQtyOnReservation(FALSE,TRUE);  // Quantity Tracked Greater Than Reservation as FALSE, Post Sales Order as TRUE.
+    END;
+
+    LOCAL PROCEDURE PostSalesOrderAfterUpdateTrackedQtyOnReservation@100(QtyTrackedGreaterThanReservation@1006 : Boolean;PostSalesOrder@1010 : Boolean);
+    VAR
+      Item@1009 : Record 27;
+      SalesHeader@1008 : Record 36;
+      SalesLine@1007 : Record 37;
+      ItemTrackingCode@1004 : Record 6502;
+      OldStockOutWarning@1000 : Boolean;
+      Quantity@1002 : Decimal;
+      Quantity2@1001 : Decimal;
+    BEGIN
+      // Update Stock Out Warning on Assembly Setup. Create Lot Item Tracking Code. Create Assembly Item with Component. Create Sales Order. Create and Post Item Journal Line. Update Quantity Base on Reservation Entry.
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      Quantity := LibraryRandom.RandDec(10,2);
+      Quantity2 := Quantity + LibraryRandom.RandDec(10,2);
+      CreateItemTrackingCode(ItemTrackingCode);
+      CreateAssemblyItemWithComponent(
+        Item,Item."Assembly Policy"::"Assemble-to-Order",Quantity,ItemTrackingCode.Code,LibraryUtility.GetGlobalNoSeriesCode);
+      CreateSalesOrder(SalesHeader,SalesLine,CalculateDateUsingDefaultSafetyLeadTime,Item."No.",Quantity + Quantity2,'',FALSE,FALSE);  // Greater Quantity Value Required for Sales Order.
+      CreateAndPostItemJournalLine(Item."No.",SalesLine.Quantity,TRUE);  // Use Tracking as TRUE.
+      IF QtyTrackedGreaterThanReservation THEN
+        Quantity := Quantity2;
+      UpdateQuantityBaseOnReservationEntry(Item."No.",Quantity);
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries);  // Enqueue for ItemTrackingLinesPageHandler.
+
+      // Exercise.
+      ASSERTERROR SalesLine.OpenItemTrackingLines;
+
+      // Verify: Verify error message.
+      Assert.ExpectedError(BindingOrderToOrderError);
+
+      IF PostSalesOrder THEN BEGIN
+        // Exercise: Update Quantity Base on Reservation Entry, Assign Tracking on Assembly Order and Open Item Tracking from Sales Line.
+        UpdateQuantityBaseAndAssignTrackingOnAssemblyOrder(Item."No.",Quantity2);
+        OpenItemTrackingFromSalesLine(SalesLine);
+        ASSERTERROR LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);  // Ship as TRUE.
+
+        // Verify.
+        // Bug 280672 is closed By Design for now. A new deliverable will be implemented in NAV8 covering this scenario.
+        // Test code to be updated accordingly when the design will change.
+        Assert.ExpectedError(STRSUBSTNO(ReservedQuantityBaseError,SalesLine.Quantity));
+      END;
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler)]
+    PROCEDURE PostSalesOrderWithQuantityTrackedOnReservation@83();
+    VAR
+      ItemTrackingCode@1002 : Record 6502;
+      Item@1003 : Record 27;
+      SalesHeader@1004 : Record 36;
+      SalesLine@1005 : Record 37;
+      PurchaseHeader@1006 : Record 38;
+      OldStockOutWarning@1000 : Boolean;
+      Quantity@1001 : Decimal;
+    BEGIN
+      // Setup: Update Stock Out Warning on Assembly Setup. Create Lot Item Tracking Code. Create Assembly Item with Component. Create Sales Order. Create Purchase Order. Assign Tracking on assembly Order. Update Quantity to Ship on Sales Line.
+      Initialize;
+      OldStockOutWarning := UpdateStockOutWarningOnAssemblySetup(FALSE);
+      Quantity := LibraryRandom.RandDec(10,2);
+      CreateItemTrackingCode(ItemTrackingCode);
+      CreateAssemblyItemWithComponent(
+        Item,Item."Assembly Policy"::"Assemble-to-Order",Quantity,ItemTrackingCode.Code,LibraryUtility.GetGlobalNoSeriesCode);
+      CreateSalesOrder(
+        SalesHeader,SalesLine,CalculateDateUsingDefaultSafetyLeadTime,Item."No.",Quantity + LibraryRandom.RandDec(10,2),'',
+        FALSE,FALSE);  // Greater Quantity Value Required for Sales Order.
+      CreatePurchaseOrder(PurchaseHeader,Item."No.",SalesLine.Quantity,Item."Base Unit of Measure",FALSE);
+      UpdateQuantityBaseOnReservationEntry(Item."No.",Quantity);
+      AssignTrackingOnAssemblyOrder(Item."No.");
+      UpdateQuantityToShipOnSalesLine(SalesLine,Quantity);
+
+      // Exercise.
+      ASSERTERROR LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);  // Ship as TRUE.
+
+      // Verify.
+      // Bug 280672 is closed By Design for now. A new deliverable will be implemented in NAV8 covering this scenario.
+      // Test code to be updated accordingly when the design will change.
+      Assert.ExpectedError(STRSUBSTNO(ReservedQuantityBaseError,SalesLine.Quantity));
+
+      // Tear Down.
+      UpdateStockOutWarningOnAssemblySetup(OldStockOutWarning);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CreateSalesOrderForAssemblyItemWithSerialItemTracking@96();
+    BEGIN
+      // Test creating sales order for assembly item with Tracking Only policy and SN Specific Item Tracking Code can succeed. Verify Reservation Entry created.
+      Initialize;
+      CreateSalesOrderForAssemblyItemWithItemTracking(TRUE,FALSE); // TRUE for SN Specific Tracking, FALSE for Lot Specific Tracking
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CreateSalesOrderForAssemblyItemWithLotItemTracking@91();
+    BEGIN
+      // Test creating sales order for assembly item with Tracking Only policy and Lot Specific Item Tracking Code can succeed. Verify Reservation Entry created.
+      Initialize;
+      CreateSalesOrderForAssemblyItemWithItemTracking(FALSE,TRUE); // FALSE for SN Specific Tracking, TRUE for Lot Specific Tracking
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,PickSelectionPageHandler)]
+    PROCEDURE GetWarehouseDocumentOnPickWorksheetWithAssembly@238();
+    VAR
+      AsmItem@1000 : Record 27;
+      SalesHeader@1002 : Record 36;
+      WarehouseShipmentHeader@1005 : Record 7320;
+    BEGIN
+      // Test Pick Worksheet Lines are correct by Get Warehouse Document in Pick Worksheet with Assembly.
+
+      // Setup: Create Assembly Item and Assembly BOM with at least three component Items.
+      // Create Sales Order with Assembly Item. Add inventory for component Items.
+      Initialize;
+      LibraryAssembly.CreateItem(
+        AsmItem,AsmItem."Costing Method"::Standard,AsmItem."Replenishment System"::Assembly,'','');
+      LibraryAssembly.CreateAssemblyList(
+        AsmItem."Costing Method"::Standard,AsmItem."No.",TRUE,LibraryRandom.RandIntInRange(3,5),
+        0,0,LibraryRandom.RandInt(5),'','');
+      CreateAndReleaseSalesOrderWithQtyToAssemble(SalesHeader,AsmItem."No.",LocationWhite.Code);
+      AddComponentInventory(AsmItem."No.");
+
+      // Create Whse. Shipment from Sales Order and release it.
+      CreateAndReleaseWhseShipmentFromSalesOrder(SalesHeader,WarehouseShipmentHeader);
+
+      // Exercise: Click Get Warehouse Document in Pick Worksheet.
+      LibraryVariableStorage.Enqueue(WarehouseShipmentHeader."No."); // Enqueue for PickSelectionPageHandler.
+      InvokeGetWarehouseDocumentOnPickWorksheet;
+
+      // Verify: Verify Pick Worksheet Lines are correct.
+      VerifyWarehouseWorksheetLines(WarehouseShipmentHeader."No.",AsmItem."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ConfirmHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE UndoPostedAssemblyOrderWithLotTrackingAndExpirationDate@101();
+    VAR
+      AssemblyItem@1000 : Record 27;
+      OrderNo@1002 : Code[20];
+      ComponentItemNo@1003 : Code[20];
+      Quantity@1008 : Decimal;
+      ExpirationDate@1014 : Date;
+    BEGIN
+      // Test Expiration Date should exist for Assembly Component after posting Undo Assembly.
+
+      // Setup: Update Stock Out Warning on Assembly Setup.
+      // Create Item with Assembly Component. Assembly Component Item with Lot Tracking and "Man. Expir. Date Entry Reqd.".
+      Initialize;
+      ComponentItemNo := CreateAssemblyItemWithTrackedComponentItemAndExpirDateReqd(AssemblyItem);
+
+      // Update Inventory for Assembly Component Item with setting Lot No. and Expiration Date.
+      Quantity := LibraryRandom.RandDec(10,2);
+      ExpirationDate := CALCDATE('<CY>',WORKDATE);
+      UpdateNoSeriesOnItemJournalBatch(ItemJournalBatch,''); // No. Series as blank.
+      CreateAndPostItemJournalLineWithLotNoAndExpirDate(ComponentItemNo,Quantity,ExpirationDate);
+
+      // Create and Post Assembly Order with Select Entries.
+      OrderNo := CreateAndPostAssemblyOrderWithItemTracking(AssemblyItem."No.",ComponentItemNo,Quantity);
+
+      // Exercise: Undo Posted Assembly Order.
+      UndoPostedAssemblyOrder(OrderNo);
+
+      // Verify: Expiration Date exists for Assembly Component after posting Undo Assembly.
+      VerifyReservationEntryForExpirationDate(ComponentItemNo,ExpirationDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CreateAndPostSalesOrderWithQtyToAssembleAndDeliveryDate@117();
+    VAR
+      AsmItem@1000 : Record 27;
+      SalesHeader@1002 : Record 36;
+      Qty@1004 : Decimal;
+    BEGIN
+      // Test "The following C/AL functions..." error does not pop up when setting the Quantity on a Sales Line, which has a related Assembly Order.
+
+      // Setup: Create Assembly Item, add inventory for Assembly Item.
+      Initialize;
+      LibraryAssembly.CreateItem(
+        AsmItem,AsmItem."Costing Method"::Standard,AsmItem."Replenishment System"::Assembly,'','');
+      Qty := LibraryRandom.RandInt(20);
+      CreateAndPostItemJournalLine(AsmItem."No.",2 * Qty,FALSE); // Use Tracking as False.
+
+      // Create 2 Sales Orders with Assembly Item. Set "Qty. to Assemble to Order", "Requested Delivery Date" and "Promised Delivery Date"
+      CreateSalesOrderWithQtyToAssembleAndDeliveryDate(SalesHeader,AsmItem."No.",Qty,WORKDATE,WORKDATE);
+
+      LibraryVariableStorage.Enqueue(IsBeforeWorkDateMsg); // Enqueue for MessageHandler.
+      CreateSalesOrderWithQtyToAssembleAndDeliveryDate(
+        SalesHeader,AsmItem."No.",Qty + LibraryRandom.RandInt(10),
+        CALCDATE(STRSUBSTNO('<-%1D>',LibraryRandom.RandInt(10)),WORKDATE),
+        CALCDATE(STRSUBSTNO('<+%1D>',LibraryRandom.RandInt(10)),WORKDATE));
+
+      // Create Sales Header
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+
+      // Exercise: Fill Item No. and Quantity
+      OpenAndEditSalesOrder(SalesHeader."No.",AsmItem."No.",Qty);
+
+      // Verify: Sales Order created successfully without error.
+      // Exercise and Verify: Post Sales Order and verify Quantity in Posted Sales Invoice.
+      VerifyPostedSalesInvoice(LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE),Qty);
+    END;
+
+    [Test]
+    [HandlerFunctions(DummyMessageHandler)]
+    PROCEDURE UndoPartialPostedAssemblyOrderAfterFullPost@119();
+    VAR
+      AssemblyItem@1001 : Record 27;
+      AssemblyHeader@1008 : Record 900;
+      PartialPostedAssemblyHeader@1000 : Record 910;
+      ComponentItemNo@1003 : Code[20];
+      QtyPer@1002 : Decimal;
+      PartialQtyToAssemble@1010 : Decimal;
+      RestOfQtyToAssemble@1009 : Decimal;
+      AssemblyItemQty@1007 : Decimal;
+      RestOfQtyPicked@1015 : Decimal;
+    BEGIN
+      // [FEATURE] [Assembly Order] [Picks]
+      // [SCENARIO 378847] "Qty. Picked" should be equal to the rest of Quantity in Assembly Line when undo a partial Posted Assembly Order after full posting.
+      Initialize;
+      QtyPer := LibraryRandom.RandDec(10,2);
+      PartialQtyToAssemble := LibraryRandom.RandDec(10,2);
+      RestOfQtyToAssemble := PartialQtyToAssemble + LibraryRandom.RandDec(20,2);
+      AssemblyItemQty := PartialQtyToAssemble + RestOfQtyToAssemble;
+      RestOfQtyPicked := RestOfQtyToAssemble * QtyPer;
+
+      // [GIVEN] Assembly Item with Component Item.
+      CreateAssemblyItemWithComponentInStock(AssemblyItem,ComponentItemNo,QtyPer,AssemblyItemQty * QtyPer);
+
+      // [GIVEN] Create and release Assembly Order for Assembly Item.
+      CreateAndReleaseAssemblyOrder(AssemblyHeader,AssemblyItem."No.",LocationWhite.Code,AssemblyItemQty);
+
+      // [GIVEN] Pick and post a partial Assembly Order.
+      PickAndPostPartialAssemblyOrder(AssemblyHeader,PartialPostedAssemblyHeader,PartialQtyToAssemble,PartialQtyToAssemble * QtyPer);
+      // [GIVEN] Pick and post the rest of "Quantity to Assemble" of Assembly Order.
+      PickAndPostRestOfAssemblyOrder(AssemblyHeader,RestOfQtyToAssemble,RestOfQtyPicked);
+
+      // [WHEN] Undo a partial Posted Assembly Order.
+      LibraryAssembly.UndoPostedAssembly(PartialPostedAssemblyHeader,TRUE,'');
+
+      // [THEN] "Qty. Picked" is equal to the rest of Quantinty in Assembly Line.
+      VerifyQtyAfterUndoPartialPostedAssemblyOrder(ComponentItemNo,RestOfQtyPicked);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationModalPageHandler,DummyMessageHandler)]
+    PROCEDURE ItemPickedToAsmBinCannotBeReservedAsAllocatedInWhse@86();
+    VAR
+      AssemblyItem@1001 : Record 27;
+      AssemblyHeader@1003 : Record 900;
+      SalesHeader@1004 : Record 36;
+      SalesLine@1005 : Record 37;
+      CompItemNo@1002 : Code[20];
+      Qty@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Warehouse Pick]
+      // [SCENARIO 381763] Item that is picked to assembly bin cannot be reserved by another demand as it is now blocked as allocated in warehouse.
+      Initialize;
+      Qty := LibraryRandom.RandInt(10);
+
+      // [GIVEN] Assembly Item "I" with a component "C" in stock.
+      CreateAssemblyItemWithComponentInStock(AssemblyItem,CompItemNo,1,Qty);
+
+      // [GIVEN] Assembly Order for "I" on location set up for directed put-away and pick.
+      CreateAndReleaseAssemblyOrder(AssemblyHeader,AssemblyItem."No.",LocationWhite.Code,Qty);
+
+      // [GIVEN] Item "C" is picked to a bin defined by "To-Assembly Bin Code" on location.
+      LibraryAssembly.CreateWhsePick(AssemblyHeader,USERID,0,FALSE,FALSE,FALSE);
+      UpdateQtyToHandleAndRegisterPick(AssemblyHeader."No.",Qty);
+
+      // [GIVEN] Sales Order for item "C".
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,CompItemNo,Qty,LocationWhite.Code,FALSE,FALSE);
+
+      // [WHEN] Open reservation page for the sales line.
+      LibraryVariableStorage.Enqueue(Qty);
+      LibraryVariableStorage.Enqueue(0);
+      SalesLine.ShowReservation;
+
+      // [THEN] Item "C" is not available for reservation.
+      // Verification is done in ReservationModalPageHandler
+    END;
+
+    [Test]
+    [HandlerFunctions(WhseItemTrackingLinePageHandler,ItemTrackingLinesPageHandler,ItemTrackingListPageHandler,ReservationModalPageHandler,ConfirmHandler,DummyMessageHandler)]
+    PROCEDURE LotPickedToAsmBinCannotBeReservedAsAllocatedInWhse@146();
+    VAR
+      AssemblyItem@1005 : Record 27;
+      AssemblyHeader@1004 : Record 900;
+      AssemblyLine@1007 : Record 901;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1002 : Record 37;
+      CompItemNo@1001 : Code[20];
+      LotNo@1008 : Code[20];
+      Qty@1000 : Decimal;
+    BEGIN
+      // [FEATURE] [Warehouse Pick] [Item Tracking] [Lot Warehouse Tracking]
+      // [SCENARIO 381763] Lot that is picked to assembly bin cannot be reserved by another demand as it is now blocked as allocated in warehouse.
+      Initialize;
+      Qty := LibraryRandom.RandInt(10);
+      LotNo := LibraryUtility.GenerateGUID;
+
+      // [GIVEN] Assembly Item "I" with a lot-tracked component "C" in stock. Lot No. = "L".
+      LibraryVariableStorage.Enqueue(LotNo);
+      CreateAssemblyItemWithTrackedComponentInStock(AssemblyItem,CompItemNo,1,Qty);
+
+      // [GIVEN] Assembly Order for "I" on location set up for directed put-away and pick.
+      // [GIVEN] Lot "L" is selected on Assembly Line.
+      CreateAndReleaseAssemblyOrder(AssemblyHeader,AssemblyItem."No.",LocationWhite.Code,Qty);
+      FindAssemblyLine(AssemblyLine,AssemblyLine."Document Type"::Order,CompItemNo);
+      EnqueueValuesForItemTrackingLines(LotNo,Qty);
+      AssemblyLine.OpenItemTrackingLines;
+
+      // [GIVEN] Item "C" is picked to a bin defined by "To-Assembly Bin Code" on location.
+      LibraryAssembly.CreateWhsePick(AssemblyHeader,USERID,0,FALSE,FALSE,FALSE);
+      UpdateQtyToHandleAndRegisterPick(AssemblyHeader."No.",Qty);
+
+      // [GIVEN] Sales Order for item "C" with lot "L" selected on the sales line.
+      EnqueueValuesForItemTrackingLines(LotNo,Qty);
+      EnqueueValuesForConfirmHandler(AvailabilityWarningsConfirmMessage,TRUE);
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,CompItemNo,Qty,LocationWhite.Code,FALSE,TRUE);
+
+      // [WHEN] Open reservation page for the sales line.
+      EnqueueValuesForConfirmHandler(LibraryInventory.GetReservConfirmText,TRUE);
+      LibraryVariableStorage.Enqueue(Qty);
+      LibraryVariableStorage.Enqueue(0);
+      SalesLine.ShowReservation;
+
+      // [THEN] Lot "L" is not available for reservation.
+      // Verification is done in ReservationModalPageHandler
+    END;
+
+    LOCAL PROCEDURE Initialize@45();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      NoSeriesSetup;
+      CreateLocationSetup;
+      ItemJournalSetup;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateFullWarehouseSetup@60(VAR Location@1000 : Record 14);
+    BEGIN
+      LibraryWarehouse.CreateFullWMSLocation(Location,2);  // Value used for number of bin per zone.
+    END;
+
+    LOCAL PROCEDURE CreateLocationSetup@92();
+    VAR
+      WarehouseEmployee@1001 : Record 7301;
+    BEGIN
+      WarehouseEmployee.DELETEALL(TRUE);
+      CreateFullWarehouseSetup(LocationWhite);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,LocationWhite.Code,TRUE);
+    END;
+
+    LOCAL PROCEDURE ItemJournalSetup@53();
+    BEGIN
+      ItemJournalTemplate.SETRANGE(Recurring,FALSE);
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalTemplate.MODIFY(TRUE);
+
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      ItemJournalBatch.VALIDATE("No. Series",'');  // Blank value required for test.
+      ItemJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@31();
+    VAR
+      AssemblySetup@1003 : Record 905;
+      SalesSetup@1001 : Record 311;
+    BEGIN
+      SalesSetup.GET;
+      SalesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesSetup.MODIFY(TRUE);
+
+      AssemblySetup.GET;
+      AssemblySetup.VALIDATE("Assembly Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      AssemblySetup.VALIDATE("Posted Assembly Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE WarehouseJournalSetup@106(LocationCode@1000 : Code[10]);
+    BEGIN
+      LibraryWarehouse.SelectWhseJournalTemplateName(WarehouseJournalTemplate,WarehouseJournalTemplate.Type::Item);
+      WarehouseJournalTemplate.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      WarehouseJournalTemplate.MODIFY(TRUE);
+
+      LibraryWarehouse.SelectWhseJournalBatchName(
+        WarehouseJournalBatch,WarehouseJournalTemplate.Type,WarehouseJournalTemplate.Name,LocationCode);
+      WarehouseJournalBatch.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      WarehouseJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE AddComponentInventoryAndPostAssemblyOrder@13(VAR AssemblyHeader@1000 : Record 900;Quantity@1005 : Decimal;UseTracking@1002 : Boolean);
+    VAR
+      LotNo@1004 : Variant;
+    BEGIN
+      LibraryAssembly.AddCompInventory(AssemblyHeader,AssemblyHeader."Due Date",AssemblyHeader.Quantity * Quantity);  // Calculated Value required.
+      IF UseTracking THEN BEGIN
+        LibraryVariableStorage.Enqueue(ItemTrackingMode::AssignLotNo);  // Enqueue for ItemTrackingLinesPageHandler.
+        AssemblyHeader.OpenItemTrackingLines;
+        LibraryVariableStorage.Dequeue(LotNo);
+      END;
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');  // Expected Error as Blank.
+    END;
+
+    LOCAL PROCEDURE AddComponentInventory@89(ItemNo@1000 : Code[20]);
+    VAR
+      AssemblyHeader@1001 : Record 900;
+    BEGIN
+      FindAssemblyHeader(AssemblyHeader,ItemNo);
+      LibraryAssembly.AddCompInventory(
+        AssemblyHeader,WORKDATE,LibraryRandom.RandInt(50) + 100); // Large inventory for component items.
+    END;
+
+    LOCAL PROCEDURE ApplyItemTrkgAfterReserveQuantityOnAssemblyOrder@77(AssemblyLine@1002 : Record 901);
+    VAR
+      ReservationMode@1000 : ' ,ReserveFromCurrentLine,Verify,VerifyBlank,AvailableToReserve';
+    BEGIN
+      LibraryVariableStorage.Enqueue(FALSE);  // Enqueue for ReservationPageHandler.
+      LibraryVariableStorage.Enqueue(ReservationMode::ReserveFromCurrentLine);  // Enqueue for ReservationPageHandler.
+      AssemblyLine.ShowReservation;
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries);  // Enqueue for ItemTrackingLinesPageHandler.
+      AssemblyLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE AssignTrackingOnAssemblyOrder@129(ItemNo@1001 : Code[20]);
+    VAR
+      AssemblyHeader@1000 : Record 900;
+      LotNo@1003 : Variant;
+    BEGIN
+      FindAssemblyHeader(AssemblyHeader,ItemNo);
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::AssignLotNo);  // Enqueue for ItemTrackingLinesPageHandler.
+      AssemblyHeader.OpenItemTrackingLines;
+      LibraryVariableStorage.Dequeue(LotNo);
+    END;
+
+    LOCAL PROCEDURE CalculateDateUsingDefaultSafetyLeadTime@5() : Date;
+    VAR
+      ManufacturingSetup@1000 : Record 99000765;
+    BEGIN
+      ManufacturingSetup.GET;
+      EXIT(CALCDATE(ManufacturingSetup."Default Safety Lead Time",WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalLine@116(VAR ItemJournalLine@1006 : Record 83;ItemNo@1005 : Code[20];Quantity@1004 : Decimal;UseTracking@1002 : Boolean) LotNo : Code[20];
+    VAR
+      DequeueVariable@1003 : Variant;
+    BEGIN
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalTemplate.Name,ItemJournalBatch.Name,ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,
+        Quantity);
+      IF UseTracking THEN BEGIN
+        LibraryVariableStorage.Enqueue(ItemTrackingMode::AssignLotNo);  // Enqueue for ItemTrackingLinesPageHandler.
+        ItemJournalLine.OpenItemTrackingLines(FALSE);
+        LibraryVariableStorage.Dequeue(DequeueVariable);
+        LotNo := DequeueVariable;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLine@109(ItemNo@1005 : Code[20];Quantity@1004 : Decimal;UseTracking@1002 : Boolean) LotNo : Code[20];
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      LotNo := CreateItemJournalLine(ItemJournalLine,ItemNo,Quantity,UseTracking);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLineWithLotNoAndExpirDate@40(ItemNo@1005 : Code[20];Quantity@1004 : Decimal;ExpirationDate@1006 : Date);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+      ReservationEntry@1001 : Record 337;
+    BEGIN
+      CreateItemJournalLine(ItemJournalLine,ItemNo,Quantity,TRUE);
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.MODIFYALL("Expiration Date",ExpirationDate,TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLineFromWhseAdjustment@126(Item@1000 : Record 27);
+    BEGIN
+      UpdateNoSeriesOnItemJournalBatch(ItemJournalBatch,LibraryUtility.GetGlobalNoSeriesCode);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      LibraryWarehouse.CalculateWhseAdjustment(Item,ItemJournalBatch);
+      LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshReleasedProductionOrder@26(ItemNo@1000 : Code[20];Quantity@1001 : Decimal);
+    VAR
+      ProductionOrder@1002 : Record 5405;
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo,Quantity);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);  // CalcLines, CalcRoutings, CalcComponents as TRUE.
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseAssemblyOrder@127(VAR AssemblyHeader@1000 : Record 900;AssemblyItemNo@1002 : Code[20];LocationCode@1003 : Code[10];AssemblyItemQty@1001 : Decimal);
+    BEGIN
+      LibraryAssembly.CreateAssemblyHeader(
+        AssemblyHeader,CalculateDateUsingDefaultSafetyLeadTime,AssemblyItemNo,LocationCode,AssemblyItemQty,'');
+      LibraryAssembly.ReleaseAO(AssemblyHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrder@139(VAR SalesHeader@1000 : Record 36;ItemNo@1004 : Code[20];Quantity@1003 : Decimal;LocationCode@1002 : Code[10]);
+    VAR
+      SalesLine@1008 : Record 37;
+    BEGIN
+      CreateSalesOrder(SalesHeader,SalesLine,SalesHeader."Shipment Date",ItemNo,Quantity,LocationCode,FALSE,FALSE);  // Reserve and Item Tracking as False.
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateAssemblyOrder@69(VAR AssemblyHeader@1000 : Record 900;VAR AssemblyLine@1001 : Record 901;ItemNo@1002 : Code[20];ComponentItemNo@1003 : Code[20];Quantity@1004 : Decimal);
+    BEGIN
+      EnqueueValuesForConfirmHandler(StartingDateError,TRUE);
+      CreateAssemblyOrder(AssemblyHeader,ItemNo,Quantity,FALSE);
+      UpdateStartingDateOnAssemblyHeader(
+        AssemblyHeader,CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',AssemblyHeader."Due Date"));  // Calculated date required for test.
+      FindAssemblyLine(AssemblyLine,AssemblyLine."Document Type"::Order,ComponentItemNo);
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyItem@28(VAR Item@1000 : Record 27;AssemblyPolicy@1003 : Option;ItemTrackingCode@1001 : Code[10];LotNos@1002 : Code[10]);
+    BEGIN
+      LibraryAssembly.CreateItem(Item,Item."Costing Method",Item."Replenishment System"::Assembly,'','');
+      Item.VALIDATE("Assembly Policy",AssemblyPolicy);
+      Item.VALIDATE("Item Tracking Code",ItemTrackingCode);
+      Item.VALIDATE("Lot Nos.",LotNos);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyItemWithComponent@3(VAR Item@1000 : Record 27;AssemblyPolicy@1001 : Option;Quantity@1004 : Decimal;ItemTrackingCode@1005 : Code[10];LotNos@1006 : Code[10]) : Code[20];
+    VAR
+      BOMComponent@1002 : Record 90;
+      ComponentItem@1003 : Record 27;
+    BEGIN
+      LibraryAssembly.CreateItem(ComponentItem,ComponentItem."Costing Method",ComponentItem."Replenishment System",'','');
+      CreateAssemblyItem(Item,AssemblyPolicy,ItemTrackingCode,LotNos);
+      LibraryAssembly.CreateAssemblyListComponent(
+        BOMComponent.Type::Item,ComponentItem."No.",Item."No.",'',BOMComponent."Resource Usage Type",Quantity,TRUE);
+      EXIT(ComponentItem."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyItemWithComponentInStock@150(VAR AssemblyItem@1000 : Record 27;VAR ComponentItemNo@1005 : Code[20];QtyPer@1003 : Decimal;ComponentItemQtyInStock@1004 : Decimal);
+    VAR
+      Bin@1001 : Record 7354;
+      ComponentItem@1002 : Record 27;
+    BEGIN
+      ComponentItemNo :=
+        CreateAssemblyItemWithComponent(
+          AssemblyItem,AssemblyItem."Assembly Policy"::"Assemble-to-Stock",QtyPer,'','');
+
+      FindBinForPickZone(Bin,LocationWhite.Code);
+      ComponentItem.GET(ComponentItemNo);
+      UpdateInventoryUsingWhseJournal(Bin,ComponentItem,ComponentItemQtyInStock);
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyItemWithTrackedComponentInStock@151(VAR AssemblyItem@1003 : Record 27;VAR ComponentItemNo@1002 : Code[20];QtyPer@1001 : Decimal;ComponentItemQtyInStock@1000 : Decimal);
+    VAR
+      Bin@1005 : Record 7354;
+      ComponentItem@1004 : Record 27;
+    BEGIN
+      ComponentItemNo :=
+        CreateAssemblyItemWithTrackedComponentItem(AssemblyItem,AssemblyItem."Assembly Policy"::"Assemble-to-Stock",QtyPer);
+      FindBinForPickZone(Bin,LocationWhite.Code);
+      ComponentItem.GET(ComponentItemNo);
+      UpdateInventoryForTrackedItemUsingWhseJournal(Bin,ComponentItem,ComponentItemQtyInStock);
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyItemWithTrackedComponentItem@37(VAR KitItem@1000 : Record 27;AssemblyPolicy@1001 : Option;Quantity@1002 : Decimal) : Code[20];
+    VAR
+      ItemTrackingCode@1003 : Record 6502;
+      ComponentItem@1004 : Record 27;
+      BOMComponent@1005 : Record 90;
+    BEGIN
+      CreateItemTrackingCode(ItemTrackingCode);
+      CreateAssemblyItem(KitItem,AssemblyPolicy,'','');
+      CreateTrackedComponentItem(ComponentItem,ItemTrackingCode.Code,LibraryUtility.GetGlobalNoSeriesCode);
+      LibraryAssembly.CreateAssemblyListComponent(
+        BOMComponent.Type::Item,ComponentItem."No.",KitItem."No.",'',BOMComponent."Resource Usage Type",Quantity,TRUE);
+      EXIT(ComponentItem."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyItemWithTrackedComponentItemAndExpirDateReqd@114(VAR AssemblyItem@1001 : Record 27) ComponentItemNo : Code[20];
+    VAR
+      ComponentItem@1000 : Record 27;
+    BEGIN
+      ComponentItemNo :=
+        CreateAssemblyItemWithTrackedComponentItem(
+          AssemblyItem,AssemblyItem."Assembly Policy"::"Assemble-to-Order",LibraryRandom.RandDec(1,2));
+      ComponentItem.GET(ComponentItemNo);
+      UpdateItemTrackingCodeForExpirDate(ComponentItem."Item Tracking Code",TRUE);
+      EXIT(ComponentItemNo);
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyOrder@93(VAR AssemblyHeader@1000 : Record 900;ItemNo@1002 : Code[20];Quantity@1003 : Decimal;UseTracking@1004 : Boolean) LotNo : Code[20];
+    VAR
+      DequeueVariable@1005 : Variant;
+    BEGIN
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,CalculateDateUsingDefaultSafetyLeadTime,ItemNo,'',Quantity,'');  // Location Code, Variant Code as Blank.
+      IF UseTracking THEN BEGIN
+        LibraryVariableStorage.Enqueue(ItemTrackingMode::AssignLotNo);  // Enqueue for ItemTrackingLinesPageHandler.
+        AssemblyHeader.OpenItemTrackingLines;
+        LibraryVariableStorage.Dequeue(DequeueVariable);
+        LotNo := DequeueVariable;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyOrderAndUpdateLocationOnAssemblyLine@22(VAR AssemblyLine@1001 : Record 901;ItemNo@1002 : Code[20];ComponentItemNo@1006 : Code[20];Quantity@1004 : Decimal;LocationCode@1005 : Code[10]);
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      EnqueueValuesForConfirmHandler(StartingDateError,TRUE);
+      CreateAssemblyOrder(AssemblyHeader,ItemNo,Quantity,FALSE);
+      UpdateStartingDateOnAssemblyHeader(
+        AssemblyHeader,CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',AssemblyHeader."Due Date"));
+      FindAssemblyLine(AssemblyLine,AssemblyLine."Document Type"::Order,ComponentItemNo);
+      UpdateLocationCodeOnAssemblyLine(AssemblyLine,LocationCode);
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyOrderWithLotItemTracking@131(VAR AssemblyHeader@1003 : Record 900;UseTracking@1004 : Boolean) LotNo : Code[20];
+    VAR
+      ItemTrackingCode@1001 : Record 6502;
+      Item@1002 : Record 27;
+      Quantity@1000 : Decimal;
+    BEGIN
+      Quantity := LibraryRandom.RandDec(10,2);
+      CreateItemTrackingCode(ItemTrackingCode);
+      CreateAssemblyItemWithComponent(
+        Item,Item."Assembly Policy"::"Assemble-to-Stock",Quantity,ItemTrackingCode.Code,LibraryUtility.GetGlobalNoSeriesCode);
+      LotNo := CreateAssemblyOrder(AssemblyHeader,Item."No.",Quantity * 2,UseTracking);  // Large Quantity Required for Assembly Order.
+    END;
+
+    LOCAL PROCEDURE CreateAndPostAssemblyOrderWithItemTracking@118(AssemblyItemNo@1003 : Code[20];ComponentItemNo@1004 : Code[20];Quantity@1001 : Decimal) : Code[20];
+    VAR
+      AssemblyHeader@1002 : Record 900;
+      AssemblyLine@1000 : Record 901;
+    BEGIN
+      CreateAndUpdateAssemblyOrder(
+        AssemblyHeader,AssemblyLine,AssemblyItemNo,ComponentItemNo,Quantity);
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries); // Enqueue for ItemTrackingLinesPageHandler.
+      AssemblyLine.OpenItemTrackingLines;
+      PostAssemblyOrder(AssemblyHeader,AssemblyLine,AssemblyLine."Quantity per" * Quantity);
+      EXIT(AssemblyHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateBlanketSalesOrder@226(VAR SalesHeader@1000 : Record 36;ItemNo@1004 : Code[20];ShipmentDate@1001 : Date;Quantity@1003 : Decimal);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Blanket Order",'');
+      SalesHeader.VALIDATE("Order Date",ShipmentDate);
+      SalesHeader.VALIDATE("Posting Date",ShipmentDate);
+      SalesHeader.VALIDATE("Shipment Date",ShipmentDate);
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateInitialSetupForAssemblyOrder@104(VAR AssemblyHeader@1004 : Record 900;VAR SalesHeader@1007 : Record 36;VAR SalesLine@1008 : Record 37);
+    VAR
+      ItemTrackingCode@1009 : Record 6502;
+      Item@1002 : Record 27;
+      Quantity@1001 : Decimal;
+    BEGIN
+      Quantity := LibraryRandom.RandDec(10,2);
+      CreateItemTrackingCode(ItemTrackingCode);
+      CreateAssemblyItemWithComponent(
+        Item,Item."Assembly Policy"::"Assemble-to-Stock",Quantity,ItemTrackingCode.Code,LibraryUtility.GetGlobalNoSeriesCode);
+      CreateAssemblyOrder(AssemblyHeader,Item."No.",Quantity * 2,TRUE);  // Large Quantity Required for Assembly Order. Use Tracking as TRUE.
+      CreateAndPostItemJournalLine(Item."No.",AssemblyHeader.Quantity,TRUE);  // Use Tracking as TRUE.
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries);  // Enqueue for ItemTrackingLinesPageHandler.
+      CreateSalesOrder(SalesHeader,SalesLine,CalculateDateUsingDefaultSafetyLeadTime,Item."No.",AssemblyHeader.Quantity,'',FALSE,TRUE);  // Use Tracking as TRUE.
+    END;
+
+    LOCAL PROCEDURE CreateInitialSetupForSalesDocument@68(VAR Item@1002 : Record 27;VAR PurchaseHeader@1001 : Record 38) ComponentItemNo : Code[20];
+    VAR
+      Quantity@1000 : Decimal;
+    BEGIN
+      Quantity := LibraryRandom.RandDec(10,2);
+      ComponentItemNo := CreateAssemblyItemWithComponent(Item,Item."Assembly Policy"::"Assemble-to-Order",Quantity,'','');
+      UpdateReserveOnItem(Item);
+      CreatePurchaseOrder(PurchaseHeader,ComponentItemNo,Quantity,Item."Base Unit of Measure",FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingCode@48(VAR ItemTrackingCode@1001 : Record 6502);
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,FALSE,TRUE);
+      ItemTrackingCode.VALIDATE("Lot Warehouse Tracking",TRUE);
+      ItemTrackingCode.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemUnitOfMeasure@25(VAR ItemUnitOfMeasure@1000 : Record 5404;ItemNo@1001 : Code[20]);
+    BEGIN
+      LibraryInventory.CreateItemUnitOfMeasureCode(ItemUnitOfMeasure,ItemNo,LibraryRandom.RandInt(10));
+    END;
+
+    LOCAL PROCEDURE CreatePickFromSalesOrder@63(VAR SalesHeader@1001 : Record 36;ItemNo@1002 : Code[20];Quantity@1003 : Decimal;LocationCode@1005 : Code[10]);
+    VAR
+      WarehouseShipmentHeader@1004 : Record 7320;
+      WarehouseShipmentLine@1006 : Record 7321;
+    BEGIN
+      CreateAndReleaseSalesOrder(SalesHeader,ItemNo,Quantity,LocationCode);
+      CreateWarehouseShipmentFromSalesHeader(SalesHeader);
+      FindWarehouseShipmentLine(WarehouseShipmentLine,SalesHeader."No.");
+      WarehouseShipmentHeader.GET(WarehouseShipmentLine."No.");
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@75(VAR PurchaseLine@1000 : Record 39;PurchaseHeader@1004 : Record 38;ItemNo@1001 : Code[20];Quantity@1002 : Decimal;UnitOfMeasureCode@1003 : Code[10]);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Unit of Measure Code",UnitOfMeasureCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@70(VAR PurchaseHeader@1006 : Record 38;ItemNo@1004 : Code[20];Quantity@1000 : Decimal;UnitOfMeasureCode@1002 : Code[10];UseTracking@1003 : Boolean);
+    VAR
+      PurchaseLine@1001 : Record 39;
+      DequeueVariable@1007 : Variant;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      PurchaseHeader.VALIDATE("Order Date",CalculateDateUsingDefaultSafetyLeadTime);
+      PurchaseHeader.VALIDATE("Posting Date",PurchaseHeader."Order Date");
+      PurchaseHeader.MODIFY(TRUE);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo,Quantity,UnitOfMeasureCode);
+      IF UseTracking THEN BEGIN
+        LibraryVariableStorage.Enqueue(ItemTrackingMode::AssignLotNo);  // Enqueue for ItemTrackingLinesPageHandler.
+        PurchaseLine.OpenItemTrackingLines;
+        LibraryVariableStorage.Dequeue(DequeueVariable);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateSalesHeader@16(VAR SalesHeader@1000 : Record 36;ShipmentDate@1001 : Date);
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      SalesHeader.VALIDATE("Order Date",ShipmentDate);
+      SalesHeader.VALIDATE("Shipment Date",ShipmentDate);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@47(VAR SalesHeader@1001 : Record 36;VAR SalesLine@1000 : Record 37;ShipmentDate@1005 : Date;ItemNo@1004 : Code[20];Quantity@1003 : Decimal;LocationCode@1008 : Code[10];Reserve@1006 : Boolean;UseTracking@1007 : Boolean);
+    BEGIN
+      CreateSalesHeader(SalesHeader,ShipmentDate);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+      IF Reserve THEN
+        SalesLine.ShowReservation;
+      IF UseTracking THEN
+        SalesLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithReservationAndLotTracking@24(VAR SalesHeader@1002 : Record 36;VAR AssemblyHeader@1004 : Record 900);
+    VAR
+      SalesLine@1003 : Record 37;
+      ReservationMode@1000 : ' ,ReserveFromCurrentLine,Verify,VerifyBlank,AvailableToReserve';
+    BEGIN
+      LibraryVariableStorage.Enqueue(FALSE);  // Enqueue for ReservationPageHandler.
+      LibraryVariableStorage.Enqueue(ReservationMode::ReserveFromCurrentLine);  // Enqueue for ReservationPageHandler.
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries);  // Enqueue for ItemTrackingLinesPageHandler.
+      CreateSalesOrder(SalesHeader,SalesLine,AssemblyHeader."Due Date",AssemblyHeader."Item No.",AssemblyHeader.Quantity,'',TRUE,TRUE);  // Reserve as TRUE. Use Tracking as TRUE.
+    END;
+
+    LOCAL PROCEDURE CreateSalesQuote@222(VAR SalesHeader@1000 : Record 36;ItemNo@1004 : Code[20];ShipmentDate@1002 : Date;Quantity@1003 : Decimal);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Quote,'');
+      SalesHeader.VALIDATE("Order Date",ShipmentDate);
+      SalesHeader.VALIDATE("Posting Date",ShipmentDate);
+      SalesHeader.VALIDATE("Shipment Date",ShipmentDate);
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateTrackedComponentItem@49(VAR ComponentItem@1000 : Record 27;ItemTrackingCode@1001 : Code[10];LotNos@1002 : Code[10]);
+    BEGIN
+      LibraryAssembly.CreateItem(ComponentItem,ComponentItem."Costing Method",ComponentItem."Replenishment System",'','');
+      ComponentItem.VALIDATE("Item Tracking Code",ItemTrackingCode);
+      ComponentItem.VALIDATE("Lot Nos.",LotNos);
+      ComponentItem.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateWhseJournalLine@132(VAR WarehouseJournalLine@1003 : Record 7311;Bin@1000 : Record 7354;ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    BEGIN
+      WarehouseJournalSetup(Bin."Location Code");
+      LibraryWarehouse.CreateWhseJournalLine(
+        WarehouseJournalLine,WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,Bin."Location Code",
+        Bin."Zone Code",Bin.Code,WarehouseJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseShipmentFromSalesHeader@44(SalesHeader@1000 : Record 36);
+    BEGIN
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderForAssemblyItemWithItemTracking@87(SerialTracking@1006 : Boolean;LotTracking@1000 : Boolean);
+    VAR
+      ItemTrackingCode@1004 : Record 6502;
+      Item@1003 : Record 27;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1001 : Record 37;
+      ReservationEntry@1005 : Record 337;
+    BEGIN
+      // Setup: Create Assemly Item with Item Tracking Code, set Item."Order Tracking Policy" to "Tracking Only".
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,SerialTracking,LotTracking);
+      CreateAssemblyItemWithComponent(
+        Item,Item."Assembly Policy"::"Assemble-to-Order",LibraryRandom.RandDec(10,2),
+        ItemTrackingCode.Code,LibraryUtility.GetGlobalNoSeriesCode);
+      UpdateOrderTrackingPolicyOnItem(Item,Item."Order Tracking Policy"::"Tracking Only");
+
+      // Exercise: Create Sales Order, the Assembly Order will be generated.
+      // Verify: No error pops up.
+      CreateSalesOrder(
+        SalesHeader,SalesLine,CalculateDateUsingDefaultSafetyLeadTime,Item."No.",LibraryRandom.RandDec(10,2),'',FALSE,FALSE);
+
+      // Verify: Reservation Entries are created.
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,Item."No.",DATABASE::"Sales Line",'',-SalesLine.Quantity);
+      VerifyReservationEntry(
+        ReservationEntry."Reservation Status"::Reservation,Item."No.",DATABASE::"Assembly Header",'',SalesLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrderWithQtyToAssemble@97(VAR SalesHeader@1000 : Record 36;ItemNo@1002 : Code[20];LocationCode@1003 : Code[10]);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      CreateSalesOrder(
+        SalesHeader,SalesLine,WORKDATE,ItemNo,LibraryRandom.RandInt(5),LocationCode,FALSE,FALSE); // Use Reserve and Tracking as FALSE.
+      UpdateQtyToAssembleOnSalesLine(SalesLine,SalesLine.Quantity);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithQtyToAssembleAndDeliveryDate@115(SalesHeader@1000 : Record 36;ItemNo@1002 : Code[20];Qty@1007 : Decimal;RequestedDeliveryDate@1005 : Date;PromisedDeliveryDate@1006 : Date);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,ItemNo,Qty,'',FALSE,FALSE); // Use Reserve and Tracking as FALSE.
+      WITH SalesLine DO BEGIN
+        VALIDATE("Qty. to Assemble to Order",Qty);
+        VALIDATE("Requested Delivery Date",RequestedDeliveryDate);
+        VALIDATE("Promised Delivery Date",PromisedDeliveryDate);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE EnqueueValuesForConfirmHandler@81(ConfirmMessage@1000 : Text;ConfirmReply@1001 : Boolean);
+    BEGIN
+      LibraryVariableStorage.Enqueue(ConfirmMessage);  // Enqueue for ConfirmHandler.
+      LibraryVariableStorage.Enqueue(ConfirmReply);  // Enqueue for ConfirmHandler.
+    END;
+
+    LOCAL PROCEDURE EnqueueValuesForHandlers@23(EnqueueConfirm@1000 : Boolean;EnqueueReservation@1001 : Boolean);
+    VAR
+      ReservationMode@1003 : ' ,ReserveFromCurrentLine,Verify,VerifyBlank,AvailableToReserve';
+    BEGIN
+      LibraryVariableStorage.Enqueue(LibraryInventory.GetReservConfirmText);  // Enqueue for ConfirmHandler.
+      LibraryVariableStorage.Enqueue(EnqueueConfirm);  // Enqueue for ConfirmHandler.
+      LibraryVariableStorage.Enqueue(EnqueueReservation);  // Enqueue for ReservationPageHandler.
+      LibraryVariableStorage.Enqueue(ReservationMode::ReserveFromCurrentLine);  // Enqueue for ReservationPageHandler.
+    END;
+
+    LOCAL PROCEDURE EnqueueValuesForReservationEntry@98(ReservationMode@1002 : ' ,ReserveFromCurrentLine,Verify,VerifyBlank,AvailableToReserve';Quantity@1000 : Decimal;Quantity2@1001 : Decimal);
+    BEGIN
+      LibraryVariableStorage.Enqueue(FALSE);  // Enqueue for ReservationPageHandler.
+      LibraryVariableStorage.Enqueue(ReservationMode);  // Enqueue for ReservationPageHandler.
+      LibraryVariableStorage.Enqueue(Quantity);  // Enqueue for ReservationPageHandler.
+      LibraryVariableStorage.Enqueue(Quantity2);  // Enqueue for ReservationPageHandler.
+    END;
+
+    LOCAL PROCEDURE EnqueueValuesForItemTrackingLines@154(LotNo@1000 : Code[20];Qty@1001 : Decimal);
+    BEGIN
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SetLotNo);
+      LibraryVariableStorage.Enqueue(LotNo);
+      LibraryVariableStorage.Enqueue(Qty);
+    END;
+
+    LOCAL PROCEDURE FindAssemblyHeader@82(VAR AssemblyHeader@1000 : Record 900;ItemNo@1001 : Code[20]);
+    BEGIN
+      AssemblyHeader.SETRANGE("Item No.",ItemNo);
+      AssemblyHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindAssemblyLine@59(VAR AssemblyLine@1000 : Record 901;DocumentType@1001 : Option;ItemNo@1002 : Code[20]);
+    BEGIN
+      AssemblyLine.SETRANGE("Document Type",DocumentType);
+      AssemblyLine.SETRANGE("No.",ItemNo);
+      AssemblyLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindAssemblyLines@107(VAR AssemblyLine@1000 : Record 901;ItemNo@1002 : Code[20]);
+    VAR
+      AssemblyHeader@1001 : Record 900;
+    BEGIN
+      FindAssemblyHeader(AssemblyHeader,ItemNo);
+      AssemblyLine.SETRANGE("Document No.",AssemblyHeader."No.");
+      AssemblyLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindBinForPickZone@43(VAR Bin@1000 : Record 7354;LocationCode@1001 : Code[10]);
+    VAR
+      Zone@1003 : Record 7300;
+    BEGIN
+      FindZone(Zone,LocationCode,LibraryWarehouse.SelectBinType(FALSE,FALSE,TRUE,TRUE));  // Put Away and Pick as TRUE.
+      Bin.SETRANGE("Location Code",LocationCode);
+      Bin.SETRANGE("Zone Code",Zone.Code);
+      LibraryWarehouse.FindBin(Bin,LocationCode,Zone.Code,RANDOM(Bin.COUNT));  // Find Random Bin.
+    END;
+
+    LOCAL PROCEDURE FindWarehouseShipmentLine@141(VAR WarehouseShipmentLine@1002 : Record 7321;SourceNo@1000 : Code[20]);
+    BEGIN
+      WarehouseShipmentLine.SETRANGE("Source Document",WarehouseShipmentLine."Source Document"::"Sales Order");
+      WarehouseShipmentLine.SETRANGE("Source No.",SourceNo);
+      WarehouseShipmentLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindZone@39(VAR Zone@1000 : Record 7300;LocationCode@1001 : Code[10];BinTypeCode@1002 : Code[10]);
+    BEGIN
+      Zone.SETRANGE("Location Code",LocationCode);
+      Zone.SETRANGE("Bin Type Code",BinTypeCode);
+      Zone.SETRANGE("Cross-Dock Bin Zone",FALSE);
+      Zone.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWhseWorksheetLines@88(VAR WhseWorksheetLine@1001 : Record 7326;WhseDocumentType@1003 : Option;WhseDocumentNo@1002 : Code[20]);
+    BEGIN
+      WhseWorksheetLine.SETRANGE("Whse. Document Type",WhseDocumentType);
+      WhseWorksheetLine.SETRANGE("Whse. Document No.",WhseDocumentNo);
+      WhseWorksheetLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE InvokeGetWarehouseDocumentOnPickWorksheet@84();
+    VAR
+      PickWorksheetTestPage@1000 : TestPage 7345;
+    BEGIN
+      PickWorksheetTestPage.TRAP;
+      PickWorksheetTestPage.OPENEDIT;
+      PickWorksheetTestPage."Get Warehouse Documents".INVOKE;
+      PickWorksheetTestPage.CLOSE;
+    END;
+
+    LOCAL PROCEDURE OpenItemTrackingFromSalesLine@78(VAR SalesLine@1001 : Record 37);
+    BEGIN
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::SelectEntries);  // Enqueue for ItemTrackingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(AvailabilityWarningsConfirmMessage);  // Enqueue for ConfirmHandler.
+      LibraryVariableStorage.Enqueue(TRUE);  // Enqueue for ConfirmHandler.
+      SalesLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE OpenAndEditSalesOrder@229(DocumentNo@1001 : Code[20];ItemNo@1003 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      SalesLine@1004 : Record 37;
+      SalesOrder@1000 : TestPage 42;
+    BEGIN
+      SalesOrder.OPENEDIT;
+      SalesOrder.FILTER.SETFILTER("No.",DocumentNo);
+      SalesOrder.SalesLines.Type.SETVALUE(SalesLine.Type::Item);
+      SalesOrder.SalesLines."No.".SETVALUE(ItemNo);
+      SalesOrder.SalesLines.Quantity.SETVALUE(Quantity);
+      SalesOrder.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE PickAndPostPartialAssemblyOrder@121(VAR AssemblyHeader@1000 : Record 900;VAR PostedAssemblyHeader@1002 : Record 910;QtyToAssemble@1001 : Decimal;QtyPicked@1004 : Decimal);
+    BEGIN
+      AssemblyHeader.VALIDATE("Quantity to Assemble",QtyToAssemble);
+      AssemblyHeader.MODIFY(TRUE);
+
+      LibraryAssembly.CreateWhsePick(AssemblyHeader,USERID,0,FALSE,TRUE,FALSE);
+      UpdateQtyToHandleAndRegisterPick(AssemblyHeader."No.",QtyPicked);
+
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+      AssemblyHeader.FIND;
+      LibraryAssembly.FindPostedAssemblyHeaders(PostedAssemblyHeader,AssemblyHeader);
+      PostedAssemblyHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE PickAndPostRestOfAssemblyOrder@123(VAR AssemblyHeader@1000 : Record 900;QtyToAssemble@1001 : Decimal;QtyPicked@1004 : Decimal);
+    BEGIN
+      AssemblyHeader.VALIDATE("Quantity to Assemble",QtyToAssemble);
+      AssemblyHeader.MODIFY(TRUE);
+
+      UpdateQtyToHandleAndRegisterPick(AssemblyHeader."No.",QtyPicked);
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+    END;
+
+    LOCAL PROCEDURE PostAssemblyOrder@90(AssemblyHeader@1000 : Record 900;AssemblyLine@1001 : Record 901;Quantity@1002 : Decimal);
+    BEGIN
+      AssemblyLine.VALIDATE("Quantity to Consume",Quantity);
+      AssemblyLine.MODIFY(TRUE);
+      AssemblyHeader.FIND;
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');  // Expected Error as Blank.
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseWhseShipmentFromSalesOrder@95(VAR SalesHeader@1000 : Record 36;VAR WarehouseShipmentHeader@1001 : Record 7320);
+    VAR
+      WarehouseShipmentLine@1002 : Record 7321;
+    BEGIN
+      CreateWarehouseShipmentFromSalesHeader(SalesHeader);
+      FindWarehouseShipmentLine(WarehouseShipmentLine,SalesHeader."No.");
+      WarehouseShipmentHeader.GET(WarehouseShipmentLine."No.");
+      LibraryWarehouse.ReleaseWarehouseShipment(WarehouseShipmentHeader)
+    END;
+
+    LOCAL PROCEDURE ShowReservationOnAssemblyLine@66(DocumentType@1003 : Option;ItemNo@1002 : Code[20]);
+    VAR
+      AssemblyLine@1001 : Record 901;
+      ReservationMode@1000 : ' ,ReserveFromCurrentLine,Verify,VerifyBlank,AvailableToReserve';
+    BEGIN
+      LibraryVariableStorage.Enqueue(FALSE);  // Enqueue for ReservationPageHandler.
+      LibraryVariableStorage.Enqueue(ReservationMode::VerifyBlank);  // Enqueue for ReservationPageHandler.
+      FindAssemblyLine(AssemblyLine,DocumentType,ItemNo);
+      AssemblyLine.ShowReservation;
+    END;
+
+    LOCAL PROCEDURE UndoPostedAssemblyOrder@108(OrderNo@1001 : Code[20]);
+    VAR
+      PostedAssemblyHeader@1000 : Record 910;
+    BEGIN
+      PostedAssemblyHeader.SETRANGE("Order No.",OrderNo);
+      PostedAssemblyHeader.FINDFIRST;
+
+      LibraryVariableStorage.Enqueue(UndoPostedAssemblyOrderQst); // Enqueue for ConfirmHandler.
+      LibraryVariableStorage.Enqueue(TRUE); // First time the answer is "Yes" for conform dialog.
+      LibraryVariableStorage.Enqueue(RecreateAssemblyOrderQst); // Enqueue for ConfirmHandler.
+      LibraryVariableStorage.Enqueue(TRUE); // Second time the answer is "Yes" for conform dialog.
+      CODEUNIT.RUN(CODEUNIT::"Pstd. Assembly - Undo (Yes/No)",PostedAssemblyHeader);
+    END;
+
+    LOCAL PROCEDURE UpdateInventoryUsingWhseJournal@113(Bin@1000 : Record 7354;Item@1002 : Record 27;Quantity@1003 : Decimal);
+    VAR
+      WarehouseJournalLine@1001 : Record 7311;
+    BEGIN
+      CreateWhseJournalLine(WarehouseJournalLine,Bin,Item."No.",Quantity);
+      LibraryWarehouse.RegisterWhseJournalLine(
+        WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,Bin."Location Code",TRUE);  // UseBatchJob as TRUE.
+      CreateAndPostItemJournalLineFromWhseAdjustment(Item);
+    END;
+
+    LOCAL PROCEDURE UpdateInventoryForTrackedItemUsingWhseJournal@142(Bin@1002 : Record 7354;Item@1001 : Record 27;Quantity@1000 : Decimal);
+    VAR
+      WarehouseJournalLine@1003 : Record 7311;
+    BEGIN
+      CreateWhseJournalLine(WarehouseJournalLine,Bin,Item."No.",Quantity);
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::AssignLotNo);
+      WarehouseJournalLine.OpenItemTrackingLines;
+      LibraryWarehouse.RegisterWhseJournalLine(
+        WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,Bin."Location Code",TRUE);
+      CreateAndPostItemJournalLineFromWhseAdjustment(Item);
+    END;
+
+    LOCAL PROCEDURE UpdateItemTrackingCodeForExpirDate@102(TrackingCode@1000 : Code[10];ManExpirDateEntryReqd@1001 : Boolean);
+    VAR
+      ItemTrackingCode@1002 : Record 6502;
+    BEGIN
+      WITH ItemTrackingCode DO BEGIN
+        SETRANGE(Code,TrackingCode);
+        FINDFIRST;
+        VALIDATE("Man. Expir. Date Entry Reqd.",ManExpirDateEntryReqd);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateLocationCodeOnAssemblyLine@52(AssemblyLine@1000 : Record 901;LocationCode@1001 : Code[10]);
+    BEGIN
+      AssemblyLine.VALIDATE("Location Code",LocationCode);
+      AssemblyLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateNoSeriesOnItemJournalBatch@110(VAR ItemJournalBatch@1000 : Record 233;NoSeries@1001 : Code[10]);
+    BEGIN
+      ItemJournalBatch.FIND;
+      ItemJournalBatch.VALIDATE("No. Series",NoSeries);
+      ItemJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateReserveOnItem@61(VAR Item@1000 : Record 27);
+    BEGIN
+      Item.VALIDATE(Reserve,Item.Reserve::Always);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateQtyToHandleAndRegisterPick@130(AssemblyOrderNo@1000 : Code[20];QtyPicked@1004 : Decimal);
+    VAR
+      WarehouseActivityLine@1003 : Record 5767;
+    BEGIN
+      WITH WarehouseActivityLine DO BEGIN
+        SETRANGE("Whse. Document No.",AssemblyOrderNo);
+        SETRANGE("Whse. Document Type","Whse. Document Type"::Assembly);
+        IF FINDSET(TRUE) THEN
+          REPEAT
+            VALIDATE("Qty. to Handle",QtyPicked);
+            MODIFY(TRUE);
+          UNTIL NEXT = 0;
+      END;
+      CODEUNIT.RUN(CODEUNIT::"Whse.-Activity-Register",WarehouseActivityLine);
+    END;
+
+    LOCAL PROCEDURE UpdateQuantityBaseAndAssignTrackingOnAssemblyOrder@76(ItemNo@1001 : Code[20];Quantity@1000 : Decimal);
+    BEGIN
+      UpdateQuantityBaseOnReservationEntry(ItemNo,Quantity);
+      AssignTrackingOnAssemblyOrder(ItemNo);
+    END;
+
+    LOCAL PROCEDURE UpdateQuantityBaseOnReservationEntry@73(ItemNo@1000 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ReservationEntry@1001 : Record 337;
+      SignFactor@1002 : Integer;
+    BEGIN
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.FINDSET;
+      REPEAT
+        SignFactor := 1;
+        IF ReservationEntry."Quantity (Base)" < 0 THEN
+          SignFactor := -1;
+        ReservationEntry.VALIDATE("Quantity (Base)",SignFactor * Quantity);
+        ReservationEntry.MODIFY(TRUE);
+      UNTIL ReservationEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateQuantityToShipOnSalesLine@80(VAR SalesLine@1000 : Record 37;Quantity@1001 : Decimal);
+    BEGIN
+      SalesLine.VALIDATE("Qty. to Ship",Quantity);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateStartingDateOnAssemblyHeader@105(AssemblyHeader@1002 : Record 900;StartingDate@1000 : Date);
+    BEGIN
+      AssemblyHeader.VALIDATE("Starting Date",StartingDate);
+      AssemblyHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateStockOutWarningOnAssemblySetup@15(NewStockOutWarning@1002 : Boolean) OldStockOutWarning : Boolean;
+    VAR
+      AssemblySetup@1000 : Record 905;
+    BEGIN
+      AssemblySetup.GET;
+      OldStockOutWarning := AssemblySetup."Stockout Warning";
+      AssemblySetup.VALIDATE("Stockout Warning",NewStockOutWarning);
+      AssemblySetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateUnitOfMeasureOnPurchaseLine@41(DocumentNo@1000 : Code[20];UnitOfMeasureCode@1001 : Code[10]);
+    VAR
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",DocumentNo);
+      PurchaseLine.FINDFIRST;
+      PurchaseLine.VALIDATE("Unit of Measure",UnitOfMeasureCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateOrderTrackingPolicyOnItem@85(VAR Item@1000 : Record 27;OrderTrackingPolicy@1001 : Option);
+    BEGIN
+      IF OrderTrackingPolicy <> Item."Order Tracking Policy"::None THEN
+        LibraryVariableStorage.Enqueue(NotAffectExistingEntriesMsg);
+      Item.VALIDATE("Order Tracking Policy",OrderTrackingPolicy);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateQtyToAssembleOnSalesLine@169(VAR SalesLine@1000 : Record 37;QtyToAssemble@1001 : Decimal);
+    BEGIN
+      LibraryVariableStorage.Enqueue(STRSUBSTNO(BeforeWorkDateMsg,WORKDATE));
+      SalesLine.VALIDATE("Qty. to Assemble to Order",QtyToAssemble);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyQtyAfterUndoPartialPostedAssemblyOrder@135(ComponentItemNo@1001 : Code[20];RestOfQtyPicked@1002 : Decimal);
+    VAR
+      AssemblyLine@1000 : Record 901;
+    BEGIN
+      FindAssemblyLine(AssemblyLine,AssemblyLine."Document Type"::Order,ComponentItemNo);
+      AssemblyLine.TESTFIELD("Qty. Picked",RestOfQtyPicked);
+    END;
+
+    LOCAL PROCEDURE VerifyReservationEntry@2(ReservationStatus@1005 : Option;ItemNo@1001 : Code[20];SourceType@1002 : Integer;LotNo@1003 : Code[20];Quantity@1004 : Decimal);
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      ReservationEntry.SETRANGE("Reservation Status",ReservationStatus);
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.SETRANGE("Source Type",SourceType);
+      ReservationEntry.SETRANGE("Lot No.",LotNo);
+      ReservationEntry.FINDFIRST;
+      ReservationEntry.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyReservationEntries@35(VAR Reservation@1002 : TestPage 498;SummaryType@1003 : Text[50];Quantity@1004 : Variant);
+    BEGIN
+      Reservation.FILTER.SETFILTER("Summary Type",SummaryType);
+      Reservation."Total Quantity".ASSERTEQUALS(Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyReservationEntryExists@17(ItemNo@1001 : Code[20]);
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      Assert.IsTrue(ReservationEntry.ISEMPTY,STRSUBSTNO(ReservationEntryDelete,ReservationEntry.TABLECAPTION));
+    END;
+
+    LOCAL PROCEDURE VerifyReservationEntryForExpirationDate@111(ItemNo@1000 : Code[20];ExpirationDate@1001 : Date);
+    VAR
+      ReservationEntry@1002 : Record 337;
+    BEGIN
+      WITH ReservationEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        FINDFIRST;
+        Assert.AreEqual(ExpirationDate,"Expiration Date",STRSUBSTNO(ReservationEntryErr,FIELDCAPTION("Expiration Date")));
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseWorksheetLines@99(WhseDocumentNo@1000 : Code[20];AsmItemNo@1001 : Code[20]);
+    VAR
+      WhseWorksheetLine@1002 : Record 7326;
+      AssemblyLine@1003 : Record 901;
+    BEGIN
+      FindWhseWorksheetLines(WhseWorksheetLine,WhseWorksheetLine."Whse. Document Type"::Shipment,WhseDocumentNo);
+      FindAssemblyLines(AssemblyLine,AsmItemNo);
+      Assert.AreEqual(AssemblyLine.COUNT,WhseWorksheetLine.COUNT,PickWorksheetLinesErr);
+      REPEAT
+        Assert.AreEqual(WhseWorksheetLine."Item No.",AssemblyLine."No.",ItemInPickWorksheetLinesErr);
+        AssemblyLine.NEXT;
+      UNTIL WhseWorksheetLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyPostedSalesInvoice@120(DocumentNo@1001 : Code[20];Qty@1002 : Decimal);
+    VAR
+      SalesInvoiceLine@1003 : Record 113;
+    BEGIN
+      SalesInvoiceLine.SETRANGE("Document No.",DocumentNo);
+      SalesInvoiceLine.FINDFIRST;
+      Assert.AreEqual(Qty,SalesInvoiceLine.Quantity,QtyIsNotCorrectErr);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@12(ConfirmMessage@1000 : Text[1024];VAR Reply@1003 : Boolean);
+    VAR
+      DequeueVariable@1002 : Variant;
+      LocalMessage@1001 : Text[1024];
+    BEGIN
+      LibraryVariableStorage.Dequeue(DequeueVariable);
+      LocalMessage := DequeueVariable;
+      Assert.IsTrue(STRPOS(ConfirmMessage,LocalMessage) > 0,ConfirmMessage);
+      LibraryVariableStorage.Dequeue(DequeueVariable);
+      Reply := DequeueVariable;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingLinesPageHandler@125(VAR ItemTrackingLines@1000 : TestPage 6510);
+    VAR
+      DequeueVariable@1004 : Variant;
+      TrackingAction@1003 : Option;
+    BEGIN
+      LibraryVariableStorage.Dequeue(DequeueVariable);
+      TrackingAction := DequeueVariable;
+      CASE TrackingAction OF
+        ItemTrackingMode::AssignLotNo:
+          BEGIN
+            ItemTrackingLines."Assign Lot No.".INVOKE;
+            LibraryVariableStorage.Enqueue(ItemTrackingLines."Lot No.".VALUE);
+          END;
+        ItemTrackingMode::SelectEntries:
+          ItemTrackingLines."Select Entries".INVOKE;
+        ItemTrackingMode::SetLotNo:
+          BEGIN
+            ItemTrackingLines."Lot No.".SETVALUE(LibraryVariableStorage.DequeueText);
+            ItemTrackingLines."Quantity (Base)".SETVALUE(LibraryVariableStorage.DequeueDecimal);
+          END;
+      END;
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingListPageHandler@50(VAR ItemTrackingList@1000 : TestPage 6507);
+    BEGIN
+      ItemTrackingList.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingSummaryPageHandler@124(VAR ItemTrackingSummary@1000 : TestPage 6500);
+    BEGIN
+      ItemTrackingSummary.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE WhseItemTrackingLinePageHandler@147(VAR WhseItemTrackingLines@1000 : TestPage 6550);
+    BEGIN
+      WhseItemTrackingLines."Lot No.".SETVALUE(LibraryVariableStorage.DequeueText);
+      WhseItemTrackingLines.Quantity.SETVALUE(LibraryVariableStorage.DequeueDecimal);
+      WhseItemTrackingLines.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@36(Message@1000 : Text[1024]);
+    VAR
+      DequeueVariable@1002 : Variant;
+      LocalMessage@1001 : Text[1024];
+    BEGIN
+      LibraryVariableStorage.Dequeue(DequeueVariable);
+      LocalMessage := DequeueVariable;
+      Assert.IsTrue(STRPOS(Message,LocalMessage) > 0,Message);
+    END;
+
+    [MessageHandler]
+    PROCEDURE DummyMessageHandler@136(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationPageHandler@27(VAR Reservation@1000 : TestPage 498);
+    VAR
+      ItemLedgerEntry@1006 : Record 32;
+      DequeueVariable@1002 : Variant;
+      Quantity@1005 : Variant;
+      Quantity2@1004 : Variant;
+      ReservationMode@1001 : ' ,ReserveFromCurrentLine,Verify,VerifyBlank,AvailableToReserve';
+      FindFirst@1003 : Boolean;
+    BEGIN
+      LibraryVariableStorage.Dequeue(DequeueVariable);
+      FindFirst := DequeueVariable;
+      LibraryVariableStorage.Dequeue(DequeueVariable);
+      ReservationMode := DequeueVariable;
+      IF FindFirst THEN
+        Reservation.FIRST;
+      CASE ReservationMode OF
+        ReservationMode::ReserveFromCurrentLine:
+          Reservation."Reserve from Current Line".INVOKE;
+        ReservationMode::Verify:
+          BEGIN
+            LibraryVariableStorage.Dequeue(DequeueVariable);
+            Quantity := DequeueVariable;
+            LibraryVariableStorage.Dequeue(DequeueVariable);
+            Quantity2 := DequeueVariable;
+            VerifyReservationEntries(Reservation,ItemLedgerEntry.TABLECAPTION,Quantity);
+            VerifyReservationEntries(Reservation,ReleasedProdOrderLine,Quantity);
+            VerifyReservationEntries(Reservation,PurchaseLineOrder,Quantity2);
+          END;
+        ReservationMode::VerifyBlank:
+          Assert.IsFalse(Reservation.FIRST,ReservationEntryShouldBeBlank);
+        ReservationMode::AvailableToReserve:
+          BEGIN
+            LibraryVariableStorage.Dequeue(DequeueVariable);
+            Quantity := DequeueVariable;
+            LibraryVariableStorage.Dequeue(DequeueVariable);
+            Quantity2 := DequeueVariable;
+            VerifyReservationEntries(Reservation,ItemLedgerEntry.TABLECAPTION,Quantity);
+            Reservation.TotalAvailableQuantity.ASSERTEQUALS(Quantity2);
+          END;
+      END;
+      Reservation.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationModalPageHandler@133(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      Reservation.QtyAllocatedInWarehouse.ASSERTEQUALS(LibraryVariableStorage.DequeueDecimal);
+      Reservation.TotalAvailableQuantity.ASSERTEQUALS(LibraryVariableStorage.DequeueDecimal);
+      Reservation.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE PickSelectionPageHandler@103(VAR PickSelectionTestPage@1000 : TestPage 7343);
+    VAR
+      WhsePickRequest@1002 : Record 7325;
+      DocumentNo@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(DocumentNo);
+      PickSelectionTestPage.FILTER.SETFILTER("Document Type",FORMAT(WhsePickRequest."Document Type"::Shipment));
+      PickSelectionTestPage.FILTER.SETFILTER("Document No.",DocumentNo);
+      PickSelectionTestPage.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Assembly] [Reservation] [SCM]
+      1.  Test to verify Reservation Entry after Reserve Sales Order against Assembly Order without Lot Item Tracking.
+      2.  Test to verify Reservation Entry is empty after Post Assembly Order and Sales Order as Ship with Lot Item Tracking.
+      3.  Test to verify Reservation Entry after Reserve Sales Order against Assembly Order with Lot Item Tracking.
+      4.  Test to verify Reservation Entry is empty after Post Assembly Order without Lot and Sales Order as Ship with Lot Item Tracking.
+      5.  Test the error message after Reserve Sales Order against Assembly Order after applying Lot Item Tracking on Sale Order without Specific Reservation.
+      6.  Test to verify Reservation Entry after Reserve Sales Order against Assembly Order after applying Lot Item Tracking on Sale Order with Specific Reservation.
+      7   Test to verify Reservation Entry after Reserve Sales Order against Assembly Order without Non Specific Reservation.
+      8.  Test to verify Reservation Entry after Reserve Sales Order against Assembly Order with Non Specific Reservation.
+      9.  Test to verify Reservation Entry is empty after Post Assembly Order and Sales Order with Specific Reservation.
+      10. Test to verify Reservation Entry is empty after Post Assembly Order and Sales Order without Non Specific Reservation.
+      11. Test to verify Reservation Entry is empty after Post Assembly Order and Sales Order with Non Specific Reservation.
+      12. Test to verify Reservation Entry on Assembly Order after create Sales Order, Purchase Order and create and refresh Production Order.
+      13. Test to verify no change in Reservation Entry on Assembly Order after change Unit Of Measure on Purchase Order.
+      14. Test to verify there is no availability to reserve for Assembly Item.
+      15. Test to verify no reservation entry on Assembly Order after create Sales Order with always reserve Item.
+      16. Test to verify no reservation entry on Assembly Order after create Blanket Sales Order with always reserve Item.
+      17. Test to verify no reservation entry on Assembly Order after create Sales Quote with always reserve Item.
+      18. Test to verify Overlap of reservations and quantities on warehouse activity lines for a Warehouse location.
+      19. Test to verify Reservation Entry When Tracked Quantity is less than Reserve Quantity for Assembly Order.
+      20. Test to verify Reservation Entry When Tracked Quantity is less than Reserve Quantity for posted Assembly Order.
+      21. Test to verify Reservation Entry When Tracked Quantity is greater than Reserve Quantity for Assembly Order.
+      22. Test to verify Reservation Entry When Tracked Quantity is greater than Reserve Quantity for posted Assembly Order.
+      23. Test to verify Reservation Entry after applying tracking on Assembly Order than Reserve Quantity for
+       Assembly Order.
+      24. Test to verify Reservation Entry after applying tracking on Assembly Order than Reserve Quantity for posted Assembly Order.
+      25. Test to verify the error after applying tracking on Assembly Order than Reserve Quantity against Purchase Order.
+      26. Test to verify the error after creating Sales Order and Updating Quantity Base Greater than total Quantity on Reservation Entry with Lot.
+      27. Test the Sales Order Posted as Ship after Updating Quantity Base Greater than total Quantity on Reservation Entry with Lot.
+      28. Test to verify the error after creating Sales Order and Updating Quantity Base Less than total Quantity on Reservation Entry with Lot.
+      29. Test the Sales Order Posted as Ship after Updating Quantity Base Less than total Quantity on Reservation Entry with Lot.
+      30. Test the Sales Order Posted as Ship after Creating Purchase Order and Updating Quantity Base on Reservation Entry with Lot.
+      31. Test creating sales order for assembly item with Tracking Only policy and SN Specific Item Tracking Code can succeed. Verify Reservation Entry created.
+      32. Test creating sales order for assembly item with Tracking Only policy and Lot Specific Item Tracking Code can succeed. Verify Reservation Entry created.
+      33. Test Pick Worksheet Lines are correct by Get Warehouse Document in Pick Worksheet with Assembly.
+      34. Test Expiration Date should exist for Assembly Component after posting Undo Assembly.
+      35. Test "The following C/AL functions..." error does not pop up when setting the Quantity on a Sales Line, which has a related Assembly Order.
+
+      Covers Test Cases for WI - 316369
+      --------------------------------------------------------------
+      Test Function Name                                    TFS ID
+      --------------------------------------------------------------
+      ReserveSalesOrderAgainstAssemblyOrderWithoutLot       258701
+      PostAssemblyOrderAndSalesOrderWithLot                 258705
+      ReserveSalesOrderAgainstAssemblyOrderWithLot          258702
+      PostAssemblyOrderWithoutLotAndSalesOrderWithLot       258705
+      ReserveSOAgainstAOAfterApplyingTrackingOnSOError      258703
+      ReserveSalesOrderAgainstAOWithSpecificReservation     258703
+      ReserveSOAgainstAOWithoutNonSpecificReservation       258704
+      ReserveSOAgainstAOWithNonSpecificReservation          258704
+      PostAssemblyOrderAndSOWithSpecificReservation         258705
+      PostAOAndSOWithoutNonSpecificReservation              258705
+      PostAssemblyOrderAndSOWithNonSpecificReservation      258705
+
+      Covers Test Cases for WI - 316370
+      -----------------------------------------------------------------
+      Test Function Name                                        TFS ID
+      -----------------------------------------------------------------
+      ReserveFromAOAfterRefreshProductionOrder                  268684
+      ReserveFromAOAfterRefreshProdOrderWithDifferentUOM        268684
+      AvailabilityToReserveForAssemblyItem                      258693
+      AssemblyOrderWithAlwaysReserveItemForSalesOrder           258695
+      AOWithAlwaysReserveItemForBlanketSalesOrder               258695
+      AssemblyOrderWithAlwaysReserveItemForSalesQuote           258695
+      ReserveFromAOAfterCreatingPickFromSalesOrder              258692
+
+      Covers Test Cases for WI - 319154
+      -----------------------------------------------------------------
+      Test Function Name                                        TFS ID
+      -----------------------------------------------------------------
+      AssemblyOrdWithTrackedQtyLessThanReserveQty               258696
+      PostAssemblyOrdWithTrackedQtyLessThanReserveQty           258699
+      AssemblyOrdWithTrackedQtyGreaterThanReserveQty            258697
+      PostAssemblyOrdWithTrackedQtyGreaterThanReserveQty        258699
+      ReserveFromAOAfterApplyingTrackingOnAssemblyOrder         258698
+      PostAssemblyOrderAfterApplyingTrackingOnAO                258699
+      ReserveFromAOWithTrackedQtyOnPurchaseOrder                258700
+
+      Covers Test Cases for WI - 319175
+      --------------------------------------------------------------------
+      Test Function Name                                          TFS ID
+      --------------------------------------------------------------------
+      QuantityTrackedGreaterThanReservationQuantityError            258706
+      PostSOWithQuantityTrackedGreaterThanReservationQty     258706,258709
+      QuantityTrackedLessThanReservationQuantityError               258708
+      PostSOWithQuantityTrackedLessThanReservationQty        258708,258709
+      PostSalesOrderWithQuantityTrackedOnReservation         258707,258709
+
+      Covers Test Cases for HFR
+      --------------------------------------------------------------------
+      Test Function Name                                           TFS ID
+      --------------------------------------------------------------------
+      CreateSalesOrderForAssemblyItemWithSerialItemTracking        58798
+      CreateSalesOrderForAssemblyItemWithLotItemTracking           58798
+
+      Covers Test Cases for Merge Bug
+      --------------------------------------------------------------------
+      Test Function Name                                           TFS ID
+      --------------------------------------------------------------------
+      GetWarehouseDocumentOnPickWorksheetWithAssembly              94678
+
+      Covers Test Cases for HFR
+      --------------------------------------------------------------------
+      Test Function Name                                           TFS ID
+      --------------------------------------------------------------------
+      UndoPostedAssemblyOrderWithLotTrackingAndExpirationDate      97582
+
+      Covers Test Cases for HFR
+      --------------------------------------------------------------------
+      Test Function Name                                           TFS ID
+      --------------------------------------------------------------------
+      CreateAndPostSalesOrderWithQtyToAssembleAndDeliveryDate      101411
+    }
+    END.
+  }
+}
+

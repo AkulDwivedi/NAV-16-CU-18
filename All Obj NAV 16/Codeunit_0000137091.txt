@@ -1,0 +1,1825 @@
+OBJECT Codeunit 137091 SCM Kitting - D2
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AssemblySetup@1015 : Record 905;
+      AssemblyLine@1009 : Record 901;
+      Item@1001 : Record 27;
+      BOMComponent@1010 : Record 90;
+      LibraryERM@1008 : Codeunit 131300;
+      LibraryInventory@1005 : Codeunit 132201;
+      LibraryPurchase@1004 : Codeunit 130512;
+      LibrarySales@1016 : Codeunit 130509;
+      LibraryWarehouse@1003 : Codeunit 132204;
+      LibraryAssembly@1023 : Codeunit 132207;
+      LibraryUtility@1017 : Codeunit 131000;
+      Assert@1002 : Codeunit 130000;
+      LibraryRandom@1007 : Codeunit 130440;
+      ChangeType@1011 : ' ,Add,Replace,Delete,Edit,Delete all,Edit cards,Usage';
+      StdCostLevel@1006 : Integer;
+      isInitialized@1000 : Boolean;
+      ErrorItemIsNotBOM@1018 : TextConst 'ENU=Item %1 is not a BOM.';
+      ErrorDeleteItem@1019 : TextConst 'ENU=You cannot delete Item %1 because there is at least one Assembly Header that includes this item.';
+      UpdateOrderLines@1020 : Boolean;
+      ErrorLineType@1014 : TextConst 'ENU=Type must be equal to ''Item''';
+      CnfmRefreshLines@1012 : TextConst 'ENU=This assembly order may have customized lines. Are you sure that you want to reset the lines according to the assembly BOM?';
+      WorkDate2@1013 : Date;
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      MfgSetup@1000 : Record 99000765;
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      // Initialize setup.
+      IF isInitialized THEN
+        EXIT;
+
+      // Setup Demonstration data.
+      isInitialized := TRUE;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+
+      MfgSetup.GET;
+      WorkDate2 := CALCDATE(MfgSetup."Default Safety Lead Time",WORKDATE); // to avoid Due Date Before Work Date message.
+      StdCostLevel := 2;
+      LibraryAssembly.UpdateAssemblySetup(
+        AssemblySetup,'',AssemblySetup."Copy Component Dimensions from"::"Order Header",LibraryUtility.GetGlobalNoSeriesCode);
+      COMMIT;
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE RefillDeleteItem@70();
+    VAR
+      Item@1002 : Record 27;
+      AssemblyHeader@1006 : Record 900;
+    BEGIN
+      // Setup.
+      Initialize;
+      StdCostLevel := 1;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',FALSE);
+      Item.GET(AssemblyHeader."Item No.");
+
+      // Exercise.
+      AssemblyHeader.VALIDATE("Item No.",Item."No.");
+      AssemblyHeader.MODIFY(TRUE);
+      COMMIT; // added as ASSERTERROR rolls back all changes made as yet- and therefore asm header cannot be verified.
+      ASSERTERROR Item.DELETE(TRUE);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",FALSE);
+      Assert.AreEqual(STRSUBSTNO(ErrorDeleteItem,Item."No."),GETLASTERRORTEXT,'Unexpected error message when deleting item.');
+      CLEARLASTERROR;
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE NegQtyHeaderLine@118();
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      AssemblyLine@1004 : Record 901;
+    BEGIN
+      // Setup.
+      Initialize;
+      StdCostLevel := 1;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',FALSE);
+
+      // Exercise.
+      AssemblyLine.SETCURRENTKEY("Document Type","Document No.",Type);
+      AssemblyLine.SETRANGE("Document Type",AssemblyHeader."Document Type");
+      AssemblyLine.SETRANGE("Document No.",AssemblyHeader."No.");
+      IF AssemblyLine.FINDSET THEN
+        REPEAT
+          AssemblyLine.VALIDATE(Quantity,-AssemblyLine.Quantity);
+          AssemblyHeader.MODIFY(TRUE);
+        UNTIL AssemblyLine.NEXT = 0;
+      COMMIT; // added as ASSERTERROR rolls back all changes made as yet- and therefore asm header cannot be verified.
+      ASSERTERROR AssemblyHeader.VALIDATE(Quantity,-AssemblyHeader.Quantity);
+      CLEARLASTERROR;
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailPageHandler,AvailabilityWindowHandler,ItemSubstitutionPageHandler)]
+    PROCEDURE UseSubstitute@113();
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      AssemblyLine@1004 : Record 901;
+      ItemSubstitution@1000 : Record 5715;
+      BOMComponent@1003 : Record 90;
+    BEGIN
+      // Setup.
+      Initialize;
+      StdCostLevel := 1;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',FALSE);
+      BOMComponent.SETRANGE("Parent Item No.",AssemblyHeader."Item No.");
+      BOMComponent.SETRANGE(Type,BOMComponent.Type::Item);
+      BOMComponent.FINDFIRST;
+      LibraryAssembly.CreateItemSubstitution(ItemSubstitution,BOMComponent."No.");
+
+      // Exercise.
+      AssemblyLine.SETCURRENTKEY("Document Type","Document No.",Type);
+      AssemblyLine.SETRANGE("Document Type",AssemblyHeader."Document Type");
+      AssemblyLine.SETRANGE("Document No.",AssemblyHeader."No.");
+      AssemblyLine.SETRANGE(Type,AssemblyLine.Type::Item);
+      AssemblyLine.SETRANGE("No.",BOMComponent."No.");
+
+      IF AssemblyLine.FINDFIRST THEN
+        AssemblyLine.ShowItemSub;
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",TRUE);
+      Assert.AreEqual(AssemblyLine."No.",ItemSubstitution."Substitute No.",'Wrong substitution selected.');
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemSubstitutionPageHandler@12(VAR ItemSubstitutionEntries@1000 : Page 5718;VAR Response@1001 : Action);
+    BEGIN
+      Response := ACTION::LookupOK;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdateLocation@40(UpdateLines@1001 : Boolean);
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      Location@1000 : Record 14;
+      Location1@1003 : Record 14;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryAssembly.UpdateAssemblySetup(
+        AssemblySetup,Location.Code,AssemblySetup."Copy Component Dimensions from"::"Order Header",
+        LibraryUtility.GetGlobalNoSeriesCode);
+      StdCostLevel := 1;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',FALSE);
+
+      // Exercise.
+      UpdateOrderLines := UpdateLines;
+      VerifyLineLocation(AssemblyHeader."No.",Location.Code);
+      LibraryWarehouse.CreateLocation(Location1);
+      AssemblyHeader.VALIDATE("Location Code",Location1.Code);
+      AssemblyHeader.MODIFY(TRUE);
+      IF UpdateOrderLines THEN
+        Location := Location1;
+
+      // Validate.
+      VerifyLineLocation(AssemblyHeader."No.",Location.Code);
+
+      // Teardown.
+      LibraryAssembly.UpdateAssemblySetup(
+        AssemblySetup,'',AssemblySetup."Copy Component Dimensions from"::"Order Header",LibraryUtility.GetGlobalNoSeriesCode);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AvailabilityWindowHandler)]
+    PROCEDURE LineUpdate@122();
+    BEGIN
+      UpdateLocation(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AvailabilityWindowHandler)]
+    PROCEDURE NoLineUpdate@124();
+    BEGIN
+      UpdateLocation(FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AssemblyListRetrieval@25(ReplSystem@1003 : Option;NoOfItems@1006 : Integer;NoOfResources@1007 : Integer;NoOfTexts@1010 : Integer;NewComps@1001 : Integer);
+    VAR
+      Item@1002 : Record 27;
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.CreateItem(Item,Item."Costing Method"::Standard,ReplSystem,'','');
+      LibraryAssembly.CreateAssemblyList(Item."Costing Method"::Standard,Item."No.",TRUE,NoOfItems,NoOfResources,NoOfTexts,1,'','');
+
+      // Exercise.
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,Item."No.",'',LibraryRandom.RandDec(10,2),'');
+      LibraryAssembly.CreateAssemblyLines(Item."Costing Method"::Standard,AssemblyHeader."No.",NewComps,NewComps);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",(NewComps > 0));
+      VerifyParentFlowFields(AssemblyHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE TwoItemOneRes@28();
+    BEGIN
+      AssemblyListRetrieval(Item."Replenishment System"::Assembly,2,1,1,0);
+    END;
+
+    [Test]
+    PROCEDURE TextOnly@21();
+    BEGIN
+      AssemblyListRetrieval(Item."Replenishment System"::Assembly,0,0,1,0);
+    END;
+
+    [Test]
+    PROCEDURE NoAssemblyList@27();
+    BEGIN
+      AssemblyListRetrieval(Item."Replenishment System"::Assembly,0,0,0,0);
+    END;
+
+    [Test]
+    PROCEDURE OnTheFlyList@62();
+    BEGIN
+      AssemblyListRetrieval(Item."Replenishment System"::Assembly,0,0,0,2);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE PurchItem@69();
+    BEGIN
+      AssemblyListRetrieval(Item."Replenishment System"::Purchase,2,2,1,0);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CostInfoSync@5(ParentCostingMethod@1009 : Option;CompCostingMethod@1003 : Option;UpdateComp@1008 : Boolean;UpdateParent@1007 : Boolean;IndirectCost@1005 : Decimal;Overhead@1004 : Decimal);
+    VAR
+      AssemblyHeader@1001 : Record 900;
+      TempBOMComponent@1006 : TEMPORARY Record 90;
+    BEGIN
+      // Setup.
+      Initialize;
+      StdCostLevel := 1;
+      LibraryAssembly.SetupAssemblyData(
+        AssemblyHeader,WorkDate2,ParentCostingMethod,CompCostingMethod,Item."Replenishment System"::Assembly,
+        '',TRUE);
+      SaveInitialAssemblyList(TempBOMComponent,AssemblyHeader."Item No.");
+
+      // Exercise.
+      LibraryAssembly.ModifyItem(AssemblyHeader."Item No.",UpdateParent,IndirectCost,Overhead);
+      LibraryAssembly.ModifyCostParams(AssemblyHeader."No.",UpdateComp,IndirectCost,Overhead);
+      IF UpdateParent THEN BEGIN
+        AssemblyHeader.VALIDATE("Indirect Cost %",IndirectCost);
+        AssemblyHeader.VALIDATE("Overhead Rate",Overhead);
+        AssemblyHeader.MODIFY(TRUE);
+      END;
+
+      LibraryAssembly.EditAssemblyLines(
+        ChangeType::Edit,AssemblyLine.Type::Item,AssemblyLine.Type::Item,'',AssemblyHeader."No.",TRUE);
+      LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+
+      // Validate.
+      VerifyOrderHeader(AssemblyHeader."No.");
+      VerifyInitialAssemblyList(TempBOMComponent,AssemblyHeader."Item No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE StdParentFIFOCompCostAdj@22();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::Standard,Item."Costing Method"::FIFO,TRUE,FALSE,0,0);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE StdParentAvgCompCostAdj@178();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::Standard,Item."Costing Method"::Average,TRUE,FALSE,0,0);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE StdParent@11();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::Standard,Item."Costing Method"::FIFO,FALSE,FALSE,0,0);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgParentFIFOCompCostAdj@13();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::Average,Item."Costing Method"::FIFO,TRUE,FALSE,0,0);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCompOverhead@18();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::FIFO,Item."Costing Method"::FIFO,TRUE,FALSE,0,LibraryRandom.RandDec(10,2));
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCompIndCost@1();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::FIFO,Item."Costing Method"::FIFO,TRUE,FALSE,LibraryRandom.RandDec(10,2),0);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOParentAndCompIndCostOvhd@7();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::FIFO,Item."Costing Method"::FIFO,TRUE,TRUE,LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(10,2));
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgParentAndCompOverhead@4();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::Average,Item."Costing Method"::Average,TRUE,TRUE,LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(10,2));
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgParentAndCompIndCost@3();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::Average,Item."Costing Method"::Average,TRUE,TRUE,LibraryRandom.RandDec(10,2),0);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgUpdateParent@76();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::Average,Item."Costing Method"::FIFO,FALSE,TRUE,0,0);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgParentIndCost@93();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::Average,Item."Costing Method"::FIFO,FALSE,TRUE,LibraryRandom.RandDec(10,2),0);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgParentOverhead@2();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::Average,Item."Costing Method"::FIFO,FALSE,TRUE,0,LibraryRandom.RandDec(10,2));
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOParentAvgComp@180();
+    BEGIN
+      CostInfoSync(Item."Costing Method"::FIFO,Item."Costing Method"::Average,FALSE,TRUE,0,0);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ModifyAssemblyLines@42(ChangeType@1004 : ' ,Add,Replace,Delete,Edit,Delete all,Edit cards,Usage';CostingMethod@1011 : Option;ComponentType@1009 : Option;NewComponentType@1010 : Option;UseBaseUnitOfMeasure@1007 : Boolean) : Code[20];
+    VAR
+      Item@1001 : Record 27;
+      Resource@1000 : Record 156;
+      AssemblyHeader@1006 : Record 900;
+      TempBOMComponent@1012 : TEMPORARY Record 90;
+      NewComponentNo@1003 : Code[20];
+    BEGIN
+      // Setup.
+      Initialize;
+      StdCostLevel := 1;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,CostingMethod,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      SaveInitialAssemblyList(TempBOMComponent,AssemblyHeader."Item No.");
+      IF NewComponentType = AssemblyLine.Type::Item THEN
+        NewComponentNo := LibraryAssembly.CreateItem(Item,Item."Costing Method"::Standard,Item."Replenishment System"::Purchase,'','')
+      ELSE
+        NewComponentNo := LibraryAssembly.CreateResource(Resource,TRUE,'');
+
+      // Exercise.
+      LibraryAssembly.EditAssemblyLines(ChangeType,ComponentType,NewComponentType,NewComponentNo,AssemblyHeader."No.",
+        UseBaseUnitOfMeasure);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",TRUE);
+      VerifyInitialAssemblyList(TempBOMComponent,AssemblyHeader."Item No.");
+      EXIT(AssemblyHeader."No.");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CostModifiedLines@74(ChangeType@1004 : ' ,Add,Replace,Delete,Edit,Delete all,Edit cards,Usage';CostingMethod@1001 : Option;ComponentType@1009 : Option;NewComponentType@1010 : Option;UseBaseUnitOfMeasure@1007 : Boolean);
+    VAR
+      AssemblyHeader@1000 : Record 900;
+      Item@1006 : Record 27;
+      Resource@1003 : Record 156;
+      TempBOMComponent@1008 : TEMPORARY Record 90;
+      CalculateStandardCost@1005 : Codeunit 5812;
+      NewComponentNo@1002 : Code[20];
+    BEGIN
+      // Setup.
+      Initialize;
+      AssemblyHeader.GET(AssemblyHeader."Document Type"::Order,
+        ModifyAssemblyLines(ChangeType,CostingMethod,ComponentType,NewComponentType,UseBaseUnitOfMeasure));
+      IF NewComponentType = AssemblyLine.Type::Item THEN
+        NewComponentNo := LibraryAssembly.CreateItem(Item,Item."Costing Method"::Standard,Item."Replenishment System"::Purchase,'','')
+      ELSE
+        NewComponentNo := LibraryAssembly.CreateResource(Resource,TRUE,'');
+
+      IF ChangeType <> ChangeType::" " THEN BEGIN
+        StdCostLevel := 2;
+        CalculateStandardCost.CalcItem(AssemblyHeader."Item No.",TRUE);
+      END;
+
+      LibraryAssembly.EditAssemblyList(ChangeType,ComponentType,NewComponentType,NewComponentNo,AssemblyHeader."Item No.");
+      SaveInitialAssemblyList(TempBOMComponent,AssemblyHeader."Item No.");
+
+      // Exercise.
+      LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",TRUE);
+      VerifyOrderHeader(AssemblyHeader."No.");
+      VerifyInitialAssemblyList(TempBOMComponent,AssemblyHeader."Item No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ItemQtyPer@32();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Edit,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::" ",TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ResQtyPer@33();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Edit,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE UnitOfMeasure@34();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Edit,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::" ",FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ReplaceItemWRes@35();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Replace,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ReplaceItemWItem@128();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Replace,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AddItem@37();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AddDirectRes@41();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AddFixedRes@43();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DeleteItem@45();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Delete,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DeleteRes@46();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Delete,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DeleteAll@47();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::"Delete all",Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE Usage@94();
+    BEGIN
+      ModifyAssemblyLines(
+        ChangeType::Usage,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostItemQtyPer@91();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Edit,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostResQtyPer@90();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Edit,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostUnitOfMeasure@89();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Edit,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostReplaceItemWItem@88();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Replace,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostReplaceItemWRes@157();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Replace,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostAddItem@87();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostAddDirectRes@86();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostAddFixedRes@84();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostDeleteItem@83();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Delete,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostDeleteRes@82();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Delete,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostDeleteAll@81();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::"Delete all",Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CostUsage@96();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Usage,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostItemQtyPer@143();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Edit,Item."Costing Method"::Average,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostResQtyPer@141();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Edit,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostUnitOfMeasure@140();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Edit,Item."Costing Method"::Average,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostReplaceItemWItem@139();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Replace,Item."Costing Method"::Average,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostReplaceItemWRes@158();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Replace,Item."Costing Method"::Average,AssemblyLine.Type::Item,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostAddItem@136();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Add,Item."Costing Method"::Average,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostAddDirectRes@133();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Add,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostAddFixedRes@132();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Add,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostDeleteItem@131();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Delete,Item."Costing Method"::Average,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostDeleteRes@130();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Delete,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostDeleteAll@97();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::"Delete all",Item."Costing Method"::Average,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostUsage@144();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Usage,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostItemQtyPer@156();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Edit,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostResQtyPer@154();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Edit,Item."Costing Method"::FIFO,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostUnitOfMeasure@153();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Edit,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostReplaceItemWItem@152();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Replace,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostReplaceItemWRes@159();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Replace,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostAddItem@151();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Add,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostAddDirectRes@150();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Add,Item."Costing Method"::FIFO,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostAddFixedRes@149();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Add,Item."Costing Method"::FIFO,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostDeleteItem@148();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Delete,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostDeleteRes@147();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Delete,Item."Costing Method"::FIFO,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostDeleteAll@146();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::"Delete all",Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FIFOCostUsage@145();
+    BEGIN
+      CostModifiedLines(
+        ChangeType::Usage,Item."Costing Method"::FIFO,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ModifyAssemblyHeader@63(CostingMethod@1009 : Option;SignFactor@1004 : Integer;BaseUoM@1007 : Boolean) : Code[20];
+    VAR
+      Item@1002 : Record 27;
+      Resource@1000 : Record 156;
+      AssemblyHeader@1006 : Record 900;
+    BEGIN
+      // Setup.
+      Initialize;
+      StdCostLevel := 1;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,CostingMethod,CostingMethod,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      LibraryAssembly.CreateItem(Item,CostingMethod,Item."Replenishment System"::Purchase,'','');
+      LibraryAssembly.CreateResource(Resource,TRUE,'');
+      LibraryAssembly.EditAssemblyLines(
+        ChangeType::Add,AssemblyLine.Type::Item,AssemblyLine.Type::Item,Item."No.",AssemblyHeader."No.",TRUE);
+      LibraryAssembly.EditAssemblyLines(
+        ChangeType::Add,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,Resource."No.",
+        AssemblyHeader."No.",TRUE);
+
+      // Exercise.
+      AssemblyHeader.VALIDATE(Quantity,SignFactor * (AssemblyHeader.Quantity + LibraryRandom.RandDec(10,2)));
+      AssemblyHeader.MODIFY(TRUE);
+      AssemblyHeader.VALIDATE(
+        "Unit of Measure Code",LibraryAssembly.GetUnitOfMeasureCode(AssemblyLine.Type::Item,AssemblyHeader."Item No.",BaseUoM));
+      AssemblyHeader.MODIFY(TRUE);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",TRUE);
+
+      EXIT(AssemblyHeader."No.");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CostModifiedHeader@73(CostingMethod@1001 : Option;SignFactor@1010 : Integer;BaseUoM@1007 : Boolean);
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      // Setup.
+      AssemblyHeader.GET(AssemblyHeader."Document Type"::Order,
+        ModifyAssemblyHeader(CostingMethod,SignFactor,BaseUoM));
+
+      // Exercise.
+      LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+
+      // Validate.
+      VerifyOrderHeader(AssemblyHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE IncreaseQty@95();
+    BEGIN
+      ModifyAssemblyHeader(Item."Costing Method"::Standard,1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ZeroQty@98();
+    BEGIN
+      ModifyAssemblyHeader(Item."Costing Method"::Standard,0,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE StdCostIncQty@100();
+    BEGIN
+      CostModifiedHeader(Item."Costing Method"::Standard,1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE StdCostZeroQty@99();
+    BEGIN
+      CostModifiedHeader(Item."Costing Method"::Standard,0,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE NonBaseUoM@102();
+    BEGIN
+      ModifyAssemblyHeader(Item."Costing Method"::Standard,1,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE StdCostNonBaseUoM@106();
+    BEGIN
+      CostModifiedHeader(Item."Costing Method"::Standard,1,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostIncQty@116();
+    BEGIN
+      CostModifiedHeader(Item."Costing Method"::Average,1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostZeroQty@115();
+    BEGIN
+      CostModifiedHeader(Item."Costing Method"::Average,0,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgCostNonBaseUoM@114();
+    BEGIN
+      CostModifiedHeader(Item."Costing Method"::Average,1,FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE RefreshOrder@101(ChangeType@1004 : ' ,Add,Replace,Delete,Edit,Delete all,Edit cards,Usage';CostingMethod@1001 : Option;ComponentType@1009 : Option;NewComponentType@1010 : Option;UseBaseUnitOfMeasure@1007 : Boolean;UpdateAssemblyList@1002 : Boolean);
+    VAR
+      AssemblyHeader@1000 : Record 900;
+      TempBOMComponent@1003 : TEMPORARY Record 90;
+      CalculateStandardCost@1005 : Codeunit 5812;
+    BEGIN
+      // Setup.
+      AssemblyHeader.GET(AssemblyHeader."Document Type"::Order,
+        ModifyAssemblyLines(ChangeType,CostingMethod,ComponentType,NewComponentType,UseBaseUnitOfMeasure));
+
+      IF ChangeType <> ChangeType::" " THEN BEGIN
+        StdCostLevel := 2;
+        CalculateStandardCost.CalcItem(AssemblyHeader."Item No.",TRUE);
+      END;
+
+      IF UpdateAssemblyList THEN
+        LibraryAssembly.EditAssemblyList(ChangeType,ComponentType,NewComponentType,'',
+          AssemblyHeader."Item No.");
+      SaveInitialAssemblyList(TempBOMComponent,AssemblyHeader."Item No.");
+
+      // Exercise.
+      LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+      AssemblyHeader.RefreshBOM;
+      LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",FALSE);
+      VerifyOrderHeader(AssemblyHeader."No.");
+      VerifyInitialAssemblyList(TempBOMComponent,AssemblyHeader."Item No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ConfirmRefreshLines)]
+    PROCEDURE SimpleRefresh@103();
+    BEGIN
+      RefreshOrder(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ConfirmRefreshLines)]
+    PROCEDURE StdChangeAssemblyList@104();
+    BEGIN
+      RefreshOrder(
+        ChangeType::Edit,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ConfirmRefreshLines)]
+    PROCEDURE AvgChangeAssemblyList@105();
+    BEGIN
+      RefreshOrder(
+        ChangeType::Edit,Item."Costing Method"::Average,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE RefreshAfterDeleteAll@112();
+    BEGIN
+      RefreshOrder(
+        ChangeType::"Delete all",Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE,TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE MultipleLvlRollup@67(CostingMethod@1003 : Option;Rollup@1009 : Boolean;Level@1004 : Integer);
+    VAR
+      Item@1002 : Record 27;
+      Item1@1001 : Record 27;
+      AssemblyHeader@1000 : Record 900;
+      TempBOMComponent@1005 : TEMPORARY Record 90;
+      CalculateStandardCost@1006 : Codeunit 5812;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.CreateMultipleLvlTree(Item,Item1,Item."Replenishment System"::Assembly,CostingMethod,1,2);
+      IF Level > 1 THEN
+        Item := Item1;
+
+      IF ChangeType <> ChangeType::" " THEN BEGIN
+        StdCostLevel := 2;
+        CalculateStandardCost.CalcItem(Item."No.",TRUE);
+      END;
+
+      LibraryAssembly.EditAssemblyList(ChangeType::Edit,AssemblyLine.Type::Item,AssemblyLine.Type::Item,'',Item."No.");
+      SaveInitialAssemblyList(TempBOMComponent,Item."No.");
+      IF Rollup THEN BEGIN
+        StdCostLevel := Level;
+        CalculateStandardCost.CalcItem(Item."No.",TRUE);
+        CalculateStandardCost.CalcAssemblyItemPrice(Item."No.");
+      END;
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,Item."No.",'',LibraryRandom.RandDec(10,2),'');
+
+      // Exercise.
+      LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",FALSE);
+      VerifyOrderHeader(AssemblyHeader."No.");
+      VerifyInitialAssemblyList(TempBOMComponent,Item."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE StdTwoLevelsNoRollup@53();
+    BEGIN
+      MultipleLvlRollup(Item."Costing Method"::Standard,FALSE,2);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE StdOneLevelNoRollup@54();
+    BEGIN
+      MultipleLvlRollup(Item."Costing Method"::Standard,FALSE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE StdOneLevelRollup@55();
+    BEGIN
+      MultipleLvlRollup(Item."Costing Method"::Standard,TRUE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,AvailabilityWindowHandler)]
+    PROCEDURE StdTwoLevelsRollup@56();
+    BEGIN
+      MultipleLvlRollup(Item."Costing Method"::Standard,TRUE,2);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgTwoLevelsNoRollup@59();
+    BEGIN
+      MultipleLvlRollup(Item."Costing Method"::Average,FALSE,2);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgOneLevelNoRollup@58();
+    BEGIN
+      MultipleLvlRollup(Item."Costing Method"::Average,FALSE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvgOneLevelRollup@77();
+    BEGIN
+      MultipleLvlRollup(Item."Costing Method"::Average,TRUE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler,AvailabilityWindowHandler)]
+    PROCEDURE AvgTwoLevelsRollup@72();
+    BEGIN
+      MultipleLvlRollup(Item."Costing Method"::Average,TRUE,2);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE KitExplosion@107(TreeDepth@1004 : Integer);
+    VAR
+      Item@1002 : Record 27;
+      Item1@1001 : Record 27;
+      AssemblyHeader@1000 : Record 900;
+      TempBOMComponent@1003 : TEMPORARY Record 90;
+      AssemblyLine@1005 : Record 901;
+      TempAssemblyLine@1006 : TEMPORARY Record 901;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.CreateMultipleLvlTree(
+        Item,Item1,Item."Replenishment System"::Assembly,Item."Costing Method"::Standard,TreeDepth,2
+        );
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,Item1."No.",'',LibraryRandom.RandDec(10,2),'');
+      SaveInitialAssemblyList(TempBOMComponent,Item1."No.");
+
+      // Exercise.
+      TempAssemblyLine.DELETEALL;
+      AssemblyLine.SETRANGE("Document Type",AssemblyHeader."Document Type");
+      AssemblyLine.SETRANGE("Document No.",AssemblyHeader."No.");
+      AssemblyLine.SETRANGE(Type,AssemblyLine.Type::Item);
+      IF AssemblyLine.FINDSET THEN
+        REPEAT
+          Item.GET(AssemblyLine."No.");
+          IF Item."Assembly BOM" THEN BEGIN
+            AssemblyLine.ExplodeAssemblyList;
+            TempAssemblyLine := AssemblyLine;
+            TempAssemblyLine.INSERT;
+          END;
+        UNTIL AssemblyLine.NEXT = 0;
+
+      // Validate.
+      VerifyExplodedLines(TempAssemblyLine,AssemblyHeader."No.");
+
+      // Exercise
+      AssemblyHeader.RefreshBOM;
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",FALSE);
+      VerifyInitialAssemblyList(TempBOMComponent,Item1."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ConfirmRefreshLines)]
+    PROCEDURE OneLevel@110();
+    BEGIN
+      KitExplosion(1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ConfirmRefreshLines)]
+    PROCEDURE TwoLevels@111();
+    BEGIN
+      KitExplosion(2);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE FakeExplode@38();
+    VAR
+      AssemblyHeader@1002 : Record 900;
+      AssemblyLine@1003 : Record 901;
+    BEGIN
+      // Setup.
+      Initialize;
+      StdCostLevel := 1;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',TRUE);
+
+      // Exercise.
+      AssemblyLine.SETCURRENTKEY("Document Type","Document No.",Type);
+      AssemblyLine.SETRANGE("Document Type",AssemblyHeader."Document Type");
+      AssemblyLine.SETRANGE("Document No.",AssemblyHeader."No.");
+      AssemblyLine.SETRANGE(Type,AssemblyLine.Type::Item);
+      IF AssemblyLine.FINDSET THEN
+        REPEAT
+          ASSERTERROR  AssemblyLine.ExplodeAssemblyList;
+          // Validate.
+          IF AssemblyLine.Type = AssemblyLine.Type::Item THEN
+            Assert.AreEqual(
+              STRSUBSTNO(ErrorItemIsNotBOM,AssemblyLine."No."),GETLASTERRORTEXT,'Wrong BOM explosion message.')
+          ELSE
+            Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorLineType) > 0,'Actual:' + GETLASTERRORTEXT + '; Expected:' + ErrorLineType);
+          CLEARLASTERROR;
+        UNTIL AssemblyLine.NEXT = 0;
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler)]
+    PROCEDURE SalesExplode@30();
+    VAR
+      Item@1002 : Record 27;
+      Item1@1001 : Record 27;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1003 : Record 37;
+      TempSalesLine@1007 : TEMPORARY Record 37;
+      TempBOMComponent@1005 : TEMPORARY Record 90;
+      SalesReceivablesSetup@1004 : Record 311;
+      SalesExplodeBOM@1006 : Codeunit 63;
+      AssBOMCompRec@1500000 : Record 90;
+      TypeBOM@1500001 : Integer;
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Stockout Warning",FALSE);
+      SalesReceivablesSetup.MODIFY(TRUE);
+      LibraryAssembly.CreateMultipleLvlTree(Item,Item1,Item."Replenishment System"::Assembly,Item."Costing Method"::Standard,1,2);
+      SaveInitialAssemblyList(TempBOMComponent,Item1."No.");
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item1."No.",LibraryRandom.RandDec(5,2));
+      TempSalesLine.DELETEALL;
+      TempSalesLine := SalesLine;
+      TempSalesLine.INSERT;
+
+      // DL
+      AssBOMCompRec.RESET;
+      AssBOMCompRec.SETCURRENTKEY("Parent Item No.","Line No.");
+      AssBOMCompRec.SETRANGE("Parent Item No.",Item1."No.");
+      IF AssBOMCompRec.FINDSET THEN REPEAT
+        TypeBOM := 0;
+        TypeBOM := AssBOMCompRec.Type + 1;
+        IF TypeBOM > 0 THEN
+        LibrarySales.FindType(TypeBOM,AssBOMCompRec."No.",SalesHeader."Gen. Bus. Posting Group",SalesHeader."VAT Bus. Posting Group");
+      UNTIL AssBOMCompRec.NEXT = 0;
+
+      // Exercise.
+      SalesExplodeBOM.RUN(SalesLine);
+
+      // Validate.
+      VerifyExplodedSalesLines(TempBOMComponent,SalesHeader,TempSalesLine);
+    END;
+
+    [Test]
+    PROCEDURE SalesFakeExplode@138();
+    VAR
+      Item@1002 : Record 27;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1003 : Record 37;
+      SalesLine1@1004 : Record 37;
+      SalesExplodeBOM@1006 : Codeunit 63;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(5,2));
+      LibrarySales.CreateSalesLine(SalesLine1,SalesHeader,SalesLine.Type::"Charge (Item)",LibraryInventory.CreateItemChargeNo,1);
+
+      // Exercise.
+      ASSERTERROR SalesExplodeBOM.RUN(SalesLine);
+
+      // Validate.
+      Assert.AreEqual(STRSUBSTNO(ErrorItemIsNotBOM,SalesLine."No."),GETLASTERRORTEXT,'Unexpected message for BOM explosion.');
+      CLEARLASTERROR;
+
+      // Exercise.
+      ASSERTERROR SalesExplodeBOM.RUN(SalesLine1);
+
+      // Validate.
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorLineType) > 0,'Actual:' + GETLASTERRORTEXT + '; Expected:' + ErrorLineType);
+      CLEARLASTERROR;
+    END;
+
+    [Test]
+    [HandlerFunctions(StrMenuHandler)]
+    PROCEDURE PurchExplode@161();
+    VAR
+      Item@1002 : Record 27;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      TempPurchaseLine@1004 : TEMPORARY Record 39;
+      TempBOMComponent@1005 : TEMPORARY Record 90;
+      PurchExplodeBOM@1006 : Codeunit 73;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.CreateItem(Item,Item."Costing Method"::Standard,Item."Replenishment System"::Assembly,'','');
+      LibraryAssembly.CreateAssemblyList(Item."Costing Method"::Standard,Item."No.",TRUE,2,0,0,1,'','');
+      SaveInitialAssemblyList(TempBOMComponent,Item."No.");
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",LibraryRandom.RandDec(5,2));
+      TempPurchaseLine.DELETEALL;
+      TempPurchaseLine := PurchaseLine;
+      TempPurchaseLine.INSERT;
+
+      // Exercise.
+      PurchExplodeBOM.RUN(PurchaseLine);
+
+      // Validate.
+      VerifyExplodedPurchLines(TempBOMComponent,PurchaseHeader,TempPurchaseLine);
+    END;
+
+    [Test]
+    PROCEDURE PurchFakeExplode@160();
+    VAR
+      Item@1002 : Record 27;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      PurchaseLine1@1004 : Record 39;
+      PurchExplodeBOM@1006 : Codeunit 73;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",LibraryRandom.RandDec(5,2));
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine1,PurchaseHeader,PurchaseLine.Type::"Charge (Item)",LibraryInventory.CreateItemChargeNo,1);
+
+      // Exercise.
+      ASSERTERROR PurchExplodeBOM.RUN(PurchaseLine);
+
+      // Validate.
+      Assert.AreEqual(STRSUBSTNO(ErrorItemIsNotBOM,PurchaseLine."No."),GETLASTERRORTEXT,'Actual:' + GETLASTERRORTEXT);
+
+      // Exercise.
+      CLEARLASTERROR;
+      ASSERTERROR PurchExplodeBOM.RUN(PurchaseLine1);
+
+      // Validate.
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrorLineType) > 0,'Actual:' + GETLASTERRORTEXT + '; Expected:' + ErrorLineType);
+      CLEARLASTERROR;
+    END;
+
+    [Normal]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    LOCAL PROCEDURE ResUsage@49(CostingMethod@1000 : Option;UseSameRes@1005 : Boolean;LotSize@1001 : Integer);
+    VAR
+      Item@1002 : Record 27;
+      Resource@1007 : Record 156;
+      AssemblyHeader@1003 : Record 900;
+      TempBOMComponent@1004 : TEMPORARY Record 90;
+      CalculateStandardCost@1006 : Codeunit 5812;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.CreateItem(Item,CostingMethod,Item."Replenishment System"::Assembly,'','');
+      Item.VALIDATE("Lot Size",LotSize);
+      Item.MODIFY(TRUE);
+      LibraryAssembly.CreateResource(Resource,TRUE,'');
+      LibraryAssembly.CreateAssemblyListComponent(
+        BOMComponent.Type::Resource,Resource."No.",Item."No.",'',
+        BOMComponent."Resource Usage Type"::Direct,LibraryRandom.RandDec(20,2),TRUE);
+      IF NOT UseSameRes THEN
+        LibraryAssembly.CreateResource(Resource,TRUE,'');
+      LibraryAssembly.CreateAssemblyListComponent(
+        BOMComponent.Type::Resource,Resource."No.",Item."No.",'',
+        BOMComponent."Resource Usage Type"::Fixed,20 + LibraryRandom.RandDec(20,2),TRUE);
+      SaveInitialAssemblyList(TempBOMComponent,Item."No.");
+      StdCostLevel := 1;
+      CalculateStandardCost.CalcItem(Item."No.",TRUE);
+      CalculateStandardCost.CalcAssemblyItemPrice(Item."No.");
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,Item."No.",'',LibraryRandom.RandDec(10,2),'');
+
+      // Exercise.
+      LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",FALSE);
+      VerifyOrderHeader(AssemblyHeader."No.");
+      VerifyInitialAssemblyList(TempBOMComponent,Item."No.");
+    END;
+
+    [Test]
+    PROCEDURE LotSize@6();
+    BEGIN
+      ResUsage(Item."Costing Method"::Standard,FALSE,LibraryRandom.RandInt(25));
+    END;
+
+    [Test]
+    PROCEDURE NoLotSize@19();
+    BEGIN
+      ResUsage(Item."Costing Method"::Standard,FALSE,0);
+    END;
+
+    [Test]
+    PROCEDURE NonStdCostLotSize@29();
+    BEGIN
+      ResUsage(Item."Costing Method"::Average,FALSE,LibraryRandom.RandInt(25));
+    END;
+
+    [Test]
+    PROCEDURE NonStdCostNoLotSize@31();
+    BEGIN
+      ResUsage(Item."Costing Method"::Average,FALSE,0);
+    END;
+
+    [Test]
+    PROCEDURE SameResLotSize@57();
+    BEGIN
+      ResUsage(Item."Costing Method"::Standard,TRUE,LibraryRandom.RandInt(25));
+    END;
+
+    [Test]
+    PROCEDURE SamesResNoLotSize@51();
+    BEGIN
+      ResUsage(Item."Costing Method"::Standard,TRUE,0);
+    END;
+
+    [Test]
+    PROCEDURE SameResNonStdCostLotSize@68();
+    BEGIN
+      ResUsage(Item."Costing Method"::Average,TRUE,LibraryRandom.RandInt(25));
+    END;
+
+    [Test]
+    PROCEDURE SameResNonStdCostNoLotSize@66();
+    BEGIN
+      ResUsage(Item."Costing Method"::Average,TRUE,0);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SameComp@109(UseVariant@1000 : Boolean);
+    VAR
+      Item@1002 : Record 27;
+      Resource@1007 : Record 156;
+      AssemblyHeader@1003 : Record 900;
+      TempBOMComponent@1004 : TEMPORARY Record 90;
+      Item1@1001 : Record 27;
+      CalculateStandardCost@1005 : Codeunit 5812;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.CreateItem(Item,Item."Costing Method"::Standard,Item."Replenishment System"::Assembly,'','');
+      LibraryAssembly.CreateItem(Item1,Item."Costing Method"::Standard,Item."Replenishment System"::Purchase,'','');
+      LibraryAssembly.CreateResource(Resource,TRUE,'');
+
+      LibraryAssembly.CreateAssemblyListComponent(
+        BOMComponent.Type::Resource,Resource."No.",Item."No.",'',
+        BOMComponent."Resource Usage Type"::Direct,LibraryRandom.RandDec(20,2),TRUE);
+      LibraryAssembly.CreateAssemblyListComponent(
+        BOMComponent.Type::Resource,Resource."No.",Item."No.",'',
+        BOMComponent."Resource Usage Type"::Direct,20 + LibraryRandom.RandDec(20,2),TRUE);
+
+      LibraryAssembly.CreateAssemblyListComponent(
+        BOMComponent.Type::Item,Item1."No.",Item."No.",'',
+        BOMComponent."Resource Usage Type"::Direct,LibraryRandom.RandDec(20,2),TRUE);
+      LibraryAssembly.CreateAssemblyListComponent(
+        BOMComponent.Type::Item,Item1."No.",Item."No.",'',
+        BOMComponent."Resource Usage Type"::Direct,20 + LibraryRandom.RandDec(20,2),TRUE);
+      SaveInitialAssemblyList(TempBOMComponent,Item."No.");
+      StdCostLevel := 1;
+      CalculateStandardCost.CalcItem(Item."No.",TRUE);
+      CalculateStandardCost.CalcAssemblyItemPrice(Item."No.");
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,Item."No.",'',LibraryRandom.RandDec(10,2),'');
+
+      // Exercise.
+      LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,AssemblyLine.Type::Item,Item1."No.",
+        LibraryAssembly.GetUnitOfMeasureCode(AssemblyLine.Type::Item,Item1."No.",TRUE),40 + LibraryRandom.RandDec(20,2),0,'');
+      IF UseVariant THEN
+        AssemblyLine.VALIDATE("Variant Code",LibraryInventory.GetVariant(Item1."No.",AssemblyLine."Variant Code"));
+      AssemblyLine.MODIFY(TRUE);
+      LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,AssemblyLine.Type::Resource,Resource."No.",
+        LibraryAssembly.GetUnitOfMeasureCode(AssemblyLine.Type::Resource,Resource."No.",TRUE),
+        40 + LibraryRandom.RandDec(20,2),0,'');
+      LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",TRUE);
+      VerifyOrderHeader(AssemblyHeader."No.");
+      VerifyInitialAssemblyList(TempBOMComponent,Item."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE SameItem@121();
+    BEGIN
+      SameComp(FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE SameItemDiffVar@125();
+    BEGIN
+      SameComp(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CircularRef@123(IsDirectLoop@1002 : Boolean);
+    VAR
+      AssemblyHeader@1000 : Record 900;
+      ItemNo@1001 : Code[20];
+    BEGIN
+      // Setup.
+      Initialize;
+      StdCostLevel := 1;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      LibraryAssembly.CreateItem(Item,Item."Costing Method"::Standard,Item."Replenishment System"::Assembly,'','');
+      LibraryAssembly.CreateAssemblyListComponent(BOMComponent.Type::Item,AssemblyHeader."Item No.",Item."No.",'',
+        BOMComponent."Resource Usage Type"::Direct,1,TRUE);
+      IF IsDirectLoop THEN
+        ItemNo := AssemblyHeader."Item No."
+      ELSE
+        ItemNo := Item."No.";
+
+      // Exercise.
+      LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,AssemblyLine.Type::Item,ItemNo,
+        LibraryAssembly.GetUnitOfMeasureCode(AssemblyLine.Type::Item,AssemblyHeader."Item No.",TRUE),1,0,'');
+      LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+
+      // Validate.
+      VerifyOrderLines(AssemblyHeader."No.",TRUE);
+      VerifyOrderHeader(AssemblyHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DirectLoop@134();
+    BEGIN
+      CircularRef(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE IndirectLoop@135();
+    BEGIN
+      CircularRef(FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyOrderLines@16(AssemblyHeaderNo@1000 : Code[20];CustomLines@1009 : Boolean);
+    VAR
+      AssemblyLine@1003 : Record 901;
+      AssemblyHeader@1004 : Record 900;
+      BOMComponent@1001 : Record 90;
+    BEGIN
+      AssemblyHeader.GET(AssemblyHeader."Document Type"::Order,AssemblyHeaderNo);
+      AssemblyLine.RESET;
+      AssemblyLine.SETRANGE("Document Type",AssemblyLine."Document Type"::Order);
+      AssemblyLine.SETRANGE("Document No.",AssemblyHeaderNo);
+      AssemblyLine.SETFILTER(Type,'<>%1',AssemblyLine.Type::" ");
+      IF AssemblyLine.FINDSET THEN
+        REPEAT
+          BOMComponent.SETRANGE("Parent Item No.",AssemblyHeader."Item No.");
+          BOMComponent.SETRANGE(Type,AssemblyLine.Type);
+          BOMComponent.SETRANGE("No.",AssemblyLine."No.");
+          BOMComponent.SETRANGE("Variant Code",AssemblyLine."Variant Code");
+          BOMComponent.SETRANGE("Quantity per",AssemblyLine."Quantity per");
+          BOMComponent.SETRANGE("Unit of Measure Code",AssemblyLine."Unit of Measure Code");
+          // Bug 219898.
+          IF NOT CustomLines THEN
+            Assert.AreEqual(1,BOMComponent.COUNT,'Asm. line for ' + AssemblyLine."No." + ' not found.');
+          VerifyOrderLine(AssemblyLine);
+        UNTIL AssemblyLine.NEXT = 0;
+
+      IF NOT CustomLines THEN BEGIN
+        BOMComponent.RESET;
+        BOMComponent.SETRANGE("Parent Item No.",AssemblyHeader."Item No.");
+        BOMComponent.SETFILTER(Type,'<>%1',BOMComponent.Type::" ");
+        Assert.AreEqual(AssemblyLine.COUNT,BOMComponent.COUNT,'Wrong no. of retrieved lines.');
+      END;
+
+      IF AssemblyHeader.Quantity = 0 THEN
+        Assert.AreEqual(0,AssemblyLine.COUNT,'No. of lines should be 0 for Qty 0.');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyOrderLine@17(AssemblyLine@1000 : Record 901);
+    VAR
+      AssemblyHeader@1004 : Record 900;
+      OrderQty@1006 : Decimal;
+      UnitCost@1001 : Decimal;
+      Overhead@1002 : Decimal;
+      IndirectCost@1003 : Decimal;
+    BEGIN
+      AssemblyHeader.GET(AssemblyHeader."Document Type"::Order,AssemblyLine."Document No.");
+      IF AssemblyLine.Type = AssemblyLine.Type::" " THEN
+        EXIT;
+      IF (AssemblyLine.Type = AssemblyLine.Type::Resource) AND
+         (AssemblyHeader.Quantity > 0) AND (AssemblyLine."Resource Usage Type" = AssemblyLine."Resource Usage Type"::Fixed)
+      THEN
+        OrderQty := 1
+      ELSE
+        OrderQty := AssemblyHeader.Quantity;
+
+      Assert.AreEqual(
+        ROUND(OrderQty * AssemblyLine."Quantity per",LibraryERM.GetAmountRoundingPrecision),
+        ROUND(AssemblyLine.Quantity,LibraryERM.GetAmountRoundingPrecision),'Wrong Quantity on Line.');
+      Assert.AreEqual(
+        ROUND(AssemblyLine.Quantity * AssemblyLine."Qty. per Unit of Measure",LibraryERM.GetUnitAmountRoundingPrecision),
+        ROUND(AssemblyLine."Quantity (Base)",LibraryERM.GetUnitAmountRoundingPrecision),'Wrong Base Qty calculation.');
+      Assert.AreEqual(AssemblyLine.Quantity,AssemblyLine."Remaining Quantity",'Wrong Remaining Qty.');
+      Assert.AreEqual(AssemblyLine."Quantity (Base)",AssemblyLine."Remaining Quantity (Base)",'Wrong Remaining Qty (Base).');
+
+      LibraryAssembly.GetCostInformation(UnitCost,Overhead,IndirectCost,AssemblyLine.Type,AssemblyLine."No.",'','');
+      Assert.AreNearlyEqual(ROUND(UnitCost,LibraryERM.GetUnitAmountRoundingPrecision),
+        ROUND(AssemblyLine."Unit Cost" / AssemblyLine."Qty. per Unit of Measure",LibraryERM.GetUnitAmountRoundingPrecision),
+        LibraryERM.GetAmountRoundingPrecision,'Wrong line Unit Cost.');
+      Assert.AreEqual(
+        ROUND(AssemblyLine."Unit Cost" * AssemblyLine.Quantity,LibraryERM.GetAmountRoundingPrecision),
+        AssemblyLine."Cost Amount",'Wrong line Cost Amount.');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyParentFlowFields@10(AssemblyHeader@1000 : Record 900);
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.GET(AssemblyHeader."Item No.");
+      Item.CALCFIELDS("Qty. on Assembly Order","Qty. on Asm. Component");
+      Assert.AreNearlyEqual(
+        AssemblyHeader.Quantity * AssemblyHeader."Qty. per Unit of Measure",Item."Qty. on Assembly Order",
+        LibraryERM.GetUnitAmountRoundingPrecision,'Wrong qty on assembly order - header.');
+      Assert.AreEqual(0,Item."Qty. on Asm. Component",'Wrong qty on component lines - header.');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyExplodedLines@39(TempAssemblyLine@1003 : TEMPORARY Record 901;AssemblyHeaderNo@1001 : Code[20]);
+    VAR
+      AssemblyHeader@1002 : Record 900;
+      AssemblyLine@1004 : Record 901;
+      TempBOMComponent@1000 : TEMPORARY Record 90;
+    BEGIN
+      AssemblyHeader.GET(AssemblyHeader."Document Type"::Order,AssemblyHeaderNo);
+      AssemblyLine.SETRANGE("Document Type",AssemblyHeader."Document Type");
+      AssemblyLine.SETRANGE("Document No.",AssemblyHeader."No.");
+      LibraryAssembly.GetBOMComponentLines(TempBOMComponent,AssemblyHeader."Item No.");
+      IF AssemblyLine.FINDSET THEN
+        REPEAT
+          TempBOMComponent.SETRANGE("Parent Item No.",AssemblyHeader."Item No.");
+          TempBOMComponent.SETRANGE(Type,AssemblyLine.Type);
+          TempBOMComponent.SETRANGE("No.",AssemblyLine."No.");
+          TempBOMComponent.SETRANGE("Variant Code",AssemblyLine."Variant Code");
+          TempBOMComponent.SETRANGE("Unit of Measure Code",AssemblyLine."Unit of Measure Code");
+          TempBOMComponent.FINDFIRST;
+          Assert.AreEqual(1,TempBOMComponent.COUNT,'Too many order lines exploded.');
+          TempAssemblyLine.SETRANGE(Type,TempAssemblyLine.Type::Item);
+          TempAssemblyLine.SETRANGE("No.",TempBOMComponent."Parent Item No.");
+          IF TempAssemblyLine.FINDFIRST THEN
+            Assert.AreNearlyEqual(TempAssemblyLine."Quantity per" * TempBOMComponent."Quantity per",AssemblyLine."Quantity per",
+              LibraryERM.GetAmountRoundingPrecision,'Wrong qty per in exploded line for ' + TempAssemblyLine."No.");
+          VerifyOrderLine(AssemblyLine);
+        UNTIL AssemblyLine.NEXT = 0
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyExplodedSalesLines@52(VAR TempBOMComponent@1003 : TEMPORARY Record 90;SalesHeader@1002 : Record 36;TempSalesLine@1001 : TEMPORARY Record 37);
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      SalesLine.RESET;
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETFILTER(Type,'<>%1',SalesLine.Type::" ");
+      SalesLine.FINDSET;
+      TempBOMComponent.FINDSET;
+
+      REPEAT
+        TempBOMComponent.SETRANGE("Parent Item No.",TempSalesLine."No.");
+        TempBOMComponent.SETRANGE("No.",SalesLine."No.");
+        TempBOMComponent.SETRANGE("Variant Code",SalesLine."Variant Code");
+        TempBOMComponent.SETRANGE("Unit of Measure Code",SalesLine."Unit of Measure Code");
+        Assert.AreEqual(1,TempBOMComponent.COUNT,'Too many order lines exploded.');
+        TempBOMComponent.FINDFIRST;
+        Assert.AreNearlyEqual(TempBOMComponent."Quantity per" * TempSalesLine.Quantity,SalesLine.Quantity,
+          LibraryERM.GetAmountRoundingPrecision,'Wrong qty in exploded line for ' + SalesLine."No.");
+        TempBOMComponent.DELETE(TRUE);
+      UNTIL SalesLine.NEXT = 0;
+
+      TempBOMComponent.RESET;
+      TempBOMComponent.SETRANGE(Type,TempBOMComponent.Type::Item);
+      Assert.AreEqual(0,TempBOMComponent.COUNT,'Not all lines were exploded.');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyExplodedPurchLines@126(VAR TempBOMComponent@1003 : TEMPORARY Record 90;PurchaseHeader@1002 : Record 38;TempPurchaseLine@1001 : TEMPORARY Record 39);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      PurchaseLine.RESET;
+      PurchaseLine.SETRANGE("Document Type",PurchaseHeader."Document Type");
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchaseLine.SETFILTER(Type,'<>%1',PurchaseLine.Type::" ");
+      PurchaseLine.FINDSET;
+      TempBOMComponent.FINDSET;
+
+      REPEAT
+        TempBOMComponent.SETRANGE("Parent Item No.",TempPurchaseLine."No.");
+        TempBOMComponent.SETRANGE("No.",PurchaseLine."No.");
+        TempBOMComponent.SETRANGE("Variant Code",PurchaseLine."Variant Code");
+        TempBOMComponent.SETRANGE("Unit of Measure Code",PurchaseLine."Unit of Measure Code");
+        Assert.AreEqual(1,TempBOMComponent.COUNT,'Too many order lines exploded.');
+        TempBOMComponent.FINDFIRST;
+        Assert.AreNearlyEqual(TempBOMComponent."Quantity per" * TempPurchaseLine.Quantity,PurchaseLine.Quantity,
+          LibraryERM.GetAmountRoundingPrecision,'Wrong qty in exploded line for ' + PurchaseLine."No.");
+        TempBOMComponent.DELETE(TRUE);
+      UNTIL PurchaseLine.NEXT = 0;
+
+      TempBOMComponent.RESET;
+      TempBOMComponent.SETRANGE(Type,TempBOMComponent.Type::Item);
+      Assert.AreEqual(0,TempBOMComponent.COUNT,'Not all lines were exploded.');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyOrderHeader@50(AssemblyHeaderNo@1000 : Code[20]);
+    VAR
+      AssemblyHeader@1001 : Record 900;
+      MaterialCost@1002 : Decimal;
+      ResourceCost@1004 : Decimal;
+      ResourceOvhd@1005 : Decimal;
+      CostAmount@1006 : Decimal;
+      AssemblyOvhd@1003 : Decimal;
+    BEGIN
+      AssemblyHeader.GET(AssemblyHeader."Document Type"::Order,AssemblyHeaderNo);
+      CostAmount := LibraryAssembly.CalcOrderCostAmount(MaterialCost,ResourceCost,ResourceOvhd,AssemblyOvhd,AssemblyHeaderNo);
+
+      Assert.AreNearlyEqual(
+        CostAmount,AssemblyHeader."Cost Amount",LibraryERM.GetAmountRoundingPrecision,'Wrong header cost amount.');
+      Assert.AreNearlyEqual(CostAmount,
+        ROUND(AssemblyHeader.Quantity * AssemblyHeader."Unit Cost",LibraryERM.GetAmountRoundingPrecision),
+        LibraryERM.GetAmountRoundingPrecision,'Wrong header unit cost.');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SaveInitialAssemblyList@75(VAR TempBOMComponent@1000 : TEMPORARY Record 90;ParentItemNo@1001 : Code[20]);
+    VAR
+      BOMComponent@1002 : Record 90;
+    BEGIN
+      COMMIT;
+      TempBOMComponent.DELETEALL;
+      BOMComponent.SETRANGE("Parent Item No.",ParentItemNo);
+      IF BOMComponent.FINDSET THEN
+        REPEAT
+          TempBOMComponent := BOMComponent;
+          TempBOMComponent.INSERT;
+        UNTIL BOMComponent.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyInitialAssemblyList@108(VAR TempBOMComponent@1000 : TEMPORARY Record 90;ParentItemNo@1001 : Code[20]);
+    VAR
+      BOMComponent@1002 : Record 90;
+    BEGIN
+      BOMComponent.SETRANGE("Parent Item No.",ParentItemNo);
+      IF TempBOMComponent.FINDSET THEN
+        Assert.AreEqual(TempBOMComponent.COUNT,BOMComponent.COUNT,'Assembly list was altered!');
+      IF BOMComponent.FINDSET THEN
+        REPEAT
+          TempBOMComponent.SETRANGE("Parent Item No.",BOMComponent."Parent Item No.");
+          TempBOMComponent.SETRANGE("Line No.",BOMComponent."Line No.");
+          TempBOMComponent.SETRANGE(Type,BOMComponent.Type);
+          TempBOMComponent.SETRANGE("No.",BOMComponent."No.");
+          TempBOMComponent.SETRANGE("Quantity per",BOMComponent."Quantity per");
+          TempBOMComponent.SETRANGE("Unit of Measure Code",BOMComponent."Unit of Measure Code");
+          TempBOMComponent.SETRANGE("Variant Code",BOMComponent."Variant Code");
+          Assert.AreEqual(1,TempBOMComponent.COUNT,'Assembly list was altered at comp.' + BOMComponent."No." + '!');
+        UNTIL BOMComponent.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyLineLocation@120(AssemblyHeaderNo@1000 : Code[20];LocationCode@1002 : Code[10]);
+    VAR
+      AssemblyLine@1001 : Record 901;
+    BEGIN
+      AssemblyLine.SETCURRENTKEY("Document Type","Document No.",Type);
+      AssemblyLine.SETRANGE("Document Type",AssemblyLine."Document Type"::Order);
+      AssemblyLine.SETRANGE("Document No.",AssemblyHeaderNo);
+      AssemblyLine.SETRANGE(Type,AssemblyLine.Type::Item);
+      IF AssemblyLine.FINDSET THEN
+        REPEAT
+          Assert.AreEqual(LocationCode,AssemblyLine."Location Code",'Wrong location code on line.');
+        UNTIL AssemblyLine.NEXT = 0;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE StrMenuHandler@168(Options@1000 : Text[1024];VAR Choice@1001 : Integer;Instructions@1002 : Text[1024]);
+    BEGIN
+      Choice := StdCostLevel;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AvailPageHandler@155(VAR CheckAvailability@1000 : Page 342;VAR Response@1001 : Action);
+    BEGIN
+      Response := ACTION::Yes;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@129(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := UpdateOrderLines;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AvailabilityWindowHandler@48(VAR AsmAvailability@1000 : Page 908;VAR Response@1001 : Action);
+    BEGIN
+      Response := ACTION::Yes; // always confirm
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmRefreshLines@9(Question@1001 : Text[1024];VAR Reply@1000 : Boolean);
+    BEGIN
+      Assert.IsTrue(STRPOS(Question,CnfmRefreshLines) > 0,Question);
+      Reply := TRUE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Assembly] [SCM]
+      This CU is covering the chapter 3.1.3 in the Test Design Specification of Kitting, as per the following:
+      SC3-1: Quantity on Assembly Order / Assembly Component flow field validation.
+      SC3-3: AssemblyListRetrieval, RefillDeleteItem
+      SC3-4: ModifyAssemblyLines, UseSubstitute, ModifyAssemblyHeader
+      SC3-5: ResUsage
+      SC3-6: MultipleLvlRollup
+      SC3-7: CostAssemblyLines, CostAssemblyHeader, CostInfoSync
+      SC3-8: RefreshOrder
+      SC3-9: CircularRef, NegQtyHeaderLine
+      SC3-10: UpdateLocation
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,636 @@
+OBJECT Codeunit 134228 ERM Close Income Statement
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1006 : Codeunit 130000;
+      LibraryDimension@1008 : Codeunit 131001;
+      LibraryERM@1002 : Codeunit 131300;
+      LibraryFiscalYear@1003 : Codeunit 131302;
+      LibraryJournals@1005 : Codeunit 131306;
+      LibraryRandom@1000 : Codeunit 130440;
+      LibraryVariableStorage@1009 : Codeunit 131004;
+      LibraryUtility@1010 : Codeunit 131000;
+      IsInitialized@1001 : Boolean;
+      ExpectedMessageMsg@1004 : TextConst 'ENU=The journal lines have successfully been created.';
+      GenJnlLineExistErr@1007 : TextConst '@@@="%1=Gen. Journal Line;%2=Account Type;%3=Account Type Value;%4=Account No.;%5=Account No. Value.";ENU="There should be no %1 with %2=%3,%4=%5"';
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CloseIncomeStatementRequestPageHandler)]
+    PROCEDURE CloseIncomeStatementOnce@2();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      DocumentNo@1002 : Code[20];
+    BEGIN
+      // [SCENARIO] Covers document TFS_TC_ID = 7421.
+
+      Initialize;
+
+      // [WHEN] Create and post Gen. Journal Lines and Run Close Income Statement Batch job.
+      DocumentNo := PostGeneralJournalLinesAndCloseIncomeStatement(GenJournalLine);
+
+      // [THEN] Verify Balance in GL Account.
+      VerifyGLAccountBalance(GenJournalLine."Account No.",DocumentNo,DocumentNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CloseIncomeStatementRequestPageHandler)]
+    PROCEDURE CloseIncomeStatementTwice@16();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      DocumentNo@1002 : Code[20];
+    BEGIN
+      // [SCENARIO] Covers document TFS_TC_ID = 7422.
+
+      // [GIVEN] Posted Gen. Journal Lines
+      // [WHEN] Run Close Income Statement Batch job twice.
+      Initialize;
+      DocumentNo := CloseIncomeStatementWithPostingLines(GenJournalLine);
+
+      // [THEN]: Verify Balance in GL Account.
+      VerifyGLAccountBalance(GenJournalLine."Account No.",DocumentNo,GenJournalLine."Document No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CloseIncomeStatementRequestPageHandler)]
+    PROCEDURE CloseIncomeStatementWithAddCur@17();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      AdditionalReportingCurrency@1004 : Code[10];
+      DocumentNo@1002 : Code[20];
+    BEGIN
+      // [SCENARIO] Covers document TFS_TC_ID = 7423, 4252
+
+      // [GIVEN] Create and Post Gen. Journal Lines and Run Close Income Statement Batch job two times.
+      Initialize;
+      DocumentNo := CloseIncomeStatementWithPostingLines(GenJournalLine);
+
+      // [GIVEN] Update General Ledger Setup for Additional Reporting Currency.
+      AdditionalReportingCurrency := UpdateCurOnGeneralLedgerSetup(CreateCurrency);
+
+      // [WHEN] Run "Close Income Statement"
+      CloseIncomeStatement(GenJournalLine,INCSTR(GenJournalLine."Document No."));
+
+      // [THEN]: Verify Balance in GL Account.
+      VerifyGLAccountBalance(GenJournalLine."Account No.",DocumentNo,GenJournalLine."Document No.");
+
+      // Cleanup: Update General Ledger Setup.
+      UpdateCurOnGeneralLedgerSetup(AdditionalReportingCurrency);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CloseIncomeStatementRequestPageHandler)]
+    PROCEDURE CloseIncomeStatementWithZeroAmount@13();
+    VAR
+      GLAccount@1002 : Record 15;
+      GenJournalLine@1001 : Record 81;
+      AdditionalReportingCurrency@1000 : Code[10];
+      Amount@1003 : Decimal;
+    BEGIN
+      // [SCENARIO 287733] Check that no one general journal line with zero amount has been created
+
+      Initialize;
+      // [GIVEN] New Fiscal Year
+      LibraryFiscalYear.CloseFiscalYear;
+      ExecuteUIHandler;
+      LibraryFiscalYear.CreateFiscalYear;
+      AdditionalReportingCurrency := UpdateCurOnGeneralLedgerSetup(CreateCurrency);
+      Amount := 1;
+
+      LibraryERM.CreateGLAccount(GLAccount);
+      CreateAndPostGenJnlLine(GenJournalLine,GLAccount."No.",Amount);
+
+      UpdateCurOnGeneralLedgerSetup('');
+
+      // [GIVEN] Balance of G/L Account = 0,00
+      CreateAndPostGenJnlLine(GenJournalLine,GLAccount."No.",-Amount);
+
+      LibraryFiscalYear.CloseFiscalYear;
+      GenJournalLine.RESET;
+      GenJournalLine.INIT;
+      GenJournalLine."Document No." := LibraryUtility.GenerateGUID;
+      // [WHEN] Run "Close Income Statement"
+      CloseIncomeStatement(GenJournalLine,INCSTR(GenJournalLine."Document No."));
+
+      // [THEN] General journal line with GLAccountNo does not exist (because of zero amount)
+      GenJournalLine.SETRANGE("Account Type",GenJournalLine."Account Type"::"G/L Account");
+      GenJournalLine.SETRANGE("Account No.",GLAccount."No.");
+      Assert.IsTrue(GenJournalLine.ISEMPTY,
+        STRSUBSTNO(GenJnlLineExistErr,
+          GenJournalLine.TABLECAPTION,
+          GenJournalLine.FIELDCAPTION("Account Type"),FORMAT(GenJournalLine."Account Type"::"G/L Account"),
+          GenJournalLine.FIELDCAPTION("Account No."),GLAccount."No."));
+
+      // Cleanup: Update General Ledger Setup.
+      UpdateCurOnGeneralLedgerSetup(AdditionalReportingCurrency);
+    END;
+
+    [Test]
+    PROCEDURE CreationOfFiscalYear@3();
+    VAR
+      StartingDate@1002 : Date;
+    BEGIN
+      // [SCENARIO 128966] Check that New Fiscal Year has been Created.
+
+      // [GIVEN] Find Last Fiscal Year.
+      Initialize;
+      StartingDate := LibraryFiscalYear.GetLastPostingDate(FALSE);
+
+      // [WHEN] Create Fiscal Year.
+      LibraryFiscalYear.CreateFiscalYear;
+
+      // [THEN] Verify that New Fiscal Year created.
+      Assert.AreNotEqual(StartingDate,LibraryFiscalYear.GetLastPostingDate(FALSE),'Fiscal Year must not be equal');
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CloseIncomeStatementRequestPageHandler)]
+    PROCEDURE LastNoUsedOnNoSeriesAfterClosingIncomeStatement@6();
+    VAR
+      GenJournalBatch@1001 : Record 232;
+      GenJournalLine@1005 : Record 81;
+      NoSeriesManagement@1006 : Codeunit 396;
+      AddtionalReportingCurrency@1000 : Code[10];
+      DocumentNo@1003 : Code[20];
+    BEGIN
+      // [SCENARIO 244918] Check Last No. Used field value on No. Series after closing Income Statement using an Additional Reporting Currency.
+
+      // [GIVEN] Close and create new Fiscal year and Update General Ledger Setup.
+      Initialize;
+      LibraryFiscalYear.CloseFiscalYear;
+      ExecuteUIHandler;
+      LibraryFiscalYear.CreateFiscalYear;
+      AddtionalReportingCurrency := UpdateCurOnGeneralLedgerSetup(CreateCurrency);
+
+      // [GIVEN] Posted Gen. Journal Lines.
+      CreateGeneralJournalLines(
+        GenJournalLine,LibraryFiscalYear.GetLastPostingDate(TRUE));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      GenJournalBatch.GET(GenJournalLine."Journal Template Name",GenJournalLine."Journal Batch Name");
+      DocumentNo := NoSeriesManagement.GetNextNo(GenJournalBatch."No. Series",WORKDATE,FALSE);
+      COMMIT;
+
+      // [WHEN] Run "Close Income Statement"
+      CloseIncomeStatement(GenJournalLine,INCSTR(GenJournalLine."Document No."));
+
+      // [THEN] Last No. Used field value on No. Series Line.
+      VerifyNoSeriesLine(GenJournalBatch."No. Series",DocumentNo);
+
+      // Tear Down: Update General Ledger Setup.
+      UpdateCurOnGeneralLedgerSetup(AddtionalReportingCurrency);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler,CloseIncomeStatementRequestPageHandler)]
+    PROCEDURE PostingNoSeriesUpdateAfterCloseIncomeStatement@12();
+    VAR
+      GenJournalBatch@1001 : Record 232;
+      GenJournalLine@1005 : Record 81;
+      NoSeriesLine@1004 : Record 309;
+      LastNoUsed@1000 : Code[20];
+    BEGIN
+      // [SCENARIO 264217] Check that Posting No. Series updated in GL Entry and No. Series after posting General Journal entries created from Close Income Statement.
+
+      // [GIVEN] Closed currect Fiscal Year
+      // [GIVEN] Created new Fiscal Year
+      // [GIVEN] Posted General Journal Lines to create entries in last Fiscal Year,
+      // [GIVEN] Created General Journal Line by "Close Income Statement" report
+      Initialize;
+      LibraryFiscalYear.CloseFiscalYear;
+      ExecuteUIHandler;
+      LibraryFiscalYear.CreateFiscalYear;
+
+      CreateGeneralJournalLines(GenJournalLine,LibraryFiscalYear.GetLastPostingDate(TRUE));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      CreateGeneralJournalLineUsingNewJournalBatch(GenJournalLine);
+      CloseIncomeStatement(GenJournalLine,GenJournalLine."Document No.");
+
+      GenJournalLine.SETRANGE("Journal Batch Name",GenJournalLine."Journal Batch Name");
+      GenJournalLine.FINDLAST;
+      GenJournalBatch.GET(GenJournalLine."Journal Template Name",GenJournalLine."Journal Batch Name");
+      NoSeriesLine.SETRANGE("Series Code",GenJournalBatch."Posting No. Series");
+      NoSeriesLine.FINDFIRST;
+      LastNoUsed := NoSeriesLine."Starting No.";
+
+      // [WHEN] Post created Gen. Journal Line
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // [THEN]: Verify Document No. in GL Entry and Last No. used in No. Series Line.
+      VerifyDocumentNoInGLEntry(GenJournalLine."Posting Date",GenJournalLine."Source Code",LastNoUsed);
+      VerifyNoSeriesLine(GenJournalBatch."Posting No. Series",LastNoUsed);
+
+      // Tear Down: Delete the new General Journal Batch created earlier.
+      GenJournalBatch.SETRANGE("Journal Template Name",GenJournalBatch."Journal Template Name");
+      GenJournalBatch.SETRANGE(Description,GenJournalBatch.Name);
+      GenJournalBatch.FINDFIRST;
+      GenJournalBatch.DELETE(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,ConfirmHandler,CloseIncomeStatementRequestPageHandler,DimensionSelectionMultipleModalPageHandler)]
+    PROCEDURE CloseIncomeStatementWithDimensions@15();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      TempDimensionSetEntry@1001 : TEMPORARY Record 480;
+      DocumentNo@1002 : Code[20];
+      PostingDate@1003 : Date;
+      GLAccountNo@1004 : Code[20];
+      BusinessUnitCode@1005 : ARRAY [2] OF Code[10];
+    BEGIN
+      // [FEATURE] [Dimension] [Business Unit]
+      // [SCENARIO 364446] "Close Income Statement" report with Global Dimension Selected and grouped by Business Unit should post G/L Entry per Business Unit
+      Initialize;
+      LibraryFiscalYear.CloseFiscalYear;
+      LibraryFiscalYear.CreateFiscalYear;
+      // [GIVEN] Global Dimension Code "G"
+      CreateDimensionSet(TempDimensionSetEntry);
+      // [GIVEN] Posted Documents without dimenions at date "Date1"
+      PostingDate := LibraryFiscalYear.GetFirstPostingDate(FALSE);
+      CreateGeneralJournalLines(GenJournalLine,PostingDate + 1);
+      GLAccountNo := LibraryERM.CreateGLAccountNo;
+      // [GIVEN] Posted Documents with dimenion code "G" for Business Unit "B1" at date "Date2" < "Date1"
+      // [GIVEN] Total Amount of posted documents for "B1" is "A1"
+      BusinessUnitCode[1] := CreateBusinessUnitCode;
+      CreateGenJournalLinesWithDim(
+        GenJournalLine,TempDimensionSetEntry,PostingDate,GLAccountNo,BusinessUnitCode[1]);
+      // [GIVEN] Posted Documents with dimenion code "G" for Business Unit "Y" at date "Date2" < "Date1"
+      // [GIVEN] Summary Amount of posted documents for "Y" = "Amount Y"
+      BusinessUnitCode[2] := CreateBusinessUnitCode;
+      CreateGenJournalLinesWithDim(
+        GenJournalLine,TempDimensionSetEntry,PostingDate,GLAccountNo,BusinessUnitCode[2]);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // [WHEN] Run 'Close Income Statement' report grouping by Business Units
+      LibraryFiscalYear.CloseFiscalYear;
+      PostingDate := CALCDATE('<1M-1D>',LibraryFiscalYear.GetLastPostingDate(TRUE));  // Using true for closed.
+      SelectDimForCloseIncomeStatement(TempDimensionSetEntry);
+      DocumentNo := INCSTR(GenJournalLine."Document No.");
+      RunCloseIncomeStatement(GenJournalLine,PostingDate,TRUE,TRUE,INCSTR(GenJournalLine."Document No."));
+      CODEUNIT.RUN(CODEUNIT::"Gen. Jnl.-Post Batch",GenJournalLine);
+
+      // [THEN] Close Income Statement G/L Entry Amount for "X" = "Amount X"
+      VerifyBusniessUnitCloseIncomeGLEntry(GLAccountNo,BusinessUnitCode[1],DocumentNo);
+      // [THEN] Close Income Statement G/L Entry Amount for "Y" = "Amount Y"
+      VerifyBusniessUnitCloseIncomeGLEntry(GLAccountNo,BusinessUnitCode[2],DocumentNo);
+    END;
+
+    LOCAL PROCEDURE Initialize@14();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      // Lazy Setup.
+      LibraryVariableStorage.Clear;
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CloseIncomeStatementWithPostingLines@9(VAR GenJournalLine@1000 : Record 81) DocumentNo : Code[20];
+    BEGIN
+      // Create and post Gen. Journal Lines and Run Close Income Statement Batch job.
+      DocumentNo := PostGeneralJournalLinesAndCloseIncomeStatement(GenJournalLine);
+      CreateGeneralJournalLines(
+        GenJournalLine,LibraryFiscalYear.GetLastPostingDate(FALSE));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      CloseIncomeStatement(GenJournalLine,INCSTR(GenJournalLine."Document No."));
+    END;
+
+    LOCAL PROCEDURE CreateBusinessUnitCode@23() : Code[10];
+    VAR
+      BusinessUnit@1000 : Record 220;
+    BEGIN
+      LibraryERM.CreateBusinessUnit(BusinessUnit);
+      EXIT(BusinessUnit.Code);
+    END;
+
+    LOCAL PROCEDURE CreateCurrency@8() : Code[10];
+    VAR
+      Currency@1001 : Record 4;
+    BEGIN
+      LibraryERM.CreateCurrency(Currency);
+      LibraryERM.SetCurrencyGainLossAccounts(Currency);
+      Currency.VALIDATE("Residual Gains Account",Currency."Realized Gains Acc.");
+      Currency.VALIDATE("Residual Losses Account",Currency."Realized Losses Acc.");
+      Currency.MODIFY(TRUE);
+      COMMIT;  // Required to run the Test Case on RTC.
+
+      // Create Exchange Rate.
+      LibraryERM.CreateRandomExchangeRate(Currency.Code);
+      EXIT(Currency.Code);
+    END;
+
+    LOCAL PROCEDURE CreateDimensionSet@24(VAR DimSetEntry@1000 : Record 480);
+    BEGIN
+      CreateAndAddDimValueToDimSetEntry(DimSetEntry,LibraryERM.GetGlobalDimensionCode(1));
+    END;
+
+    LOCAL PROCEDURE CreateAndAddDimValueToDimSetEntry@31(VAR DimSetEntry@1001 : Record 480;DimensionCode@1000 : Code[20]);
+    VAR
+      DimensionValue@1002 : Record 349;
+    BEGIN
+      LibraryDimension.CreateDimensionValue(DimensionValue,DimensionCode);
+
+      WITH DimSetEntry DO BEGIN
+        INIT;
+        "Dimension Code" := DimensionCode;
+        "Dimension Value Code" := DimensionValue.Code;
+        "Dimension Value ID" := DimensionValue."Dimension Value ID";
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalLines@5(VAR GenJournalLine@1001 : Record 81;PostingDate@1003 : Date);
+    VAR
+      GenJournalBatch@1000 : Record 232;
+      Counter@1002 : Integer;
+    BEGIN
+      // Create General Journal Lines in an open Fiscal Year; Generate random No. of Lines from 1 to 10 and
+      // take any Random Amount from 1 to 1000.
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      FOR Counter := 1 TO LibraryRandom.RandIntInRange(2,5) DO BEGIN
+        LibraryERM.CreateGeneralJnlLine(
+          GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,GenJournalLine."Document Type"::" ",
+          GenJournalLine."Account Type"::"G/L Account",LibraryERM.CreateGLAccountNo,LibraryRandom.RandInt(1000));
+        GenJournalLine.VALIDATE("Posting Date",PostingDate);
+        GenJournalLine.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalLineUsingNewJournalBatch@48(VAR GenJournalLine@1000 : Record 81);
+    VAR
+      GenJournalBatch@1001 : Record 232;
+    BEGIN
+      // Creating blank General Journal Line that is to be used for Close Income Statement's Request Page Parameters.
+      CreateNewJournalBatch(GenJournalBatch);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,GenJournalLine."Document Type"::" ",
+        GenJournalLine."Account Type"::Customer,'',0);
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateNewJournalBatch@105(VAR GenJournalBatch@1001 : Record 232);
+    VAR
+      GenJournalTemplate@1000 : Record 80;
+    BEGIN
+      // Create a new General Journal Batch with Posting No. Series attached to it.
+      GenJournalTemplate.SETRANGE(Type,GenJournalTemplate.Type::General);
+      LibraryERM.FindGenJournalTemplate(GenJournalTemplate);
+      LibraryERM.CreateGenJournalBatch(GenJournalBatch,GenJournalTemplate.Name);
+      GenJournalBatch.SetupNewBatch;
+      GenJournalBatch.VALIDATE("Posting No. Series",CreateNoSeries);
+      GenJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostGenJnlLine@30(VAR GenJournalLine@1004 : Record 81;GLAccountNo@1000 : Code[20];Amount@1001 : Decimal);
+    VAR
+      GenJournalBatch@1003 : Record 232;
+    BEGIN
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,GenJournalLine."Document Type"::" ",
+        GenJournalLine."Account Type"::"G/L Account",GLAccountNo,Amount);
+      GenJournalLine.VALIDATE("Posting Date",LibraryFiscalYear.GetFirstPostingDate(FALSE));
+      GenJournalLine.MODIFY(TRUE);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE CreateGenJournalLinesWithDim@25(VAR GenJournalLine@1006 : Record 81;VAR TempDimensionSetEntry@1000 : TEMPORARY Record 480;PostingDate@1003 : Date;GLAccountNo@1004 : Code[20];BusinessUnitCode@1005 : Code[10]);
+    VAR
+      DimensionManagement@1001 : Codeunit 408;
+      Index@1002 : Integer;
+      BalanceGLAccountNo@1007 : Code[20];
+    BEGIN
+      BalanceGLAccountNo := LibraryERM.CreateGLAccountNo;
+      FOR Index := 1 TO LibraryRandom.RandIntInRange(2,5) DO BEGIN
+        LibraryJournals.CreateGenJournalLine(
+          GenJournalLine,GenJournalLine."Journal Template Name",GenJournalLine."Journal Batch Name",
+          GenJournalLine."Document Type"::" ",
+          GenJournalLine."Account Type"::"G/L Account",GLAccountNo,
+          GenJournalLine."Bal. Account Type"::"G/L Account",BalanceGLAccountNo,
+          LibraryRandom.RandDec(100,2));
+        GenJournalLine.VALIDATE("Posting Date",PostingDate);
+        GenJournalLine."Business Unit Code" := BusinessUnitCode;
+        GenJournalLine.MODIFY(TRUE);
+
+        GenJournalLine."Dimension Set ID" := DimensionManagement.GetDimensionSetID(TempDimensionSetEntry);
+        DimensionManagement.UpdateGlobalDimFromDimSetID(
+          GenJournalLine."Dimension Set ID",GenJournalLine."Shortcut Dimension 1 Code",GenJournalLine."Shortcut Dimension 2 Code");
+
+        GenJournalLine.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateNoSeries@103() : Code[10];
+    VAR
+      NoSeries@1000 : Record 308;
+      NoSeriesLine@1001 : Record 309;
+      LibraryUtility@1002 : Codeunit 131000;
+    BEGIN
+      LibraryUtility.CreateNoSeries(NoSeries,TRUE,FALSE,FALSE);
+      LibraryUtility.CreateNoSeriesLine(NoSeriesLine,NoSeries.Code,'','');
+      EXIT(NoSeries.Code);
+    END;
+
+    LOCAL PROCEDURE CloseIncomeStatement@11(GenJournalLine@1003 : Record 81;DocumentNo@1000 : Code[20]);
+    VAR
+      Date@1001 : Record 2000000007;
+    BEGIN
+      // Run the Close Income Statement Batch Job.
+      Date.SETRANGE("Period Type",Date."Period Type"::Month);
+      Date.SETRANGE("Period Start",LibraryFiscalYear.GetLastPostingDate(TRUE));
+      Date.FINDFIRST;
+
+      RunCloseIncomeStatement(GenJournalLine,NORMALDATE(Date."Period End"),TRUE,FALSE,DocumentNo);
+    END;
+
+    LOCAL PROCEDURE PostGeneralJournalLinesAndCloseIncomeStatement@18(VAR GenJournalLine@1004 : Record 81) DocumentNo : Code[20];
+    BEGIN
+      // Close existing Fiscal Year and Create new Fiscal Year.
+      LibraryFiscalYear.CloseFiscalYear;
+      ExecuteUIHandler;
+      LibraryFiscalYear.CreateFiscalYear;
+
+      // Create random Transactions in General Journal Line, Post the Journal Lines, Close the Fiscal Year and run Close Income Statement Batch Job.
+      CreateGeneralJournalLines(
+        GenJournalLine,LibraryFiscalYear.GetLastPostingDate(FALSE));
+      DocumentNo := GenJournalLine."Document No.";
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      LibraryFiscalYear.CloseFiscalYear;
+      CloseIncomeStatement(GenJournalLine,INCSTR(GenJournalLine."Document No."));
+    END;
+
+    LOCAL PROCEDURE RunCloseIncomeStatement@33(GenJournalLine@1001 : Record 81;PostingDate@1002 : Date;ClosePerBusinessUnit@1000 : Boolean;UseDimensions@1003 : Boolean;DocumentNo@1004 : Code[20]);
+    BEGIN
+      // Enqueue values for CloseIncomeStatementRequestPageHandler.
+      LibraryVariableStorage.Enqueue(PostingDate);
+      LibraryVariableStorage.Enqueue(GenJournalLine."Journal Template Name");
+      LibraryVariableStorage.Enqueue(GenJournalLine."Journal Batch Name");
+      LibraryVariableStorage.Enqueue(DocumentNo);
+      LibraryVariableStorage.Enqueue(LibraryERM.CreateGLAccountNo);
+      LibraryVariableStorage.Enqueue(ClosePerBusinessUnit);
+      LibraryVariableStorage.Enqueue(UseDimensions);
+
+      COMMIT;  // commit requires to run report.
+      REPORT.RUN(REPORT::"Close Income Statement");
+    END;
+
+    LOCAL PROCEDURE SelectDimForCloseIncomeStatement@27(VAR DimSetEntry@1001 : Record 480);
+    VAR
+      SelectedDimension@1000 : Record 369;
+    BEGIN
+      WITH SelectedDimension DO BEGIN
+        DELETEALL;
+
+        DimSetEntry.FINDSET;
+        REPEAT
+          "User ID" := USERID;
+          "Object Type" := 3;
+          "Object ID" := REPORT::"Close Income Statement";
+          "Dimension Code" := DimSetEntry."Dimension Code";
+          INSERT;
+        UNTIL DimSetEntry.NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateCurOnGeneralLedgerSetup@4(CurrencyCode@1000 : Code[10]) OldAdditionalReportingCurrency : Code[10];
+    VAR
+      GeneralLedgerSetup@1001 : Record 98;
+    BEGIN
+      // Update Additional Reporting Currency.
+      GeneralLedgerSetup.GET;
+      OldAdditionalReportingCurrency := GeneralLedgerSetup."Additional Reporting Currency";
+      GeneralLedgerSetup."Additional Reporting Currency" := CurrencyCode;
+      GeneralLedgerSetup.MODIFY(TRUE);
+      COMMIT;  // Required to run the Test Case on RTC because Modal Form Pops Up after modifying General Ledger Setup.
+    END;
+
+    LOCAL PROCEDURE VerifyDocumentNoInGLEntry@59(PostingDate@1001 : Date;SourceCode@1000 : Code[10];DocumentNo@1004 : Code[20]);
+    VAR
+      GLEntry@1002 : Record 17;
+    BEGIN
+      GLEntry.SETRANGE("Posting Date",PostingDate);
+      GLEntry.SETRANGE("Source Code",SourceCode);
+      GLEntry.FINDFIRST;
+      GLEntry.TESTFIELD("Document No.",DocumentNo);
+    END;
+
+    LOCAL PROCEDURE VerifyGLAccountBalance@7(AccountNo@1003 : Code[20];DocumentNo@1007 : Code[20];DocumentNo2@1008 : Code[20]);
+    VAR
+      GLAccount@1005 : Record 15;
+      GLEntry@1000 : Record 17;
+      TotalAmount@1002 : Decimal;
+    BEGIN
+      GLEntry.SETRANGE("Document No.",DocumentNo,DocumentNo2);
+      GLEntry.SETRANGE("G/L Account No.",AccountNo);
+      GLEntry.CALCSUMS(Amount);
+      TotalAmount := GLEntry.Amount;
+      GLAccount.GET(AccountNo);
+      GLAccount.CALCFIELDS(Balance);
+      Assert.AreEqual(GLAccount.Balance,TotalAmount,'Balance in GL Account not matched.');
+    END;
+
+    LOCAL PROCEDURE VerifyNoSeriesLine@26(SeriesCode@1001 : Code[10];LastNoUsed@1002 : Code[20]);
+    VAR
+      NoSeriesLine@1000 : Record 309;
+    BEGIN
+      NoSeriesLine.SETRANGE("Series Code",SeriesCode);
+      NoSeriesLine.FINDFIRST;
+      NoSeriesLine.TESTFIELD("Last No. Used",LastNoUsed);
+    END;
+
+    LOCAL PROCEDURE VerifyBusniessUnitCloseIncomeGLEntry@28(GLAccountNo@1000 : Code[20];BusinessUnitCode@1001 : Code[10];CloseIncomeDocumentNo@1002 : Code[20]);
+    VAR
+      GLEntryPosted@1003 : Record 17;
+      GLEntryCloseIncome@1004 : Record 17;
+    BEGIN
+      GLEntryPosted.SETRANGE("G/L Account No.",GLAccountNo);
+      GLEntryPosted.SETRANGE("Business Unit Code",BusinessUnitCode);
+      GLEntryPosted.SETFILTER("Document No.",'<>%1',CloseIncomeDocumentNo);
+      GLEntryPosted.CALCSUMS(Amount);
+
+      GLEntryCloseIncome.SETRANGE("G/L Account No.",GLAccountNo);
+      GLEntryCloseIncome.SETRANGE("Business Unit Code",BusinessUnitCode);
+      GLEntryCloseIncome.SETRANGE("Document No.",CloseIncomeDocumentNo);
+      GLEntryCloseIncome.FINDFIRST;
+
+      Assert.AreEqual(GLEntryPosted.Amount,-GLEntryCloseIncome.Amount,'Closed Income Entry has invalid amount');
+    END;
+
+    LOCAL PROCEDURE ExecuteUIHandler@78();
+    BEGIN
+      // Generate Dummy message. Required for executing the test case successfully in ES.
+      MESSAGE(ExpectedMessageMsg);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@1(Message@1000 : Text[1024]);
+    BEGIN
+      // Message Handler for confirm message.
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@10(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      // Confirm the Message.
+      Reply := TRUE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CloseIncomeStatementRequestPageHandler@29(VAR CloseIncomeStatement@1000 : TestRequestPage 94);
+    BEGIN
+      CloseIncomeStatement.FiscalYearEndingDate.SETVALUE(LibraryVariableStorage.DequeueDate); // Fiscal Year Ending Date
+      CloseIncomeStatement.GenJournalTemplate.SETVALUE(LibraryVariableStorage.DequeueText); // Gen. Journal Template
+      CloseIncomeStatement.GenJournalBatch.SETVALUE(LibraryVariableStorage.DequeueText); // Gen. Journal Batch
+      CloseIncomeStatement.DocumentNo.SETVALUE(LibraryVariableStorage.DequeueText); // Document No.
+      CloseIncomeStatement.RetainedEarningsAcc.SETVALUE(LibraryVariableStorage.DequeueText); // Retained Earnings Acc.
+      CloseIncomeStatement.Control5.SETVALUE(LibraryVariableStorage.DequeueBoolean); // Close Business Unit Code
+      IF LibraryVariableStorage.DequeueBoolean THEN // get stored flag for usage Dimensions
+        CloseIncomeStatement.Dimensions.ASSISTEDIT; // Select Dimensions
+      CloseIncomeStatement.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE DimensionSelectionMultipleModalPageHandler@32(VAR DimensionSelectionMultiple@1001 : TestPage 562);
+    BEGIN
+      // Select only two created dimensions
+      DimensionSelectionMultiple.FILTER.SETFILTER(Code,LibraryERM.GetGlobalDimensionCode(1));
+      DimensionSelectionMultiple.FIRST;
+      DimensionSelectionMultiple.Selected.SETVALUE(TRUE);
+      DimensionSelectionMultiple.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Close Fiscal Year] [Close Income Statement]
+      Test to verify Functionality of Close Income Statement.
+        1. Test the Close Income Statement Batch Job by Creating and Closing a Fiscal Year.
+        2. Test the Close Income Statement Batch Job by running it twice.
+        3. Test the Close Income Statement Batch Job With Additional Reporting Currency attached on General Ledger Setup.
+        4. Check that New Fiscal Year has been Created.
+        5. Check Last No. Used field value on No. Series after closing Income Statement using an Additional Reporting Currency.
+        6. Test that Posting No. Series updated after posting entries created from Close Income Statement.
+    }
+    END.
+  }
+}
+

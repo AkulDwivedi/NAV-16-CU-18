@@ -1,0 +1,817 @@
+OBJECT Codeunit 137070 SCM Avg. Cost Calc.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1008 : Codeunit 130000;
+      LibraryInventory@1000 : Codeunit 132201;
+      LibrarySales@1004 : Codeunit 130509;
+      LibraryPurchase@1006 : Codeunit 130512;
+      LibraryCosting@1002 : Codeunit 132200;
+      IncorrectAverageCostErr@1007 : TextConst 'ENU=Average Cost is incorrect.';
+      IncorrectAverageCostACYErr@1010 : TextConst 'ENU=Average Cost (ACY) is incorrect.';
+      LibraryERM@1009 : Codeunit 131300;
+      LibraryUtility@1011 : Codeunit 131000;
+      LibraryRandom@1012 : Codeunit 130440;
+      IsInitialized@1001 : Boolean;
+
+    [Test]
+    PROCEDURE TestBug270797_UsingSales@2();
+    VAR
+      Item@1002 : Record 27;
+      PurchaseLine@1008 : Record 39;
+      InventorySetup@1000 : Record 313;
+    BEGIN
+      // [SCENARIO] Average Cost Period: Day, Average Cost Calc. Type: Item, verify expected Cost after posting: purchase - sale - negative purchase - undo negative purchase - adjust cost - sale - adjust cost.
+
+      Initialize;
+      InvtSetup(InventorySetup."Average Cost Period"::Day,InventorySetup."Average Cost Calc. Type"::Item);
+      CreateItem(Item);
+      PostPurch(Item,'',WORKDATE,142.7,8.458);
+      PostSaleOrder(Item,'',WORKDATE,132.5,TRUE,TRUE,'');
+      PostNegPurch(Item,PurchaseLine,'',-28.7);
+      UndoNegPurch(PurchaseLine);
+      AdjustCost(Item);
+      PostSaleOrder(Item,'',WORKDATE,3.9,TRUE,TRUE,'');
+      AdjustCost(Item);
+      VerifyExpectedCostunit(Item."No.",8.458,0.001);
+    END;
+
+    [Test]
+    PROCEDURE TestBug270797_UsingTransfer@1();
+    VAR
+      Item@1002 : Record 27;
+      PurchaseLine@1000 : Record 39;
+      InventorySetup@1001 : Record 313;
+    BEGIN
+      // [SCENARIO] Average Cost Period: Day, Average Cost Calc. Type: Item & Location & Variant, verify expected Cost after posting: purchase - transfer - negative purchase - undo negative purchase - adjust cost - sale - adjust cost.
+
+      Initialize;
+      InvtSetup(InventorySetup."Average Cost Period"::Day,InventorySetup."Average Cost Calc. Type"::"Item & Location & Variant");
+      CreateItem(Item);
+      PostPurch(Item,'',WORKDATE,142.7,8.458);
+      PostTrans(Item,'',SelectLocBlue,132.5);
+      PostNegPurch(Item,PurchaseLine,'',-28.7);
+      UndoNegPurch(PurchaseLine);
+      AdjustCost(Item);
+      PostSaleOrder(Item,SelectLocBlue,WORKDATE,3.9,TRUE,TRUE,'');
+      AdjustCost(Item);
+      VerifyExpectedCostunit(Item."No.",8.458,0.001);
+    END;
+
+    [Test]
+    PROCEDURE TestBug270797NegativeStart@3();
+    VAR
+      Item@1002 : Record 27;
+      ItemJnlLine@1004 : Record 83;
+      ItemLedgerEntry@1005 : Record 32;
+      InventorySetup@1003 : Record 313;
+      ItemJnlPostLine@1001 : Codeunit 22;
+      Assert@1000 : Codeunit 130000;
+      i@1007 : Integer;
+      TotalCost@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Item Journal]
+      // [SCENARIO] Average Cost Period: Day, Average Cost Calc. Type: Item, verify Total Cost in ILEs after post: purchase (Qty = X*3) - three sales (Qty = X), then Adjust Cost.
+
+      Initialize;
+      InvtSetup(InventorySetup."Average Cost Period"::Day,InventorySetup."Average Cost Calc. Type"::Item);
+      CreateItem(Item);
+
+      ItemJnlLine.INIT;
+      ItemJnlLine.VALIDATE("Document No.",'my no');  // find a number
+      ItemJnlLine.VALIDATE("Posting Date",WORKDATE);
+      ItemJnlLine.VALIDATE("Item No.",Item."No.");
+      ItemJnlLine.VALIDATE(Quantity,3);
+      ItemJnlLine.VALIDATE("Entry Type",ItemJnlLine."Entry Type"::Purchase);
+      ItemJnlLine.VALIDATE(Amount,10);
+
+      ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+
+      FOR i := 1 TO 3 DO BEGIN
+        ItemJnlLine.INIT;
+        ItemJnlLine.VALIDATE("Document No.",'my no');
+        ItemJnlLine.VALIDATE("Posting Date",WORKDATE);
+        ItemJnlLine.VALIDATE("Item No.",Item."No.");
+        ItemJnlLine.VALIDATE(Quantity,1);
+        ItemJnlLine.VALIDATE("Entry Type",ItemJnlLine."Entry Type"::Sale);
+
+        ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+      END;
+
+      AdjustCost(Item);
+
+      // VERIFYCATION
+      ItemLedgerEntry.SETCURRENTKEY("Item No.");
+      ItemLedgerEntry.SETRANGE("Item No.",Item."No.");
+      IF ItemLedgerEntry.FINDSET THEN
+        REPEAT
+          ItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)");
+          TotalCost += ItemLedgerEntry."Cost Amount (Actual)";
+        UNTIL ItemLedgerEntry.NEXT = 0;
+
+      Assert.AreEqual(0,TotalCost,'');
+      // entry no   Cost per unit            Cost amount              qty
+      // 734     3,33333000000000000000 10,00000000000000000000  3,00000000000000000000
+      // 735     0,00000000000000000000 0,00000000000000000000  -1,00000000000000000000
+      // 736     0,00000000000000000000 0,00000000000000000000  -1,00000000000000000000
+      // 737     0,00000000000000000000 0,00000000000000000000  -1,00000000000000000000
+    END;
+
+    [Test]
+    PROCEDURE TestBug292444_ReproSteps@15();
+    VAR
+      Item@1012 : Record 27;
+      InventorySetup@1011 : Record 313;
+      QtyRevalued@1001 : Decimal;
+      InbndQty@1009 : Decimal;
+      InbndQtyLeftOnInventory@1008 : Decimal;
+      InbndDate@1007 : Date;
+      ShipOutbndQty@1006 : Decimal;
+      ShipOutbndDate@1005 : Date;
+      UnitCost@1002 : Decimal;
+      UnitCostRevaluedInitial@1000 : Decimal;
+    BEGIN
+      // [FEATURE] [Revaluation]
+      // [SCENARIO] Verify that can run Revaluation in chain: purchase(day 1) - ship sales(day 2) - adjust cost - revaluate(day 2).
+
+      // Bug 292444 Calculate Inventory Value batch doesn't work because of fix 268295
+      // Scenario: Revaluation should be allowed for an inbnd ILE even it has one ore more otbnd entries not invoiced
+
+      // Setup test
+      Initialize;
+      InvtSetup(InventorySetup."Average Cost Period"::Day,InventorySetup."Average Cost Calc. Type"::Item);
+      CreateItem(Item); // Step 1
+
+      // Steps
+      // Day 1
+      InbndDate := WORKDATE;
+      InbndQty := 10;
+      UnitCost := 100;
+      PostPurch(Item,'',InbndDate,InbndQty,UnitCost); // Step 2 & 3 Inbnd entry shipped and invoiced to be revaluated
+
+      // Day 2
+      InbndQtyLeftOnInventory := 1;
+      ShipOutbndDate := CALCDATE('<1D>',InbndDate);
+      ShipOutbndQty := InbndQty - InbndQtyLeftOnInventory;
+      PostSaleOrder(Item,'',ShipOutbndDate,ShipOutbndQty,TRUE,FALSE,''); // Step 4 & 5 Ship Sales Order = outbnd not invoiced
+
+      AdjustCost(Item); // Step 6
+      UnitCostRevaluedInitial := 1200;
+      CalcAndPostRevaluation(Item,ShipOutbndDate,UnitCostRevaluedInitial,QtyRevalued); // Step 7
+      // Actual Result from bug: An error is thrown - "...cannot be revalued because there is at least one not completely invoiced Item Ledger Entry."
+      // Expected result is that Calculate Inventory Value batch can run in Step 7
+
+      // Regresion introduced in bug 268295
+    END;
+
+    [Test]
+    PROCEDURE TestBug207612_ReproSteps@14();
+    VAR
+      Item@1002 : Record 27;
+      InventorySetup@1005 : Record 313;
+      Assert@1014 : Codeunit 130000;
+      SODocNo@1003 : Code[20];
+      InbndQty@1000 : Decimal;
+      QtyRevalued@1013 : Decimal;
+      InbndDate@1001 : Date;
+      ShipOutbndQty@1008 : Decimal;
+      ShipOutbndDate@1006 : Date;
+      InvOutbndQty@1009 : Decimal;
+      InvOutbndDate@1007 : Date;
+      UnitCost@1012 : Decimal;
+      UnitCostRevaluedInitial@1011 : Decimal;
+      UnitCostRevaluedFinal@1010 : Decimal;
+    BEGIN
+      // [SCENARIO 57537] Verify Cost in Item after run Adjust Cost, after chain: purchase(day 1) - ship sale(day 2) - adjust cost - revaluate(day 2) - invoice sale (previous, day 3) - adjust cost - revaluate(day 3).
+
+      // Unit cost on item card demonstrate a negative amount,
+      // probably due to an incorrect revaluable quantity in a Revaluation journal earlier in the process.
+
+      // Scenario: Revaluation of an inbnd ILE is allowed even it has one ore more otbnd entries not invoiced. However if
+      // Revaluation is made in this case it should not be forwarded to outbnd entries not invoiced at the time of revaluation since
+      // revaluation is done on qty on inventory.
+
+      // Setup test
+      Initialize;
+      InvtSetup(InventorySetup."Average Cost Period"::Day,InventorySetup."Average Cost Calc. Type"::Item);
+      CreateItem(Item); // Step 1
+
+      // Steps
+      // Day 1
+      InbndDate := WORKDATE;
+      InbndQty := 10;
+      UnitCost := 100;
+      PostPurch(Item,'',InbndDate,InbndQty,UnitCost); // Step 2 & 3 Inbnd entry shipped and invoiced to be revaluated
+
+      // Day 2
+      ShipOutbndDate := CALCDATE('<1D>',InbndDate);
+      ShipOutbndQty := 9;
+      SODocNo := PostSaleOrder(Item,'',ShipOutbndDate,ShipOutbndQty,TRUE,FALSE,''); // Step 4 & 5 Ship Sales Order = outbnd not invoiced
+
+      AdjustCost(Item); // Step 6
+      UnitCostRevaluedInitial := 1200;
+      CalcAndPostRevaluation(Item,ShipOutbndDate,UnitCostRevaluedInitial,QtyRevalued); // Step 7 Revaluate
+      Assert.AreEqual(InbndQty - ShipOutbndQty,QtyRevalued,'The quantity to revalue should be InboundQty - OutboundQty)');
+
+      // Day 3
+      InvOutbndDate := CALCDATE('<2D>',InbndDate);
+      InvOutbndQty := ShipOutbndQty;
+      PostSaleOrder(Item,'',InvOutbndDate,InvOutbndQty,FALSE,TRUE,SODocNo); // Step 8 & 9 Invoice Sales Order shipped earlier - previos outbnd now invoiced
+
+      AdjustCost(Item); // Step 10
+      UnitCostRevaluedFinal := 120;
+      CalcAndPostRevaluation(Item,InvOutbndDate,UnitCostRevaluedFinal,QtyRevalued); // Step 11 Revaluate
+      Assert.AreEqual(InbndQty - ShipOutbndQty,QtyRevalued,'The quantity to revalue should be InboundQty - OutboundQty)');
+
+      // Not needed: PostSaleOrder(Item,'',InvOutbndDate,InbndQtyLeftOnInventory,TRUE,TRUE,''); // Step 12 Ship & Invoice Sales Order of remaining qty on inventory
+      AdjustCost(Item); // Step 13
+
+      // Verification
+      VerifyItemUnitCost(Item."No.",UnitCostRevaluedFinal); // Actual result from bug: -8580
+    END;
+
+    [Test]
+    PROCEDURE TestBug207612_ReproSteps_MoveRevalDateToInbndDate@16();
+    VAR
+      Item@1002 : Record 27;
+      InventorySetup@1005 : Record 313;
+      Assert@1014 : Codeunit 130000;
+      QtyRevalued@1013 : Decimal;
+      SODocNo@1003 : Code[20];
+      InbndQty@1000 : Decimal;
+      InbndDate@1001 : Date;
+      ShipOutbndQty@1008 : Decimal;
+      ShipOutbndDate@1006 : Date;
+      InvOutbndQty@1009 : Decimal;
+      InvOutbndDate@1007 : Date;
+      UnitCost@1012 : Decimal;
+      UnitCostRevaluedInitial@1011 : Decimal;
+      UnitCostRevaluedFinal@1010 : Decimal;
+    BEGIN
+      // [SCENARIO] Verify Cost in Item after run Adjust Cost, after chain: purchase(day 1) - ship sale(day 2) - adjust cost - revaluate(day 1) - invoice sale (previous, day 3) - adjust cost - revaluate(day 3).
+
+      // As TestBug207612_ReproSteps except using Inbnd date (and InbndQty) in step 6 to revalue the entire purchased quantity from step 2 & 3
+      // This is to test that not only Entry No is used in Adjustment of revaluation but alse Date of revaluation is taken into account
+
+      // Setup test
+      Initialize;
+      InvtSetup(InventorySetup."Average Cost Period"::Day,InventorySetup."Average Cost Calc. Type"::Item);
+      CreateItem(Item); // Step 1
+
+      // Steps
+      // Day 1
+      InbndDate := WORKDATE;
+      InbndQty := 10;
+      UnitCost := 100;
+      PostPurch(Item,'',InbndDate,InbndQty,UnitCost); // Step 2 & 3 Inbnd entry shipped and invoiced to be revaluated
+
+      // Day 2
+      ShipOutbndDate := CALCDATE('<1D>',InbndDate);
+      ShipOutbndQty := 9;
+      SODocNo := PostSaleOrder(Item,'',ShipOutbndDate,ShipOutbndQty,TRUE,FALSE,''); // Step 4 & 5 Ship Sales Order = outbnd not invoiced
+
+      AdjustCost(Item); // Step 6
+      UnitCostRevaluedInitial := 1200;
+      // Use Inbnd date (and InbndQty)
+      CalcAndPostRevaluation(Item,InbndDate,UnitCostRevaluedInitial,QtyRevalued); // Step 7 Revaluate
+      Assert.AreEqual(InbndQty,QtyRevalued,'The quantity to revalue should be InboundQty');
+
+      // Day 3
+      InvOutbndDate := CALCDATE('<2D>',InbndDate);
+      InvOutbndQty := ShipOutbndQty;
+      PostSaleOrder(Item,'',InvOutbndDate,InvOutbndQty,FALSE,TRUE,SODocNo); // Step 8 & 9 Invoice Sales Order shipped earlier - previos outbnd now invoiced
+
+      AdjustCost(Item); // Step 10
+      UnitCostRevaluedFinal := 120;
+      CalcAndPostRevaluation(Item,InvOutbndDate,UnitCostRevaluedFinal,QtyRevalued); // Step 11 Revaluate
+      Assert.AreEqual(InbndQty - ShipOutbndQty,QtyRevalued,'The quantity to revalue should be InboundQty - OutboundQty)');
+
+      // Not needed: PostSaleOrder(Item,'',InvOutbndDate,InbndQtyLeftOnInventory,TRUE,TRUE,''); // Step 12 Ship & Invoice Sales Order of remaining qty on inventory
+      AdjustCost(Item); // Step 13
+
+      // Verification
+      VerifyItemUnitCost(Item."No.",UnitCostRevaluedFinal); // Actual result from bug: -8580
+    END;
+
+    [Test]
+    PROCEDURE AverageCostWhenSumOfCostIsEqualToRoundingPrecision@18();
+    VAR
+      GeneralLedgerSetup@1013 : Record 98;
+      Item@1000 : Record 27;
+      ItemCostMgt@1005 : Codeunit 5804;
+      ExpectedAverageCost@1006 : Decimal;
+      ExpectedAverageCostACY@1007 : Decimal;
+      AverageCost@1010 : Decimal;
+      AverageCostACY@1011 : Decimal;
+    BEGIN
+      // [FEATURE] [Average Cost] [UT]
+      // [SCENARIO 380304] In case sum of Cost Amount for Item is equal to rounding precision of a local currency, the Average Cost is equal to precise remaining Cost divided by remaining Quantity.
+      Initialize;
+      GeneralLedgerSetup.GET;
+      LibraryInventory.CreateItem(Item);
+
+      // [GIVEN] Fully applied positive and negative Item entries "E1+" and "E1-".
+      // [GIVEN] There is no difference between Cost Amounts of "E1+" and "E1-" as the cost is considered to have been adjusted.
+      PostPositiveAndNegativeAdjustments(Item."No.",0,0,0);
+
+      // [GIVEN] Partially applied positive and negative Item entries "E2+" and "E2-".
+      // [GIVEN] Difference between Cost Amounts of "E2+" and "E2-" is equal to the rounding precision of a local currency.
+      PostPositiveAndNegativeAdjustments(
+        Item."No.",LibraryRandom.RandInt(5),GeneralLedgerSetup."Amount Rounding Precision",0);
+
+      // [WHEN] Calculate Average Cost.
+      ItemCostMgt.CalculateAverageCost(Item,AverageCost,AverageCostACY);
+
+      // [THEN] Average Cost is equal to unit cost of the open positive Item entry "E2+".
+      CalcOpenItemLedgerEntriesAverageUnitCosts(Item."No.",ExpectedAverageCost,ExpectedAverageCostACY);
+      Assert.AreNearlyEqual(
+        ExpectedAverageCost,AverageCost,GeneralLedgerSetup."Amount Rounding Precision",IncorrectAverageCostErr);
+    END;
+
+    [Test]
+    PROCEDURE AverageCostACYWhenSumOfCostIsEqualToRoundingPrecision@23();
+    VAR
+      GeneralLedgerSetup@1013 : Record 98;
+      Item@1000 : Record 27;
+      Currency@1009 : Record 4;
+      ItemCostMgt@1005 : Codeunit 5804;
+      OldACYCode@1012 : Code[10];
+      ExpectedAverageCost@1008 : Decimal;
+      ExpectedAverageCostACY@1007 : Decimal;
+      AverageCost@1010 : Decimal;
+      AverageCostACY@1011 : Decimal;
+    BEGIN
+      // [FEATURE] [Average Cost] [UT]
+      // [SCENARIO 380304] In case sum of Cost Amount in an additional reporting currency (ACY) for Item is equal to rounding precision of ACY, the Average Cost in ACY is equal to precise remaining Cost divided by remaining Quantity.
+      Initialize;
+      CreateCurrencyWithRoundingPrecision(Currency);
+      OldACYCode := UpdateAdditionalReportingCurrencyInGLSetup(GeneralLedgerSetup,Currency.Code);
+      LibraryInventory.CreateItem(Item);
+
+      // [GIVEN] Fully applied positive and negative Item entries "E1+" and "E1-".
+      // [GIVEN] There is no difference between Cost Amounts (ACY) of "E1+" and "E1-" as the cost is considered to have been adjusted.
+      PostPositiveAndNegativeAdjustments(Item."No.",0,0,0);
+
+      // [GIVEN] Partially applied positive and negative Item entries "E2+" and "E2-".
+      // [GIVEN] Difference between Cost Amounts (ACY) of "E2+" and "E2-" is equal to the rounding precision of the ACY.
+      PostPositiveAndNegativeAdjustments(
+        Item."No.",LibraryRandom.RandInt(5),0,Currency."Amount Rounding Precision");
+
+      // [WHEN] Calculate Average Cost.
+      ItemCostMgt.CalculateAverageCost(Item,AverageCost,AverageCostACY);
+
+      // [THEN] Average Cost is equal to unit cost (ACY) of the open positive Item entry "E2+".
+      CalcOpenItemLedgerEntriesAverageUnitCosts(Item."No.",ExpectedAverageCost,ExpectedAverageCostACY);
+      Assert.AreNearlyEqual(
+        ExpectedAverageCostACY,AverageCostACY,Currency."Amount Rounding Precision",IncorrectAverageCostACYErr);
+
+      // restore ACY in General Ledger Setup
+      UpdateAdditionalReportingCurrencyInGLSetup(GeneralLedgerSetup,OldACYCode);
+    END;
+
+    [Test]
+    PROCEDURE AverageCostWhenSumOfCostIsGreaterThanRoundingPrecision@33();
+    VAR
+      GeneralLedgerSetup@1013 : Record 98;
+      Item@1000 : Record 27;
+      ItemCostMgt@1005 : Codeunit 5804;
+      ExpectedAverageCost@1002 : Decimal;
+      ExpectedAverageCostACY@1001 : Decimal;
+      AverageCost@1010 : Decimal;
+      AverageCostACY@1011 : Decimal;
+    BEGIN
+      // [FEATURE] [Average Cost] [UT]
+      // [SCENARIO 380304] In case sum of Cost Amount for Item is greater than rounding precision of a local currency, the Average Cost is equal to the sum of cost divided by the sum of quantity of posted entries.
+      Initialize;
+      GeneralLedgerSetup.GET;
+      LibraryInventory.CreateItem(Item);
+
+      // [GIVEN] Fully applied positive and negative Item entries "E1+" and "E1-".
+      // [GIVEN] There is no difference between Cost Amounts of "E1+" and "E1-" as the cost is considered to have been adjusted.
+      PostPositiveAndNegativeAdjustments(Item."No.",0,0,0);
+
+      // [GIVEN] Partially applied positive and negative Item entries "E2+" and "E2-".
+      // [GIVEN] Difference between Cost Amounts of "E2+" and "E2-" is greater than the rounding precision of a local currency.
+      PostPositiveAndNegativeAdjustments(
+        Item."No.",LibraryRandom.RandInt(5),
+        GeneralLedgerSetup."Amount Rounding Precision" + LibraryRandom.RandInt(5),0);
+
+      // [WHEN] Calculate Average Cost.
+      ItemCostMgt.CalculateAverageCost(Item,AverageCost,AverageCostACY);
+
+      // [THEN] Average Cost is equal to the sum of cost divided by the sum of quantity of all entries "E1+", "E2+", "E1-", "E2-".
+      CalcBulkAverageUnitCosts(Item."No.",ExpectedAverageCost,ExpectedAverageCostACY);
+      Assert.AreNearlyEqual(
+        ExpectedAverageCost,AverageCost,GeneralLedgerSetup."Amount Rounding Precision",IncorrectAverageCostErr);
+    END;
+
+    [Test]
+    PROCEDURE AverageCostACYWhenSumOfCostIsGreaterThanRoundingPrecision@32();
+    VAR
+      GeneralLedgerSetup@1013 : Record 98;
+      Item@1000 : Record 27;
+      Currency@1009 : Record 4;
+      ItemCostMgt@1005 : Codeunit 5804;
+      OldACYCode@1012 : Code[10];
+      ExpectedAverageCost@1002 : Decimal;
+      ExpectedAverageCostACY@1001 : Decimal;
+      AverageCost@1010 : Decimal;
+      AverageCostACY@1011 : Decimal;
+    BEGIN
+      // [FEATURE] [Average Cost] [UT]
+      // [SCENARIO 380304] In case sum of Cost Amount in an additional reporting currency (ACY) for Item is greater than the rounding precision of ACY, the Average Cost in ACY is equal to the sum of cost (ACY) divided by the sum of quantity.
+      Initialize;
+      CreateCurrencyWithRoundingPrecision(Currency);
+      OldACYCode := UpdateAdditionalReportingCurrencyInGLSetup(GeneralLedgerSetup,Currency.Code);
+      LibraryInventory.CreateItem(Item);
+
+      // [GIVEN] Fully applied positive and negative Item entries "E1+" and "E1-".
+      // [GIVEN] There is no difference between Cost Amounts (ACY) of "E1+" and "E1-" as the cost is considered to have been adjusted.
+      PostPositiveAndNegativeAdjustments(Item."No.",0,0,0);
+
+      // [GIVEN] Partially applied positive and negative Item entries "E2+" and "E2-".
+      // [GIVEN] Difference between Cost Amounts (ACY) of "E2+" and "E2-" is greater than the rounding precision of the ACY.
+      PostPositiveAndNegativeAdjustments(
+        Item."No.",LibraryRandom.RandInt(5),0,
+        Currency."Amount Rounding Precision" + LibraryRandom.RandInt(5));
+
+      // [WHEN] Calculate Average Cost.
+      ItemCostMgt.CalculateAverageCost(Item,AverageCost,AverageCostACY);
+
+      // [THEN] Average Cost is equal to the sum of cost (ACY) divided by the sum of quantity of all entries "E1+", "E2+", "E1-", "E2-".
+      CalcBulkAverageUnitCosts(Item."No.",ExpectedAverageCost,ExpectedAverageCostACY);
+      Assert.AreNearlyEqual(
+        ExpectedAverageCostACY,AverageCostACY,Currency."Amount Rounding Precision",IncorrectAverageCostACYErr);
+
+      // restore ACY in General Ledger Setup
+      UpdateAdditionalReportingCurrencyInGLSetup(GeneralLedgerSetup,OldACYCode);
+    END;
+
+    LOCAL PROCEDURE InvtSetup@5(AverageCostPeriod@1002 : Integer;AverageCostCalcType@1001 : Integer);
+    VAR
+      InventorySetup@1000 : Record 313;
+    BEGIN
+      InventorySetup.GET;
+      InventorySetup.VALIDATE("Average Cost Period",AverageCostPeriod);
+      InventorySetup."Average Cost Calc. Type" := AverageCostCalcType;
+      InventorySetup."Automatic Cost Posting" := FALSE;
+      InventorySetup."Automatic Cost Adjustment" := InventorySetup."Automatic Cost Adjustment"::Never;
+      InventorySetup."Expected Cost Posting to G/L" := FALSE;
+      InventorySetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItem@6(VAR Item@1001 : Record 27);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE(Description,'Description Required DK');
+      Item.VALIDATE("Costing Method",Item."Costing Method"::Average);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE PostPurch@7(Item@1000 : Record 27;LocationCode@1003 : Code[10];PostingDate@1006 : Date;Qty@1004 : Decimal;UnitAmt@1005 : Decimal);
+    VAR
+      ItemJnlLine@1001 : Record 83;
+      ItemJnlPostLine@1002 : Codeunit 22;
+    BEGIN
+      ItemJnlLine.INIT;
+      ItemJnlLine.VALIDATE("Document No.",'my no');
+      ItemJnlLine.VALIDATE("Posting Date",PostingDate);
+      ItemJnlLine.VALIDATE("Item No.",Item."No.");
+      ItemJnlLine.VALIDATE("Location Code",LocationCode);
+      ItemJnlLine.VALIDATE(Quantity,Qty);
+      ItemJnlLine.VALIDATE("Entry Type",ItemJnlLine."Entry Type"::Purchase);
+      ItemJnlLine.VALIDATE("Unit Cost",UnitAmt);
+      ItemJnlLine.VALIDATE("Unit Amount",UnitAmt);
+      ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+    END;
+
+    LOCAL PROCEDURE PostTrans@8(Item@1000 : Record 27;FromLocationCode@1004 : Code[10];ToLocationCode@1005 : Code[10];Qty@1007 : Decimal);
+    VAR
+      ItemJnlLine@1001 : Record 83;
+      ItemJnlPostLine@1002 : Codeunit 22;
+    BEGIN
+      ItemJnlLine.INIT;
+      ItemJnlLine.VALIDATE("Document No.",'my no');
+      ItemJnlLine.VALIDATE("Posting Date",WORKDATE);
+      ItemJnlLine.VALIDATE("Item No.",Item."No.");
+      ItemJnlLine.VALIDATE("Location Code",FromLocationCode);
+      ItemJnlLine.VALIDATE("Entry Type",ItemJnlLine."Entry Type"::Transfer);
+      ItemJnlLine.VALIDATE("New Location Code",ToLocationCode);
+      ItemJnlLine.VALIDATE(Quantity,Qty);
+      ItemJnlPostLine.RunWithCheck(ItemJnlLine);
+    END;
+
+    LOCAL PROCEDURE PostNegPurch@9(Item@1000 : Record 27;VAR PurchLine@1001 : Record 39;LocationCode@1005 : Code[10];Qty@1006 : Decimal);
+    VAR
+      PurchHeader@1002 : Record 38;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchHeader,PurchHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchLine,PurchHeader,PurchLine.Type::Item,Item."No.",Qty);
+      PurchLine.VALIDATE("Location Code",LocationCode);
+      PurchLine.MODIFY(TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchHeader,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE UndoNegPurch@10(PurchLine@1002 : Record 39);
+    VAR
+      PurchRcptLine@1001 : Record 121;
+      UndoPurchRcptLine@1003 : Codeunit 5813;
+    BEGIN
+      PurchRcptLine.SETRANGE("Order No.",PurchLine."Document No.");
+      PurchRcptLine.SETRANGE("Order Line No.",PurchLine."Line No.");
+      UndoPurchRcptLine.SetHideDialog(TRUE);
+      UndoPurchRcptLine.RUN(PurchRcptLine);
+    END;
+
+    LOCAL PROCEDURE CalcAndPostRevaluation@22(Item@1000 : Record 27;PostingDate@1001 : Date;UnitCostRevalued@1002 : Decimal;VAR QtyRevalued@1006 : Decimal);
+    VAR
+      ItemJnlLine@1005 : Record 83;
+      ItemJournalBatch@1007 : Record 233;
+      LibraryUtility@1004 : Codeunit 131000;
+    BEGIN
+      // Do revaluation of Item
+      GetItemJournalBatch(ItemJournalBatch,ItemJournalBatch."Template Type"::Revaluation);
+      ItemJnlLine.INIT;
+      ItemJnlLine."Journal Template Name" := ItemJournalBatch."Journal Template Name";
+      ItemJnlLine."Journal Batch Name" := ItemJournalBatch.Name;
+      LibraryCosting.CreateRevaluationJnlLines(Item,ItemJnlLine,LibraryUtility.GenerateGUID,1,0,FALSE,FALSE,FALSE,PostingDate);
+
+      // Change Unit Cost
+      ItemJnlLine.SETRANGE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJnlLine.SETRANGE("Journal Batch Name",ItemJournalBatch.Name);
+      ItemJnlLine.FINDFIRST;
+      ItemJnlLine.VALIDATE("Unit Cost (Revalued)",UnitCostRevalued);
+      ItemJnlLine.MODIFY;
+      QtyRevalued := ItemJnlLine.Quantity;
+
+      // Post Revaluation
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE AdjustCost@11(Item@1000 : Record 27);
+    BEGIN
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+    END;
+
+    LOCAL PROCEDURE PostSaleOrder@12(Item@1000 : Record 27;LocationCode@1005 : Code[10];PostingDate@1001 : Date;Qty@1006 : Decimal;Ship@1004 : Boolean;Invoice@1007 : Boolean;DocumentNo@1008 : Code[20]) : Code[20];
+    VAR
+      SalesHeader@1003 : Record 36;
+      SalesLine@1002 : Record 37;
+    BEGIN
+      IF DocumentNo = '' THEN
+        LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'')
+      ELSE
+        SalesHeader.GET(SalesHeader."Document Type"::Order,DocumentNo);
+
+      SalesHeader.Status := SalesHeader.Status::Open; // Only Open Sales Orders can be changed
+      SalesHeader.VALIDATE("Posting Date",PostingDate);
+      SalesHeader.MODIFY(TRUE);
+
+      IF DocumentNo = '' THEN
+        LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",Qty)
+      ELSE BEGIN
+        SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+        SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+        SalesLine.FINDFIRST;
+      END;
+
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+
+      LibrarySales.PostSalesDocument(SalesHeader,Ship,Invoice);
+
+      EXIT(SalesHeader."No.");
+    END;
+
+    LOCAL PROCEDURE VerifyExpectedCostunit@13(itemNo@1000 : Code[20];expectedValue@1001 : Decimal;tolerance@1005 : Decimal);
+    VAR
+      ValueEntry@1002 : Record 5802;
+      ItemLedgerEntry@1003 : Record 32;
+      Assert@1004 : Codeunit 130000;
+    BEGIN
+      ItemLedgerEntry.SETCURRENTKEY("Item No.");
+      ItemLedgerEntry.SETRANGE("Item No.",itemNo);
+      ValueEntry.SETCURRENTKEY("Item Ledger Entry No.");
+      IF ItemLedgerEntry.FINDSET THEN
+        REPEAT
+          ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntry."Entry No.");
+          ValueEntry.FINDFIRST;
+          Assert.AreNearlyEqual(expectedValue,ValueEntry."Cost per Unit",tolerance,'');
+        UNTIL ItemLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyItemUnitCost@24(ItemNo@1000 : Code[20];ExpectedUnitCost@1001 : Decimal);
+    VAR
+      Item@1003 : Record 27;
+      Assert@1002 : Codeunit 130000;
+    BEGIN
+      Item.GET(ItemNo);
+      Assert.AreEqual(ExpectedUnitCost,Item."Unit Cost",'The Unit Cost is not calculated correctly.');
+    END;
+
+    LOCAL PROCEDURE SelectLocBlue@17() : Code[10];
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      Location.SETRANGE("Use As In-Transit",FALSE);
+      Location.SETRANGE("Bin Mandatory",FALSE);
+      Location.SETRANGE("Directed Put-away and Pick",FALSE);
+      Location.SETRANGE("Require Receive",FALSE);
+      Location.SETRANGE("Require Shipment",FALSE);
+      Location.FINDFIRST;
+      EXIT(Location.Code);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1003 : Codeunit 131305;
+    BEGIN
+      // Lazy Setup.
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      IsInitialized := TRUE;
+
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateCurrencyWithRoundingPrecision@28(VAR Currency@1000 : Record 4);
+    BEGIN
+      WITH Currency DO BEGIN
+        LibraryERM.CreateCurrency(Currency);
+        VALIDATE("Amount Rounding Precision",1 / POWER(10,LibraryRandom.RandInt(5)));
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE MockItemLedgerEntry@27(ItemNo@1002 : Code[20];Qty@1003 : Decimal;RemQty@1006 : Decimal;CostAmt@1004 : Decimal;CostAmtACY@1005 : Decimal);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      WITH ItemLedgerEntry DO BEGIN
+        INIT;
+        "Entry No." := LibraryUtility.GetNewRecNo(ItemLedgerEntry,FIELDNO("Entry No."));
+        "Item No." := ItemNo;
+        Quantity := Qty;
+        "Remaining Quantity" := RemQty;
+        Open := "Remaining Quantity" <> 0;
+        Positive := Quantity > 0;
+        INSERT;
+      END;
+
+      MockValueEntry(ItemLedgerEntry,CostAmt,CostAmtACY);
+    END;
+
+    LOCAL PROCEDURE MockValueEntry@29(ItemLedgerEntry@1000 : Record 32;CostAmt@1002 : Decimal;CostAmtACY@1003 : Decimal);
+    VAR
+      ValueEntry@1004 : Record 5802;
+    BEGIN
+      WITH ValueEntry DO BEGIN
+        INIT;
+        "Entry No." := LibraryUtility.GetNewRecNo(ValueEntry,FIELDNO("Entry No."));
+        "Item Ledger Entry No." := ItemLedgerEntry."Entry No.";
+        "Item No." := ItemLedgerEntry."Item No.";
+        "Item Ledger Entry Quantity" := ItemLedgerEntry.Quantity;
+        "Cost Amount (Actual)" := CostAmt;
+        "Cost Amount (Actual) (ACY)" := CostAmtACY;
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE PostPositiveAndNegativeAdjustments@21(ItemNo@1001 : Code[20];QtyDifference@1008 : Decimal;AmtDifference@1009 : Decimal;AmtACYDifference@1006 : Decimal);
+    VAR
+      PositiveQty@1005 : Decimal;
+      PositiveAmt@1004 : Decimal;
+      PositiveAmtACY@1007 : Decimal;
+      NegativeQty@1003 : Decimal;
+      NegativeAmt@1002 : Decimal;
+      NegativeAmtACY@1010 : Decimal;
+    BEGIN
+      PositiveQty := LibraryRandom.RandIntInRange(11,20);
+      PositiveAmt := LibraryRandom.RandDecInRange(50,100,2);
+      PositiveAmtACY := LibraryRandom.RandDecInRange(50,100,2);
+      NegativeQty := PositiveQty - QtyDifference;
+      NegativeAmt := PositiveAmt - AmtDifference;
+      NegativeAmtACY := PositiveAmtACY - AmtACYDifference;
+
+      MockItemLedgerEntry(ItemNo,PositiveQty,PositiveQty - NegativeQty,PositiveAmt,PositiveAmtACY);
+      MockItemLedgerEntry(ItemNo,-NegativeQty,0,-NegativeAmt,-NegativeAmtACY);
+    END;
+
+    LOCAL PROCEDURE GetItemJournalBatch@25(VAR ItemJournalBatch@1000 : Record 233;TemplateType@1002 : Integer);
+    VAR
+      LibraryUtility@1001 : Codeunit 131000;
+    BEGIN
+      ItemJournalBatch.SETRANGE("Template Type",TemplateType);
+      IF ItemJournalBatch.FINDFIRST THEN BEGIN
+        IF ItemJournalBatch."No. Series" <> '' THEN BEGIN
+          ItemJournalBatch.VALIDATE("No. Series",'');
+          ItemJournalBatch.MODIFY(TRUE);
+        END;
+        EXIT;
+      END;
+
+      ItemJournalBatch.INIT;
+      ItemJournalBatch.VALIDATE("Journal Template Name",GetItemJournalTemplate(TemplateType));
+      ItemJournalBatch.VALIDATE(
+        Name,COPYSTR(LibraryUtility.GenerateRandomCode(ItemJournalBatch.FIELDNO(Name),DATABASE::"Item Journal Batch"),1,
+          MAXSTRLEN(ItemJournalBatch.Name)));
+      ItemJournalBatch.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetItemJournalTemplate@26(TemplateType@1002 : Integer) : Code[10];
+    VAR
+      ItemJournalTemplate@1000 : Record 82;
+      LibraryUtility@1001 : Codeunit 131000;
+    BEGIN
+      ItemJournalTemplate.SETRANGE(Type,TemplateType);
+      IF ItemJournalTemplate.FINDFIRST THEN
+        EXIT(ItemJournalTemplate.Name);
+
+      ItemJournalTemplate.INIT;
+      ItemJournalTemplate.Name :=
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(ItemJournalTemplate.FIELDNO(Name),DATABASE::"Item Journal Template"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Item Journal Template",ItemJournalTemplate.FIELDNO(Name)));
+      ItemJournalTemplate.Type := TemplateType;
+      ItemJournalTemplate.INSERT;
+
+      EXIT(ItemJournalTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE UpdateAdditionalReportingCurrencyInGLSetup@19(VAR GeneralLedgerSetup@1000 : Record 98;ACYCode@1001 : Code[10]) OldACYCode : Code[10];
+    BEGIN
+      WITH GeneralLedgerSetup DO BEGIN
+        GET;
+        OldACYCode := "Additional Reporting Currency";
+        "Additional Reporting Currency" := ACYCode;
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CalcOpenItemLedgerEntriesAverageUnitCosts@31(ItemNo@1000 : Code[20];VAR AverageCost@1002 : Decimal;VAR AverageCostACY@1003 : Decimal);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+      TotalQuantity@1004 : Decimal;
+    BEGIN
+      AverageCost := 0;
+      AverageCostACY := 0;
+      WITH ItemLedgerEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE(Positive,TRUE);
+        SETRANGE(Open,TRUE);
+
+        CALCSUMS(Quantity);
+        TotalQuantity := Quantity;
+
+        FINDSET;
+        REPEAT
+          CALCFIELDS("Cost Amount (Actual)","Cost Amount (Actual) (ACY)");
+          AverageCost += "Cost Amount (Actual)";
+          AverageCostACY += "Cost Amount (Actual) (ACY)";
+        UNTIL NEXT = 0;
+      END;
+
+      AverageCost /= TotalQuantity;
+      AverageCostACY /= TotalQuantity;
+    END;
+
+    LOCAL PROCEDURE CalcBulkAverageUnitCosts@34(ItemNo@1000 : Code[20];VAR AverageCost@1001 : Decimal;VAR AverageCostACY@1002 : Decimal);
+    VAR
+      ValueEntry@1003 : Record 5802;
+    BEGIN
+      WITH ValueEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        CALCSUMS("Item Ledger Entry Quantity","Cost Amount (Actual)","Cost Amount (Actual) (ACY)");
+        AverageCost := "Cost Amount (Actual)" / "Item Ledger Entry Quantity";
+        AverageCostACY := "Cost Amount (Actual) (ACY)" / "Item Ledger Entry Quantity";
+      END;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Adjust Cost Item Entries] [Cost Average] [SCM]
+    }
+    END.
+  }
+}
+

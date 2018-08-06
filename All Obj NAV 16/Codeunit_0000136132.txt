@@ -1,0 +1,661 @@
+OBJECT Codeunit 136132 Sales Stockout
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1013 : Codeunit 130000;
+      LibraryInventory@1008 : Codeunit 132201;
+      LibrarySales@1003 : Codeunit 130509;
+      LibraryWarehouse@1014 : Codeunit 132204;
+      LibraryPurchase@1007 : Codeunit 130512;
+      LibraryVariableStorage@1012 : Codeunit 131004;
+      SalesOrder@1004 : TestPage 42;
+      IsInitialized@1001 : Boolean;
+      ZeroQuantity@1006 : Integer;
+      QuantityValidationErrorText@1009 : TextConst 'ENU="Validation error for Field: Quantity,  Message = ''The update has been interrupted to respect the warning.''"';
+      SaleQuantity@1010 : Integer;
+      CheckAvailabilityActionYes@1000 : Boolean;
+      ReceiptDateDocumentError@1002 : TextConst 'ENU=No Purchase Line found with sales order no %1.';
+      ShipmentDateDocumentError@1005 : TextConst 'ENU=No Sales Line found with sales order no %1.';
+      ValidateQuantityDocumentError@1011 : TextConst 'ENU=DocNo %1 not found in following objects: Sales Header.';
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@11();
+    VAR
+      SalesAndReceivablesSetup@1000 : Record 311;
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      // Clear the needed globals
+      ClearGlobals;
+      LibraryVariableStorage.Clear;
+
+      // Lazy Setup.
+      IF IsInitialized THEN
+        EXIT;
+
+      SalesAndReceivablesSetup.GET;
+      SalesAndReceivablesSetup.VALIDATE("Stockout Warning",TRUE);
+      SalesAndReceivablesSetup.MODIFY;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailability)]
+    PROCEDURE SalesAnswerYes@2();
+    VAR
+      Item@1001 : Record 27;
+      SalesOrderNo@1002 : Code[20];
+    BEGIN
+      // Test availability warning for demand from sales.
+
+      // SETUP: Create Sales Order for Demand for Item with Zero Quantity on Inventory.
+      Initialize;
+      SaleQuantity := RANDOM(10000);
+      CreateItem(Item);
+      SalesOrderNo := CreateSalesDemand(Item."No.",ZeroQuantity);
+
+      // EXECUTE: Open the sales order page, Change Demand Quantity on Sales Order Through UI.
+      // EXECUTE: Answer Yes to the ignore stock out warning (in HandleCheckAvailability method).
+      CheckAvailabilityActionYes := TRUE;
+      EditSalesOrderQuantity(SalesOrderNo,SaleQuantity);
+
+      // VERIFY: quantity on Sales Order is changed to the new quantity.
+      ValidateQuantity(SalesOrderNo,SaleQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailability)]
+    PROCEDURE SalesAnswerNo@1();
+    VAR
+      Item@1001 : Record 27;
+      SalesOrderNo@1002 : Code[20];
+    BEGIN
+      // Test availability warning for demand from sales. Answer No to Warning.
+
+      // SETUP: Create Sales Order for Demand for Item with Zero Quantity on Inventory.
+      Initialize;
+      SaleQuantity := RANDOM(10000);
+      CreateItem(Item);
+      SalesOrderNo := CreateSalesDemand(Item."No.",ZeroQuantity);
+
+      // EXECUTE: Open the sales order page, Change Demand Quantity on Sales Order Through UI.
+      // EXECUTE: Answer No to the availability warning. (in HandleCheckAvailability method).
+      CheckAvailabilityActionYes := FALSE;
+      ASSERTERROR EditSalesOrderQuantity(SalesOrderNo,SaleQuantity);
+
+      // Verify the operation was cancelled.
+      Assert.AreEqual(FORMAT(QuantityValidationErrorText),FORMAT(GETLASTERRORTEXT),
+        'Verify operation was cancelled and right error message is displayed');
+      SalesOrder.CLOSE;
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailability)]
+    PROCEDURE SalesDemandHigherThanSupply@3();
+    VAR
+      Item@1003 : Record 27;
+      PurchaseQuantity@1000 : Integer;
+      PurchaseOrderNo@1004 : Code[20];
+      SalesOrderNo@1006 : Code[20];
+    BEGIN
+      // Test availability warning for Sales Demand higher than Supply.
+
+      // SETUP: Create Supply with Purchase Order for Item X, Quantity = Y.
+      // SETUP: Create Sales Demand for Item X,with zero quantity .
+      Initialize;
+      PurchaseQuantity := RANDOM(10);
+      SaleQuantity := PurchaseQuantity + 1;
+      CreateItem(Item);
+      PurchaseOrderNo := CreatePurchaseSupply(Item."No.",PurchaseQuantity);
+      SalesOrderNo := CreateSalesDemandAfter(Item."No.",ZeroQuantity,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Open the sales order page, Change Demand Quantity on Sales Order Through UI to Quantity = Y + 1.
+      // EXECUTE: Answer Yes to ignore the availability warning. (in HandleCheckAvailability method).
+      CheckAvailabilityActionYes := TRUE;
+      EditSalesOrderQuantity(SalesOrderNo,SaleQuantity);
+
+      // VERIFY: Quantity on sales order after warning is Y + 1.
+      ValidateQuantity(SalesOrderNo,SaleQuantity);
+    END;
+
+    [Test]
+    PROCEDURE SalesDemandLowerThanSupply@4();
+    VAR
+      Item@1003 : Record 27;
+      PurchaseQuantity@1000 : Integer;
+      PurchaseOrderNo@1004 : Code[20];
+      SalesOrderNo@1006 : Code[20];
+    BEGIN
+      // Test supply cover Sales Order demand and therefore no warning.
+
+      // SETUP: Create Supply for Item X.
+      Initialize;
+      PurchaseQuantity := RANDOM(10);
+      SaleQuantity := PurchaseQuantity - 1;
+      CreateItem(Item);
+      PurchaseOrderNo := CreatePurchaseSupply(Item."No.",PurchaseQuantity);
+      SalesOrderNo := CreateSalesDemandAfter(Item."No.",ZeroQuantity,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Open sales order page, Create Sales Demand for Item X at a date after Supply has arrived and quantity < supply.
+      // EXECUTE: Answer Yes to the availability warning.  (in HandleCheckAvailability method).
+      CheckAvailabilityActionYes := TRUE;
+      EditSalesOrderQuantity(SalesOrderNo,SaleQuantity);
+
+      // VERIFY: that quantity change is reflected when availability warning is ignored
+      ValidateQuantity(SalesOrderNo,SaleQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailability)]
+    PROCEDURE SalesDemandBeforeSupplyArrive@9();
+    VAR
+      Item@1003 : Record 27;
+      PurchaseQuantity@1000 : Integer;
+      SalesOrderNo@1006 : Code[20];
+    BEGIN
+      // Test availability warning if Sales Demand is at a date before Supply arrives.
+
+      // SETUP: Create Sales Demand for Item X,with zero quantity.
+      // SETUP: Create Supply with Purchase Order for Item X, Quantity=Y, at a date after Sales Demand.
+      Initialize;
+      PurchaseQuantity := RANDOM(10) * 2;  // Taking Minimum Value as 2 as the Sale Quantity should not be zero.
+      SaleQuantity := PurchaseQuantity - 1;
+      CreateItem(Item);
+      SalesOrderNo := CreateSalesDemand(Item."No.",ZeroQuantity);
+      CreatePurchaseSupplyAfter(Item."No.",PurchaseQuantity,GetShipmentDate(SalesOrderNo));
+
+      // EXECUTE: Open the sales order page, Change Demand Quantity on Sales Order Through UI to Quantity = Y - 1.
+      // EXECUTE: Answer Yes to the availability warning. (in HandleCheckAvailability method).
+      EditSalesOrderQuantity(SalesOrderNo,SaleQuantity);
+
+      // VERIFY: Verify Quantity on sales order after warning is Y - 1.
+      ValidateQuantity(SalesOrderNo,SaleQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailability)]
+    PROCEDURE SalesLocationDifferent@13();
+    VAR
+      Item@1001 : Record 27;
+      PurchaseQuantity@1000 : Integer;
+      PurchaseOrderNo@1004 : Code[20];
+      SalesOrderNo@1006 : Code[20];
+      LocationB@1002 : Code[10];
+      LocationA@1003 : Code[10];
+    BEGIN
+      // Test availability warning if Sales Demand is at a different Location than a supply from purchase.
+
+      // SETUP: Create Supply with Purchase Order for Item X, Qantity=Y, Location = Z.
+      // SETUP: Create Sales Demand for Item X, Quantity=0, Location = M .
+      Initialize;
+      PurchaseQuantity := RANDOM(10) * 2;  // Taking Minimum Value as 2 as the Sale Quantity should not be zero.
+      SaleQuantity := PurchaseQuantity - 1;
+      CreateItem(Item);
+      LocationA := CreateLocation;
+      LocationB := CreateLocation;
+      PurchaseOrderNo := CreatePurchaseSupplyAtLocation(Item."No.",PurchaseQuantity,LocationA);
+      SalesOrderNo := CreateSalesLocationDemandAfter(Item."No.",ZeroQuantity,LocationB,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Open the sales order page, Change Demand Quantity on Sales Order Through UI to Quantity = Y - 1.
+      // EXECUTE: Answer Yes to the availability warning. (in HandleCheckAvailability method).
+      CheckAvailabilityActionYes := TRUE;
+      EditSalesOrderQuantity(SalesOrderNo,SaleQuantity);
+
+      // VERIFY: Quantity on sales order after warning is Y - 1.
+      ValidateQuantity(SalesOrderNo,SaleQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailability)]
+    PROCEDURE SalesChangeLocation@18();
+    VAR
+      Item@1007 : Record 27;
+      PurchaseQuantity@1000 : Integer;
+      PurchaseOrderNo@1004 : Code[20];
+      SalesOrderNo@1006 : Code[20];
+      LocationA@1002 : Code[10];
+      LocationB@1003 : Code[10];
+    BEGIN
+      // Test availability warning if the location for Sales Demand modified to a location where demand cannot be met
+
+      // SETUP: Create Supply with Purchase Order for Item X, Qantity=Y, Location = Z.
+      // SETUP: Create Sales Demand for Item X, Quantity=Y, Location = Z
+      Initialize;
+      PurchaseQuantity := RANDOM(10) * 2;  // Taking Minimum Value as 2 as the Sale Quantity should not be zero.
+      SaleQuantity := PurchaseQuantity - 1;
+      CreateItem(Item);
+      LocationA := CreateLocation;
+      LocationB := CreateLocation;
+      PurchaseOrderNo := CreatePurchaseSupplyAtLocation(Item."No.",PurchaseQuantity,LocationA);
+      SalesOrderNo := CreateSalesLocationDemandAfter(Item."No.",SaleQuantity,LocationA,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Open the sales order page, Change Location on Sales Order Through UI to location M.
+      // EXECUTE: Answer Yes to the availability warning. (in HandleCheckAvailability method).
+      OpenSalesOrderPageByNo(SalesOrderNo,SalesOrder);
+      CheckAvailabilityActionYes := TRUE;
+      SalesOrder.SalesLines."Location Code".VALUE(LocationB);
+      SalesOrder.CLOSE;
+
+      // VERIFY: Quantity on sales order after warning is Y and location M.
+      ValidateQuantity(SalesOrderNo,SaleQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailability)]
+    PROCEDURE SalesChangeDate@22();
+    VAR
+      Item@1003 : Record 27;
+      PurchaseQuantity@1000 : Integer;
+      PurchaseOrderNo@1004 : Code[20];
+      SalesOrderNo@1006 : Code[20];
+    BEGIN
+      // Test availability warning if the date of Sales Demand is modified to a date where demand cannot be met
+
+      // SETUP: Create Supply with Purchase Order for Item X, Qantity=Y, Date = Workdate.
+      // SETUP: Create Sales Demand for Item X, Quantity=Y, Date = Workdate + 1
+      Initialize;
+      PurchaseQuantity := RANDOM(10);
+      SaleQuantity := PurchaseQuantity;
+      CreateItem(Item);
+      SalesOrderNo := CreateSalesDemand(Item."No.",PurchaseQuantity);
+      PurchaseOrderNo := CreatePurchaseSupplyAfter(Item."No.",PurchaseQuantity * 2,GetShipmentDate(SalesOrderNo));
+      SalesOrderNo := CreateSalesDemandAfter(Item."No.",PurchaseQuantity,GetReceiptDate(PurchaseOrderNo));
+
+      // EXECUTE: Open the sales order page, Change Date on Sales Order Through UI to Date = Workdate - 1.
+      // EXECUTE: Answer Yes to the availability warning. (in HandleCheckAvailability method).
+      OpenSalesOrderPageByNo(SalesOrderNo,SalesOrder);
+      CheckAvailabilityActionYes := TRUE;
+      SalesOrder.SalesLines."Planned Shipment Date".VALUE(FORMAT(WORKDATE));
+      SalesOrder.CLOSE;
+
+      // VERIFY: Quantity on sales order after warning is Y and Date is Workdate - 1.
+      ValidateQuantity(SalesOrderNo,SaleQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleCheckAvailabilityUom)]
+    PROCEDURE SalesChangeUOMAvailWarning@34();
+    VAR
+      Item@1006 : Record 27;
+      QtyPerUOM@1005 : Decimal;
+      SalesOrderNo@1004 : Code[20];
+      LocationCode@1003 : Code[10];
+      PcsUOM@1002 : Code[10];
+      BoxUOM@1001 : Code[10];
+      StockAvailSupplyDate@1000 : Date;
+    BEGIN
+      // [SCENARIO 118221.1] Verify Availability Warning's Earliest Date when changing UOM from PCS to BOX
+      Initialize;
+      QtyPerUOM := 3;
+      LocationCode := CreateLocation;
+
+      // [GIVEN] Item with two UOMs: 1 BOX = 3 PCS
+      CreateItem(Item);
+      PcsUOM := GetPcsUOM(Item."No.");
+      BoxUOM := CreateItemUOM(Item."No.",QtyPerUOM);
+
+      // [GIVEN] Create Purchase Order with 2 PCS on WorkDate
+      CreatePurchSupplyWithUOMAtLocation(Item."No.",LocationCode,PcsUOM,2,WORKDATE);
+
+      // [GIVEN] Create Purchase Order with 1 BOX on SupplyDate = WorkDate + 1Day
+      StockAvailSupplyDate := WORKDATE + 1;
+      CreatePurchSupplyWithUOMAtLocation(Item."No.",LocationCode,BoxUOM,1,StockAvailSupplyDate);
+
+      // [GIVEN] Create Sales Order with 1 PCS on WorkDate
+      SalesOrderNo := CreateSalesDemandAtLocation(Item."No.",1,LocationCode);
+
+      // [WHEN] Change Sales Order Line's UOM from PCS to BOX
+      // [THEN] Availability Warning is shown with Earliest Date = SupplyDate
+      LibraryVariableStorage.Enqueue(StockAvailSupplyDate);
+      SetSalesUOMPageTestability(SalesOrderNo,BoxUOM);
+    END;
+
+    [Test]
+    PROCEDURE SalesChangeUOMAvailNoWarning@15();
+    VAR
+      Item@1006 : Record 27;
+      QtyPerUOM@1005 : Decimal;
+      SalesOrderNo@1004 : Code[20];
+      LocationCode@1003 : Code[10];
+      PcsUOM@1002 : Code[10];
+      BoxUOM@1001 : Code[10];
+    BEGIN
+      // [SCENARIO 118221.2] Verify Availability Warning is not shown when changing UOM from BOX to PCS
+      Initialize;
+      QtyPerUOM := 3;
+      LocationCode := CreateLocation;
+
+      // [GIVEN] Item with two UOMs: 1 BOX = 3 PCS
+      CreateItem(Item);
+      PcsUOM := GetPcsUOM(Item."No.");
+      BoxUOM := CreateItemUOM(Item."No.",QtyPerUOM);
+
+      // [GIVEN] Create Post Purchase Order with 1 BOX
+      CreatePurchSupplyWithUOMAtLocation(Item."No.",LocationCode,BoxUOM,1,WORKDATE);
+
+      // [GIVEN] Create Sales Order with 1 BOX
+      SalesOrderNo := CreateSalesDemandAtLocation(Item."No.",1,LocationCode);
+      SetSalesUOM(SalesOrderNo,BoxUOM);
+
+      // [WHEN] Change Sales Order Line's UOM from BOX to PCS
+      // [THEN] Availability Warning is not shown
+      SetSalesUOMPageTestability(SalesOrderNo,PcsUOM);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ClearGlobals@5();
+    BEGIN
+      // Clear all global variables
+      ZeroQuantity := 0;
+      CLEAR(SalesOrder);
+      SaleQuantity := 0;
+      CheckAvailabilityActionYes := TRUE;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateItem@12(VAR Item@1000 : Record 27);
+    BEGIN
+      // Creates a new item. Wrapper for the library method.
+      LibraryInventory.CreateItem(Item);
+      // Item.VALIDATE("Unit Price",10);
+    END;
+
+    LOCAL PROCEDURE CreateItemUOM@43(ItemNo@1002 : Code[20];QtyPerUOM@1003 : Decimal) : Code[10];
+    VAR
+      ItemUnitOfMeasure@1000 : Record 5404;
+    BEGIN
+      LibraryInventory.CreateItemUnitOfMeasureCode(ItemUnitOfMeasure,ItemNo,QtyPerUOM);
+      EXIT(ItemUnitOfMeasure.Code);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateLocation@6() : Code[10];
+    VAR
+      Location@1001 : Record 14;
+    BEGIN
+      // Creates a new Location. Wrapper for the library method.
+      LibraryWarehouse.CreateLocation(Location);
+      EXIT(Location.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyBasis@36(ItemNo@1008 : Code[20];Quantity@1000 : Integer;LocationCode@1006 : Code[10];ReceiptDate@1001 : Date) : Code[20];
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1005 : Record 39;
+    BEGIN
+      // Creates a Purchase order for the given item.
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE(Quantity,Quantity);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.VALIDATE("Expected Receipt Date",ReceiptDate);
+      PurchaseLine.MODIFY;
+      EXIT(PurchaseHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupply@25(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,ItemQuantity,'',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyAtLocation@14(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer;LocationCode@1000 : Code[10]) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item at the specified location.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,ItemQuantity,LocationCode,WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseSupplyAfter@26(ItemNo@1004 : Code[20];Quantity@1000 : Integer;ReceiptDate@1001 : Date) : Code[20];
+    BEGIN
+      // Creates a Purchase order for the given item After a source document date.
+      EXIT(CreatePurchaseSupplyBasis(ItemNo,Quantity,'',CALCDATE('<+1D>',ReceiptDate)));
+    END;
+
+    LOCAL PROCEDURE CreatePurchSupplyWithUOMAtLocation@30(ItemNo@1000 : Code[20];LocationCode@1004 : Code[10];UOMCode@1001 : Code[10];Quantity@1007 : Decimal;ReceiptDate@1005 : Date) DocumentNo : Code[20];
+    BEGIN
+      DocumentNo := CreatePurchaseSupplyAtLocation(ItemNo,Quantity,LocationCode);
+      UpdatePurchLineUOMAndReceiptDate(DocumentNo,UOMCode,ReceiptDate);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDemandBasis@35(ItemNo@1008 : Code[20];Quantity@1000 : Integer;LocationCode@1006 : Code[10];ShipDate@1001 : Date) : Code[20];
+    VAR
+      SalesLine@1003 : Record 37;
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      // Creates a sales order for the given item.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.VALIDATE("Shipment Date",ShipDate);
+      SalesLine.MODIFY;
+      EXIT(SalesHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateSalesDemand@70(ItemNo@1003 : Code[20];ItemQuantity@1002 : Integer) : Code[20];
+    BEGIN
+      // Creates a sales order for the given item.
+      EXIT(CreateSalesDemandBasis(ItemNo,ItemQuantity,'',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateSalesDemandAtLocation@37(ItemNo@1001 : Code[20];ItemQuantity@1000 : Integer;LocationCode@1002 : Code[10]) : Code[20];
+    VAR
+      SalesOrderNo@1003 : Code[20];
+    BEGIN
+      SalesOrderNo := CreateSalesDemand(ItemNo,ItemQuantity);
+      SetSalesDemandLocation(SalesOrderNo,LocationCode);
+      EXIT(SalesOrderNo);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDemandAfter@71(ItemNo@1004 : Code[20];Quantity@1000 : Integer;ShipDate@1001 : Date) : Code[20];
+    BEGIN
+      // Creates sales order after a source document date.
+      EXIT(CreateSalesDemandBasis(ItemNo,Quantity,'',CALCDATE('<+1D>',ShipDate)));
+    END;
+
+    LOCAL PROCEDURE CreateSalesLocationDemandAfter@16(ItemNo@1004 : Code[20];Quantity@1000 : Integer;LocationCode@1003 : Code[10];ShipDate@1001 : Date) : Code[20];
+    BEGIN
+      // Creates sales order for a specific item at a specified date.
+      EXIT(CreateSalesDemandBasis(ItemNo,Quantity,LocationCode,CALCDATE('<+1D>',ShipDate)));
+    END;
+
+    LOCAL PROCEDURE UpdatePurchLineUOMAndReceiptDate@31(PurchaseOrderNo@1000 : Code[20];UOMCode@1002 : Code[10];ReceiptDate@1003 : Date);
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      WITH PurchaseLine DO BEGIN
+        SETRANGE("Document Type","Document Type"::Order);
+        SETRANGE("Document No.",PurchaseOrderNo);
+        FINDFIRST;
+        VALIDATE("Unit of Measure Code",UOMCode);
+        VALIDATE("Expected Receipt Date",ReceiptDate);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE EditSalesOrderQuantity@8(SalesOrderNo@1001 : Code[20];SaleQuantity@1002 : Integer);
+    BEGIN
+      // Method Edits Sales Order Quantity.
+      OpenSalesOrderPageByNo(SalesOrderNo,SalesOrder);
+
+      // EXECUTE: Change Demand Quantity on Sales Order Through UI.
+      SalesOrder.SalesLines.Quantity.VALUE(FORMAT(SaleQuantity));
+      SalesOrder.CLOSE;
+    END;
+
+    LOCAL PROCEDURE GetShipmentDate@19(SalesHeaderNo@1000 : Code[20]) : Date;
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      // Method returns the shipment date from a sales order.
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SalesLine.SETRANGE("Document No.",SalesHeaderNo);
+      SalesLine.FINDFIRST;
+      IF SalesLine.COUNT > 0 THEN
+        EXIT(SalesLine."Shipment Date");
+      ERROR(ShipmentDateDocumentError,SalesHeaderNo);
+    END;
+
+    LOCAL PROCEDURE GetReceiptDate@20(PurchaseHeaderNo@1000 : Code[20]) : Date;
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      // Method returns the expected receipt date from a purchase order.
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeaderNo);
+      PurchaseLine.FINDFIRST;
+      IF PurchaseLine.COUNT > 0 THEN
+        EXIT(PurchaseLine."Expected Receipt Date");
+      ERROR(ReceiptDateDocumentError,PurchaseHeaderNo);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE OpenSalesOrderPageByNo@68(SalesOrderNoToFind@1001 : Code[20];SalesOrderToReturn@1002 : TestPage 42);
+    VAR
+      SalesHeader@1003 : Record 36;
+    BEGIN
+      // Method Opens sales order page for the sales order no.
+      SalesOrderToReturn.OPENEDIT;
+      Assert.IsTrue(
+        SalesOrderToReturn.GOTOKEY(SalesHeader."Document Type"::Order,SalesOrderNoToFind),
+        'Unable to locate sales order with order no');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AssertCheckAvailabilityInfo@67(CheckAvailability@1000 : TestPage 342;SourceSalesOrder@1001 : TestPage 42;EditedQuantity@1002 : Text[30]);
+    BEGIN
+      // Perform validations on the check availability form.
+      Assert.AreEqual(
+        SourceSalesOrder.SalesLines."No.".VALUE,CheckAvailability."No.".VALUE,'Verify No. match');
+      Assert.AreEqual(
+        SourceSalesOrder.SalesLines.Description.VALUE,CheckAvailability.Description.VALUE,'Verify Description match');
+      Assert.AreEqual(
+        EditedQuantity,FORMAT(CheckAvailability.CurrentQuantity.ASINTEGER),
+        'Verify Current Quantity matches edited quantity');
+      // Formula: (Inventory+ ScheduledReceipt) - (GrossRequirement+Current quantity) = total quantity
+      Assert.AreEqual(
+        SourceSalesOrder.SalesLines."Unit of Measure Code".VALUE,CheckAvailability.UnitOfMeasureCode.VALUE,
+        'Verify Unit of measure match');
+    END;
+
+    LOCAL PROCEDURE ValidateQuantity@21(DocumentNo@1000 : Code[20];Quantity@1001 : Integer);
+    VAR
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Method verifies the quantity on a sales order.
+      IF SalesHeader.GET(SalesHeader."Document Type"::Order,DocumentNo) THEN BEGIN
+        SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+        SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+        SalesLine.FINDFIRST;
+        Assert.AreEqual(Quantity,SalesLine.Quantity,'Verify Sales Line Quantity matches expected');
+        EXIT;
+      END;
+
+      ERROR(ValidateQuantityDocumentError,DocumentNo);
+    END;
+
+    LOCAL PROCEDURE SetSalesUOMPageTestability@33(SalesOrderNo@1001 : Code[20];UOM@1000 : Code[10]);
+    VAR
+      SalesHeader@1003 : Record 36;
+      SalesOrder@1002 : TestPage 42;
+    BEGIN
+      CLEAR(SalesOrder);
+      SalesHeader.GET(SalesHeader."Document Type"::Order,SalesOrderNo);
+      SalesOrder.OPENEDIT;
+      SalesOrder.GOTORECORD(SalesHeader);
+      SalesOrder.SalesLines."Unit of Measure Code".SETVALUE(UOM);  // Should trigger the avail.warning
+      SalesOrder.CLOSE;
+    END;
+
+    LOCAL PROCEDURE SetSalesUOM@28(SalesOrderNo@1000 : Code[20];UOM@1001 : Code[10]);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      WITH SalesLine DO BEGIN
+        GET("Document Type"::Order,SalesOrderNo,10000);
+        VALIDATE("Unit of Measure Code",UOM);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetPcsUOM@24(ItemNo@1000 : Code[20]) : Code[10];
+    VAR
+      ItemUnitOfMeasure@1001 : Record 5404;
+    BEGIN
+      ItemUnitOfMeasure.SETRANGE("Item No.",ItemNo);
+      ItemUnitOfMeasure.SETRANGE("Qty. per Unit of Measure",1);
+      ItemUnitOfMeasure.FINDFIRST;
+      EXIT(ItemUnitOfMeasure.Code);
+    END;
+
+    LOCAL PROCEDURE SetSalesDemandLocation@17(SalesOrderNo@1000 : Code[20];LocationCode@1002 : Code[10]);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      WITH SalesLine DO BEGIN
+        GET("Document Type"::Order,SalesOrderNo,10000);
+        VALIDATE("Location Code",LocationCode);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE HandleCheckAvailability@66(VAR CheckAvailability@1000 : TestPage 342);
+    BEGIN
+      // Handler for Check Availability Warning Page.
+      // VERIFY:  Verify Availability Warning quantities.
+      AssertCheckAvailabilityInfo(CheckAvailability,SalesOrder,FORMAT(SaleQuantity));
+      IF CheckAvailabilityActionYes THEN BEGIN
+        CheckAvailability.Yes.INVOKE;
+        EXIT;
+      END;
+      CheckAvailability.No.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE HandleCheckAvailabilityUom@10(VAR CheckAvailability@1000 : TestPage 342);
+    BEGIN
+      CheckAvailability.EarliestAvailDate.ASSERTEQUALS(LibraryVariableStorage.DequeueDate);
+      CheckAvailability.Yes.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Item Availability] [Sales]
+      Tests Availability warning for Sales Order.
+
+      Covered Test cases:
+      --------------------------------------------------
+      Test Function Name                  TFS ID
+      --------------------------------------------------
+      SalesAnswerYes                      174078
+      SalesAnswerNo                       174079
+      SalesDemandHigherThanSupply         174080
+      SalesDemandLowerThanSupply          174081
+      SalesDemandBeforeSupplyArrive       174082
+      SalesLocationDifferent              174083
+      SalesChangeLocation                 174084
+      SalesChangeDate                     174085
+    }
+    END.
+  }
+}
+
