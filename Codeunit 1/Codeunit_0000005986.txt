@@ -1,0 +1,2395 @@
+OBJECT Codeunit 5986 Serv-Amounts Mgt.
+{
+  OBJECT-PROPERTIES
+  {
+    Date=01-08-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00.48992,NAVIN9.00.00.48992;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 49=imd,
+                TableData 252=imd,
+                TableData 290=imd,
+                TableData 357=imd,
+                TableData 360=imd,
+                TableData 5902=imd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Currency@1004 : Record 4;
+      SalesSetup@1000 : Record 311;
+      ExcisePostingSetup@1500002 : Record 13711;
+      CompanyInfo@1500001 : Record 79;
+      DimBufMgt@1008 : Codeunit 411;
+      FALineNo@1001 : Integer;
+      RoundingLineNo@1003 : Integer;
+      Text016@1007 : TextConst 'ENU=VAT Amount;ENN=VAT Amount';
+      Text017@1006 : TextConst 'ENU=%1% VAT;ENN=%1% VAT';
+      RoundingLineIsInserted@1002 : Boolean;
+      IsInitialized@1005 : Boolean;
+      Text16502@1500023 : TextConst 'ENU=Tax Type must be %1 for Tax Jurisdiction in Tax Area Line %2.;ENN=Tax Type must be %1 for Tax Jurisdiction in Tax Area Line %2.';
+      Text16503@1500022 : TextConst 'ENU=Type should not be Cost, Resource or G/L Account in trading transaction.;ENN=Type should not be Cost, Resource or G/L Account in trading transaction.';
+      Location@1500018 : Record 14;
+      GLSetup@1500017 : Record 98;
+      TempServiceTaxEntry@1500015 : TEMPORARY Record 16473;
+      GenJnlLine@1500014 : Record 81;
+      TempServiceLineInst@1500013 : TEMPORARY Record 5902;
+      TotalServiceLine@1500012 : Record 5902;
+      IndianSalesTaxCalculate@1500011 : Codeunit 13704;
+      CVDEntry@1500009 : Boolean;
+      ExecuteForLookup@1500008 : Boolean;
+      CompanyInfoRead@1500007 : Boolean;
+      StartingEntryNo@1500006 : Integer;
+      TotalStandardDeduction@1500005 : Decimal;
+      GenJnlLineDocType@1500004 : Integer;
+      GenJnlLineDocNo@1500003 : Code[20];
+      Text16519@1500021 : TextConst 'ENU=Service Tax Advance Payment Document/s cannot be applied with non Service Tax Invoice/s.;ENN=Service Tax Advance Payment Document/s cannot be applied with non Service Tax Invoice/s.';
+      Text16520@1500020 : TextConst 'ENU=Invoice/s and Payment/s documents cannot be applied as both have different Service Tax Group Codes.;ENN=Invoice/s and Payment/s documents cannot be applied as both have different Service Tax Group Codes.';
+      Text16521@1500019 : TextConst 'ENU=Invoice/s and Payment/s documents cannot be applied as both have different Service Tax Registration Nos.;ENN=Invoice/s and Payment/s documents cannot be applied as both have different Service Tax Registration Nos.';
+      Text16522@1500000 : TextConst 'ENU=The %1 Value in the %2 and the %3 is not the same.;ENN=The %1 Value in the %2 and the %3 is not the same.';
+      GSTManagement@1500010 : Codeunit 16401;
+
+    PROCEDURE Initialize@1(CurrencyCode@1000 : Code[10]);
+    BEGIN
+      RoundingLineIsInserted := FALSE;
+      GetCurrency(CurrencyCode,Currency);
+      SalesSetup.GET;
+      IsInitialized := TRUE;
+    END;
+
+    PROCEDURE GetDimensions@20(DimensionEntryNo@1000 : Integer;VAR TempDimBuf@1001 : Record 360);
+    BEGIN
+      DimBufMgt.GetDimensions(DimensionEntryNo,TempDimBuf);
+    END;
+
+    PROCEDURE Finalize@5();
+    BEGIN
+      IsInitialized := FALSE;
+    END;
+
+    PROCEDURE FillInvPostingBuffer@5804(VAR InvPostingBuffer@1002 : ARRAY [2] OF Record 49;VAR ServiceLine@1000 : Record 5902;VAR ServiceLineACY@1001 : Record 5902;ServiceHeader@1500007 : Record 5900;VAR ExcisePostingBuffer@1500006 : ARRAY [2] OF TEMPORARY Record 13706;VAR SvcTaxPostingBuffer@1500005 : ARRAY [2] OF TEMPORARY Record 16478);
+    VAR
+      GenPostingSetup@1003 : Record 252;
+      ServCost@1004 : Record 5905;
+      TotalVAT@1005 : Decimal;
+      TotalVATACY@1007 : Decimal;
+      TotalAmount@1008 : Decimal;
+      TotalAmountACY@1009 : Decimal;
+      TotalTaxAmount@1500004 : Decimal;
+      TaxBaseAmount@1500003 : Decimal;
+      TotalTaxAmountACY@1500002 : Decimal;
+      TaxBaseAmountACY@1500001 : Decimal;
+      StandardDeductionAmount@1500000 : Decimal;
+    BEGIN
+      IF (ServiceLine."Gen. Bus. Posting Group" <> GenPostingSetup."Gen. Bus. Posting Group") OR
+         (ServiceLine."Gen. Prod. Posting Group" <> GenPostingSetup."Gen. Prod. Posting Group")
+      THEN
+        GenPostingSetup.GET(ServiceLine."Gen. Bus. Posting Group",ServiceLine."Gen. Prod. Posting Group");
+
+      InvPostingBuffer[1].PrepareService(ServiceLine);
+      TotalVAT := ServiceLine."Amount Including VAT" - ServiceLine.Amount;
+      TotalVATACY := ServiceLineACY."Amount Including VAT" - ServiceLineACY.Amount;
+      TotalAmount := ServiceLine.Amount;
+      TotalAmountACY := ServiceLineACY.Amount;
+
+      TotalTaxAmount := ServiceLine."Tax Amount";
+      TaxBaseAmount := ServiceLine."Tax Base Amount";
+      TotalTaxAmountACY := ServiceLineACY."Tax Amount";
+      TaxBaseAmountACY := ServiceLineACY."Tax Base Amount";
+
+      IF SalesSetup."Discount Posting" IN
+         [SalesSetup."Discount Posting"::"Invoice Discounts",SalesSetup."Discount Posting"::"All Discounts"]
+      THEN
+        IF ServiceLine."VAT Calculation Type" = ServiceLine."VAT Calculation Type"::"Reverse Charge VAT" THEN
+          InvPostingBuffer[1].CalcDiscountNoVAT(
+            -ServiceLine."Inv. Discount Amount",
+            -ServiceLineACY."Inv. Discount Amount")
+        ELSE
+          InvPostingBuffer[1].CalcDiscount(
+            ServiceHeader."Prices Including VAT",
+            -ServiceLine."Inv. Discount Amount",
+            -ServiceLineACY."Inv. Discount Amount");
+      IF (InvPostingBuffer[1].Amount <> 0) OR
+         (InvPostingBuffer[1]."Amount (ACY)" <> 0)
+      THEN BEGIN
+        GenPostingSetup.TESTFIELD("Sales Inv. Disc. Account");
+        InvPostingBuffer[1].SetAccount(
+          GenPostingSetup."Sales Inv. Disc. Account",
+          TotalVAT,
+          TotalVATACY,
+          TotalAmount,
+          TotalAmountACY);
+        IF ServiceLine."Line Discount %" = 100 THEN BEGIN
+          InvPostingBuffer[1]."VAT Base Amount" := 0;
+          InvPostingBuffer[1]."VAT Base Amount (ACY)" := 0;
+          InvPostingBuffer[1]."VAT Amount" := 0;
+          InvPostingBuffer[1]."VAT Amount (ACY)" := 0;
+        END;
+        UpdInvPostingBuffer(InvPostingBuffer,ServiceLine);
+      END;
+
+      IF SalesSetup."Discount Posting" IN
+         [SalesSetup."Discount Posting"::"Line Discounts",SalesSetup."Discount Posting"::"All Discounts"]
+      THEN
+        IF ServiceLine."VAT Calculation Type" = ServiceLine."VAT Calculation Type"::"Reverse Charge VAT" THEN
+          InvPostingBuffer[1].CalcDiscountNoVAT(
+            -ServiceLine."Line Discount Amount",
+            -ServiceLineACY."Line Discount Amount")
+        ELSE
+          InvPostingBuffer[1].CalcDiscount(
+            ServiceHeader."Prices Including VAT",
+            -ServiceLine."Line Discount Amount",
+            -ServiceLineACY."Line Discount Amount");
+      IF (InvPostingBuffer[1].Amount <> 0) OR
+         (InvPostingBuffer[1]."Amount (ACY)" <> 0)
+      THEN BEGIN
+        GenPostingSetup.TESTFIELD("Sales Line Disc. Account");
+        InvPostingBuffer[1].SetAccount(
+          GenPostingSetup."Sales Line Disc. Account",
+          TotalVAT,
+          TotalVATACY,
+          TotalAmount,
+          TotalAmountACY);
+        UpdInvPostingBuffer(InvPostingBuffer,ServiceLine);
+      END;
+
+      InvPostingBuffer[1].SetAmounts(
+        TotalVAT,
+        TotalVATACY,
+        TotalAmount,
+        TotalAmountACY,
+        ServiceLine."VAT Difference",
+        TotalAmount,
+        TotalAmountACY);
+
+      InvPostingBuffer[1].SetTaxAmounts(TotalTaxAmount,TaxBaseAmount,TotalTaxAmountACY,TaxBaseAmountACY,ServiceLine."Tax %");
+      FillExcisePostingBuffer(ExcisePostingBuffer,ServiceLine,ServiceLineACY,ServiceHeader);
+      IF (ServiceLine."Service Tax Amount" <> 0) OR ServiceHeader."ST Pure Agent" OR
+         (ServiceHeader."Nature of Services" = ServiceHeader."Nature of Services"::Export) OR
+         (ServiceHeader."Nature of Services" = ServiceHeader."Nature of Services"::Exempted)
+      THEN
+        FillSvcTaxPostingBuffer(SvcTaxPostingBuffer,ServiceLine,ServiceLine."Line No.");
+      IF ServiceLine."Tax Amount" <> 0 THEN
+        InsertDetailedVAT(ServiceHeader,ServiceLine,StandardDeductionAmount);
+      InvPostingBuffer[1].SetTaxAmountswithVAT(0,0,FALSE,0,StandardDeductionAmount);
+
+      CASE ServiceLine.Type OF
+        ServiceLine.Type::"G/L Account":
+          InvPostingBuffer[1].SetAccount(
+            ServiceLine."No.",
+            TotalVAT,
+            TotalVATACY,
+            TotalAmount,
+            TotalAmountACY)
+          ;
+        ServiceLine.Type::Cost:
+          BEGIN
+            ServCost.GET(ServiceLine."No.");
+            InvPostingBuffer[1].SetAccount(
+              ServCost."Account No.",
+              TotalVAT,
+              TotalVATACY,
+              TotalAmount,
+              TotalAmountACY)
+          END
+        ELSE
+          IF ServiceLine."Document Type" = ServiceLine."Document Type"::"Credit Memo" THEN BEGIN
+            IF ServiceHeader.Trading THEN BEGIN
+              GenPostingSetup.TESTFIELD("Sales Cr. Memo Acc. (Trading)");
+              InvPostingBuffer[1].SetAccount(
+                GenPostingSetup."Sales Cr. Memo Acc. (Trading)",
+                TotalVAT,
+                TotalVATACY,
+                TotalAmount,
+                TotalAmountACY);
+            END ELSE BEGIN
+              GenPostingSetup.TESTFIELD("Sales Credit Memo Account");
+              InvPostingBuffer[1].SetAccount(
+                GenPostingSetup."Sales Credit Memo Account",
+                TotalVAT,
+                TotalVATACY,
+                TotalAmount,
+                TotalAmountACY);
+            END;
+          END ELSE
+            IF ServiceHeader.Trading THEN BEGIN
+              GenPostingSetup.TESTFIELD("Sales Account (Trading)");
+              InvPostingBuffer[1].SetAccount(
+                GenPostingSetup."Sales Account (Trading)",
+                TotalVAT,
+                TotalVATACY,
+                TotalAmount,
+                TotalAmountACY);
+            END ELSE BEGIN
+              GenPostingSetup.TESTFIELD("Sales Account");
+              InvPostingBuffer[1].SetAccount(
+                GenPostingSetup."Sales Account",
+                TotalVAT,
+                TotalVATACY,
+                TotalAmount,
+                TotalAmountACY);
+            END;
+      END;
+      UpdInvPostingBuffer(InvPostingBuffer,ServiceLine);
+    END;
+
+    LOCAL PROCEDURE UpdInvPostingBuffer@6(VAR InvPostingBuffer@1002 : ARRAY [2] OF Record 49;ServiceLine@1003 : Record 5902);
+    BEGIN
+      InvPostingBuffer[1]."Dimension Set ID" := ServiceLine."Dimension Set ID";
+      IF InvPostingBuffer[1].Type = InvPostingBuffer[1].Type::"Fixed Asset" THEN BEGIN
+        FALineNo := FALineNo + 1;
+        InvPostingBuffer[1]."Fixed Asset Line No." := FALineNo;
+      END;
+
+      InvPostingBuffer[2] := InvPostingBuffer[1];
+      IF InvPostingBuffer[2].FIND THEN BEGIN
+        InvPostingBuffer[2].Amount := InvPostingBuffer[2].Amount + InvPostingBuffer[1].Amount;
+        InvPostingBuffer[2]."VAT Amount" :=
+          InvPostingBuffer[2]."VAT Amount" + InvPostingBuffer[1]."VAT Amount";
+        InvPostingBuffer[2]."VAT Base Amount" :=
+          InvPostingBuffer[2]."VAT Base Amount" + InvPostingBuffer[1]."VAT Base Amount";
+        InvPostingBuffer[2]."Amount (ACY)" :=
+          InvPostingBuffer[2]."Amount (ACY)" + InvPostingBuffer[1]."Amount (ACY)";
+        InvPostingBuffer[2]."VAT Amount (ACY)" :=
+          InvPostingBuffer[2]."VAT Amount (ACY)" + InvPostingBuffer[1]."VAT Amount (ACY)";
+        InvPostingBuffer[2]."VAT Difference" :=
+          InvPostingBuffer[2]."VAT Difference" + InvPostingBuffer[1]."VAT Difference";
+        InvPostingBuffer[2]."VAT Base Amount (ACY)" :=
+          InvPostingBuffer[2]."VAT Base Amount (ACY)" +
+          InvPostingBuffer[1]."VAT Base Amount (ACY)";
+        InvPostingBuffer[2].Quantity :=
+          InvPostingBuffer[2].Quantity + InvPostingBuffer[1].Quantity;
+        InvPostingBuffer[2]."Standard Deduction Amount" += InvPostingBuffer[1]."Standard Deduction Amount";
+        IF NOT InvPostingBuffer[1]."System-Created Entry" THEN
+          InvPostingBuffer[2]."System-Created Entry" := FALSE;
+        InvPostingBuffer[2]."Tax Amount" := InvPostingBuffer[2]."Tax Amount" + InvPostingBuffer[1]."Tax Amount";
+        InvPostingBuffer[2]."Tax Amount (ACY)" := InvPostingBuffer[2]."Tax Amount (ACY)" + InvPostingBuffer[1]."Tax Amount (ACY)";
+        InvPostingBuffer[2]."Tax Base Amount" := InvPostingBuffer[2]."Tax Base Amount" + InvPostingBuffer[1]."Tax Base Amount";
+        InvPostingBuffer[2]."Src. Curr. Tax Base Amount" :=
+          InvPostingBuffer[2]."Src. Curr. Tax Base Amount" + InvPostingBuffer[1]."Src. Curr. Tax Base Amount";
+        InvPostingBuffer[2].MODIFY;
+      END ELSE
+        InvPostingBuffer[1].INSERT;
+    END;
+
+    PROCEDURE DivideAmount@8(QtyType@1000 : 'General,Invoicing,Shipping';ServLineQty@1004 : Decimal;VAR ServiceHeader@1005 : Record 5900;VAR ServiceLine@1002 : Record 5902;VAR TempVATAmountLine@1003 : Record 290;VAR TempVATAmountLineRemainder@1001 : Record 290);
+    VAR
+      TaxAreaLine@1500001 : Record 319;
+      TaxJurisdiction@1500000 : Record 320;
+      ChargeableQty@1006 : Decimal;
+    BEGIN
+      IF RoundingLineInserted AND (RoundingLineNo = ServiceLine."Line No.") THEN
+        EXIT;
+      WITH ServiceLine DO
+        IF ServLineQty = 0 THEN BEGIN
+          "Line Amount" := 0;
+          "Line Discount Amount" := 0;
+          "Inv. Discount Amount" := 0;
+          "VAT Base Amount" := 0;
+          Amount := 0;
+          "Amount Including VAT" := 0;
+
+          "Tax Base Amount" := 0;
+          "Tax Amount" := 0;
+          "GST Base Amount" := 0;
+          "Total GST Amount" := 0;
+          "Amount Including Tax" := 0;
+          IF (ServLineQty = 0) OR ("Unit Price" = 0) THEN BEGIN
+            "Amount To Customer" := 0;
+            "Charges To Customer" := 0;
+          END;
+          "Service Tax Base" := 0;
+          "Service Tax Amount" := 0;
+          "Service Tax eCess Amount" := 0;
+          "Service Tax SHE Cess Amount" := 0;
+          "Service Tax SBC Amount" := 0;
+          "KK Cess Amount" := 0;
+          "Excise Base Amount" := 0;
+          "Excise Amount" := 0;
+        END ELSE BEGIN
+          IF TempVATAmountLine.GET("VAT Identifier","VAT Calculation Type","Tax Group Code",FALSE,"Line Amount" >= 0) THEN;
+          IF "VAT Calculation Type" = "VAT Calculation Type"::"Sales Tax" THEN
+            "VAT %" := TempVATAmountLine."VAT %";
+          TempVATAmountLineRemainder := TempVATAmountLine;
+          IF NOT TempVATAmountLineRemainder.FIND THEN BEGIN
+            TempVATAmountLineRemainder.INIT;
+            TempVATAmountLineRemainder.INSERT;
+          END;
+
+          CASE QtyType OF
+            QtyType::Shipping:
+              IF ("Qty. to Consume" <> 0) OR (ServLineQty <= MaxQtyToInvoice) THEN
+                ChargeableQty := ServLineQty
+              ELSE
+                ChargeableQty := MaxQtyToInvoice;
+            QtyType::Invoicing:
+              ChargeableQty := ServLineQty;
+            ELSE
+              ChargeableQty := CalcChargeableQty;
+          END;
+
+          "Line Amount" :=
+            ROUND(
+              ChargeableQty * "Unit Price",
+              Currency."Amount Rounding Precision");
+
+          IF ServLineQty <> Quantity THEN
+            "Line Discount Amount" :=
+              ROUND("Line Amount" * "Line Discount %" / 100,Currency."Amount Rounding Precision");
+
+          "Line Amount" := "Line Amount" - "Line Discount Amount";
+
+          "VAT Base Amount" := ROUND("VAT Base Amount" * ServLineQty / Quantity,Currency."Amount Rounding Precision");
+          IF "Currency Code" = '' THEN BEGIN
+            IF NOT ServiceHeader.Trading THEN BEGIN
+              "BED Amount" := RoundExciseAmount("BED Amount",ServLineQty,Quantity);
+              "AED(GSI) Amount" := RoundExciseAmount("AED(GSI) Amount",ServLineQty,Quantity);
+              "AED(TTA) Amount" := RoundExciseAmount("AED(TTA) Amount",ServLineQty,Quantity);
+              "SED Amount" := RoundExciseAmount("SED Amount",ServLineQty,Quantity);
+              "SAED Amount" := RoundExciseAmount("SAED Amount",ServLineQty,Quantity);
+              "CESS Amount" := RoundExciseAmount("CESS Amount",ServLineQty,Quantity);
+              "NCCD Amount" := RoundExciseAmount("NCCD Amount",ServLineQty,Quantity);
+              "eCess Amount" := RoundExciseAmount("eCess Amount",ServLineQty,Quantity);
+              "SHE Cess Amount" := RoundExciseAmount("SHE Cess Amount",ServLineQty,Quantity);
+              "ADET Amount" := RoundExciseAmount("ADET Amount",ServLineQty,Quantity);
+              "ADE Amount" := RoundExciseAmount("ADE Amount",ServLineQty,Quantity);
+              "ADC VAT Amount" := RoundExciseAmount("ADC VAT Amount",ServLineQty,Quantity);
+            END;
+            "Service Tax Amount" := RoundServiceTaxAmt(ServiceHeader,"Service Tax Amount",ServLineQty,Quantity);
+            "Service Tax eCess Amount" := RoundServiceTaxAmt(ServiceHeader,"Service Tax eCess Amount",ServLineQty,Quantity);
+            "Service Tax SHE Cess Amount" := RoundServiceTaxAmt(ServiceHeader,"Service Tax SHE Cess Amount",ServLineQty,Quantity);
+            "Service Tax SBC Amount" := RoundServiceTaxAmt(ServiceHeader,"Service Tax SBC Amount",ServLineQty,Quantity);
+            "KK Cess Amount" := RoundServiceTaxAmt(ServiceHeader,"KK Cess Amount",ServLineQty,Quantity);
+          END ELSE BEGIN
+            IF NOT ServiceHeader.Trading THEN BEGIN
+              "BED Amount" := ROUND("BED Amount" * ServLineQty / Quantity);
+              "AED(GSI) Amount" := ROUND("AED(GSI) Amount" * ServLineQty / Quantity);
+              "AED(TTA) Amount" := ROUND("AED(TTA) Amount" * ServLineQty / Quantity);
+              "SED Amount" := ROUND("SED Amount" * ServLineQty / Quantity);
+              "SAED Amount" := ROUND("SAED Amount" * ServLineQty / Quantity);
+              "CESS Amount" := ROUND("CESS Amount" * ServLineQty / Quantity);
+              "NCCD Amount" := ROUND("NCCD Amount" * ServLineQty / Quantity);
+              "eCess Amount" := ROUND("eCess Amount" * ServLineQty / Quantity);
+              "SHE Cess Amount" := ROUND("SHE Cess Amount" * ServLineQty / Quantity);
+              "ADET Amount" := ROUND("ADET Amount" * ServLineQty / Quantity);
+              "ADE Amount" := ROUND("ADE Amount" * ServLineQty / Quantity);
+              "ADC VAT Amount" := ROUND("ADC VAT Amount" * ServLineQty / Quantity);
+            END;
+            "Service Tax Amount" := ROUND("Service Tax Amount" * ServLineQty / Quantity);
+            "Service Tax eCess Amount" := ROUND("Service Tax eCess Amount" * ServLineQty / Quantity);
+            "Service Tax SHE Cess Amount" := ROUND("Service Tax SHE Cess Amount" * ServLineQty / Quantity);
+            "Service Tax SBC Amount" := ROUND("Service Tax SBC Amount" * ServLineQty / Quantity);
+            "KK Cess Amount" :=  ROUND("KK Cess Amount" * ServLineQty / Quantity);
+          END;
+          "Excise Base Amount" := ROUND("Excise Base Amount" * ServLineQty / Quantity,Currency."Amount Rounding Precision");
+          IF NOT ServiceHeader.Trading THEN
+            "Excise Amount" :=
+              "BED Amount" + "AED(GSI) Amount" + "AED(TTA) Amount" + "SED Amount" + "SAED Amount" + "CESS Amount" +
+              "NCCD Amount" + "eCess Amount" + "ADET Amount" + "ADE Amount" + "ADC VAT Amount" + "SHE Cess Amount"
+          ELSE
+            "Excise Amount" := RoundExciseAmount("Excise Amount",1,1);
+          "Amount Including Excise" := "Excise Base Amount" + "Excise Amount";
+          "Tax Base Amount" := ROUND("Tax Base Amount" * ServLineQty / Quantity,Currency."Amount Rounding Precision");
+          "Standard Deduction Amount" :=
+            ROUND(
+              "Standard Deduction Amount" * ServLineQty / Quantity,
+              Currency."Amount Rounding Precision");
+          "Tax Amount" := ("Tax Amount" * ServLineQty / Quantity);
+          "GST Base Amount" := ROUND("GST Base Amount" * ServLineQty / Quantity,Currency."Amount Rounding Precision");
+          "Total GST Amount" := ROUND(GSTManagement.RoundGSTPrecision("Total GST Amount" * ServLineQty / Quantity),
+            Currency."Amount Rounding Precision");
+          TaxAreaLine.RESET;
+          TaxAreaLine.SETCURRENTKEY("Tax Area","Calculation Order");
+          TaxAreaLine.SETRANGE("Tax Area","Tax Area Code");
+          IF TaxAreaLine.FINDFIRST THEN BEGIN
+            TaxJurisdiction.GET(TaxAreaLine."Tax Jurisdiction Code");
+            IF (TaxJurisdiction."Tax Type" = TaxJurisdiction."Tax Type"::VAT) OR
+               (TaxJurisdiction."Tax Type" = TaxJurisdiction."Tax Type"::CST)
+            THEN BEGIN
+              IF "Currency Code" = '' THEN
+                "Tax Amount" := RoundVATPrecision("Tax Amount")
+              ELSE
+                "Tax Amount" := ROUND("Tax Amount");
+            END ELSE
+              "Tax Amount" := ROUND("Tax Amount",Currency."Amount Rounding Precision");
+          END;
+          "Amount Including Tax" := "Tax Base Amount" + "Tax Amount";
+          "Charges To Customer" :=
+            ROUND("Charges To Customer" * ServLineQty / Quantity,Currency."Amount Rounding Precision");
+          "Service Tax Base" := ROUND("Service Tax Base" * ServLineQty / Quantity,Currency."Amount Rounding Precision");
+
+          IF "Allow Invoice Disc." AND (TempVATAmountLine."Inv. Disc. Base Amount" <> 0) THEN
+            IF QtyType = QtyType::Invoicing THEN
+              "Inv. Discount Amount" := "Inv. Disc. Amount to Invoice"
+            ELSE BEGIN
+              TempVATAmountLineRemainder."Invoice Discount Amount" :=
+                TempVATAmountLineRemainder."Invoice Discount Amount" +
+                TempVATAmountLine."Invoice Discount Amount" * "Line Amount" /
+                TempVATAmountLine."Inv. Disc. Base Amount";
+              "Inv. Discount Amount" :=
+                ROUND(
+                  TempVATAmountLineRemainder."Invoice Discount Amount",Currency."Amount Rounding Precision");
+              TempVATAmountLineRemainder."Invoice Discount Amount" :=
+                TempVATAmountLineRemainder."Invoice Discount Amount" - "Inv. Discount Amount";
+            END;
+
+          IF ServiceHeader."Prices Including VAT" THEN BEGIN
+            IF (TempVATAmountLine."Line Amount" - TempVATAmountLine."Invoice Discount Amount" = 0) OR
+               ("Line Amount" = 0)
+            THEN BEGIN
+              TempVATAmountLineRemainder."VAT Amount" := 0;
+              TempVATAmountLineRemainder."Amount Including VAT" := 0;
+            END ELSE BEGIN
+              TempVATAmountLineRemainder."VAT Amount" :=
+                TempVATAmountLineRemainder."VAT Amount" +
+                TempVATAmountLine."VAT Amount" *
+                ("Line Amount" - "Inv. Discount Amount") /
+                (TempVATAmountLine."Line Amount" - TempVATAmountLine."Invoice Discount Amount");
+              TempVATAmountLineRemainder."Amount Including VAT" :=
+                TempVATAmountLineRemainder."Amount Including VAT" +
+                TempVATAmountLine."Amount Including VAT" *
+                ("Line Amount" - "Inv. Discount Amount") /
+                (TempVATAmountLine."Line Amount" - TempVATAmountLine."Invoice Discount Amount");
+            END;
+            IF "Line Discount %" <> 100 THEN
+              "Amount Including VAT" :=
+                ROUND(TempVATAmountLineRemainder."Amount Including VAT",Currency."Amount Rounding Precision")
+            ELSE
+              "Amount Including VAT" := 0;
+            Amount :=
+              ROUND("Amount Including VAT",Currency."Amount Rounding Precision") -
+              ROUND(TempVATAmountLineRemainder."VAT Amount",Currency."Amount Rounding Precision");
+            "VAT Base Amount" :=
+              ROUND(
+                Amount * (1 - ServiceHeader."VAT Base Discount %" / 100),Currency."Amount Rounding Precision");
+            TempVATAmountLineRemainder."Amount Including VAT" :=
+              TempVATAmountLineRemainder."Amount Including VAT" - "Amount Including VAT";
+            TempVATAmountLineRemainder."VAT Amount" :=
+              TempVATAmountLineRemainder."VAT Amount" - "Amount Including VAT" + Amount;
+          END ELSE BEGIN
+            IF "VAT Calculation Type" = "VAT Calculation Type"::"Full VAT" THEN BEGIN
+              IF "Line Discount %" <> 100 THEN
+                "Amount Including VAT" := "Line Amount" - "Inv. Discount Amount"
+              ELSE
+                "Amount Including VAT" := 0;
+              Amount := 0;
+              "VAT Base Amount" := 0;
+            END ELSE BEGIN
+              Amount := "Line Amount" - "Inv. Discount Amount";
+              "VAT Base Amount" :=
+                ROUND(
+                  Amount * (1 - ServiceHeader."VAT Base Discount %" / 100),Currency."Amount Rounding Precision");
+              IF TempVATAmountLine."VAT Base" = 0 THEN
+                TempVATAmountLineRemainder."VAT Amount" := 0
+              ELSE
+                TempVATAmountLineRemainder."VAT Amount" :=
+                  TempVATAmountLineRemainder."VAT Amount" +
+                  TempVATAmountLine."VAT Amount" *
+                  ("Line Amount" - "Inv. Discount Amount") /
+                  (TempVATAmountLine."Line Amount" - TempVATAmountLine."Invoice Discount Amount");
+              IF "Line Discount %" <> 100 THEN
+                "Amount Including VAT" :=
+                  Amount + ROUND(TempVATAmountLineRemainder."VAT Amount",Currency."Amount Rounding Precision")
+              ELSE
+                "Amount Including VAT" := 0;
+              TempVATAmountLineRemainder."VAT Amount" :=
+                TempVATAmountLineRemainder."VAT Amount" - "Amount Including VAT" + Amount;
+            END;
+          END;
+
+          TempVATAmountLineRemainder.MODIFY;
+          "Amount To Customer" :=
+            ROUND(
+              "Line Amount" - "Inv. Discount Amount" + "Excise Amount" + "Tax Amount" +
+              "Service Tax Amount" + "Service Tax eCess Amount" + "Service Tax SHE Cess Amount" + "Service Tax SBC Amount" +
+              "KK Cess Amount" + "Charges To Customer" + "Total GST Amount",Currency."Amount Rounding Precision")
+        END;
+    END;
+
+    PROCEDURE RoundAmount@9(ServLineQty@1009 : Decimal;VAR ServiceHeader@1006 : Record 5900;VAR ServiceLine@1002 : Record 5902;VAR TempServiceLine@1004 : Record 5902;VAR TotalServiceLine@1000 : Record 5902;VAR TotalServiceLineLCY@1003 : Record 5902;VAR ServiceLineACY@1005 : Record 5902);
+    VAR
+      CurrExchRate@1008 : Record 330;
+      NoVAT@1001 : Boolean;
+      UseDate@1007 : Date;
+      NoTax@1500000 : Boolean;
+    BEGIN
+      WITH ServiceLine DO BEGIN
+        IncrAmount(ServiceLine,TotalServiceLine,ServiceHeader."Prices Including VAT");
+        Increment(TotalServiceLine."Net Weight",ROUND(ServLineQty * "Net Weight",0.00001));
+        Increment(TotalServiceLine."Gross Weight",ROUND(ServLineQty * "Gross Weight",0.00001));
+        Increment(TotalServiceLine."Unit Volume",ROUND(ServLineQty * "Unit Volume",0.00001));
+        Increment(TotalServiceLine.Quantity,ServLineQty);
+        IF "Units per Parcel" > 0 THEN
+          Increment(
+            TotalServiceLine."Units per Parcel",
+            ROUND(ServLineQty / "Units per Parcel",1,'>'));
+
+        TempServiceLine := ServiceLine;
+        ServiceLineACY := ServiceLine;
+
+        IF ServiceHeader."Currency Code" <> '' THEN BEGIN
+          IF ("Document Type" IN ["Document Type"::Quote]) AND
+             (ServiceHeader."Posting Date" = 0D)
+          THEN
+            UseDate := WORKDATE
+          ELSE
+            UseDate := ServiceHeader."Posting Date";
+
+          NoVAT := Amount = "Amount Including VAT";
+          "Amount Including VAT" :=
+            RoundInvPrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."Amount Including VAT",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."Amount Including VAT");
+          IF NoVAT THEN
+            Amount := "Amount Including VAT"
+          ELSE
+            Amount :=
+              ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine.Amount,ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY.Amount;
+          "Line Amount" :=
+            RoundInvPrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."Line Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."Line Amount");
+          "Line Discount Amount" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Line Discount Amount",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Line Discount Amount";
+          "Inv. Discount Amount" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Inv. Discount Amount",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Inv. Discount Amount";
+          "VAT Difference" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."VAT Difference",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."VAT Difference";
+          "Excise Base Amount" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Excise Base Amount",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Excise Base Amount";
+          "Excise Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."Excise Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."Excise Amount");
+          "CESS Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."CESS Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."CESS Amount");
+          "BED Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."BED Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."BED Amount");
+          "AED(GSI) Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."AED(GSI) Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."AED(GSI) Amount");
+          "AED(TTA) Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."AED(TTA) Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."AED(TTA) Amount");
+          "SED Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."SED Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."SED Amount");
+          "SAED Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."SAED Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."SAED Amount");
+          "NCCD Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."NCCD Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."NCCD Amount");
+          "ADC VAT Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."ADC VAT Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."ADC VAT Amount");
+          "eCess Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."eCess Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."eCess Amount");
+          "SHE Cess Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."SHE Cess Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."SHE Cess Amount");
+          "ADET Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."ADET Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."ADET Amount");
+          "ADE Amount" :=
+            RoundExcisePrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."ADE Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."ADE Amount");
+          "Amount To Customer" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Amount To Customer",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Amount To Customer";
+          "Charges To Customer" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Charges To Customer",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Charges To Customer";
+          "Amount Including Excise" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Amount Including Excise",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Excise Base Amount";
+          NoTax := "Tax Base Amount" = "Amount Including Tax";
+          "Amount Including Tax" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Amount Including Tax",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Amount Including Tax";
+          IF NoTax THEN
+            "Tax Base Amount" := "Amount Including Tax"
+          ELSE
+            "Tax Base Amount" :=
+              ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."Tax Base Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."Tax Base Amount";
+          "Tax Amount" :=
+            RoundVATPrecision(ROUND(
+                CurrExchRate.ExchangeAmtFCYToLCY(
+                  UseDate,ServiceHeader."Currency Code",
+                  TotalServiceLine."Tax Amount",ServiceHeader."Currency Factor")) -
+              TotalServiceLineLCY."Tax Amount");
+          "VAT Base Amount" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."VAT Base Amount",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."VAT Base Amount";
+          "Service Tax Base" :=
+            ROUND(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Service Tax Base",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Service Tax Base";
+          "Service Tax Amount" :=
+            RoundServiceTaxPrecision(
+              ServiceHeader,
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Service Tax Amount",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Service Tax Amount";
+          "Service Tax eCess Amount" :=
+            RoundServiceTaxPrecision(
+              ServiceHeader,
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Service Tax eCess Amount",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Service Tax eCess Amount";
+          "Service Tax SHE Cess Amount" :=
+            RoundServiceTaxPrecision(
+              ServiceHeader,
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Service Tax SHE Cess Amount",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Service Tax SHE Cess Amount";
+          "Service Tax SBC Amount" :=
+            RoundServiceTaxPrecision(
+              ServiceHeader,
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Service Tax SBC Amount",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."Service Tax SBC Amount";
+          "KK Cess Amount" :=
+            RoundServiceTaxPrecision(
+              ServiceHeader,
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."KK Cess Amount",ServiceHeader."Currency Factor")) -
+            TotalServiceLineLCY."KK Cess Amount";
+          "Total GST Amount" :=
+            GSTManagement.RoundGSTPrecision(
+              CurrExchRate.ExchangeAmtFCYToLCY(
+                UseDate,ServiceHeader."Currency Code",
+                TotalServiceLine."Total GST Amount",ServiceHeader."Currency Factor")) -
+             TotalServiceLineLCY."Total GST Amount";
+        END;
+
+        IncrAmount(ServiceLine,TotalServiceLineLCY,ServiceHeader."Prices Including VAT");
+        Increment(TotalServiceLineLCY."Unit Cost (LCY)",ROUND(ServLineQty * "Unit Cost (LCY)"));
+      END;
+    END;
+
+    PROCEDURE ReverseAmount@10(VAR ServiceLine@1000 : Record 5902);
+    BEGIN
+      WITH ServiceLine DO BEGIN
+        "Qty. to Ship" := -"Qty. to Ship";
+        "Qty. to Ship (Base)" := -"Qty. to Ship (Base)";
+        "Qty. to Invoice" := -"Qty. to Invoice";
+        "Qty. to Invoice (Base)" := -"Qty. to Invoice (Base)";
+        "Qty. to Consume" := -"Qty. to Consume";
+        "Qty. to Consume (Base)" := -"Qty. to Consume (Base)";
+        "Line Amount" := -"Line Amount";
+        Amount := -Amount;
+        "VAT Base Amount" := -"VAT Base Amount";
+        "VAT Difference" := -"VAT Difference";
+        "Amount Including VAT" := -"Amount Including VAT";
+        "Line Discount Amount" := -"Line Discount Amount";
+        "Inv. Discount Amount" := -"Inv. Discount Amount";
+        "Excise Base Amount" := -"Excise Base Amount";
+        "Excise Amount" := -"Excise Amount";
+        "Amount To Customer" := -"Amount To Customer";
+        "Charges To Customer" := -"Charges To Customer";
+        "Amount Including Excise" := -"Amount Including Excise";
+        "Tax Base Amount" := -"Tax Base Amount";
+        "Amount Including Tax" := -"Amount Including Tax";
+        "Tax Amount" := -"Tax Amount";
+        "BED Amount" := -"BED Amount";
+        "AED(GSI) Amount" := -"AED(GSI) Amount";
+        "AED(TTA) Amount" := -"AED(TTA) Amount";
+        "ADET Amount" := -"ADET Amount";
+        "ADE Amount" := -"ADE Amount";
+        "SED Amount" := -"SED Amount";
+        "SAED Amount" := -"SAED Amount";
+        "CESS Amount" := -"CESS Amount";
+        "NCCD Amount" := -"NCCD Amount";
+        "eCess Amount" := -"eCess Amount";
+        "ADC VAT Amount" := -"ADC VAT Amount";
+        "SHE Cess Amount" := -"SHE Cess Amount";
+        "Service Tax Base" := -"Service Tax Base";
+        "Service Tax Amount" := -"Service Tax Amount";
+        "Service Tax eCess Amount" := -"Service Tax eCess Amount";
+        "Service Tax SHE Cess Amount" := -"Service Tax SHE Cess Amount";
+        "Service Tax SBC Amount" := -"Service Tax SBC Amount";
+        "KK Cess Amount" := -"KK Cess Amount";
+        "GST Base Amount" := -"GST Base Amount";
+        "Total GST Amount" := -"Total GST Amount";
+      END;
+    END;
+
+    PROCEDURE InvoiceRounding@12(VAR ServiceHeader@1005 : Record 5900;VAR ServiceLine@1007 : Record 5902;VAR TotalServiceLine@1004 : Record 5902;VAR LastLineRetrieved@1008 : Boolean;UseTempData@1000 : Boolean;BiggestLineNo@1002 : Integer);
+    VAR
+      TempServiceLineForCalc@1003 : TEMPORARY Record 5902;
+      RoundingServiceLine@1009 : Record 5902;
+      CustPostingGr@1006 : Record 92;
+      InvoiceRoundingAmount@1001 : Decimal;
+    BEGIN
+      Currency.TESTFIELD("Invoice Rounding Precision");
+      InvoiceRoundingAmount :=
+        -ROUND(
+          TotalServiceLine."Amount To Customer" -
+          ROUND(
+            TotalServiceLine."Amount To Customer",
+            Currency."Invoice Rounding Precision",
+            Currency.InvoiceRoundingDirection),
+          Currency."Amount Rounding Precision");
+      IF InvoiceRoundingAmount <> 0 THEN BEGIN
+        CustPostingGr.GET(ServiceHeader."Customer Posting Group");
+        CustPostingGr.TESTFIELD("Invoice Rounding Account");
+        WITH ServiceLine DO BEGIN
+          INIT;
+          BiggestLineNo := GetLastLineNo(ServiceLine) + 10000;
+          "System-Created Entry" := TRUE;
+          IF UseTempData THEN BEGIN
+            "Line No." := 0;
+            Type := Type::"G/L Account";
+            TempServiceLineForCalc := ServiceLine;
+            TempServiceLineForCalc.VALIDATE("No.",CustPostingGr."Invoice Rounding Account");
+            ServiceLine := TempServiceLineForCalc;
+          END ELSE BEGIN
+            "Line No." := BiggestLineNo;
+            RoundingServiceLine := ServiceLine;
+            RoundingServiceLine.VALIDATE(Type,Type::"G/L Account");
+            RoundingServiceLine.VALIDATE("No.",CustPostingGr."Invoice Rounding Account");
+            ServiceLine := RoundingServiceLine;
+          END;
+          VALIDATE(Quantity,1);
+          IF ServiceHeader."Prices Including VAT" THEN
+            VALIDATE("Unit Price",InvoiceRoundingAmount)
+          ELSE
+            VALIDATE(
+              "Unit Price",
+              ROUND(
+                InvoiceRoundingAmount /
+                (1 + (1 - ServiceHeader."VAT Base Discount %" / 100) * "VAT %" / 100),
+                Currency."Amount Rounding Precision"));
+          VALIDATE("Amount To Customer",InvoiceRoundingAmount);
+          "Line No." := BiggestLineNo;
+
+          LastLineRetrieved := FALSE;
+          RoundingLineIsInserted := TRUE;
+          RoundingLineNo := "Line No.";
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE IncrAmount@13(VAR ServiceLine@1001 : Record 5902;VAR TotalServiceLine@1000 : Record 5902;PricesIncludingVAT@1002 : Boolean);
+    BEGIN
+      WITH ServiceLine DO BEGIN
+        IF PricesIncludingVAT OR
+           ("VAT Calculation Type" <> "VAT Calculation Type"::"Full VAT")
+        THEN
+          Increment(TotalServiceLine."Line Amount","Line Amount");
+        Increment(TotalServiceLine.Amount,Amount);
+        Increment(TotalServiceLine."VAT Base Amount","VAT Base Amount");
+        Increment(TotalServiceLine."VAT Difference","VAT Difference");
+        Increment(TotalServiceLine."Amount Including VAT","Amount Including VAT");
+        Increment(TotalServiceLine."Line Discount Amount","Line Discount Amount");
+        Increment(TotalServiceLine."Inv. Discount Amount","Inv. Discount Amount");
+        Increment(TotalServiceLine."Inv. Disc. Amount to Invoice","Inv. Disc. Amount to Invoice");
+        Increment(TotalServiceLine."Excise Base Amount","Excise Base Amount");
+        Increment(TotalServiceLine."Excise Amount","Excise Amount");
+        Increment(TotalServiceLine."BED Amount","BED Amount");
+        Increment(TotalServiceLine."AED(GSI) Amount","AED(GSI) Amount");
+        Increment(TotalServiceLine."SED Amount","SED Amount");
+        Increment(TotalServiceLine."ADET Amount","ADET Amount");
+        Increment(TotalServiceLine."ADE Amount","ADE Amount");
+        Increment(TotalServiceLine."AED(TTA) Amount","AED(TTA) Amount");
+        Increment(TotalServiceLine."SAED Amount","SAED Amount");
+        Increment(TotalServiceLine."NCCD Amount","NCCD Amount");
+        Increment(TotalServiceLine."eCess Amount","eCess Amount");
+        Increment(TotalServiceLine."ADC VAT Amount","ADC VAT Amount");
+        Increment(TotalServiceLine."SHE Cess Amount","SHE Cess Amount");
+        Increment(TotalServiceLine."Amount To Customer","Amount To Customer");
+        Increment(TotalServiceLine."Charges To Customer","Charges To Customer");
+        Increment(TotalServiceLine."Amount Including Excise","Amount Including Excise");
+        Increment(TotalServiceLine."Tax Base Amount","Tax Base Amount");
+        Increment(TotalServiceLine."Amount Including Tax","Amount Including Tax");
+        Increment(TotalServiceLine."Tax Amount","Tax Amount");
+        Increment(TotalServiceLine."Service Tax Base","Service Tax Base");
+        Increment(TotalServiceLine."Service Tax Amount","Service Tax Amount");
+        Increment(TotalServiceLine."Service Tax eCess Amount","Service Tax eCess Amount");
+        Increment(TotalServiceLine."Service Tax SHE Cess Amount","Service Tax SHE Cess Amount");
+        Increment(TotalServiceLine."Service Tax SBC Amount","Service Tax SBC Amount");
+        Increment(TotalServiceLine."KK Cess Amount","KK Cess Amount");
+        Increment(TotalServiceLine."Total GST Amount","Total GST Amount");
+      END;
+    END;
+
+    LOCAL PROCEDURE Increment@14(VAR Number@1000 : Decimal;Number2@1001 : Decimal);
+    BEGIN
+      Number := Number + Number2;
+    END;
+
+    PROCEDURE RoundingLineInserted@2() : Boolean;
+    BEGIN
+      EXIT(RoundingLineIsInserted);
+    END;
+
+    PROCEDURE GetRoundingLineNo@4() : Integer;
+    BEGIN
+      EXIT(RoundingLineNo);
+    END;
+
+    PROCEDURE SumServiceLines@17(VAR NewServHeader@1000 : Record 5900;QtyType@1001 : 'General,Invoicing,Shipping,Consuming';VAR NewTotalServLine@1002 : Record 5902;VAR NewTotalServLineLCY@1003 : Record 5902;VAR VATAmount@1004 : Decimal;VAR VATAmountText@1005 : Text[30];VAR ProfitLCY@1006 : Decimal;VAR ProfitPct@1007 : Decimal;VAR TotalAdjCostLCY@1011 : Decimal;ChargestoCustomer@1000000000 : Decimal);
+    VAR
+      OldServLine@1008 : Record 5902;
+    BEGIN
+      SumServiceLinesTemp(
+        NewServHeader,OldServLine,QtyType,NewTotalServLine,NewTotalServLineLCY,
+        VATAmount,VATAmountText,ProfitLCY,ProfitPct,TotalAdjCostLCY,ChargestoCustomer);
+    END;
+
+    PROCEDURE SumServiceLinesTemp@25(VAR NewServHeader@1000 : Record 5900;VAR OldServLine@1001 : Record 5902;QtyType@1002 : 'General,Invoicing,Shipping,Consuming';VAR NewTotalServLine@1003 : Record 5902;VAR NewTotalServLineLCY@1004 : Record 5902;VAR VATAmount@1005 : Decimal;VAR VATAmountText@1006 : Text[30];VAR ProfitLCY@1007 : Decimal;VAR ProfitPct@1008 : Decimal;VAR TotalAdjCostLCY@1015 : Decimal;ChargestoCustomer@1000000000 : Decimal);
+    VAR
+      ServHeader@1013 : Record 5900;
+      ServLine@1009 : Record 5902;
+      TempServiceLine@1014 : Record 5902;
+      TotalServiceLine@1012 : Record 5902;
+      TotalServiceLineLCY@1011 : Record 5902;
+      ServiceLineACY@1010 : Record 5902;
+    BEGIN
+      IF NOT IsInitialized THEN
+        Initialize(NewServHeader."Currency Code");
+
+      WITH ServHeader DO BEGIN
+        ServHeader := NewServHeader;
+        SumServiceLines2(ServHeader,ServLine,OldServLine,TempServiceLine,
+          TotalServiceLine,TotalServiceLineLCY,ServiceLineACY,QtyType,FALSE,TRUE,TotalAdjCostLCY,ChargestoCustomer);
+
+        IF (QtyType = QtyType::Shipping) AND (OldServLine."Qty. to Consume" <> 0) THEN BEGIN
+          TotalServiceLineLCY.Amount := 0;
+          TotalServiceLine."Amount Including VAT" := 0;
+          ProfitLCY := 0;
+          VATAmount := 0;
+        END ELSE BEGIN
+          ProfitLCY := TotalServiceLineLCY.Amount - TotalServiceLineLCY."Unit Cost (LCY)";
+          VATAmount := TotalServiceLine."Amount Including VAT" - TotalServiceLine.Amount;
+        END;
+
+        IF TotalServiceLineLCY.Amount = 0 THEN
+          ProfitPct := 0
+        ELSE
+          ProfitPct := ROUND(ProfitLCY / TotalServiceLineLCY.Amount * 100,0.1);
+        IF TotalServiceLine."VAT %" = 0 THEN
+          VATAmountText := Text016
+        ELSE
+          VATAmountText := STRSUBSTNO(Text017,TotalServiceLine."VAT %");
+        NewTotalServLine := TotalServiceLine;
+        NewTotalServLineLCY := TotalServiceLineLCY;
+      END;
+    END;
+
+    LOCAL PROCEDURE SumServiceLines2@16(VAR ServHeader@1010 : Record 5900;VAR NewServLine@1000 : Record 5902;VAR OldServLine@1001 : Record 5902;VAR TempServiceLine@1016 : Record 5902;VAR TotalServiceLine@1009 : Record 5902;VAR TotalServiceLineLCY@1008 : Record 5902;VAR ServiceLineACY@1007 : Record 5902;QtyType@1002 : 'General,Invoicing,Shipping,Consuming,ServLineItems,ServLineResources,ServLineCosts';InsertServLine@1003 : Boolean;CalcAdCostLCY@1028 : Boolean;VAR TotalAdjCostLCY@1017 : Decimal;ChargestoCustomer@1000000000 : Decimal);
+    VAR
+      ServLine@1015 : Record 5902;
+      TempVATAmountLine@1006 : TEMPORARY Record 290;
+      TempVATAmountLineRemainder@1005 : TEMPORARY Record 290;
+      GLSetup@1011 : Record 98;
+      Currency@1014 : Record 4;
+      SvcTaxPostingBuffer@1500000 : ARRAY [2] OF TEMPORARY Record 16478;
+      CostCalcMgt@1012 : Codeunit 5836;
+      ServLineQty@1004 : Decimal;
+      LastLineRetrieved@1026 : Boolean;
+      AdjCostLCY@1027 : Decimal;
+      BiggestLineNo@1019 : Integer;
+      AppliedServiceTaxAmountPmt@1500001 : Decimal;
+    BEGIN
+      TotalAdjCostLCY := 0;
+      IF NOT IsInitialized THEN
+        Initialize(ServHeader."Currency Code");
+      TempVATAmountLineRemainder.DELETEALL;
+      OldServLine.CalcVATAmountLines(QtyType,ServHeader,OldServLine,TempVATAmountLine,FALSE);
+      WITH ServHeader DO BEGIN
+        GLSetup.GET;
+        SalesSetup.GET;
+        GetCurrency("Currency Code",Currency);
+        OldServLine.SETRANGE("Document Type","Document Type");
+        OldServLine.SETRANGE("Document No.","No.");
+        CASE QtyType OF
+          QtyType::ServLineItems:
+            OldServLine.SETRANGE(Type,OldServLine.Type::Item);
+          QtyType::ServLineResources:
+            OldServLine.SETRANGE(Type,OldServLine.Type::Resource);
+          QtyType::ServLineCosts:
+            OldServLine.SETFILTER(Type,'%1|%2',OldServLine.Type::Cost,OldServLine.Type::"G/L Account");
+        END;
+
+        RoundingLineIsInserted := FALSE;
+        IF OldServLine.FIND('-') THEN
+          REPEAT
+            IF NOT RoundingLineInserted THEN
+              ServLine := OldServLine;
+            CASE QtyType OF
+              QtyType::Invoicing:
+                ServLineQty := ServLine."Qty. to Invoice";
+              QtyType::Consuming:
+                BEGIN
+                  ServLineQty := ServLine."Qty. to Consume";
+                  ServLine."Unit Price" := 0;
+                  ServLine."Inv. Discount Amount" := 0;
+                END;
+              QtyType::Shipping:
+                BEGIN
+                  IF "Document Type" = "Document Type"::"Credit Memo" THEN
+                    ServLineQty := ServLine.Quantity
+                  ELSE
+                    ServLineQty := ServLine."Qty. to Ship";
+                  IF OldServLine."Qty. to Consume" <> 0 THEN BEGIN
+                    ServLine."Unit Price" := 0;
+                    ServLine."Inv. Discount Amount" := 0;
+                    ServLine.Amount := 0;
+                  END
+                END;
+              ELSE
+                ServLineQty := ServLine.Quantity;
+            END;
+
+            DivideAmount(QtyType,
+              ServLineQty,
+              ServHeader,
+              ServLine,
+              TempVATAmountLine,
+              TempVATAmountLineRemainder);
+
+            ServLine.Quantity := ServLineQty;
+            IF ServLineQty <> 0 THEN BEGIN
+              IF (ServLine.Amount <> 0) AND NOT RoundingLineInserted THEN
+                IF TotalServiceLine.Amount = 0 THEN
+                  TotalServiceLine."VAT %" := ServLine."VAT %"
+                ELSE
+                  IF TotalServiceLine."VAT %" <> ServLine."VAT %" THEN
+                    TotalServiceLine."VAT %" := 0;
+              RoundAmount(ServLineQty,ServHeader,ServLine,TempServiceLine,
+                TotalServiceLine,TotalServiceLineLCY,ServiceLineACY);
+
+              IF NOT (QtyType IN [QtyType::Shipping]) AND
+                 NOT InsertServLine AND CalcAdCostLCY
+              THEN BEGIN
+                AdjCostLCY := CostCalcMgt.CalcServLineCostLCY(ServLine,QtyType);
+                TotalAdjCostLCY := TotalAdjCostLCY + GetServLineAdjCostLCY(ServLine,QtyType,AdjCostLCY);
+              END;
+
+              ServLine := TempServiceLine;
+            END;
+            IF InsertServLine THEN BEGIN
+              NewServLine := ServLine;
+              IF NewServLine.INSERT THEN;
+            END;
+            IF RoundingLineInserted THEN
+              LastLineRetrieved := TRUE
+            ELSE BEGIN
+              BiggestLineNo := MAX(BiggestLineNo,OldServLine."Line No.");
+              LastLineRetrieved := OldServLine.NEXT = 0;
+              IF LastLineRetrieved AND SalesSetup."Invoice Rounding" THEN
+                InvoiceRounding(ServHeader,ServLine,TotalServiceLine,
+                  LastLineRetrieved,TRUE,BiggestLineNo);
+            END;
+          UNTIL LastLineRetrieved;
+        FilterAppliedEntries(
+          ServHeader,TRUE,ChargestoCustomer,SvcTaxPostingBuffer,TotalServiceLineLCY,AppliedServiceTaxAmountPmt);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetCurrency@18(CurrencyCode@1000 : Code[10];VAR Currency2@1001 : Record 4);
+    BEGIN
+      IF CurrencyCode = '' THEN
+        Currency2.InitRoundingPrecision
+      ELSE BEGIN
+        Currency2.GET(CurrencyCode);
+        Currency2.TESTFIELD("Amount Rounding Precision");
+      END;
+    END;
+
+    PROCEDURE GetServiceLines@19(VAR NewServiceHeader@1000 : Record 5900;VAR NewServiceLine@1001 : Record 5902;QtyType@1002 : 'General,Invoicing,Shipping,Consuming';ChargestoCustomer@1000000000 : Decimal);
+    VAR
+      OldServiceLine@1003 : Record 5902;
+      TempServiceLine@1007 : Record 5902;
+      TotalServiceLine@1006 : Record 5902;
+      TotalServiceLineLCY@1005 : Record 5902;
+      ServiceLineACY@1004 : Record 5902;
+      TotalAdjCostLCY@1008 : Decimal;
+    BEGIN
+      IF NOT IsInitialized THEN
+        Initialize(NewServiceHeader."Currency Code");
+
+      SumServiceLines2(NewServiceHeader,NewServiceLine,
+        OldServiceLine,TempServiceLine,TotalServiceLine,TotalServiceLineLCY,ServiceLineACY,
+        QtyType,TRUE,FALSE,TotalAdjCostLCY,ChargestoCustomer);
+    END;
+
+    PROCEDURE MAX@55(number1@1000 : Integer;number2@1001 : Integer) : Integer;
+    BEGIN
+      IF number1 > number2 THEN
+        EXIT(number1);
+      EXIT(number2);
+    END;
+
+    LOCAL PROCEDURE GetServLineAdjCostLCY@48(ServLine2@1000 : Record 5902;QtyType@1002 : 'General,Invoicing,Shipping,Consuming,ServLineItems,ServLineResources,ServLineCosts';AdjCostLCY@1001 : Decimal) : Decimal;
+    BEGIN
+      WITH ServLine2 DO BEGIN
+        IF "Document Type" IN ["Document Type"::Order,"Document Type"::Invoice] THEN
+          AdjCostLCY := -AdjCostLCY;
+
+        CASE TRUE OF
+          "Shipment No." <> '':
+            EXIT(AdjCostLCY);
+          (QtyType = QtyType::General) OR (QtyType = QtyType::ServLineItems) OR
+          (QtyType = QtyType::ServLineResources) OR (QtyType = QtyType::ServLineCosts):
+            EXIT(ROUND("Outstanding Quantity" * "Unit Cost (LCY)") + AdjCostLCY);
+          "Document Type" IN ["Document Type"::Order,"Document Type"::Invoice]:
+            BEGIN
+              IF ("Qty. to Invoice" > "Qty. to Ship") OR ("Qty. to Consume" > 0) THEN
+                EXIT(ROUND("Qty. to Ship" * "Unit Cost (LCY)") + AdjCostLCY);
+              EXIT(ROUND("Qty. to Invoice" * "Unit Cost (LCY)"));
+            END;
+          "Document Type" = "Document Type"::"Credit Memo":
+            EXIT(ROUND("Qty. to Invoice" * "Unit Cost (LCY)"));
+        END;
+      END;
+    END;
+
+    PROCEDURE GetLastLineNo@3(ServLine@1000 : Record 5902) : Integer;
+    BEGIN
+      WITH ServLine DO BEGIN
+        SETRANGE("Document Type","Document Type");
+        SETRANGE("Document No.","Document No.");
+        IF FINDLAST THEN;
+        EXIT("Line No.");
+      END;
+    END;
+
+    PROCEDURE FillExcisePostingBuffer@1500002(VAR ExcisePostingBuffer@1500003 : ARRAY [2] OF TEMPORARY Record 13706;ServiceLine@1500002 : Record 5902;ServiceLineACY@1500001 : Record 5902;ServiceHeader@1500000 : Record 5900);
+    BEGIN
+      IF NOT (
+              ServiceLine.Type IN [ServiceLine.Type::Item,ServiceLine.Type::Cost,ServiceLine.Type::Resource,
+                                   ServiceLine.Type::"G/L Account"])
+      THEN
+        EXIT;
+
+      IF (ServiceLine.Type IN [ServiceLine.Type::Cost,ServiceLine.Type::"G/L Account",ServiceLine.Type::Resource]) AND
+         ServiceHeader.Trading AND (ServiceLine."Excise Amount" <> 0)
+      THEN
+        ERROR(Text16503);
+
+      WITH ServiceLine DO BEGIN
+        ExcisePostingSetup.RESET;
+        ExcisePostingSetup.SETRANGE("Excise Bus. Posting Group","Excise Bus. Posting Group");
+        ExcisePostingSetup.SETRANGE("Excise Prod. Posting Group","Excise Prod. Posting Group");
+        ExcisePostingSetup.SETRANGE("From Date",0D,ServiceHeader."Posting Date");
+        IF ExcisePostingSetup.FINDLAST THEN;
+
+        ExcisePostingBuffer[1]."Excise Bus. Posting Group" := "Excise Bus. Posting Group";
+        ExcisePostingBuffer[1]."Excise Prod. Posting Group" := "Excise Prod. Posting Group";
+        IF Location.GET("Location Code") THEN
+          ExcisePostingBuffer[1]."E.C.C. No." := Location."E.C.C. No."
+        ELSE BEGIN
+          GetCompanyInfo;
+          ExcisePostingBuffer[1]."E.C.C. No." := CompanyInfo."E.C.C. No.";
+        END;
+        IF Type IN [Type::Cost,Type::"G/L Account"] THEN
+          ExcisePostingBuffer[1].Type := ExcisePostingBuffer[1].Type::"G/L Account"
+        ELSE
+          IF Type = Type::Item THEN
+            ExcisePostingBuffer[1].Type := ExcisePostingBuffer[1].Type::Item
+          ELSE
+            ExcisePostingBuffer[1].Type := ExcisePostingBuffer[1].Type::Resource;
+
+        ExcisePostingBuffer[1]."Item No." := "No.";
+        ExcisePostingBuffer[1]."System-Created Entry" := TRUE;
+        ExcisePostingBuffer[1]."Amount Including Excise" := "Amount Including Excise";
+        ExcisePostingBuffer[1]."BED Calculation Type" := ExcisePostingSetup."BED Calculation Type";
+        ExcisePostingBuffer[1]."Excise Amount" := "Excise Amount";
+        ExcisePostingBuffer[1]."Excise Amount (ACY)" := ServiceLineACY."Excise Amount";
+        ExcisePostingBuffer[1]."CESS Amount (ACY)" := ServiceLineACY."CESS Amount";
+        ExcisePostingBuffer[1]."Excise Base Amount" := "Excise Base Amount";
+        ExcisePostingBuffer[1]."BED %" := ExcisePostingSetup."BED %";
+        ExcisePostingBuffer[1]."BED Amount" := "BED Amount";
+        ExcisePostingBuffer[1]."AED(GSI) Amount" := "AED(GSI) Amount";
+        ExcisePostingBuffer[1]."AED(TTA) Amount" := "AED(TTA) Amount";
+        ExcisePostingBuffer[1]."SED Amount" := "SED Amount";
+        ExcisePostingBuffer[1]."SAED Amount" := "SAED Amount";
+        ExcisePostingBuffer[1]."CESS Amount" := "CESS Amount";
+        ExcisePostingBuffer[1]."NCCD Amount" := "NCCD Amount";
+        ExcisePostingBuffer[1]."ADC VAT Amount" := "ADC VAT Amount";
+        ExcisePostingBuffer[1]."ADC VAT Amount (ACY)" := ServiceLineACY."ADC VAT Amount";
+        ExcisePostingBuffer[1].CVD := CVDEntry;
+        ExcisePostingBuffer[1]."eCess Amount" := "eCess Amount";
+        ExcisePostingBuffer[1]."SHE Cess Amount" := "SHE Cess Amount";
+        ExcisePostingBuffer[1]."ADET Amount" := "ADET Amount";
+        ExcisePostingBuffer[1]."ADE Amount" := "ADE Amount";
+        ExcisePostingBuffer[1].Quantity := "Qty. to Invoice (Base)";
+        ExcisePostingBuffer[1]."Global Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        ExcisePostingBuffer[1]."Global Dimension 2 Code" := "Shortcut Dimension 2 Code";
+        ExcisePostingBuffer[1]."Dimension Set ID" := "Dimension Set ID";
+        UpdExcisePostingBuffer(ExcisePostingBuffer,"Line No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdExcisePostingBuffer@1500003(VAR ExcisePostingBuffer@1500001 : ARRAY [2] OF TEMPORARY Record 13706;ServiceLineNo@1500000 : Integer);
+    BEGIN
+      ExcisePostingBuffer[2] := ExcisePostingBuffer[1];
+      IF ExcisePostingBuffer[2].FIND THEN BEGIN
+        ExcisePostingBuffer[2]."Amount Including Excise" += ExcisePostingBuffer[1]."Amount Including Excise";
+        ExcisePostingBuffer[2]."Excise Amount" += ExcisePostingBuffer[1]."Excise Amount";
+        ExcisePostingBuffer[2]."Excise Amount (ACY)" += ExcisePostingBuffer[1]."Excise Amount (ACY)";
+        ExcisePostingBuffer[2]."CESS Amount (ACY)" += ExcisePostingBuffer[1]."CESS Amount (ACY)";
+        ExcisePostingBuffer[2]."Excise Base Amount" += ExcisePostingBuffer[1]."Excise Base Amount";
+        ExcisePostingBuffer[2]."BED Amount" += ExcisePostingBuffer[1]."BED Amount";
+        ExcisePostingBuffer[2]."AED(GSI) Amount" += ExcisePostingBuffer[1]."AED(GSI) Amount";
+        ExcisePostingBuffer[2]."AED(TTA) Amount" += ExcisePostingBuffer[1]."AED(TTA) Amount";
+        ExcisePostingBuffer[2]."SED Amount" += ExcisePostingBuffer[1]."SED Amount";
+        ExcisePostingBuffer[2]."SAED Amount" += ExcisePostingBuffer[1]."SAED Amount";
+        ExcisePostingBuffer[2]."CESS Amount" += ExcisePostingBuffer[1]."CESS Amount";
+        ExcisePostingBuffer[2]."NCCD Amount" += ExcisePostingBuffer[1]."NCCD Amount";
+        ExcisePostingBuffer[2]."eCess Amount" += ExcisePostingBuffer[1]."eCess Amount";
+        ExcisePostingBuffer[2]."SHE Cess Amount" += ExcisePostingBuffer[1]."SHE Cess Amount";
+        ExcisePostingBuffer[2]."ADET Amount" += ExcisePostingBuffer[1]."ADET Amount";
+        ExcisePostingBuffer[2]."ADE Amount" += ExcisePostingBuffer[1]."ADE Amount";
+        ExcisePostingBuffer[2]."ADC VAT Amount" += ExcisePostingBuffer[1]."ADC VAT Amount";
+        ExcisePostingBuffer[2]."ADC VAT Amount (ACY)" += ExcisePostingBuffer[1]."ADC VAT Amount (ACY)";
+        ExcisePostingBuffer[2].Quantity += ExcisePostingBuffer[1].Quantity;
+        ExcisePostingBuffer[2].MODIFY;
+      END ELSE
+        ExcisePostingBuffer[1].INSERT;
+    END;
+
+    PROCEDURE FillSvcTaxPostingBuffer@1500004(VAR SvcTaxPostingBuffer@1500001 : ARRAY [2] OF TEMPORARY Record 16478;ServiceLine@1500000 : Record 5902;OldLineNo@1500002 : Integer);
+    BEGIN
+      ServiceLine.TESTFIELD("Service Tax Registration No.");
+      WITH ServiceLine DO BEGIN
+        SvcTaxPostingBuffer[1].Type := SvcTaxPostingBuffer[1].Type::Sale;
+        SvcTaxPostingBuffer[1]."Service Tax Group Code" := "Service Tax Group";
+        SvcTaxPostingBuffer[1]."Service Tax Registration No." := "Service Tax Registration No.";
+        SvcTaxPostingBuffer[1]."Party Code" := "Bill-to Customer No.";
+        SvcTaxPostingBuffer[1]."Service Tax Base Amount" := "Service Tax Base";
+        SvcTaxPostingBuffer[1]."Service Tax Amount" := "Service Tax Amount";
+        SvcTaxPostingBuffer[1]."Service Tax eCess Amount" := "Service Tax eCess Amount";
+        SvcTaxPostingBuffer[1]."Service Tax SHE Cess Amount" := "Service Tax SHE Cess Amount";
+        SvcTaxPostingBuffer[1]."Service Tax SBC Amount" := "Service Tax SBC Amount";
+        SvcTaxPostingBuffer[1]."KK Cess Amount" := "KK Cess Amount";
+        SvcTaxPostingBuffer[1]."Tot. Serv Tax Amount (Intm)" := "Tot. Serv Tax Amount (Intm)";
+        SvcTaxPostingBuffer[1]."S. Tax Base Amount (Intm)" := "S. Tax Base Amount (Intm)";
+        SvcTaxPostingBuffer[1]."S. Tax Amount (Intm)" := "S. Tax Amount (Intm)";
+        SvcTaxPostingBuffer[1]."S. Tax eCess Amount (Intm)" := "S. Tax eCess Amount (Intm)";
+        SvcTaxPostingBuffer[1]."S. Tax SHE Cess Amount (Intm)" := "S. Tax SHE Cess Amount (Intm)";
+        SvcTaxPostingBuffer[1]."S. Tax SBC Amount (Intm)" := "S. Tax SBC Amount (Intm)";
+        SvcTaxPostingBuffer[1]."KK Cess Amount (Intm)" := "KK Cess Amount (Intm)";
+        SvcTaxPostingBuffer[1]."Global Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        SvcTaxPostingBuffer[1]."Global Dimension 2 Code" := "Shortcut Dimension 2 Code";
+        SvcTaxPostingBuffer[1]."Dimension Set ID" := "Dimension Set ID";
+        IF "Location Code" <> '' THEN BEGIN
+          GetLocation("Location Code");
+          IF Location."E.C.C. No." <> '' THEN
+            SvcTaxPostingBuffer[1]."Location E.C.C. No." := Location."E.C.C. No.";
+        END ELSE BEGIN
+          GetCompanyInfo;
+          IF CompanyInfo."E.C.C. No." <> '' THEN
+            SvcTaxPostingBuffer[1]."Location E.C.C. No." := CompanyInfo."E.C.C. No.";
+        END;
+        UpdSvcTaxPostingBuffer(SvcTaxPostingBuffer,OldLineNo);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdSvcTaxPostingBuffer@1500005(VAR SvcTaxPostingBuffer@1500001 : ARRAY [2] OF TEMPORARY Record 16478;ServiceLineNo@1500000 : Integer);
+    BEGIN
+      SvcTaxPostingBuffer[2] := SvcTaxPostingBuffer[1];
+      IF SvcTaxPostingBuffer[2].FIND THEN BEGIN
+        SvcTaxPostingBuffer[2]."Service Tax Base Amount" += SvcTaxPostingBuffer[1]."Service Tax Base Amount";
+        SvcTaxPostingBuffer[2]."Service Tax Amount" += SvcTaxPostingBuffer[1]."Service Tax Amount";
+        SvcTaxPostingBuffer[2]."Service Tax eCess Amount" += SvcTaxPostingBuffer[1]."Service Tax eCess Amount";
+        SvcTaxPostingBuffer[2]."Service Tax SHE Cess Amount" += SvcTaxPostingBuffer[1]."Service Tax SHE Cess Amount";
+        SvcTaxPostingBuffer[2]."Service Tax SBC Amount" += SvcTaxPostingBuffer[1]."Service Tax SBC Amount";
+        SvcTaxPostingBuffer[2]."KK Cess Amount" += SvcTaxPostingBuffer[1]."KK Cess Amount";
+        SvcTaxPostingBuffer[2]."Tot. Serv Tax Amount (Intm)" :=
+          SvcTaxPostingBuffer[2]."Tot. Serv Tax Amount (Intm)" + SvcTaxPostingBuffer[1]."Tot. Serv Tax Amount (Intm)";
+        SvcTaxPostingBuffer[2]."S. Tax Base Amount (Intm)" :=
+          SvcTaxPostingBuffer[2]."S. Tax Base Amount (Intm)" + SvcTaxPostingBuffer[1]."S. Tax Base Amount (Intm)";
+        SvcTaxPostingBuffer[2]."S. Tax Amount (Intm)" :=
+          SvcTaxPostingBuffer[2]."S. Tax Amount (Intm)" + SvcTaxPostingBuffer[1]."S. Tax Amount (Intm)";
+        SvcTaxPostingBuffer[2]."S. Tax eCess Amount (Intm)" :=
+          SvcTaxPostingBuffer[2]."S. Tax eCess Amount (Intm)" + SvcTaxPostingBuffer[1]."S. Tax eCess Amount (Intm)";
+        SvcTaxPostingBuffer[2]."S. Tax SHE Cess Amount (Intm)" :=
+          SvcTaxPostingBuffer[2]."S. Tax SHE Cess Amount (Intm)" + SvcTaxPostingBuffer[1]."S. Tax SHE Cess Amount (Intm)";
+        SvcTaxPostingBuffer[2]."S. Tax SBC Amount (Intm)" :=
+          SvcTaxPostingBuffer[2]."S. Tax SBC Amount (Intm)" + SvcTaxPostingBuffer[1]."S. Tax SBC Amount (Intm)";
+        SvcTaxPostingBuffer[2]."KK Cess Amount (Intm)" :=
+          SvcTaxPostingBuffer[2]."KK Cess Amount (Intm)" + SvcTaxPostingBuffer[1]."KK Cess Amount (Intm)";
+        SvcTaxPostingBuffer[2].MODIFY;
+      END ELSE
+        SvcTaxPostingBuffer[1].INSERT;
+    END;
+
+    PROCEDURE FillStrPostBuf@1500006(VAR StrPostBuf@1500004 : ARRAY [2] OF TEMPORARY Record 13796;VAR SrcCurrChargestoCustomer@1500003 : Decimal;VAR ChargestoCustomer@1500002 : Decimal;ServLine@1500001 : Record 5902;ServLineACY@1500000 : Record 5902);
+    VAR
+      StrOrdLineDetails@1500008 : Record 13795;
+      PostedStrOrderLineDetails@1500007 : Record 13798;
+      TaxAreaLine@1500006 : Record 319;
+      TaxJurisdiction@1500005 : Record 320;
+    BEGIN
+      StrOrdLineDetails.SETCURRENTKEY("Document Type","Document No.",Type);
+      StrOrdLineDetails.SETRANGE("Document Type",ServLine."Document Type");
+      StrOrdLineDetails.SETRANGE("Document No.",ServLine."Document No.");
+      StrOrdLineDetails.SETRANGE(Type,StrOrdLineDetails.Type::Service);
+      StrOrdLineDetails.SETRANGE("Item No.",ServLine."No.");
+      StrOrdLineDetails.SETRANGE("Line No.",ServLine."Line No.");
+      StrOrdLineDetails.SETFILTER(
+        "Tax/Charge Type",'%1|%2',StrOrdLineDetails."Tax/Charge Type"::Charges,StrOrdLineDetails."Tax/Charge Type"::"Other Taxes");
+      IF StrOrdLineDetails.FINDSET THEN
+        REPEAT
+          InsertStrPostBuf(
+            StrPostBuf,SrcCurrChargestoCustomer,ChargestoCustomer,StrOrdLineDetails,
+            ServLineACY."Qty. to Invoice",ServLineACY.Quantity);
+        UNTIL StrOrdLineDetails.NEXT = 0;
+
+      StrOrdLineDetails.RESET;
+      StrOrdLineDetails.SETCURRENTKEY("Document Type","Document No.",Type);
+      StrOrdLineDetails.SETRANGE("Document Type",ServLine."Document Type");
+      StrOrdLineDetails.SETRANGE("Document No.",ServLine."Document No.");
+      StrOrdLineDetails.SETRANGE(Type,StrOrdLineDetails.Type::Service);
+      StrOrdLineDetails.SETRANGE("Item No.",ServLine."No.");
+      StrOrdLineDetails.SETRANGE("Line No.",ServLine."Line No.");
+      IF StrOrdLineDetails.FINDSET THEN
+        REPEAT
+          PostedStrOrderLineDetails.INIT;
+          PostedStrOrderLineDetails.TRANSFERFIELDS(StrOrdLineDetails);
+          PostedStrOrderLineDetails."Invoice No." := GenJnlLineDocNo;
+          PostedStrOrderLineDetails."Base Amount" :=
+            ROUND(
+              StrOrdLineDetails."Base Amount" * ServLine."Qty. to Invoice" / ServLine.Quantity,
+              Currency."Amount Rounding Precision");
+          PostedStrOrderLineDetails."Amount (LCY)" :=
+            ROUND(
+              StrOrdLineDetails."Amount (LCY)" * ServLine."Qty. to Invoice" / ServLine.Quantity,
+              Currency."Amount Rounding Precision");
+          PostedStrOrderLineDetails.Amount :=
+            ROUND(
+              StrOrdLineDetails.Amount * ServLine."Qty. to Invoice" / ServLine.Quantity,
+              Currency."Amount Rounding Precision");
+          IF StrOrdLineDetails."Document Type" = StrOrdLineDetails."Document Type"::Order THEN
+            PostedStrOrderLineDetails."Document Type" := PostedStrOrderLineDetails."Document Type"::Invoice;
+          PostedStrOrderLineDetails.INSERT;
+        UNTIL StrOrdLineDetails.NEXT = 0;
+
+      PostedStrOrderLineDetails.RESET;
+      PostedStrOrderLineDetails.SETRANGE("Invoice No.",GenJnlLineDocNo);
+      PostedStrOrderLineDetails.SETRANGE(Type,StrOrdLineDetails.Type::Service);
+      PostedStrOrderLineDetails.SETRANGE("Line No.",ServLine."Line No.");
+      PostedStrOrderLineDetails.SETRANGE("Tax/Charge Type",PostedStrOrderLineDetails."Tax/Charge Type"::Excise);
+      IF PostedStrOrderLineDetails.FINDFIRST THEN BEGIN
+        PostedStrOrderLineDetails.Amount := ServLineACY."Excise Amount";
+        IF ServLine."Currency Code" = '' THEN
+          PostedStrOrderLineDetails."Amount (LCY)" := ServLine."Excise Amount"
+        ELSE
+          PostedStrOrderLineDetails."Amount (LCY)" := ServLineACY."Excise Amount";
+        PostedStrOrderLineDetails.MODIFY;
+      END;
+
+      TaxAreaLine.SETCURRENTKEY("Tax Area","Calculation Order");
+      TaxAreaLine.SETRANGE("Tax Area",ServLine."Tax Area Code");
+      IF TaxAreaLine.FINDFIRST THEN BEGIN
+        TaxJurisdiction.GET(TaxAreaLine."Tax Jurisdiction Code");
+        IF TaxJurisdiction."Tax Type" IN [TaxJurisdiction."Tax Type"::VAT,TaxJurisdiction."Tax Type"::CST] THEN BEGIN
+          PostedStrOrderLineDetails.RESET;
+          PostedStrOrderLineDetails.SETRANGE("Invoice No.",GenJnlLineDocNo);
+          PostedStrOrderLineDetails.SETRANGE(Type,StrOrdLineDetails.Type::Service);
+          PostedStrOrderLineDetails.SETRANGE("Line No.",ServLine."Line No.");
+          PostedStrOrderLineDetails.SETRANGE("Tax/Charge Type",PostedStrOrderLineDetails."Tax/Charge Type"::"Sales Tax");
+          IF PostedStrOrderLineDetails.FINDFIRST THEN BEGIN
+            PostedStrOrderLineDetails.Amount := ServLine."Tax Amount";
+            IF ServLine."Currency Code" = '' THEN
+              PostedStrOrderLineDetails."Amount (LCY)" := ServLine."Tax Amount"
+            ELSE
+              PostedStrOrderLineDetails."Amount (LCY)" := ServLineACY."Tax Amount";
+            PostedStrOrderLineDetails.MODIFY;
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE InsertStrPostBuf@1500007(VAR StrPostBuf@1500005 : ARRAY [2] OF TEMPORARY Record 13796;VAR SrcCurrChargestoCustomer@1500004 : Decimal;VAR ChargestoCustomer@1500003 : Decimal;StrOrdLineDetails@1500002 : Record 13795;Quantity@1500001 : Decimal;ActQty@1500000 : Decimal);
+    BEGIN
+      WITH StrOrdLineDetails DO BEGIN
+        StrPostBuf[1].Type := Type;
+        StrPostBuf[1]."Document Type" := "Document Type";
+        StrPostBuf[1]."Document No." := "Document No.";
+        StrPostBuf[1]."Item No." := "Item No.";
+        StrPostBuf[1]."Structure Code" := "Structure Code";
+        StrPostBuf[1]."Tax/Charge Type" := "Tax/Charge Type";
+        StrPostBuf[1]."Tax/Charge Group" := "Tax/Charge Group";
+        StrPostBuf[1]."Tax/Charge Code" := "Tax/Charge Code";
+        StrPostBuf[1]."Loading on Inventory" := "Loading on Inventory";
+        StrPostBuf[1]."% Loading on Inventory" := "% Loading on Inventory";
+        StrPostBuf[1]."Payable to Third Party" := "Payable to Third Party";
+        StrPostBuf[1]."Third Party Code" := "Third Party Code";
+        StrPostBuf[1]."Account No." := "Account No.";
+        StrPostBuf[1]."Header/Line" := "Header/Line";
+        StrPostBuf[1]."Base Amount" :=
+          ROUND("Base Amount" * Quantity / ActQty,Currency."Amount Rounding Precision");
+        StrPostBuf[1].Amount :=
+          ROUND("Amount (LCY)" * Quantity / ActQty,Currency."Amount Rounding Precision");
+        StrPostBuf[1]."Source Currency Amount" :=
+          ROUND(Amount * Quantity / ActQty,Currency."Amount Rounding Precision");
+        IF NOT "Payable to Third Party" THEN BEGIN
+          ChargestoCustomer += StrPostBuf[1].Amount;
+          SrcCurrChargestoCustomer += StrPostBuf[1]."Source Currency Amount";
+        END;
+        StrPostBuf[1].LCY := LCY;
+        UpdStrPostBuffer(StrPostBuf,StrOrdLineDetails);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdStrPostBuffer@1500008(VAR StrPostBuf@1500001 : ARRAY [2] OF TEMPORARY Record 13796;StrOrdLineDetails@1500000 : Record 13795);
+    VAR
+      ServiceLine@1500004 : Record 5902;
+      EntryNo@1500002 : Integer;
+    BEGIN
+      IF (StrPostBuf[1]."Tax/Charge Type" = StrPostBuf[1]."Tax/Charge Type"::Charges) AND
+         (StrPostBuf[1]."Header/Line" = StrPostBuf[1]."Header/Line"::Header)
+      THEN
+        EntryNo := 0
+      ELSE
+        IF ServiceLine.GET(StrOrdLineDetails."Document Type",StrOrdLineDetails."Document No.",StrOrdLineDetails."Line No.") THEN
+          EntryNo := ServiceLine."Dimension Set ID";
+
+      StrPostBuf[1]."Dimension Set ID" := EntryNo;
+      StrPostBuf[2] := StrPostBuf[1];
+      IF StrPostBuf[2].FIND THEN BEGIN
+        StrPostBuf[2].Amount += StrPostBuf[1].Amount;
+        StrPostBuf[2]."Source Currency Amount" += StrPostBuf[1]."Source Currency Amount";
+        StrPostBuf[2]."Base Amount" += StrPostBuf[1]."Base Amount";
+        StrPostBuf[2].MODIFY;
+      END ELSE
+        StrPostBuf[1].INSERT;
+    END;
+
+    PROCEDURE RoundExciseAmount@1500009(ExciseDutyAmount@1500002 : Decimal;Qty@1500001 : Decimal;TotalQty@1500000 : Decimal) : Decimal;
+    VAR
+      ExciseRoundingPrecision@1500003 : Decimal;
+    BEGIN
+      GLSetup.GET;
+      IF GLSetup."Excise Rounding Precision" <> 0 THEN
+        ExciseRoundingPrecision := GLSetup."Excise Rounding Precision"
+      ELSE
+        ExciseRoundingPrecision := 0.01;
+      IF TotalQty = 0 THEN
+        EXIT;
+      EXIT(ROUND(ExciseDutyAmount * (Qty / TotalQty),ExciseRoundingPrecision,GetRndgDirection(GLSetup."Excise Rounding Type")));
+    END;
+
+    PROCEDURE RoundExcisePrecision@1500010(ExciseDutyAmount@1500000 : Decimal) : Decimal;
+    VAR
+      ExciseRoundingPrecision@1500001 : Decimal;
+    BEGIN
+      GLSetup.GET;
+      IF GLSetup."Excise Rounding Precision" <> 0 THEN
+        ExciseRoundingPrecision := GLSetup."Excise Rounding Precision"
+      ELSE
+        ExciseRoundingPrecision := 0.01;
+      EXIT(ROUND(ExciseDutyAmount,ExciseRoundingPrecision,GetRndgDirection(GLSetup."Excise Rounding Type")));
+    END;
+
+    PROCEDURE RoundServiceTaxAmt@1500011(ServiceHeader@1500003 : Record 5900;ServiceTaxAmount@1500002 : Decimal;Qty@1500001 : Decimal;TotalQty@1500000 : Decimal) : Decimal;
+    VAR
+      ServiceTaxRoundingPrecision@1500004 : Decimal;
+    BEGIN
+      IF ServiceHeader."Service Tax Rounding Precision" <> 0 THEN
+        ServiceTaxRoundingPrecision := ServiceHeader."Service Tax Rounding Precision"
+      ELSE
+        ServiceTaxRoundingPrecision := 0.01;
+      IF TotalQty = 0 THEN
+        EXIT;
+      EXIT(
+        ROUND(ServiceTaxAmount * (Qty / TotalQty),ServiceTaxRoundingPrecision,
+          GetRndgDirection(ServiceHeader."Service Tax Rounding Type")));
+    END;
+
+    PROCEDURE RoundServiceTaxPrecision@1500012(ServiceHeader@1500001 : Record 5900;ServiceTaxAmount@1500000 : Decimal) : Decimal;
+    VAR
+      ServiceTaxRoundingPrecision@1500002 : Decimal;
+    BEGIN
+      IF ServiceHeader."Service Tax Rounding Precision" <> 0 THEN
+        ServiceTaxRoundingPrecision := ServiceHeader."Service Tax Rounding Precision"
+      ELSE
+        ServiceTaxRoundingPrecision := 0.01;
+      EXIT(ROUND(ServiceTaxAmount,ServiceTaxRoundingPrecision,GetRndgDirection(ServiceHeader."Service Tax Rounding Type")));
+    END;
+
+    PROCEDURE InsertDetailedVAT@1500013(ServiceHeader@1500002 : Record 5900;ServiceLine@1500001 : Record 5902;VAR StandardDeductionAmount@1500000 : Decimal);
+    VAR
+      State2@1500019 : Record 13762;
+      Cust@1500018 : Record 18;
+      TaxAreaLine@1500017 : Record 319;
+      TaxJurisdiction@1500016 : Record 320;
+      TaxDetail@1500015 : Record 322;
+      TaxGroup@1500014 : Record 321;
+      TaxBuffer@1500013 : TEMPORARY Record 13766;
+      TaxDetailBuffer@1500012 : Record 13766;
+      StateCode@1500011 : Code[10];
+      TaxType@1500010 : Text[30];
+      TaxBaseAmount@1500009 : Decimal;
+      TaxBaseAmt@1500008 : Decimal;
+      TaxAmount@1500007 : Decimal;
+      GrossTaxAmount@1500006 : Decimal;
+      StandardDeduction@1500005 : Decimal;
+      StandardDeductionLoaded@1500004 : Decimal;
+      TotalTaxAmount@1500003 : Decimal;
+    BEGIN
+      WITH ServiceLine DO BEGIN
+        StartingEntryNo := 0;
+        IF "Location Code" <> '' THEN BEGIN
+          Location.GET("Location Code");
+          Location.TESTFIELD("State Code");
+          StateCode := Location."State Code";
+        END ELSE BEGIN
+          GetCompanyInfo;
+          CompanyInfo.TESTFIELD(State);
+          StateCode := CompanyInfo.State;
+        END;
+        State2.GET(StateCode);
+        Cust.GET("Customer No.");
+
+        TaxAreaLine.SETCURRENTKEY("Tax Area","Calculation Order");
+        TaxAreaLine.SETRANGE("Tax Area","Tax Area Code");
+        IF TaxAreaLine.FINDSET THEN
+          REPEAT
+            TaxJurisdiction.GET(TaxAreaLine."Tax Jurisdiction Code");
+            IF TaxType = '' THEN
+              TaxType := FORMAT(TaxJurisdiction."Tax Type")
+            ELSE
+              IF TaxType <> FORMAT(TaxJurisdiction."Tax Type") THEN
+                ERROR(STRSUBSTNO(Text16502,TaxType,TaxAreaLine."Tax Jurisdiction Code"));
+            TaxAmount := 0;
+            TaxBaseAmount := 0;
+            IF TaxJurisdiction."Tax Type" <> TaxJurisdiction."Tax Type"::" " THEN BEGIN
+              TaxDetail.RESET;
+              TaxDetail.SETRANGE("Tax Jurisdiction Code",TaxAreaLine."Tax Jurisdiction Code");
+              TaxDetail.SETRANGE("Tax Group Code","Tax Group Code");
+              TaxDetail.SETRANGE("Tax Group Code","Tax Group Code");
+              TaxDetail.SETFILTER("Effective Date",'<=%1',ServiceHeader."Posting Date");
+              IF NOT TaxJurisdiction."Forms Not Applicable" THEN
+                TaxDetail.SETRANGE("Form Code","Form Code")
+              ELSE
+                TaxDetail.SETRANGE("Forms Not Applicable",TRUE);
+
+              IF TaxDetail.FINDLAST THEN BEGIN
+                TaxGroup.GET(TaxDetail."Tax Group Code");
+                IF TaxAreaLine.Formula <> '' THEN
+                  TaxBaseAmount := IndianSalesTaxCalculate.EvaluateExpression(TRUE,TaxAreaLine.Formula,TaxBuffer,TaxAreaLine);
+                IF TaxAreaLine."Include Tax Base" THEN
+                  TaxBaseAmount += "Tax Base Amount";
+                IF TaxAreaLine."Formula Incl.Std.Deduction" <> '' THEN
+                  TaxBaseAmount +=
+                    IndianSalesTaxCalculate.EvaluateExpressionStdDeduction(
+                      TRUE,TaxAreaLine."Formula Incl.Std.Deduction",
+                      TaxBuffer,TaxAreaLine);
+                IF TaxDetail."Standard Deduction %" <> 0 THEN BEGIN
+                  TaxBaseAmt := TaxBaseAmount - (TaxBaseAmount * TaxDetail."Standard Deduction %" / 100);
+                  GrossTaxAmount := RoundVATPrecision(TaxBaseAmount * TaxDetail."Tax Below Maximum" / 100);
+                  TaxAmount := RoundVATPrecision(TaxBaseAmt * TaxDetail."Tax Below Maximum" / 100);
+                  StandardDeduction := TaxAmount;
+                  StandardDeductionLoaded := GrossTaxAmount - TaxAmount;
+                  TotalStandardDeduction += StandardDeductionLoaded;
+                END ELSE BEGIN
+                  TaxAmount := TaxBaseAmount * TaxDetail."Tax Below Maximum" / 100;
+                  StandardDeduction := 0;
+                END;
+                StandardDeductionLoaded := ROUND(StandardDeductionLoaded);
+                IF TaxJurisdiction."Tax Type" = TaxJurisdiction."Tax Type"::CST THEN BEGIN
+                  InsertDetailedVATEntry(
+                    ServiceHeader,
+                    ServiceLine,
+                    TaxAreaLine."Tax Area",
+                    TaxAreaLine."Tax Jurisdiction Code",
+                    TaxAmount,
+                    State2."CST Account (Sales)",
+                    TaxDetail."Tax Below Maximum",
+                    State2."Tax Period",
+                    TaxBaseAmount,
+                    StandardDeductionLoaded,
+                    "No.",
+                    TaxDetail."Form Code",
+                    TaxGroup."Works Contract",
+                    TaxJurisdiction."Tax Type");
+                END ELSE
+                  InsertDetailedVATEntry(
+                    ServiceHeader,
+                    ServiceLine,
+                    TaxAreaLine."Tax Area",
+                    TaxAreaLine."Tax Jurisdiction Code",
+                    TaxAmount,
+                    State2."Tax Account (Sales)",
+                    TaxDetail."Tax Below Maximum",
+                    State2."Tax Period",
+                    TaxBaseAmount,
+                    StandardDeductionLoaded,
+                    "No.",
+                    TaxDetail."Form Code",
+                    TaxGroup."Works Contract",
+                    TaxJurisdiction."Tax Type");
+
+                TaxDetailBuffer.LOCKTABLE;
+                TaxDetailBuffer.INIT;
+                TaxDetailBuffer."Tax Area" := TaxAreaLine."Tax Area";
+                TaxDetailBuffer."Tax Jurisdiction Code" := TaxAreaLine."Tax Jurisdiction Code";
+                TaxDetailBuffer."Calculation Order" := TaxAreaLine."Calculation Order";
+                IF GrossTaxAmount <> 0 THEN
+                  TaxDetailBuffer.Amount := ROUND(GrossTaxAmount)
+                ELSE
+                  TaxDetailBuffer.Amount := ROUND(TaxAmount);
+                TaxDetailBuffer."Standard Deduction Amount" := StandardDeductionLoaded;
+                TaxDetailBuffer."Account No." := TaxJurisdiction."Tax Account (Purchases)";
+                IF NOT TaxDetailBuffer.INSERT THEN
+                  TaxDetailBuffer.MODIFY;
+                TotalTaxAmount += TaxAmount;
+              END;
+              TaxAmount := ROUND(TotalTaxAmount);
+            END;
+          UNTIL TaxAreaLine.NEXT = 0;
+      END;
+      StandardDeductionAmount := StandardDeductionLoaded;
+    END;
+
+    PROCEDURE InsertDetailedVATEntry@1500014(ServiceHeader@1500003 : Record 5900;ServiceLine@1500000 : Record 5902;TaxAreaCode@1500009 : Code[20];TaxJurisdiction@1500008 : Code[20];TaxAmount@1500007 : Decimal;TaxGLAccount@1500006 : Code[20];TaxPercentage@1500005 : Decimal;TaxPeriod@1500002 : DateFormula;TaxBaseAmount@1500010 : Decimal;StandardDeductionAmount@1500004 : Decimal;"ItemNo."@1500011 : Code[20];FormCode@1500014 : Code[10];WorksContract@1500015 : Boolean;TaxType@1500001 : ' ,VAT,CST');
+    VAR
+      DetailedTaxEntry@1500013 : Record 16522;
+      TaxJurisdiction2@1500012 : Record 320;
+    BEGIN
+      WITH DetailedTaxEntry DO BEGIN
+        INIT;
+        "Entry No." := GetNextDetTaxEntryNo;
+        TaxJurisdiction2.GET(TaxJurisdiction);
+        IF StartingEntryNo = 0 THEN BEGIN
+          StartingEntryNo := "Entry No.";
+          "Main Component Entry No." := StartingEntryNo;
+        END ELSE
+          "Main Component Entry No." := StartingEntryNo;
+        "Entry Type" := "Entry Type"::"Initial Entry";
+        "Transaction Type" := "Transaction Type"::Sale;
+        "Document Type" := GenJnlLineDocType;
+        "Document No." := GenJnlLineDocNo;
+        "Posting Date" := ServiceHeader."Posting Date";
+        Type := Type::Item;
+        "No." := "ItemNo.";
+        "Product Type" := "Product Type"::Item;
+        "Source Type" := "Source Type"::Customer;
+        "Source No." := ServiceLine."Customer No.";
+        "Tax Base Amount" := TaxBaseAmount;
+        "Non ITC Claimable Usage %" := 0;
+        IF NOT ServiceHeader."Export or Deemed Export" AND NOT ServiceHeader."VAT Exempted" THEN
+          "Tax Amount" := RoundVATPrecision(TaxAmount);
+        "Input Credit/Output Tax Amount" := RoundVATPrecision(TaxAmount);
+        "Amount Loaded on Item" := 0;
+        "Location Code" := ServiceHeader."Location Code";
+        IF "Location Code" <> '' THEN BEGIN
+          Location.GET("Location Code");
+          Location.TESTFIELD("State Code");
+          "State Code" := Location."State Code";
+        END ELSE BEGIN
+          GetCompanyInfo;
+          CompanyInfo.TESTFIELD(State);
+          "State Code" := CompanyInfo.State;
+        END;
+
+        "Tax Period" := TaxPeriod;
+        "Tax Area Code" := TaxAreaCode;
+        "Tax Jurisdiction Code" := TaxJurisdiction;
+        "Tax Group Code" := ServiceLine."Tax Group Code";
+        "Tax %" := TaxPercentage;
+        Quantity := ServiceLine."Qty. to Invoice (Base)";
+        "G/L Account No." := TaxGLAccount;
+        "Standard Deduction %" := ServiceLine."Standard Deduction %";
+        "Standard Deduction Amount" := StandardDeductionAmount;
+        "Document Line No." := ServiceLine."Line No.";
+        "Item Charge Entry" := ServiceLine."Item Charge Entry";
+        "Tax Component" := TaxJurisdiction2."Tax Component";
+        "Export or Deemed Export" := ServiceHeader."Export or Deemed Export";
+        "Exempted Sale" := ServiceHeader."VAT Exempted";
+        "Remaining Tax Amount" := "Input Credit/Output Tax Amount";
+        "Remaining Quantity" := Quantity;
+        "Form Code" := FormCode;
+        "Tax Type" := TaxType;
+        "Works Contract" := WorksContract;
+        "Schedule Code" := "Schedule Code";
+        "Item Ledger Entry No." := 0;
+        "Types Of Composition" := Location."Composition Type";
+        Composition := Location.Composition;
+        Positive := TaxAmount > 0;
+        IF "Document Type" = "Document Type"::"Credit Memo" THEN BEGIN
+          "Tax Base Amount" := TaxBaseAmount;
+          "Tax Amount" := RoundVATPrecision(TaxAmount);
+          "Input Credit/Output Tax Amount" := RoundVATPrecision(TaxAmount);
+          "Remaining Tax Amount" := "Input Credit/Output Tax Amount";
+        END;
+        INSERT(TRUE);
+      END;
+    END;
+
+    PROCEDURE RoundVATPrecision@1500015(Amount@1500000 : Decimal) : Decimal;
+    VAR
+      VATRoundingPrecision@1500001 : Decimal;
+    BEGIN
+      GLSetup.GET;
+      IF GLSetup."VAT Rounding Precision" <> 0 THEN
+        VATRoundingPrecision := GLSetup."VAT Rounding Precision"
+      ELSE
+        VATRoundingPrecision := 0.01;
+      EXIT(ROUND(Amount,VATRoundingPrecision,GetRndgDirection(GLSetup."VAT Rounding Type")));
+    END;
+
+    LOCAL PROCEDURE GetNextDetTaxEntryNo@1500016() : Integer;
+    VAR
+      DetailedTaxEntry@1500001 : Record 16522;
+      NextDetTaxEntryNo@1500000 : Integer;
+    BEGIN
+      IF DetailedTaxEntry.FINDLAST THEN
+        NextDetTaxEntryNo := DetailedTaxEntry."Entry No." + 1
+      ELSE
+        NextDetTaxEntryNo := 1;
+      EXIT(NextDetTaxEntryNo);
+    END;
+
+    PROCEDURE RoundInvPrecision@1500017(InvAmount@1500000 : Decimal) : Decimal;
+    VAR
+      InvRoundingPrecision@1500001 : Decimal;
+    BEGIN
+      GLSetup.GET;
+      IF GLSetup."Inv. Rounding Precision (LCY)" <> 0 THEN
+        InvRoundingPrecision := GLSetup."Inv. Rounding Precision (LCY)"
+      ELSE
+        InvRoundingPrecision := 0.01;
+      EXIT(ROUND(InvAmount,InvRoundingPrecision,GetRndgDirection(GLSetup."Inv. Rounding Type (LCY)")));
+    END;
+
+    PROCEDURE FilterAppliedEntries@1500018(ServiceHeader@1500002 : Record 5900;ExecuteForStatistics@1500001 : Boolean;ChargestoCustomer@1500000 : Decimal;VAR SvcTaxPostingBuffer@1500017 : ARRAY [2] OF TEMPORARY Record 16478;TotalServiceLineLCY@1500018 : Record 5902;VAR AppliedServiceTaxAmountPmt@1500020 : Decimal);
+    VAR
+      Cust@1500016 : Record 18;
+      OldCustLedgEntry@1500015 : Record 21;
+      ServiceTaxEntry@1500014 : Record 16473;
+      GenJnlApply@1500013 : Codeunit 225;
+      AmountforAppl@1500012 : Decimal;
+      AppliedAmount@1500011 : Decimal;
+      AppliedAmountLCY@1500010 : Decimal;
+      RemainingAmount@1500009 : Decimal;
+      AmountToBeApplied@1500008 : Decimal;
+      AppliedServiceTaxAmount@1500007 : Decimal;
+      AppliedServiceTaxEcessAmount@1500006 : Decimal;
+      AppliedServiceTaxSHEcessAmount@1500005 : Decimal;
+      AppliedServiceTaxSBCAmount@1500421 : Decimal;
+      ApplyingDate@1500004 : Date;
+      AccType@1500003 : 'G/L Account,Customer,Vendor,Bank Account,Fixed Asset';
+      AppliedKKCessAmount@1500019 : Decimal;
+    BEGIN
+      IF ExecuteForLookup THEN
+        EXIT;
+      WITH ServiceHeader DO BEGIN
+        AmountforAppl :=
+          ROUND(
+            TotalServiceLineLCY."Line Amount" - TotalServiceLineLCY."Inv. Discount Amount" + TotalServiceLineLCY."Excise Amount" +
+            TotalServiceLineLCY."Tax Amount" + TotalServiceLineLCY."Service Tax Amount" + ChargestoCustomer +
+            TotalServiceLineLCY."Service Tax eCess Amount" + TotalServiceLineLCY."Service Tax SHE Cess Amount" +
+            TotalServiceLineLCY."Service Tax SBC Amount" + TotalServiceLineLCY."KK Cess Amount" + TotalServiceLineLCY."Total GST Amount");
+        TempServiceTaxEntry.DELETEALL;
+        CLEAR(TempServiceTaxEntry);
+        ApplyingDate := "Posting Date";
+        IF "Bill-to Customer No." <> '' THEN
+          Cust.GET("Bill-to Customer No.")
+        ELSE
+          Cust.GET("Customer No.");
+        IF (Cust."Nature of Services" <> Cust."Nature of Services"::" ") OR "ST Pure Agent" THEN
+          EXIT;
+        IF "Applies-to Doc. No." <> '' THEN BEGIN
+          OldCustLedgEntry.SETCURRENTKEY("Document No.");
+          OldCustLedgEntry.SETRANGE("Document No.","Applies-to Doc. No.");
+          OldCustLedgEntry.SETRANGE("Document Type","Applies-to Doc. Type");
+          OldCustLedgEntry.SETRANGE("Customer No.","Bill-to Customer No.");
+          OldCustLedgEntry.SETRANGE(Open,TRUE);
+
+          OldCustLedgEntry.FINDFIRST;
+          IF NOT OldCustLedgEntry."Serv. Tax on Advance Payment" THEN
+            EXIT;
+          IF OldCustLedgEntry."Posting Date" > ApplyingDate THEN
+            ApplyingDate := OldCustLedgEntry."Posting Date";
+          GenJnlApply.CheckAgainstApplnCurrency("Currency Code",OldCustLedgEntry."Currency Code",AccType::Vendor,TRUE);
+          OldCustLedgEntry.CALCFIELDS("Remaining Amount");
+          FindAmtForAppln(
+            OldCustLedgEntry,ServiceHeader,AppliedAmount,AppliedAmountLCY,
+            Currency."Amount Rounding Precision",AmountforAppl);
+          CalculateAppliedPmtAmtST(OldCustLedgEntry,AppliedServiceTaxAmountPmt);
+          ServiceTaxEntry.SETRANGE("Transaction No.",OldCustLedgEntry."Transaction No.");
+          ServiceTaxEntry.SETRANGE("ST Pure Agent",FALSE);
+          IF ServiceTaxEntry.FINDSET THEN
+            REPEAT
+              RemainingAmount := 0;
+              AmountToBeApplied := 0;
+              TempServiceTaxEntry.TRANSFERFIELDS(ServiceTaxEntry);
+              RemainingAmount := ABS(ServiceTaxEntry."Amount Including Service Tax" - ServiceTaxEntry."Amount Received/Paid");
+              IF RemainingAmount > 0 THEN BEGIN
+                IF RemainingAmount >= ABS(AppliedAmountLCY) THEN
+                  AmountToBeApplied := ABS(AppliedAmountLCY)
+                ELSE
+                  AmountToBeApplied := RemainingAmount;
+              END;
+              AppliedServiceTaxAmount :=
+                ((AmountToBeApplied / TempServiceTaxEntry."Amount Including Service Tax") *
+                 (TempServiceTaxEntry."Service Tax Amount" + TempServiceTaxEntry."eCess Amount" +
+                  TempServiceTaxEntry."SHE Cess Amount"));
+              AppliedServiceTaxEcessAmount :=
+                ((AppliedServiceTaxAmount * TempServiceTaxEntry."eCess Amount") /
+                 (TempServiceTaxEntry."Service Tax Amount" + TempServiceTaxEntry."eCess Amount" +
+                  TempServiceTaxEntry."SHE Cess Amount"));
+              AppliedServiceTaxSHEcessAmount :=
+                ((AppliedServiceTaxAmount * TempServiceTaxEntry."SHE Cess Amount") /
+                 (TempServiceTaxEntry."Service Tax Amount" + TempServiceTaxEntry."eCess Amount" +
+                  TempServiceTaxEntry."SHE Cess Amount"));
+              AppliedServiceTaxSBCAmount :=
+                ((AmountToBeApplied / TempServiceTaxEntry."Amount Including Service Tax") *
+                 (TempServiceTaxEntry."Service Tax SBC Amount"));
+              AppliedKKCessAmount :=
+                ((AmountToBeApplied / TempServiceTaxEntry."Amount Including Service Tax") *
+                 (TempServiceTaxEntry."KK Cess Amount"));
+              AppliedServiceTaxSHEcessAmount := RoundServiceTaxPrecision(ServiceHeader,AppliedServiceTaxSHEcessAmount);
+              AppliedServiceTaxEcessAmount := RoundServiceTaxPrecision(ServiceHeader,AppliedServiceTaxEcessAmount);
+              AppliedServiceTaxSBCAmount := RoundServiceTaxPrecision(ServiceHeader,AppliedServiceTaxSBCAmount);
+              AppliedKKCessAmount := RoundServiceTaxPrecision(ServiceHeader,AppliedKKCessAmount);
+              AppliedServiceTaxAmount :=
+                RoundServiceTaxPrecision(
+                  ServiceHeader,AppliedServiceTaxAmount - AppliedServiceTaxEcessAmount - AppliedServiceTaxSHEcessAmount);
+              TempServiceTaxEntry."Service Tax Amount" := AppliedServiceTaxAmount;
+              TempServiceTaxEntry."eCess Amount" := AppliedServiceTaxEcessAmount;
+              TempServiceTaxEntry."SHE Cess Amount" := AppliedServiceTaxSHEcessAmount;
+              TempServiceTaxEntry."Service Tax SBC Amount" := AppliedServiceTaxSBCAmount;
+              TempServiceTaxEntry."KK Cess Amount" := AppliedKKCessAmount;
+              TempServiceTaxEntry."Amount Including Service Tax" := AmountToBeApplied;
+              TempServiceTaxEntry."Service Tax Base Amount" :=
+                AmountToBeApplied - AppliedServiceTaxAmount -
+                AppliedServiceTaxEcessAmount - AppliedServiceTaxSHEcessAmount - AppliedServiceTaxSBCAmount - AppliedKKCessAmount;
+              TempServiceTaxEntry.INSERT;
+            UNTIL ServiceTaxEntry.NEXT = 0;
+        END ELSE
+          IF "Applies-to ID" <> '' THEN BEGIN
+            // Find the first old entry (Invoice) which the new entry (Payment) should apply to
+            OldCustLedgEntry.RESET;
+            OldCustLedgEntry.SETCURRENTKEY("Customer No.","Applies-to ID",Open,Positive,"Due Date");
+            OldCustLedgEntry.SETRANGE("Customer No.","Bill-to Customer No.");
+            OldCustLedgEntry.SETRANGE("Applies-to ID","Applies-to ID");
+            OldCustLedgEntry.SETRANGE(Open,TRUE);
+            IF NOT (Cust."Application Method" = Cust."Application Method"::"Apply to Oldest") THEN
+              OldCustLedgEntry.SETFILTER("Amount to Apply",'<>%1',0);
+            IF Cust."Application Method" = Cust."Application Method"::"Apply to Oldest" THEN
+              OldCustLedgEntry.SETFILTER("Posting Date",'..%1',GenJnlLine."Posting Date");
+            // Check Cust Ledger Entry and add to Temp.
+            IF SalesSetup."Appln. between Currencies" = SalesSetup."Appln. between Currencies"::None THEN
+              OldCustLedgEntry.SETRANGE("Currency Code","Currency Code");
+            IF OldCustLedgEntry.FINDSET THEN
+              REPEAT
+                IF OldCustLedgEntry."Serv. Tax on Advance Payment" THEN BEGIN
+                  IF GenJnlApply.CheckAgainstApplnCurrency(
+                       "Currency Code",OldCustLedgEntry."Currency Code",AccType::Vendor,FALSE)
+                  THEN BEGIN
+                    IF (OldCustLedgEntry."Posting Date" > ApplyingDate) AND (OldCustLedgEntry."Applies-to ID" <> '') THEN
+                      ApplyingDate := OldCustLedgEntry."Posting Date";
+                    OldCustLedgEntry.CALCFIELDS("Remaining Amount");
+                    FindAmtForAppln(
+                      OldCustLedgEntry,ServiceHeader,AppliedAmount,AppliedAmountLCY,
+                      Currency."Amount Rounding Precision",AmountforAppl);
+                    AmountforAppl := AmountforAppl - AppliedAmountLCY;
+                    CalculateAppliedPmtAmtST(OldCustLedgEntry,AppliedServiceTaxAmountPmt);
+                    ServiceTaxEntry.RESET;
+                    ServiceTaxEntry.SETRANGE("Transaction No.",OldCustLedgEntry."Transaction No.");
+                    ServiceTaxEntry.SETRANGE("ST Pure Agent",FALSE);
+                    IF ServiceTaxEntry.FINDSET THEN
+                      REPEAT
+                        RemainingAmount := 0;
+                        AmountToBeApplied := 0;
+                        TempServiceTaxEntry.TRANSFERFIELDS(ServiceTaxEntry);
+                        RemainingAmount :=
+                          ABS(ServiceTaxEntry."Amount Including Service Tax" - ServiceTaxEntry."Amount Received/Paid");
+                        IF RemainingAmount > 0 THEN BEGIN
+                          IF RemainingAmount >= ABS(AppliedAmountLCY) THEN
+                            AmountToBeApplied := ABS(AppliedAmountLCY)
+                          ELSE
+                            AmountToBeApplied := RemainingAmount;
+                        END;
+                        AppliedServiceTaxAmount :=
+                          ((AmountToBeApplied / TempServiceTaxEntry."Amount Including Service Tax") *
+                           (TempServiceTaxEntry."Service Tax Amount" + TempServiceTaxEntry."eCess Amount" +
+                            TempServiceTaxEntry."SHE Cess Amount"));
+                        AppliedServiceTaxEcessAmount :=
+                          ((AppliedServiceTaxAmount * TempServiceTaxEntry."eCess Amount") /
+                           (TempServiceTaxEntry."Service Tax Amount" + TempServiceTaxEntry."eCess Amount" +
+                            TempServiceTaxEntry."SHE Cess Amount"));
+                        AppliedServiceTaxSHEcessAmount :=
+                          ((AppliedServiceTaxAmount * TempServiceTaxEntry."SHE Cess Amount") /
+                           (TempServiceTaxEntry."Service Tax Amount" + TempServiceTaxEntry."eCess Amount" +
+                            TempServiceTaxEntry."SHE Cess Amount"));
+                        AppliedServiceTaxSBCAmount :=
+                          ((AmountToBeApplied / TempServiceTaxEntry."Amount Including Service Tax") *
+                           (TempServiceTaxEntry."Service Tax SBC Amount"));
+                        AppliedKKCessAmount :=
+                          ((AmountToBeApplied / TempServiceTaxEntry."Amount Including Service Tax") *
+                           (TempServiceTaxEntry."KK Cess Amount"));
+                        AppliedServiceTaxSHEcessAmount := RoundServiceTaxPrecision(ServiceHeader,AppliedServiceTaxSHEcessAmount);
+                        AppliedServiceTaxEcessAmount := RoundServiceTaxPrecision(ServiceHeader,AppliedServiceTaxEcessAmount);
+                        AppliedServiceTaxSBCAmount := RoundServiceTaxPrecision(ServiceHeader,AppliedServiceTaxSBCAmount);
+                        AppliedKKCessAmount := RoundServiceTaxPrecision(ServiceHeader,AppliedKKCessAmount);
+                        AppliedServiceTaxAmount :=
+                          RoundServiceTaxPrecision(
+                            ServiceHeader,AppliedServiceTaxAmount - AppliedServiceTaxEcessAmount - AppliedServiceTaxSHEcessAmount);
+                        TempServiceTaxEntry."Service Tax Amount" := AppliedServiceTaxAmount;
+                        TempServiceTaxEntry."eCess Amount" := AppliedServiceTaxEcessAmount;
+                        TempServiceTaxEntry."SHE Cess Amount" := AppliedServiceTaxSHEcessAmount;
+                        TempServiceTaxEntry."Service Tax SBC Amount" := AppliedServiceTaxSBCAmount;
+                        TempServiceTaxEntry."KK Cess Amount" := AppliedKKCessAmount;
+                        TempServiceTaxEntry."Amount Including Service Tax" := AmountToBeApplied;
+                        TempServiceTaxEntry."Service Tax Base Amount" :=
+                          AmountToBeApplied - AppliedServiceTaxAmount -
+                          AppliedServiceTaxEcessAmount - AppliedServiceTaxSHEcessAmount - AppliedServiceTaxSBCAmount - AppliedKKCessAmount;
+                        TempServiceTaxEntry.INSERT;
+                      UNTIL ServiceTaxEntry.NEXT = 0;
+                  END;
+                END;
+              UNTIL OldCustLedgEntry.NEXT = 0;
+          END;
+        CreateTempServiceLine(ServiceHeader,ExecuteForStatistics,SvcTaxPostingBuffer);
+      END;
+    END;
+
+    PROCEDURE CreateTempServiceLine@1500025(ServiceHeader@1500000 : Record 5900;ExecuteForStatistics@1500002 : Boolean;VAR SvcTaxPostingBuffer@1500004 : ARRAY [2] OF TEMPORARY Record 16478);
+    VAR
+      ServiceLineInst@1500003 : Record 5902;
+      LastLineNo@1500001 : Integer;
+    BEGIN
+      TempServiceLineInst.DELETEALL;
+      ServiceLineInst.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLineInst.SETRANGE("Document No.",ServiceHeader."No.");
+      IF ServiceLineInst.FINDLAST THEN
+        LastLineNo := ServiceLineInst."Line No." + 10000
+      ELSE
+        LastLineNo := 10000;
+      IF TempServiceTaxEntry.FINDSET THEN
+        REPEAT
+          ServiceLineInst.RESET;
+          ServiceLineInst.SETRANGE("Document Type",ServiceHeader."Document Type");
+          ServiceLineInst.SETRANGE("Document No.",ServiceHeader."No.");
+          ServiceLineInst.SETRANGE("Service Tax Group",TempServiceTaxEntry."Service Tax Group Code");
+          ServiceLineInst.SETRANGE("Service Tax Registration No.",TempServiceTaxEntry."Service Tax Registration No.");
+          IF ServiceLineInst.FINDSET THEN
+            REPEAT
+              WITH ServiceLineInst DO BEGIN
+                TempServiceLineInst.TRANSFERFIELDS(ServiceLineInst);
+                TempServiceLineInst."Line No." := LastLineNo;
+                LastLineNo := LastLineNo + 10000;
+                TempServiceLineInst.VALIDATE(Quantity,1);
+                TempServiceLineInst."Service Tax Base" := -TempServiceTaxEntry."Service Tax Base Amount";
+                TempServiceLineInst."Service Tax Amount" := -TempServiceTaxEntry."Service Tax Amount";
+                TempServiceLineInst."Service Tax eCess Amount" := -TempServiceTaxEntry."eCess Amount";
+                TempServiceLineInst."Service Tax SHE Cess Amount" := -TempServiceTaxEntry."SHE Cess Amount";
+                TempServiceLineInst."Service Tax SBC Amount" := -TempServiceTaxEntry."Service Tax SBC Amount";
+                TempServiceLineInst."KK Cess Amount" := -TempServiceTaxEntry."KK Cess Amount";
+
+                IF TempServiceTaxEntry.PoT THEN BEGIN
+                  TempServiceLineInst."Tot. Serv Tax Amount (Intm)" :=
+                    TempServiceLineInst."Service Tax Amount" +
+                    TempServiceLineInst."Service Tax eCess Amount" +
+                    TempServiceLineInst."Service Tax SHE Cess Amount";
+                  TempServiceLineInst."S. Tax Base Amount (Intm)" := TempServiceLineInst."Service Tax Base";
+                  TempServiceLineInst."S. Tax Amount (Intm)" := TempServiceLineInst."Service Tax Amount";
+                  TempServiceLineInst."S. Tax eCess Amount (Intm)" := TempServiceLineInst."Service Tax eCess Amount";
+                  TempServiceLineInst."S. Tax SHE Cess Amount (Intm)" := TempServiceLineInst."Service Tax SHE Cess Amount";
+                  TempServiceLineInst."S. Tax SBC Amount (Intm)" := TempServiceLineInst."Service Tax SBC Amount";
+                  TempServiceLineInst."KK Cess Amount (Intm)" := TempServiceLineInst."KK Cess Amount";
+                END;
+                TempServiceLineInst.INSERT;
+                IF ExecuteForStatistics THEN BEGIN
+                  Increment(
+                    TotalServiceLine."Amount To Customer",-TotalServiceLine."Service Tax Amount" -
+                    TotalServiceLine."Service Tax eCess Amount" - TotalServiceLine."Service Tax SHE Cess Amount" -
+                    TotalServiceLine."Service Tax SBC Amount" - TotalServiceLine."KK Cess Amount" );
+                  Increment(TotalServiceLine."Service Tax Amount",TempServiceLineInst."Service Tax Amount");
+                  Increment(TotalServiceLine."Service Tax eCess Amount",TempServiceLineInst."Service Tax eCess Amount");
+                  Increment(TotalServiceLine."Service Tax SHE Cess Amount",TempServiceLineInst."Service Tax SHE Cess Amount");
+                  Increment(TotalServiceLine."Service Tax SBC Amount",TempServiceLineInst."Service Tax SBC Amount");
+                  Increment(TotalServiceLine."KK Cess Amount",TempServiceLineInst."KK Cess Amount");
+                  IF TotalServiceLine."Service Tax Amount" < 0 THEN BEGIN
+                    Increment(TotalServiceLine."Service Tax Amount",-TotalServiceLine."Service Tax Amount");
+                    Increment(TotalServiceLine."Service Tax eCess Amount",-TotalServiceLine."Service Tax eCess Amount");
+                    Increment(TotalServiceLine."Service Tax SHE Cess Amount",-TotalServiceLine."Service Tax SHE Cess Amount");
+                    Increment(TotalServiceLine."Service Tax SBC Amount",-TotalServiceLine."Service Tax SBC Amount");
+                    Increment(TotalServiceLine."KK Cess Amount",-TotalServiceLine."KK Cess Amount");
+                  END;
+                  Increment(
+                    TotalServiceLine."Amount To Customer",TotalServiceLine."Service Tax Amount" +
+                    TotalServiceLine."Service Tax eCess Amount" + TotalServiceLine."Service Tax SHE Cess Amount" +
+                    TotalServiceLine."Service Tax SBC Amount" + TotalServiceLine."KK Cess Amount" );
+                END ELSE
+                  IF TempServiceTaxEntry.PoT THEN BEGIN
+                    TempServiceLineInst."Service Tax Base" := -TempServiceLineInst."Service Tax Base";
+                    TempServiceLineInst."Service Tax Amount" := -TempServiceLineInst."Service Tax Amount";
+                    TempServiceLineInst."Service Tax eCess Amount" := -TempServiceLineInst."Service Tax eCess Amount";
+                    TempServiceLineInst."Service Tax SHE Cess Amount" := -TempServiceLineInst."Service Tax SHE Cess Amount";
+                    TempServiceLineInst."Service Tax SBC Amount" := -TempServiceLineInst."Service Tax SBC Amount";
+                    TempServiceLineInst."KK Cess Amount" := -TempServiceLineInst."KK Cess Amount";
+                    FillSvcTaxPostingBuffer(SvcTaxPostingBuffer,TempServiceLineInst,"Line No.");
+                  END;
+                TempServiceTaxEntry."Service Tax Base Amount" := 0;
+                TempServiceTaxEntry."Service Tax Amount" := 0;
+                TempServiceTaxEntry."eCess Amount" := 0;
+                TempServiceTaxEntry."SHE Cess Amount" := 0;
+                TempServiceTaxEntry."Service Tax SBC Amount" := 0;
+                TempServiceTaxEntry."KK Cess Amount" := 0;
+                LastLineNo += 10000;
+              END;
+            UNTIL ServiceLineInst.NEXT = 0
+          ELSE
+            IF NOT ExecuteForStatistics THEN BEGIN
+              IF TotalServiceLine."Service Tax Amount" = 0 THEN
+                ERROR(Text16519,TempServiceTaxEntry."Document No.");
+              ServiceLineInst.SETRANGE("Service Tax Group",TempServiceTaxEntry."Service Tax Group Code");
+              ServiceLineInst.SETRANGE("Service Tax Registration No.");
+              IF NOT ServiceLineInst.FINDSET THEN
+                ERROR(Text16520);
+              ServiceLineInst.SETRANGE("Service Tax Registration No.",TempServiceTaxEntry."Service Tax Registration No.");
+              IF NOT ServiceLineInst.FINDSET THEN
+                ERROR(Text16521);
+            END;
+          IF TempServiceTaxEntry."Serv. Tax on Advance Payment" THEN
+            IF ServiceHeader.PoT <> TempServiceTaxEntry.PoT THEN
+              ERROR(Text16522,ServiceHeader.FIELDCAPTION(PoT),ServiceHeader."No.",TempServiceTaxEntry."Document No.");
+        UNTIL TempServiceTaxEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindAmtForAppln@1500026(OldCustLedgEntry@1500007 : Record 21;ServiceHeader@1500001 : Record 5900;VAR AppliedAmount@1500005 : Decimal;VAR AppliedAmountLCY@1500004 : Decimal;ApplnRoundingPrecision@1500000 : Decimal;AmountforAppl@1500006 : Decimal);
+    VAR
+      CurrExchRate@1500003 : Record 330;
+      OldAppliedAmount@1500002 : Decimal;
+    BEGIN
+      IF OldCustLedgEntry.GETFILTER(Positive) <> '' THEN BEGIN
+        IF OldCustLedgEntry."Amount to Apply" <> 0 THEN
+          AppliedAmount := -OldCustLedgEntry."Amount to Apply"
+        ELSE
+          AppliedAmount := -OldCustLedgEntry."Remaining Amount";
+      END ELSE BEGIN
+        IF OldCustLedgEntry."Amount to Apply" <> 0 THEN BEGIN
+          IF (CheckCalcPmtDisc(OldCustLedgEntry,ServiceHeader,ApplnRoundingPrecision,FALSE,FALSE,AmountforAppl) AND
+              (ABS(OldCustLedgEntry."Amount to Apply") >=
+               ABS(OldCustLedgEntry."Remaining Amount" - OldCustLedgEntry."Remaining Pmt. Disc. Possible")) AND
+              (ABS(AmountforAppl) >=
+               ABS(OldCustLedgEntry."Amount to Apply" - OldCustLedgEntry."Remaining Pmt. Disc. Possible"))) OR
+             OldCustLedgEntry."Accepted Pmt. Disc. Tolerance"
+          THEN BEGIN
+            AppliedAmount := -OldCustLedgEntry."Remaining Amount";
+            OldCustLedgEntry."Accepted Pmt. Disc. Tolerance" := FALSE;
+          END ELSE BEGIN
+            IF ABS(AmountforAppl) <= ABS(OldCustLedgEntry."Amount to Apply") THEN
+              AppliedAmount := AmountforAppl
+            ELSE
+              AppliedAmount := -OldCustLedgEntry."Amount to Apply";
+          END;
+        END ELSE
+          IF ABS(AmountforAppl) < ABS(OldCustLedgEntry."Remaining Amount") THEN
+            AppliedAmount := AmountforAppl
+          ELSE
+            AppliedAmount := -OldCustLedgEntry."Remaining Amount";
+      END;
+
+      IF ServiceHeader."Currency Code" = OldCustLedgEntry."Currency Code" THEN BEGIN
+        AppliedAmountLCY := ROUND(AppliedAmount / OldCustLedgEntry."Original Currency Factor");
+        OldAppliedAmount := AppliedAmount;
+      END ELSE BEGIN
+        IF AppliedAmount = -OldCustLedgEntry."Remaining Amount" THEN
+          OldAppliedAmount := -OldCustLedgEntry."Remaining Amount"
+        ELSE
+          OldAppliedAmount :=
+            CurrExchRate.ExchangeAmount(
+              AppliedAmount,ServiceHeader."Currency Code",
+              OldCustLedgEntry."Currency Code",ServiceHeader."Posting Date");
+
+        IF ServiceHeader."Currency Code" <> '' THEN
+          AppliedAmountLCY := ROUND(OldAppliedAmount / OldCustLedgEntry."Original Currency Factor")
+        ELSE
+          AppliedAmountLCY := ROUND(AppliedAmount / ServiceHeader."Currency Factor");
+      END;
+    END;
+
+    LOCAL PROCEDURE CheckCalcPmtDisc@1500027(VAR OldCustLedgEntry@1500003 : Record 21;ServiceHeader@1500005 : Record 5900;ApplnRoundingPrecision@1500002 : Decimal;CheckFilter@1500001 : Boolean;CheckAmount@1500000 : Boolean;AmountforAppl@1500004 : Decimal) : Boolean;
+    BEGIN
+      IF ((OldCustLedgEntry."Document Type" = OldCustLedgEntry."Document Type"::Invoice) AND
+          (ServiceHeader."Posting Date" <= OldCustLedgEntry."Pmt. Discount Date"))
+      THEN BEGIN
+        IF CheckFilter THEN BEGIN
+          IF CheckAmount THEN
+            EXIT(
+              (OldCustLedgEntry.GETFILTER(Positive) <> '') OR
+              (ABS(AmountforAppl) + ApplnRoundingPrecision >=
+               ABS(OldCustLedgEntry."Remaining Amount" - OldCustLedgEntry."Remaining Pmt. Disc. Possible")));
+          EXIT(OldCustLedgEntry.GETFILTER(Positive) <> '');
+        END;
+        IF CheckAmount THEN
+          EXIT(
+            ABS(AmountforAppl) + ApplnRoundingPrecision >=
+            ABS(OldCustLedgEntry."Remaining Amount" - OldCustLedgEntry."Remaining Pmt. Disc. Possible"));
+        EXIT(TRUE);
+
+        EXIT(TRUE);
+      END;
+      EXIT(FALSE);
+    END;
+
+    PROCEDURE GetCompanyInfo@1500019();
+    BEGIN
+      IF NOT CompanyInfoRead THEN BEGIN
+        CompanyInfo.GET;
+        CompanyInfoRead := TRUE;
+      END;
+    END;
+
+    LOCAL PROCEDURE GetLocation@1500020(LocationCode@1500000 : Code[10]);
+    BEGIN
+      IF LocationCode = '' THEN
+        Location.GetLocationSetup(LocationCode,Location)
+      ELSE
+        IF Location.Code <> LocationCode THEN
+          Location.GET(LocationCode);
+    END;
+
+    PROCEDURE ApplLookup@1500021(ApplLookupOk@1500000 : Boolean);
+    BEGIN
+      ExecuteForLookup := ApplLookupOk;
+    END;
+
+    PROCEDURE DivideExciseElements@1500022(VAR passedServLine@1500002 : Record 5902;VAR ServShptLine@1500001 : TEMPORARY Record 5991;ServiceLineQty@1500000 : Decimal);
+    BEGIN
+      WITH ServShptLine DO BEGIN
+        IF Quantity = 0 THEN BEGIN
+          "BED Amount" := 0;
+          "AED(GSI) Amount" := 0;
+          "AED(TTA) Amount" := 0;
+          "SED Amount" := 0;
+          "SAED Amount" := 0;
+          "CESS Amount" := 0;
+          "Custom eCess Amount" := 0;
+          "Custom SHECess Amount" := 0;
+          "NCCD Amount" := 0;
+          "eCess Amount" := 0;
+          "SHE Cess Amount" := 0;
+          "ADET Amount" := 0;
+          "ADE Amount" := 0;
+          "Excise Base Amount" := 0;
+          "ADC VAT Amount" := 0;
+        END ELSE BEGIN
+          IF "Currency Code" = '' THEN BEGIN
+            "BED Amount" := RoundExciseAmount("BED Amount",Quantity,ServiceLineQty);
+            "AED(GSI) Amount" := RoundExciseAmount("AED(GSI) Amount",Quantity,ServiceLineQty);
+            "AED(TTA) Amount" := RoundExciseAmount("AED(TTA) Amount",Quantity,ServiceLineQty);
+            "SED Amount" := RoundExciseAmount("SED Amount",Quantity,ServiceLineQty);
+            "SAED Amount" := RoundExciseAmount("SAED Amount",Quantity,ServiceLineQty);
+            "CESS Amount" := RoundExciseAmount("CESS Amount",Quantity,ServiceLineQty);
+            "Custom eCess Amount" := RoundExciseAmount("Custom eCess Amount",Quantity,ServiceLineQty);
+            "Custom SHECess Amount" := RoundExciseAmount("Custom SHECess Amount",Quantity,ServiceLineQty);
+            "NCCD Amount" := RoundExciseAmount("NCCD Amount",Quantity,ServiceLineQty);
+            "eCess Amount" := RoundExciseAmount("eCess Amount",Quantity,ServiceLineQty);
+            "SHE Cess Amount" := RoundExciseAmount("SHE Cess Amount",Quantity,ServiceLineQty);
+            "ADET Amount" := RoundExciseAmount("ADET Amount",Quantity,ServiceLineQty);
+            "ADE Amount" := RoundExciseAmount("ADE Amount",Quantity,ServiceLineQty);
+            "ADC VAT Amount" := RoundExciseAmount("ADC VAT Amount",Quantity,ServiceLineQty);
+            "Excise Base Amount" := ROUND("Excise Base Amount" * Quantity / ServiceLineQty);
+          END ELSE BEGIN
+            "BED Amount" := ROUND("BED Amount" * Quantity / ServiceLineQty);
+            "AED(GSI) Amount" := ROUND("AED(GSI) Amount" * Quantity / ServiceLineQty);
+            "AED(TTA) Amount" := ROUND("AED(TTA) Amount" * Quantity / ServiceLineQty);
+            "SED Amount" := ROUND("SED Amount" * Quantity / ServiceLineQty);
+            "SAED Amount" := ROUND("SAED Amount" * Quantity / ServiceLineQty);
+            "CESS Amount" := ROUND("CESS Amount" * Quantity / ServiceLineQty);
+            "Custom eCess Amount" := ROUND("Custom eCess Amount" * Quantity / ServiceLineQty);
+            "Custom SHECess Amount" := ROUND("Custom SHECess Amount" * Quantity / ServiceLineQty);
+            "NCCD Amount" := ROUND("NCCD Amount" * Quantity / ServiceLineQty);
+            "eCess Amount" := ROUND("eCess Amount" * Quantity / ServiceLineQty);
+            "SHE Cess Amount" := ROUND("SHE Cess Amount" * Quantity / ServiceLineQty);
+            "ADET Amount" := ROUND("ADET Amount" * Quantity / ServiceLineQty);
+            "ADE Amount" := ROUND("ADE Amount" * Quantity / ServiceLineQty);
+            "ADC VAT Amount" := ROUND("ADC VAT Amount" * Quantity / ServiceLineQty);
+            "Excise Base Amount" := ROUND("Excise Base Amount" * Quantity / ServiceLineQty);
+          END;
+        END;
+
+        passedServLine."BED Amount" := ABS("BED Amount");
+        passedServLine."AED(GSI) Amount" := ABS("AED(GSI) Amount");
+        passedServLine."AED(TTA) Amount" := ABS("AED(TTA) Amount");
+        passedServLine."SED Amount" := ABS("SED Amount");
+        passedServLine."SAED Amount" := ABS("SAED Amount");
+        passedServLine."CESS Amount" := ABS("CESS Amount");
+        passedServLine."Custom eCess Amount" := ABS("Custom eCess Amount");
+        passedServLine."Custom SHECess Amount" := ABS("Custom SHECess Amount");
+        passedServLine."NCCD Amount" := ABS("NCCD Amount");
+        passedServLine."eCess Amount" := ABS("eCess Amount");
+        passedServLine."SHE Cess Amount" := ABS("SHE Cess Amount");
+        passedServLine."ADET Amount" := ABS("ADET Amount");
+        passedServLine."ADE Amount" := ABS("ADE Amount");
+        passedServLine."ADC VAT Amount" := ABS("ADC VAT Amount");
+        passedServLine."Excise Base Amount" := ABS("Excise Base Amount");
+        passedServLine."Excise Amount" :=
+          ABS(
+            "BED Amount" + "AED(GSI) Amount" + "SED Amount" + "SAED Amount" +
+            "CESS Amount" + "NCCD Amount" + "AED(TTA) Amount" + "eCess Amount" + "ADET Amount" + "ADE Amount" + "ADC VAT Amount" +
+            "SHE Cess Amount" + "Custom eCess Amount" + "Custom SHECess Amount");
+        passedServLine."Amount Including Excise" := passedServLine."Excise Base Amount" + passedServLine."Excise Amount";
+      END;
+    END;
+
+    PROCEDURE RestoreExciseForInvoice@1500023(VAR passedServLine@1500002 : Record 5902;QtyRcv@1500001 : Decimal;QtyInv@1500000 : Decimal);
+    BEGIN
+      WITH passedServLine DO BEGIN
+        "BED Amount" *= (QtyInv / QtyRcv);
+        "AED(GSI) Amount" *= (QtyInv / QtyRcv);
+        "AED(TTA) Amount" *= (QtyInv / QtyRcv);
+        "SED Amount" *= (QtyInv / QtyRcv);
+        "SAED Amount" *= (QtyInv / QtyRcv);
+        "CESS Amount" *= (QtyInv / QtyRcv);
+        "NCCD Amount" *= (QtyInv / QtyRcv);
+        "eCess Amount" *= (QtyInv / QtyRcv);
+        "SHE Cess Amount" *= (QtyInv / QtyRcv);
+        "ADET Amount" *= (QtyInv / QtyRcv);
+        "ADE Amount" *= (QtyInv / QtyRcv);
+        "ADC VAT Amount" *= (QtyInv / QtyRcv);
+        "Custom eCess Amount" *= (QtyInv / QtyRcv);
+        "Custom SHECess Amount" *= (QtyInv / QtyRcv);
+        "Excise Amount" *= (QtyInv / QtyRcv);
+        "Excise Base Amount" *= (QtyInv / QtyRcv);
+        "Amount Including Excise" := "Excise Base Amount" + "Excise Amount";
+      END;
+    END;
+
+    PROCEDURE RestoreExciseForInvoicewithShp@1500024(VAR passedServLine@1500001 : Record 5902;VAR TempServLine@1500000 : TEMPORARY Record 5902);
+    BEGIN
+      WITH passedServLine DO BEGIN
+        "BED Amount" := TempServLine."BED Amount";
+        "AED(GSI) Amount" := TempServLine."AED(GSI) Amount";
+        "AED(TTA) Amount" := TempServLine."AED(TTA) Amount";
+        "SED Amount" := TempServLine."SED Amount";
+        "SAED Amount" := TempServLine."SAED Amount";
+        "CESS Amount" := TempServLine."CESS Amount";
+        "NCCD Amount" := TempServLine."NCCD Amount";
+        "eCess Amount" := TempServLine."eCess Amount";
+        "SHE Cess Amount" := TempServLine."SHE Cess Amount";
+        "ADET Amount" := TempServLine."ADET Amount";
+        "ADE Amount" := TempServLine."ADE Amount";
+        "ADC VAT Amount" := TempServLine."ADC VAT Amount";
+        "Custom eCess Amount" := TempServLine."Custom eCess Amount";
+        "Custom SHECess Amount" := TempServLine."Custom SHECess Amount";
+        "Excise Amount" := TempServLine."Excise Amount";
+        "Amount Including Excise" := TempServLine."Amount Including Excise";
+      END;
+    END;
+
+    PROCEDURE SetCVDEntry@1500028(CVDEntryFrom@1500000 : Boolean);
+    BEGIN
+      CVDEntry := CVDEntryFrom;
+    END;
+
+    PROCEDURE SetGenJnlLineDocVariables@1500029(GenJnlLineDocTypeFrom@1500001 : Integer;GenJnlLineDocNoFrom@1500000 : Code[20]);
+    BEGIN
+      GenJnlLineDocType := GenJnlLineDocTypeFrom;
+      GenJnlLineDocNo := GenJnlLineDocNoFrom;
+    END;
+
+    PROCEDURE GetRndgDirection@1500001(RoundingType@1500000 : 'Nearest,Up,Down') : Text[1];
+    BEGIN
+      CASE RoundingType OF
+        RoundingType::Nearest:
+          EXIT('=');
+        RoundingType::Up:
+          EXIT('>');
+        RoundingType::Down:
+          EXIT('<');
+      END;
+    END;
+
+    PROCEDURE CalculateAppliedPmtAmtST@1500030(OldCustLedgEntry@1500001 : Record 21;VAR AppliedServiceTaxAmountPmt@1500000 : Decimal);
+    VAR
+      ServiceTaxEntry@1500002 : Record 16473;
+    BEGIN
+      OldCustLedgEntry.CALCFIELDS("Amount (LCY)","Remaining Amt. (LCY)");
+      ServiceTaxEntry.SETRANGE("Transaction No.",OldCustLedgEntry."Transaction No.");
+      ServiceTaxEntry.SETRANGE("ST Pure Agent",FALSE);
+      IF ServiceTaxEntry.FINDFIRST THEN
+        AppliedServiceTaxAmountPmt :=
+          AppliedServiceTaxAmountPmt + ABS((OldCustLedgEntry."Remaining Amt. (LCY)" / OldCustLedgEntry."Amount (LCY)") *
+            (ServiceTaxEntry."Service Tax Amount" + ServiceTaxEntry."eCess Amount" + ServiceTaxEntry."SHE Cess Amount" +
+            ServiceTaxEntry."Service Tax SBC Amount" + ServiceTaxEntry."KK Cess Amount"));
+    END;
+
+    PROCEDURE FillGSTPostingBufferService@1500033(VAR GSTPostingBuffer@1500016 : ARRAY [2] OF TEMPORARY Record 16420;ServiceHeader@1500013 : Record 5900;ServiceLine@1500011 : Record 5902);
+    VAR
+      GSTPostingSetup@1500008 : Record 16406;
+      DetailedGSTEntryBuffer@1500010 : Record 16412;
+      GSTManagement@1500003 : Codeunit 16401;
+      DimMgt@1500005 : Codeunit 408;
+      GSTStateCode@1500009 : Code[10];
+      QFactor@1500001 : Decimal;
+      RefundAcc@1500002 : Boolean;
+    BEGIN
+      WITH ServiceLine DO BEGIN
+        ServiceHeader.GET("Document Type",ServiceLine."Document No.");
+        Location.GET("Location Code");
+        Location.TESTFIELD("State Code");
+        GSTStateCode := Location."State Code";
+        DetailedGSTEntryBuffer.RESET;
+        DetailedGSTEntryBuffer.SETCURRENTKEY("Transaction Type","Document Type","Document No.","Line No.");
+        DetailedGSTEntryBuffer.SETRANGE("Transaction Type",DetailedGSTEntryBuffer."Transaction Type"::Service);
+        DetailedGSTEntryBuffer.SETRANGE("Document Type","Document Type");
+        DetailedGSTEntryBuffer.SETRANGE("Document No.","Document No.");
+        DetailedGSTEntryBuffer.SETRANGE("Line No.","Line No.");
+        DetailedGSTEntryBuffer.SETFILTER("GST Base Amount",'<>%1',0);
+        IF DetailedGSTEntryBuffer.FINDSET THEN
+          REPEAT
+            CASE Type OF
+              Type::Cost,Type::"G/L Account" :
+                GSTPostingBuffer[1].Type := GSTPostingBuffer[1].Type::"G/L Account";
+              Type::Item :
+                GSTPostingBuffer[1].Type := GSTPostingBuffer[1].Type::Item;
+              Type::Resource :
+                GSTPostingBuffer[1].Type := GSTPostingBuffer[1].Type::Resource;
+            END;
+            GSTPostingBuffer[1]."Gen. Bus. Posting Group" := "Gen. Bus. Posting Group";
+            GSTPostingBuffer[1]."Gen. Prod. Posting Group" := "Gen. Prod. Posting Group";
+            GSTPostingBuffer[1]."Global Dimension 1 Code" := "Shortcut Dimension 1 Code";
+            GSTPostingBuffer[1]."Global Dimension 2 Code" := "Shortcut Dimension 2 Code";
+            GSTPostingBuffer[1]."GST Group Code"  := "GST Group Code";
+            GSTPostingBuffer[1]."Party Code" := "Customer No.";
+            QFactor := ABS("Qty. to Invoice" / Quantity);
+            GSTPostingBuffer[1]."GST Base Amount" := ROUND(DetailedGSTEntryBuffer."GST Base Amount (LCY)" * QFactor,
+              GLSetup."Amount Rounding Precision");
+            GSTPostingBuffer[1]."GST Amount" := GSTManagement.RoundGSTPrecision(DetailedGSTEntryBuffer."GST Amount (LCY)" * QFactor);
+            GSTPostingBuffer[1]."GST %" := DetailedGSTEntryBuffer."GST %" ;
+            GSTPostingSetup.GET(GSTStateCode,DetailedGSTEntryBuffer."GST Component Code");
+            RefundAcc :=
+              ServiceHeader."GST Customer Type" IN [ServiceHeader."GST Customer Type"::Export,
+                                                    ServiceHeader."GST Customer Type"::"Deemed Export",
+                                                    ServiceHeader."GST Customer Type"::"SEZ Development",
+                                                    ServiceHeader."GST Customer Type"::"SEZ Unit"];
+            IF RefundAcc THEN BEGIN
+              GSTPostingSetup.TESTFIELD("Refund Account");
+              GSTPostingBuffer[1]."Bal. Account No." := GSTPostingSetup."Refund Account";
+            END;
+            IF (NOT ServiceHeader."GST Without Payment of Duty") OR
+              (ServiceHeader."GST Customer Type" <> ServiceHeader."GST Customer Type"::Exempted)
+             THEN BEGIN
+               GSTPostingSetup.TESTFIELD("Payable Account");
+               GSTPostingBuffer[1]."Account No." := GSTPostingSetup."Payable Account";
+               GSTPostingBuffer[1]."GST Component Code" := GSTPostingSetup."GST Component Code";
+            END;
+            GSTPostingBuffer[1]."Dimension Set ID" := "Dimension Set ID";
+            DimMgt.UpdateGlobalDimFromDimSetID(GSTPostingBuffer[1]."Dimension Set ID",
+              GSTPostingBuffer[1]."Global Dimension 1 Code",GSTPostingBuffer[1]."Global Dimension 2 Code");
+            GSTPostingBuffer[2] := GSTPostingBuffer[1];
+            IF GSTPostingBuffer[2].FIND THEN BEGIN
+              GSTPostingBuffer[2]."GST Base Amount" += GSTPostingBuffer[1]."GST Base Amount";
+              GSTPostingBuffer[2]."GST Amount" += GSTPostingBuffer[1]."GST Amount";
+              GSTPostingBuffer[2]."Interim Amount" += GSTPostingBuffer[1]."Interim Amount";
+              GSTPostingBuffer[2].MODIFY;
+            END ELSE
+              GSTPostingBuffer[1].INSERT;
+          UNTIL DetailedGSTEntryBuffer.NEXT=0;
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

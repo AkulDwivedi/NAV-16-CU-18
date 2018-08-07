@@ -1,0 +1,927 @@
+OBJECT Codeunit 130509 Library - Sales
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SalesReceivablesSetup@1006 : Record 311;
+      LibraryUtility@1000 : Codeunit 131000;
+      PaymentChannelTxt@1002 : TextConst 'ENU=Payment Channel';
+      WrongDocumentType@1003 : TextConst 'ENU=Document type not supported: %1';
+      LibraryERM@1004 : Codeunit 131300;
+      LibraryInventory@1005 : Codeunit 132201;
+      LibraryResource@1001 : Codeunit 130511;
+      LibraryRandom@1008 : Codeunit 130440;
+      LibraryJournals@1007 : Codeunit 131306;
+      LibrarySmallBusiness@1009 : Codeunit 132213;
+
+    PROCEDURE BatchPostSalesHeaders@40(VAR SalesHeader@1000 : Record 36;Ship@1005 : Boolean;Invoice@1006 : Boolean;PostingDate@1003 : Date;ReplacePostingDate@1004 : Boolean;ReplaceDocumentDate@1007 : Boolean;CalcInvDiscount@1001 : Boolean);
+    VAR
+      BatchPostSalesOrders@1002 : Report 296;
+    BEGIN
+      BatchPostSalesOrders.USEREQUESTPAGE(FALSE);
+      BatchPostSalesOrders.InitializeRequest(Ship,Invoice,PostingDate,ReplacePostingDate,ReplaceDocumentDate,CalcInvDiscount);
+      BatchPostSalesOrders.SETTABLEVIEW(SalesHeader);
+      BatchPostSalesOrders.RUNMODAL;
+    END;
+
+    PROCEDURE BlanketSalesOrderMakeOrder@36(VAR SalesHeader@1000 : Record 36) : Code[20];
+    VAR
+      SalesOrderHeader@1002 : Record 36;
+      BlanketSalesOrderToOrder@1001 : Codeunit 87;
+    BEGIN
+      CLEAR(BlanketSalesOrderToOrder);
+      BlanketSalesOrderToOrder.RUN(SalesHeader);
+      BlanketSalesOrderToOrder.GetSalesOrderHeader(SalesOrderHeader);
+      EXIT(SalesOrderHeader."No.");
+    END;
+
+    PROCEDURE CopySalesDocument@60(SalesHeader@1000 : Record 36;DocType@1005 : Option;DocNo@1004 : Code[20];IncludeHeader@1003 : Boolean;RecalcLines@1002 : Boolean);
+    VAR
+      CopySalesDocument@1001 : Report 292;
+    BEGIN
+      CopySalesDocument.SetSalesHeader(SalesHeader);
+      CopySalesDocument.InitializeRequest(DocType,DocNo,IncludeHeader,RecalcLines);
+      CopySalesDocument.USEREQUESTPAGE(FALSE);
+      CopySalesDocument.RUN;
+    END;
+
+    PROCEDURE CreateCustomer@3(VAR Customer@1000 : Record 18);
+    VAR
+      PaymentMethod@1001 : Record 289;
+      GeneralPostingSetup@1002 : Record 252;
+      VATPostingSetup@1003 : Record 325;
+    BEGIN
+      LibraryERM.FindPaymentMethod(PaymentMethod);
+      LibraryERM.FindGeneralPostingSetupInvtFull(GeneralPostingSetup);
+      LibraryERM.FindVATPostingSetupInvt(VATPostingSetup);
+      LibraryUtility.UpdateSetupNoSeriesCode(
+        DATABASE::"Sales & Receivables Setup",SalesReceivablesSetup.FIELDNO("Customer Nos."));
+
+      CLEAR(Customer);
+      Customer.INSERT(TRUE);
+      Customer.VALIDATE(Name,Customer."No.");  // Validating Name as No. because value is not important.
+      Customer.VALIDATE("Payment Method Code",PaymentMethod.Code);  // Mandatory for posting in ES build
+      Customer.VALIDATE("Payment Terms Code",LibraryERM.FindPaymentTermsCode);  // Mandatory for posting in ES build
+      Customer.VALIDATE("Gen. Bus. Posting Group",GeneralPostingSetup."Gen. Bus. Posting Group");
+      Customer.VALIDATE("VAT Bus. Posting Group",VATPostingSetup."VAT Bus. Posting Group");
+      Customer.VALIDATE("Customer Posting Group",FindCustomerPostingGroup);
+      Customer.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateCustomerWithAddress@65(VAR Customer@1001 : Record 18);
+    BEGIN
+      CreateCustomer(Customer);
+      CreateCustomerAddress(Customer);
+    END;
+
+    LOCAL PROCEDURE CreateCustomerAddress@64(VAR Customer@1001 : Record 18);
+    VAR
+      PostCode@1002 : Record 225;
+      CustContUpdate@1000 : Codeunit 5056;
+    BEGIN
+      Customer.VALIDATE(Address,COPYSTR(LibraryUtility.GenerateGUID,1,MAXSTRLEN(Customer.Address)));
+      Customer.VALIDATE("Address 2",COPYSTR(LibraryUtility.GenerateGUID,1,MAXSTRLEN(Customer."Address 2")));
+
+      LibraryERM.CreatePostCode(PostCode);
+      Customer.VALIDATE(City,PostCode.City);
+      Customer.VALIDATE(County,PostCode.County);
+      Customer.VALIDATE("Post Code",PostCode.Code);
+      Customer.VALIDATE("Country/Region Code" ,PostCode."Country/Region Code");
+      Customer.MODIFY(TRUE);
+      CustContUpdate.OnModify(Customer);
+    END;
+
+    PROCEDURE CreateCustomerNo@30() : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      CreateCustomer(Customer);
+      EXIT(Customer."No.");
+    END;
+
+    PROCEDURE CreateCustomerBankAccount@24(VAR CustomerBankAccount@1001 : Record 287;CustomerNo@1000 : Code[20]);
+    BEGIN
+      CustomerBankAccount.INIT;
+      CustomerBankAccount.VALIDATE("Customer No.",CustomerNo);
+      CustomerBankAccount.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(CustomerBankAccount.FIELDNO(Code),DATABASE::"Customer Bank Account"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Customer Bank Account",CustomerBankAccount.FIELDNO(Code))));
+      CustomerBankAccount.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCustomerPostingGroup@50(VAR CustomerPostingGroup@1000 : Record 92);
+    BEGIN
+      CustomerPostingGroup.INIT;
+      CustomerPostingGroup.VALIDATE(Code,
+        LibraryUtility.GenerateRandomCode(CustomerPostingGroup.FIELDNO(Code),DATABASE::"Customer Posting Group"));
+      CustomerPostingGroup.VALIDATE("Receivables Account",LibraryERM.CreateGLAccountNo);
+      CustomerPostingGroup.VALIDATE("Invoice Rounding Account",LibraryERM.CreateGLAccountWithSalesSetup);
+      CustomerPostingGroup.VALIDATE("Debit Rounding Account",LibraryERM.CreateGLAccountNo);
+      CustomerPostingGroup.VALIDATE("Credit Rounding Account",LibraryERM.CreateGLAccountNo);
+      CustomerPostingGroup.VALIDATE("Payment Disc. Debit Acc.",LibraryERM.CreateGLAccountNo);
+      CustomerPostingGroup.VALIDATE("Payment Disc. Credit Acc.",LibraryERM.CreateGLAccountNo);
+      CustomerPostingGroup.VALIDATE("Payment Tolerance Debit Acc.",LibraryERM.CreateGLAccountNo);
+      CustomerPostingGroup.VALIDATE("Payment Tolerance Credit Acc.",LibraryERM.CreateGLAccountNo);
+      CustomerPostingGroup.VALIDATE("Debit Curr. Appln. Rndg. Acc.",LibraryERM.CreateGLAccountNo);
+      CustomerPostingGroup.VALIDATE("Credit Curr. Appln. Rndg. Acc.",LibraryERM.CreateGLAccountNo);
+      CustomerPostingGroup.VALIDATE("Interest Account",LibraryERM.CreateGLAccountWithSalesSetup);
+      CustomerPostingGroup.VALIDATE("Additional Fee Account",LibraryERM.CreateGLAccountWithSalesSetup);
+      CustomerPostingGroup.VALIDATE("Add. Fee per Line Account",LibraryERM.CreateGLAccountWithSalesSetup);
+      CustomerPostingGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCustomerPriceGroup@6(VAR CustomerPriceGroup@1000 : Record 6);
+    BEGIN
+      CustomerPriceGroup.INIT;
+      CustomerPriceGroup.VALIDATE(
+        Code,LibraryUtility.GenerateRandomCode(CustomerPriceGroup.FIELDNO(Code),DATABASE::"Customer Price Group"));
+      CustomerPriceGroup.VALIDATE(Description,CustomerPriceGroup.Code);
+      // Validating Description as Code because value is not important.
+      CustomerPriceGroup.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCustomerTemplate@1(VAR CustomerTemplate@1000 : Record 5105);
+    BEGIN
+      CustomerTemplate.INIT;
+      CustomerTemplate.VALIDATE(Code,LibraryUtility.GenerateRandomCode(CustomerTemplate.FIELDNO(Code),DATABASE::"Customer Template"));
+      CustomerTemplate.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCustomerWithLocationCode@102(VAR Customer@1000 : Record 18;LocationCode@1001 : Code[10]) : Code[20];
+    BEGIN
+      WITH Customer DO BEGIN
+        CreateCustomer(Customer);
+        VALIDATE("Location Code",LocationCode);
+        MODIFY(TRUE);
+        EXIT("No.");
+      END;
+    END;
+
+    PROCEDURE CreateCustomerWithBusPostingGroups@53(GenBusPostGroupCode@1001 : Code[10];VATBusPostGroupCode@1002 : Code[10]) : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      WITH Customer DO BEGIN
+        CreateCustomer(Customer);
+        VALIDATE("Gen. Bus. Posting Group",GenBusPostGroupCode);
+        VALIDATE("VAT Bus. Posting Group",VATBusPostGroupCode);
+        MODIFY(TRUE);
+        EXIT("No.");
+      END;
+    END;
+
+    PROCEDURE CreateCustomerWithStateCode@1500000(VAR Customer@1500000 : Record 18;StateCode@1500001 : Code[10]) : Code[20];
+    BEGIN
+      WITH Customer DO BEGIN
+        CreateCustomer(Customer);
+        VALIDATE("State Code",StateCode);
+        MODIFY(TRUE);
+        EXIT("No.");
+      END;
+    END;
+
+    PROCEDURE CreateCustomerWithVATBusPostingGroup@63(VATBusPostGroupCode@1001 : Code[10]) : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      WITH Customer DO BEGIN
+        CreateCustomer(Customer);
+        VALIDATE("VAT Bus. Posting Group",VATBusPostGroupCode);
+        MODIFY(TRUE);
+        EXIT("No.");
+      END;
+    END;
+
+    PROCEDURE CreateCustomerWithVATRegNo@35(VAR Customer@1000 : Record 18) : Code[20];
+    VAR
+      CountryRegion@1001 : Record 9;
+    BEGIN
+      CreateCustomer(Customer);
+      LibraryERM.CreateCountryRegion(CountryRegion);
+      Customer.VALIDATE("Country/Region Code",CountryRegion.Code);
+      Customer.VALIDATE("VAT Registration No.",LibraryERM.GenerateVATRegistrationNo(CountryRegion.Code));
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    PROCEDURE CreateForeignCustomer@1500012(CurrencyCode@1500000 : Code[10]) : Code[20];
+    VAR
+      Customer@1500001 : Record 18;
+    BEGIN
+      CreateCustomer(Customer);
+      Customer.VALIDATE("Currency Code",CurrencyCode);
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalBatch@111(VAR GenJournalBatch@1000 : Record 232);
+    VAR
+      GenJournalTemplate@1001 : Record 80;
+    BEGIN
+      GenJournalTemplate.SETRANGE(Recurring,FALSE);
+      GenJournalTemplate.SETRANGE(Type,GenJournalTemplate.Type::General);
+      LibraryERM.FindGenJournalTemplate(GenJournalTemplate);
+      LibraryERM.CreateGenJournalBatch(GenJournalBatch,GenJournalTemplate.Name);
+    END;
+
+    PROCEDURE CreateItemChargeAssignment@43(VAR ItemChargeAssignmentSales@1000 : Record 5809;SalesLine@1001 : Record 37;ItemCharge@1011 : Record 5800;DocType@1010 : Option;DocNo@1009 : Code[20];DocLineNo@1008 : Integer;ItemNo@1007 : Code[20];Qty@1006 : Decimal;UnitCost@1005 : Decimal);
+    VAR
+      RecRef@1003 : RecordRef;
+    BEGIN
+      CLEAR(ItemChargeAssignmentSales);
+
+      WITH ItemChargeAssignmentSales DO BEGIN
+        "Document Type" := SalesLine."Document Type";
+        "Document No." := SalesLine."Document No.";
+        "Document Line No." := SalesLine."Line No.";
+        "Item Charge No." := SalesLine."No.";
+        "Unit Cost" := SalesLine."Unit Cost";
+        RecRef.GETTABLE(ItemChargeAssignmentSales);
+        "Line No." := LibraryUtility.GetNewLineNo(RecRef,FIELDNO("Line No."));
+        "Item Charge No." := ItemCharge."No.";
+        "Applies-to Doc. Type" := DocType;
+        "Applies-to Doc. No." := DocNo;
+        "Applies-to Doc. Line No." := DocLineNo;
+        "Item No." := ItemNo;
+        "Unit Cost" := UnitCost;
+        VALIDATE("Qty. to Assign",Qty);
+      END;
+    END;
+
+    PROCEDURE CreatePaymentAndApplytoInvoice@69(VAR GenJournalLine@1003 : Record 81;CustomerNo@1004 : Code[20];AppliesToDocNo@1007 : Code[20];Amount@1005 : Decimal);
+    VAR
+      GenJournalBatch@1000 : Record 232;
+      GLAccount@1001 : Record 15;
+    BEGIN
+      CreateGeneralJournalBatch(GenJournalBatch);
+      LibraryERM.CreateGLAccount(GLAccount);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,GenJournalLine."Document Type"::Payment,
+        GenJournalLine."Account Type"::Customer,CustomerNo,Amount);
+
+      // Value of Document No. is not important.
+      GenJournalLine.VALIDATE("Document No.",GenJournalLine."Journal Batch Name" + FORMAT(GenJournalLine."Line No."));
+      GenJournalLine.VALIDATE("Applies-to Doc. Type",GenJournalLine."Applies-to Doc. Type"::Invoice);
+      GenJournalLine.VALIDATE("Applies-to Doc. No.",AppliesToDocNo);
+      GenJournalLine.VALIDATE("Bal. Account No.",GLAccount."No.");
+      GenJournalLine.MODIFY(TRUE);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    PROCEDURE CreatePrepaymentVATSetup@34(VAR LineGLAccount@1001 : Record 15;VATCalculationType@1000 : Option) : Code[20];
+    VAR
+      PrepmtGLAccount@1002 : Record 15;
+    BEGIN
+      LibraryERM.CreatePrepaymentVATSetup(
+        LineGLAccount,PrepmtGLAccount,LineGLAccount."Gen. Posting Type"::Sale,VATCalculationType,VATCalculationType);
+      EXIT(PrepmtGLAccount."No.");
+    END;
+
+    PROCEDURE CreateSalesDocumentWithItem@33(VAR SalesHeader@1000 : Record 36;VAR SalesLine@1008 : Record 37;DocumentType@1001 : Option;CustomerNo@1003 : Code[20];ItemNo@1002 : Code[20];Quantity@1004 : Decimal;LocationCode@1005 : Code[10];ShipmentDate@1006 : Date);
+    BEGIN
+      CreateFCYSalesDocumentWithItem(SalesHeader,SalesLine,DocumentType,CustomerNo,ItemNo,Quantity,LocationCode,ShipmentDate,'');
+    END;
+
+    PROCEDURE CreateFCYSalesDocumentWithItem@56(VAR SalesHeader@1008 : Record 36;VAR SalesLine@1007 : Record 37;DocumentType@1006 : Option;CustomerNo@1005 : Code[20];ItemNo@1004 : Code[20];Quantity@1002 : Decimal;LocationCode@1001 : Code[10];ShipmentDate@1000 : Date;CurrencyCode@1003 : Code[10]);
+    BEGIN
+      CreateSalesHeader(SalesHeader,DocumentType,CustomerNo);
+      IF LocationCode <> '' THEN
+        SalesHeader.VALIDATE("Location Code",LocationCode);
+      IF CurrencyCode <> '' THEN
+        SalesHeader.VALIDATE("Currency Code",CurrencyCode);
+      SalesHeader.MODIFY(TRUE);
+      IF ItemNo = '' THEN
+        ItemNo := LibraryInventory.CreateItemNo;
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      IF LocationCode <> '' THEN
+        SalesLine.VALIDATE("Location Code",LocationCode);
+      IF ShipmentDate <> 0D THEN
+        SalesLine.VALIDATE("Shipment Date",ShipmentDate);
+      SalesLine.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2));
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateSalesHeader@14(VAR SalesHeader@1000 : Record 36;DocumentType@1001 : Option;SellToCustomerNo@1002 : Code[20]);
+    BEGIN
+      CLEAR(SalesHeader);
+      SalesHeader.VALIDATE("Document Type",DocumentType);
+      SalesHeader.INSERT(TRUE);
+      IF SellToCustomerNo = '' THEN
+        SellToCustomerNo := CreateCustomerNo;
+      SalesHeader.VALIDATE("Sell-to Customer No.",SellToCustomerNo);
+      SalesHeader.VALIDATE(
+        "External Document No.",
+        COPYSTR(LibraryUtility.GenerateRandomCode(SalesHeader.FIELDNO("External Document No."),DATABASE::"Sales Header"),1,20));
+      UpdatePaymentChannel(SalesHeader);
+      SetCorrDocNoSales(SalesHeader);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateSalesLine@17(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36;Type@1003 : Option;No@1004 : Code[20];Quantity@1005 : Decimal);
+    BEGIN
+      CreateSalesLineWithShipmentDate(SalesLine,SalesHeader,Type,No,SalesHeader."Shipment Date",Quantity);
+    END;
+
+    PROCEDURE CreateSalesLineWithShipmentDate@16(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36;Type@1003 : Option;No@1004 : Code[20];ShipmentDate@1006 : Date;Quantity@1005 : Decimal);
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      SalesLine.INIT;
+      SalesLine.VALIDATE("Document Type",SalesHeader."Document Type");
+      SalesLine.VALIDATE("Document No.",SalesHeader."No.");
+      RecRef.GETTABLE(SalesLine);
+      SalesLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,SalesLine.FIELDNO("Line No.")));
+      SalesLine.INSERT(TRUE);
+
+      SalesLine.VALIDATE(Type,Type);
+      CASE Type OF
+        SalesLine.Type::Item:
+          IF No = '' THEN
+            No := LibraryInventory.CreateItemNo;
+        SalesLine.Type::Resource:
+          IF No = '' THEN
+            No := LibraryResource.CreateResourceNo;
+        SalesLine.Type::"Charge (Item)":
+          IF No = '' THEN
+            No := LibraryInventory.CreateItemChargeNo;
+      END;
+
+      IF No <> '' THEN
+          FindType(SalesLine.Type,No,SalesHeader."Gen. Bus. Posting Group",SalesHeader."VAT Bus. Posting Group");
+
+      SalesLine.VALIDATE("No.",No);
+      SalesLine.VALIDATE("Shipment Date",ShipmentDate);
+      SalesLine.VALIDATE(Quantity,Quantity);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateSalesInvoice@55(VAR SalesHeader@1000 : Record 36);
+    VAR
+      Item@1002 : Record 27;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,CreateCustomerNo);
+      LibraryInventory.CreateItemWithUnitPriceAndUnitCost(
+        Item,LibraryRandom.RandDecInRange(1,100,2),LibraryRandom.RandDecInRange(1,100,2));
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandInt(100));
+    END;
+
+    PROCEDURE CreateSalesperson@5(VAR SalespersonPurchaser@1000 : Record 13);
+    BEGIN
+      SalespersonPurchaser.INIT;
+      SalespersonPurchaser.VALIDATE(
+        Code,LibraryUtility.GenerateRandomCode(SalespersonPurchaser.FIELDNO(Code),DATABASE::"Salesperson/Purchaser"));
+      SalespersonPurchaser.VALIDATE(Name,SalespersonPurchaser.Code);  // Validating Name as Code because value is not important.
+      SalespersonPurchaser.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateSalesPrepaymentPct@38(VAR SalesPrepaymentPct@1000 : Record 459;SalesType@1001 : Option;SalesCode@1002 : Code[20];ItemNo@1003 : Code[20];StartingDate@1004 : Date);
+    BEGIN
+      SalesPrepaymentPct.INIT;
+      SalesPrepaymentPct.VALIDATE("Item No.",ItemNo);
+      SalesPrepaymentPct.VALIDATE("Sales Type",SalesType);
+      SalesPrepaymentPct.VALIDATE("Sales Code",SalesCode);
+      SalesPrepaymentPct.VALIDATE("Starting Date",StartingDate);
+      SalesPrepaymentPct.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateSalesCommentLine@22(VAR SalesCommentLine@1000 : Record 44;DocumentType@1001 : Option;No@1003 : Code[20];DocumentLineNo@1004 : Integer);
+    VAR
+      RecRef@1006 : RecordRef;
+    BEGIN
+      SalesCommentLine.INIT;
+      SalesCommentLine.VALIDATE("Document Type",DocumentType);
+      SalesCommentLine.VALIDATE("No.",No);
+      SalesCommentLine.VALIDATE("Document Line No.",DocumentLineNo);
+      RecRef.GETTABLE(SalesCommentLine);
+      SalesCommentLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,SalesCommentLine.FIELDNO("Line No.")));
+      SalesCommentLine.INSERT(TRUE);
+      // Validate Comment as primary key to enable user to distinguish between comments because value is not important.
+      SalesCommentLine.VALIDATE(
+        Comment,FORMAT(SalesCommentLine."Document Type") + SalesCommentLine."No." +
+        FORMAT(SalesCommentLine."Document Line No.") + FORMAT(SalesCommentLine."Line No."));
+      SalesCommentLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateSalesPrice@10(VAR SalesPrice@1000 : Record 7002;ItemNo@1001 : Code[20];SalesType@1002 : Option;SalesCode@1003 : Code[20];StartingDate@1004 : Date;CurrencyCode@1005 : Code[10];VariantCode@1006 : Code[10];UOMCode@1007 : Code[10];MinQty@1008 : Decimal;UnitPrice@1009 : Decimal);
+    BEGIN
+      CLEAR(SalesPrice);
+      SalesPrice.VALIDATE("Item No.",ItemNo);
+      SalesPrice.VALIDATE("Sales Type",SalesType);
+      SalesPrice.VALIDATE("Sales Code",SalesCode);
+      SalesPrice.VALIDATE("Starting Date",StartingDate);
+      SalesPrice.VALIDATE("Currency Code",CurrencyCode);
+      SalesPrice.VALIDATE("Variant Code",VariantCode);
+      SalesPrice.VALIDATE("Unit of Measure Code",UOMCode);
+      SalesPrice.VALIDATE("Minimum Quantity",MinQty);
+      SalesPrice.INSERT(TRUE);
+      SalesPrice.VALIDATE("Unit Price",UnitPrice);
+      SalesPrice.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateShipToAddress@13(VAR ShipToAddress@1000 : Record 222;CustomerNo@1001 : Code[20]);
+    BEGIN
+      ShipToAddress.INIT;
+      ShipToAddress.VALIDATE("Customer No.",CustomerNo);
+      ShipToAddress.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(ShipToAddress.FIELDNO(Code),DATABASE::"Ship-to Address"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Ship-to Address",ShipToAddress.FIELDNO(Code))));
+      ShipToAddress.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateStandardSalesCode@8(VAR StandardSalesCode@1000 : Record 170);
+    BEGIN
+      StandardSalesCode.INIT;
+      StandardSalesCode.VALIDATE(
+        Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(StandardSalesCode.FIELDNO(Code),DATABASE::"Standard Sales Code"),
+          1,
+          LibraryUtility.GetFieldLength(DATABASE::"Standard Sales Code",StandardSalesCode.FIELDNO(Code))));
+      // Validating Description as Code because value is not important.
+      StandardSalesCode.VALIDATE(Description,StandardSalesCode.Code);
+      StandardSalesCode.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateStandardSalesLine@15(VAR StandardSalesLine@1000 : Record 171;StandardSalesCode@1001 : Code[10]);
+    VAR
+      RecRef@1002 : RecordRef;
+    BEGIN
+      StandardSalesLine.INIT;
+      StandardSalesLine.VALIDATE("Standard Sales Code",StandardSalesCode);
+      RecRef.GETTABLE(StandardSalesLine);
+      StandardSalesLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,StandardSalesLine.FIELDNO("Line No.")));
+      StandardSalesLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCustomerSalesCode@25(VAR StandardCustomerSalesCode@1000 : Record 172;CustomerNo@1001 : Code[20];Code@1002 : Code[10]);
+    BEGIN
+      StandardCustomerSalesCode.INIT;
+      StandardCustomerSalesCode.VALIDATE("Customer No.",CustomerNo);
+      StandardCustomerSalesCode.VALIDATE(Code,Code);
+      StandardCustomerSalesCode.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateCustomerMandate@27(VAR SEPADirectDebitMandate@1000 : Record 1230;CustomerNo@1001 : Code[20];CustomerBankCode@1002 : Code[10];FromDate@1003 : Date;ToDate@1004 : Date);
+    BEGIN
+      SEPADirectDebitMandate.INIT;
+      SEPADirectDebitMandate.VALIDATE("Customer No.",CustomerNo);
+      SEPADirectDebitMandate.VALIDATE("Customer Bank Account Code",CustomerBankCode);
+      SEPADirectDebitMandate.VALIDATE("Valid From",FromDate);
+      SEPADirectDebitMandate.VALIDATE("Valid To",ToDate);
+      SEPADirectDebitMandate.VALIDATE("Date of Signature",FromDate);
+      SEPADirectDebitMandate.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateStandardTextWithExtendedText@130(VAR StandardText@1004 : Record 7;VAR ExtendedText@1003 : Text) : Code[20];
+    VAR
+      ExtendedTextHeader@1000 : Record 279;
+      ExtendedTextLine@1001 : Record 280;
+    BEGIN
+      StandardText.INIT;
+      StandardText.Code := LibraryUtility.GenerateRandomCode(StandardText.FIELDNO(Code),DATABASE::"Standard Text");
+      StandardText.Description := LibraryUtility.GenerateGUID;
+      StandardText.INSERT;
+      LibrarySmallBusiness.CreateExtendedTextHeader(
+        ExtendedTextHeader,ExtendedTextHeader."Table Name"::"Standard Text",StandardText.Code);
+      LibrarySmallBusiness.CreateExtendedTextLine(ExtendedTextLine,ExtendedTextHeader);
+      ExtendedText := ExtendedTextLine.Text;
+      EXIT(StandardText.Code);
+    END;
+
+    PROCEDURE CombineReturnReceipts@39(VAR SalesHeader@1000 : Record 36;VAR ReturnReceiptHeader@1001 : Record 6660;PostingDate@1002 : Date;DocDate@1003 : Date;CalcInvDiscount@1004 : Boolean;PostCreditMemos@1005 : Boolean);
+    VAR
+      TmpSalesHeader@1007 : Record 36;
+      TmpReturnReceiptHeader@1006 : Record 6660;
+      CombineReturnReceipts@1008 : Report 6653;
+    BEGIN
+      CombineReturnReceipts.InitializeRequest(PostingDate,DocDate,CalcInvDiscount,PostCreditMemos);
+      IF SalesHeader.HASFILTER THEN
+        TmpSalesHeader.COPYFILTERS(SalesHeader)
+      ELSE BEGIN
+        SalesHeader.GET(SalesHeader."No.",SalesHeader."Document Type");
+        TmpSalesHeader.SETRANGE("Document Type",SalesHeader."Document Type");
+        TmpSalesHeader.SETRANGE("No.",SalesHeader."No.");
+      END;
+      CombineReturnReceipts.SETTABLEVIEW(TmpSalesHeader);
+      IF ReturnReceiptHeader.HASFILTER THEN
+        TmpReturnReceiptHeader.COPYFILTERS(ReturnReceiptHeader)
+      ELSE BEGIN
+        ReturnReceiptHeader.GET(ReturnReceiptHeader."No.");
+        TmpReturnReceiptHeader.SETRANGE("No.",ReturnReceiptHeader."No.");
+      END;
+      CombineReturnReceipts.SETTABLEVIEW(TmpReturnReceiptHeader);
+      CombineReturnReceipts.USEREQUESTPAGE(FALSE);
+      CombineReturnReceipts.RUNMODAL;
+    END;
+
+    PROCEDURE CombineShipments@37(VAR SalesHeader@1003 : Record 36;VAR SalesShipmentHeader@1004 : Record 110;PostingDate@1005 : Date;DocumentDate@1006 : Date;CalcInvDisc@1007 : Boolean;PostInvoices@1008 : Boolean;OnlyStdPmtTerms@1009 : Boolean;CopyTextLines@1010 : Boolean);
+    VAR
+      TmpSalesHeader@1002 : Record 36;
+      TmpSalesShipmentHeader@1001 : Record 110;
+      CombineShipments@1000 : Report 295;
+    BEGIN
+      CombineShipments.InitializeRequest(PostingDate,DocumentDate,CalcInvDisc,PostInvoices,OnlyStdPmtTerms,CopyTextLines);
+      IF SalesHeader.HASFILTER THEN
+        TmpSalesHeader.COPYFILTERS(SalesHeader)
+      ELSE BEGIN
+        SalesHeader.GET(SalesHeader."No.",SalesHeader."Document Type");
+        TmpSalesHeader.SETRANGE("Document Type",SalesHeader."Document Type");
+        TmpSalesHeader.SETRANGE("No.",SalesHeader."No.");
+        END;
+      CombineShipments.SETTABLEVIEW(TmpSalesHeader);
+      IF SalesShipmentHeader.HASFILTER THEN
+        TmpSalesShipmentHeader.COPYFILTERS(SalesShipmentHeader)
+      ELSE BEGIN
+        SalesShipmentHeader.GET(SalesShipmentHeader."No.");
+        TmpSalesShipmentHeader.SETRANGE("No.",SalesShipmentHeader."No.");
+      END;
+      CombineShipments.SETTABLEVIEW(TmpSalesShipmentHeader);
+      CombineShipments.USEREQUESTPAGE(FALSE);
+      CombineShipments.RUNMODAL;
+    END;
+
+    PROCEDURE DeleteInvoicedSalesOrders@41(VAR SalesHeader@1000 : Record 36);
+    VAR
+      TmpSalesHeader@1002 : Record 36;
+      DeleteInvoicedSalesOrders@1001 : Report 299;
+    BEGIN
+      IF SalesHeader.HASFILTER THEN
+        TmpSalesHeader.COPYFILTERS(SalesHeader)
+      ELSE BEGIN
+        SalesHeader.GET(SalesHeader."Document Type",SalesHeader."No.");
+        TmpSalesHeader.SETRANGE("Document Type",SalesHeader."Document Type");
+        TmpSalesHeader.SETRANGE("No.",SalesHeader."No.");
+      END;
+      DeleteInvoicedSalesOrders.SETTABLEVIEW(TmpSalesHeader);
+      DeleteInvoicedSalesOrders.USEREQUESTPAGE(FALSE);
+      DeleteInvoicedSalesOrders.RUNMODAL;
+    END;
+
+    PROCEDURE DeleteInvoicedSalesReturnOrders@42(VAR SalesHeader@1000 : Record 36);
+    VAR
+      TmpSalesHeader@1001 : Record 36;
+      DeleteInvdSalesRetOrders@1002 : Report 6651;
+    BEGIN
+      IF SalesHeader.HASFILTER THEN
+        TmpSalesHeader.COPYFILTERS(SalesHeader)
+      ELSE BEGIN
+        SalesHeader.GET(SalesHeader."Document Type",SalesHeader."No.");
+        TmpSalesHeader.SETRANGE("Document Type",SalesHeader."Document Type");
+        TmpSalesHeader.SETRANGE("No.",SalesHeader."No.");
+      END;
+      DeleteInvdSalesRetOrders.SETTABLEVIEW(TmpSalesHeader);
+      DeleteInvdSalesRetOrders.USEREQUESTPAGE(FALSE);
+      DeleteInvdSalesRetOrders.RUNMODAL;
+    END;
+
+    PROCEDURE ExplodeBOM@72(VAR SalesLine@1001 : Record 37);
+    VAR
+      SalesExplodeBOM@1000 : Codeunit 63;
+    BEGIN
+      CLEAR(SalesExplodeBOM);
+      SalesExplodeBOM.RUN(SalesLine);
+    END;
+
+    PROCEDURE FindCustomerPostingGroup@31() : Code[10];
+    VAR
+      CustomerPostingGroup@1000 : Record 92;
+    BEGIN
+      IF NOT CustomerPostingGroup.FINDFIRST THEN
+        CreateCustomerPostingGroup(CustomerPostingGroup);
+      EXIT(CustomerPostingGroup.Code);
+    END;
+
+    PROCEDURE FindItem@93(VAR Item@1000 : Record 27);
+    BEGIN
+      // Filter Item so that errors are not generated due to mandatory fields or Item Tracking.
+      Item.SETFILTER("Inventory Posting Group",'<>''''');
+      Item.SETFILTER("Gen. Prod. Posting Group",'<>''''');
+      Item.SETRANGE("Item Tracking Code",'');
+      Item.SETRANGE(Blocked,FALSE);
+      Item.SETFILTER("Unit Price",'<>0');
+      Item.SETFILTER(Reserve,'<>%1',Item.Reserve::Always);
+
+      Item.FINDSET;
+    END;
+
+    PROCEDURE GetShipmentLines@7(VAR SalesLine@1000 : Record 37);
+    VAR
+      SalesGetShipment@1001 : Codeunit 64;
+    BEGIN
+      CLEAR(SalesGetShipment);
+      SalesGetShipment.RUN(SalesLine);
+    END;
+
+    PROCEDURE GetCustomerAccount@1500013(CustomerNo@1500000 : Code[20]) : Code[20];
+    VAR
+      Customer@1500001 : Record 18;
+      CustomerPostingGroup@1500002 : Record 92;
+    BEGIN
+      Customer.GET(CustomerNo);
+      CustomerPostingGroup.GET(Customer."Customer Posting Group");
+      EXIT(CustomerPostingGroup."Receivables Account");
+    END;
+
+    PROCEDURE PostSalesDocument@19(VAR SalesHeader@1000 : Record 36;NewShipReceive@1001 : Boolean;NewInvoice@1002 : Boolean) : Code[20];
+    BEGIN
+      EXIT(DoPostSalesDocument(SalesHeader,NewShipReceive,NewInvoice,FALSE));
+    END;
+
+    PROCEDURE PostSalesDocumentAndEmail@29(VAR SalesHeader@1000 : Record 36;NewShipReceive@1001 : Boolean;NewInvoice@1002 : Boolean) : Code[20];
+    BEGIN
+      EXIT(DoPostSalesDocument(SalesHeader,NewShipReceive,NewInvoice,TRUE));
+    END;
+
+    LOCAL PROCEDURE DoPostSalesDocument@28(VAR SalesHeader@1000 : Record 36;NewShipReceive@1001 : Boolean;NewInvoice@1002 : Boolean;AfterPostSalesDocumentSendAsEmail@1008 : Boolean) DocumentNo : Code[20];
+    VAR
+      SalesPost@1003 : Codeunit 80;
+      SalesPostPrint@1007 : Codeunit 82;
+      Assert@1005 : Codeunit 130000;
+      NoSeriesManagement@1006 : Codeunit 396;
+      NoSeriesCode@1004 : Code[10];
+    BEGIN
+      // Taking name as NewInvoice to avoid conflict with table field name.
+      // Post the sales document.
+      // Depending on the document type and posting type return the number of the:
+      // - sales shipment,
+      // - posted sales invoice,
+      // - sales return receipt, or
+      // - posted credit memo
+      SetCorrDocNoSales(SalesHeader);
+      WITH SalesHeader DO BEGIN
+        VALIDATE(Ship,NewShipReceive);
+        VALIDATE(Receive,NewShipReceive);
+        VALIDATE(Invoice,NewInvoice);
+
+        CASE "Document Type" OF
+          "Document Type"::Invoice:
+            NoSeriesCode := "Posting No. Series";  // posted sales invoice.
+          "Document Type"::Order:
+            IF NewShipReceive AND NOT NewInvoice THEN
+              // posted sales shipment.
+              NoSeriesCode := "Shipping No. Series"
+            ELSE
+              NoSeriesCode := "Posting No. Series";  // posted sales invoice.
+          "Document Type"::"Credit Memo":
+            NoSeriesCode := "Posting No. Series";  // posted sales credit memo.
+          "Document Type"::"Return Order":
+            IF NewShipReceive AND NOT NewInvoice THEN
+              // posted sales return receipt.
+              NoSeriesCode := "Return Receipt No. Series"
+            ELSE
+              NoSeriesCode := "Posting No. Series";  // posted sales credit memo.
+          ELSE
+            Assert.Fail(STRSUBSTNO(WrongDocumentType,"Document Type"));
+        END;
+      END;
+
+      IF SalesHeader."Posting No." = '' THEN
+        DocumentNo := NoSeriesManagement.GetNextNo(NoSeriesCode,LibraryUtility.GetNextNoSeriesSalesDate(NoSeriesCode),FALSE)
+      ELSE
+        DocumentNo := SalesHeader."Posting No.";
+      CLEAR(SalesPost);
+      IF AfterPostSalesDocumentSendAsEmail THEN
+        SalesPostPrint.PostAndEmail(SalesHeader)
+      ELSE
+        SalesPost.RUN(SalesHeader);
+    END;
+
+    PROCEDURE PostSalesPrepaymentCrMemo@12(VAR SalesHeader@1000 : Record 36);
+    VAR
+      SalesPostPrepayments@1001 : Codeunit 442;
+    BEGIN
+      SalesPostPrepayments.CreditMemo(SalesHeader);
+    END;
+
+    PROCEDURE PostSalesPrepaymentInvoice@23(VAR SalesHeader@1001 : Record 36);
+    VAR
+      SalesPostPrepayments@1000 : Codeunit 442;
+    BEGIN
+      SalesPostPrepayments.Invoice(SalesHeader);
+    END;
+
+    PROCEDURE QuoteMakeOrder@44(VAR SalesHeader@1000 : Record 36) : Code[20];
+    VAR
+      SalesOrderHeader@1002 : Record 36;
+      SalesQuoteToOrder@1001 : Codeunit 86;
+    BEGIN
+      CLEAR(SalesQuoteToOrder);
+      SalesQuoteToOrder.RUN(SalesHeader);
+      SalesQuoteToOrder.GetSalesOrderHeader(SalesOrderHeader);
+      EXIT(SalesOrderHeader."No.");
+    END;
+
+    PROCEDURE ReleaseSalesDocument@78(VAR SalesHeader@1000 : Record 36);
+    VAR
+      ReleaseSalesDoc@1001 : Codeunit 414;
+    BEGIN
+      ReleaseSalesDoc.PerformManualRelease(SalesHeader);
+    END;
+
+    PROCEDURE ReopenSalesDocument@32(VAR SalesHeader@1000 : Record 36);
+    VAR
+      ReleaseSalesDoc@1001 : Codeunit 414;
+    BEGIN
+      ReleaseSalesDoc.PerformManualReopen(SalesHeader);
+    END;
+
+    PROCEDURE SetAllowVATDifference@48(AllowVATDifference@1000 : Boolean);
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Allow VAT Difference",AllowVATDifference);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetApplnBetweenCurrencies@45(ApplnBetweenCurrencies@1000 : Option);
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Appln. between Currencies",ApplnBetweenCurrencies);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetCalcInvDiscount@46(CalcInvDiscount@1000 : Boolean);
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Calc. Inv. Discount",CalcInvDiscount);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetCorrDocNoSales@11(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+      WITH SalesHeader DO
+        IF "Document Type" IN ["Document Type"::"Credit Memo","Document Type"::"Return Order"] THEN;
+    END;
+
+    PROCEDURE SetCreditWarnings@49(CreditWarnings@1001 : Option);
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Credit Warnings",CreditWarnings);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetCreditWarningsToNoWarnings@2();
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Credit Warnings",SalesReceivablesSetup."Credit Warnings"::"No Warning");
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetExactCostReversingMandatory@54(ExactCostReversingMandatory@1000 : Boolean);
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Exact Cost Reversing Mandatory",ExactCostReversingMandatory);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetInvoiceRounding@47(InvoiceRounding@1000 : Boolean);
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Invoice Rounding",InvoiceRounding);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetStockoutWarning@4(StockoutWarning@1001 : Boolean);
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Stockout Warning",StockoutWarning);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetPreventNegativeInventory@21(PreventNegativeInventory@1001 : Boolean);
+    VAR
+      InventorySetup@1000 : Record 313;
+    BEGIN
+      InventorySetup.GET;
+      InventorySetup.VALIDATE("Prevent Negative Inventory",PreventNegativeInventory);
+      InventorySetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetArchiveQuotesandOrders@26(ArchiveQuotesAndOrders@1001 : Boolean);
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Archive Quotes and Orders",ArchiveQuotesAndOrders);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE SetExtDocNo@100(ExtDocNoMandatory@1001 : Boolean);
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Ext. Doc. No. Mandatory",ExtDocNoMandatory);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    PROCEDURE UndoSalesShipmentLine@18(VAR SalesShipmentLine@1000 : Record 111);
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"Undo Sales Shipment Line",SalesShipmentLine);
+    END;
+
+    PROCEDURE UndoReturnReceiptLine@20(VAR ReturnReceiptLine@1000 : Record 6661);
+    BEGIN
+      CODEUNIT.RUN(CODEUNIT::"Undo Return Receipt Line",ReturnReceiptLine);
+    END;
+
+    LOCAL PROCEDURE UpdatePaymentChannel@62(VAR SalesHeader@1000 : Record 36);
+    VAR
+      RecRef@1001 : RecordRef;
+      FieldRef@1002 : FieldRef;
+    BEGIN
+      IF LibraryUtility.CheckFieldExistenceInTable(DATABASE::"Sales Header",PaymentChannelTxt) THEN BEGIN
+        RecRef.GETTABLE(SalesHeader);
+        FieldRef := RecRef.FIELD(LibraryUtility.FindFieldNoInTable(DATABASE::"Sales Header",PaymentChannelTxt));
+        FieldRef.VALIDATE(2);  // Input Option as Account Transfer.
+        RecRef.SETTABLE(SalesHeader);
+      END;
+    END;
+
+    PROCEDURE AutoReserveSalesLine@9(SalesLine@1000 : Record 37);
+    BEGIN
+      SalesLine.AutoReserve;
+    END;
+
+    PROCEDURE SelectCashReceiptJnlBatch@52(VAR GenJournalBatch@1000 : Record 232);
+    BEGIN
+      LibraryJournals.SelectGenJournalBatch(GenJournalBatch,SelectCashReceiptJnlTemplate);
+    END;
+
+    PROCEDURE SelectCashReceiptJnlTemplate@51() : Code[10];
+    VAR
+      GenJournalTemplate@1001 : Record 80;
+    BEGIN
+      EXIT(LibraryJournals.SelectGenJournalTemplate(GenJournalTemplate.Type::"Cash Receipts",PAGE::"Cash Receipt Journal"));
+    END;
+
+    PROCEDURE FindType@1500001(Type@1500000 : ' ,G/L Account,Item,Resource,Fixed Asset,Charge (Item)';No@1500001 : Code[20];GenBusPostCode@1500009 : Code[10];VATBusPostCode@1500010 : Code[10]);
+    VAR
+      GenProdPostCode@1500008 : Code[10];
+      VATPostCode@1500007 : Code[10];
+      ItemRec@1500006 : Record 27;
+      GLAccRec@1500005 : Record 15;
+      ChargeItemRec@1500004 : Record 5800;
+      ResourceRec@1500003 : Record 156;
+      FARec@1500002 : Record 5600;
+    BEGIN
+      GenProdPostCode := '';
+      VATPostCode := '';
+      CASE Type OF
+        Type::Item: BEGIN
+          ItemRec.RESET;
+          ItemRec.GET(No);
+          GenProdPostCode := ItemRec."Gen. Prod. Posting Group";
+          VATPostCode := ItemRec."VAT Prod. Posting Group";
+        END;
+        Type::Resource: BEGIN
+          ResourceRec.RESET;
+          ResourceRec.GET(No);
+          GenProdPostCode := ResourceRec."Gen. Prod. Posting Group";
+          VATPostCode := ResourceRec."VAT Prod. Posting Group";
+        END;
+        Type::"Charge (Item)": BEGIN
+          ChargeItemRec.RESET;
+          ChargeItemRec.GET(No);
+          GenProdPostCode := ChargeItemRec."Gen. Prod. Posting Group";
+          VATPostCode := ChargeItemRec."VAT Prod. Posting Group";
+        END;
+        Type::"G/L Account": BEGIN
+          GLAccRec.RESET;
+          GLAccRec.GET(No);
+          GenProdPostCode := GLAccRec."Gen. Prod. Posting Group";
+          VATPostCode := GLAccRec."VAT Prod. Posting Group";
+        END;
+        Type::"Fixed Asset": BEGIN
+          FARec.RESET;
+          FARec.GET(No);
+          GenProdPostCode := FARec."Gen. Prod. Posting Group";
+          VATPostCode := FARec."VAT Product Posting Group";
+        END;
+      END;
+      LibraryERM.CreateGenPostSetup(GenBusPostCode,GenProdPostCode);
+      LibraryERM.CreateVATPostingSetups(VATBusPostCode,VATPostCode);
+    END;
+
+    BEGIN
+    {
+      Contains all utility functions related to Sales.
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,208 @@
+OBJECT Codeunit 111 Vend. Entry-SetAppl.ID
+{
+  OBJECT-PROPERTIES
+  {
+    Date=01-08-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00.48992,NAVIN9.00.00.48992;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 25=imd;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+      VendEntryApplID@1000 : Code[50];
+      Refund@1500001 : Boolean;
+
+    PROCEDURE SetApplId@1(VAR VendLedgEntry@1000 : Record 25;ApplyingVendLedgEntry@1001 : Record 25;AppliesToID@1005 : Code[50]);
+    VAR
+      TempVendLedgEntry@1003 : TEMPORARY Record 25;
+      VendLedgEntryToUpdate@1002 : Record 25;
+      GSTApplicationManagement@1500000 : Codeunit 16403;
+      TransactionType1@1500001 : 'Purchase,Sale';
+      GSTGroupRemAmount@1500004 : Decimal;
+      InvoiceGSTAmount@1500003 : Decimal;
+      AppliedGSTAmount@1500002 : Decimal;
+      InvoiceBase@1500005 : Decimal;
+    BEGIN
+      VendLedgEntry.LOCKTABLE;
+      IF VendLedgEntry.FINDSET THEN BEGIN
+        // Make Applies-to ID
+        IF VendLedgEntry."Applies-to ID" <> '' THEN
+          VendEntryApplID := ''
+        ELSE BEGIN
+          VendEntryApplID := AppliesToID;
+          IF VendEntryApplID = '' THEN BEGIN
+            VendEntryApplID := USERID;
+            IF VendEntryApplID = '' THEN
+              VendEntryApplID := '***';
+          END;
+        END;
+        REPEAT
+          TempVendLedgEntry := VendLedgEntry;
+          TempVendLedgEntry.INSERT;
+        UNTIL VendLedgEntry.NEXT = 0;
+      END;
+
+      IF TempVendLedgEntry.FINDSET THEN
+        REPEAT
+          VendLedgEntryToUpdate.COPY(TempVendLedgEntry);
+          VendLedgEntryToUpdate.TESTFIELD(Open,TRUE);
+          VendLedgEntryToUpdate."Applies-to ID" := VendEntryApplID;
+          IF VendLedgEntryToUpdate."Applies-to ID" = '' THEN BEGIN
+            VendLedgEntryToUpdate."Accepted Pmt. Disc. Tolerance" := FALSE;
+            VendLedgEntryToUpdate."Accepted Payment Tolerance" := 0;
+          END;
+          // Set Amount to Apply
+
+          IF ((VendLedgEntryToUpdate."Amount to Apply" <> 0) AND (VendEntryApplID = '')) OR
+             (VendEntryApplID = '')
+          THEN BEGIN
+            VendLedgEntryToUpdate."Amount to Apply" := 0;
+            GSTApplicationManagement.DeletePaymentAplicationBuffer(
+              TransactionType1::Purchase,VendLedgEntryToUpdate."Entry No.");
+          END ELSE
+            IF VendLedgEntryToUpdate."Amount to Apply" = 0 THEN BEGIN
+              VendLedgEntryToUpdate.CALCFIELDS("Remaining Amount");
+              VendLedgEntryToUpdate."Amount to Apply" := VendLedgEntryToUpdate."Remaining Amount"
+            END;
+
+          IF IsGSTOnAdvancePayment(VendLedgEntryToUpdate) AND (ApplyingVendLedgEntry."Entry No." IN [0,1]) AND (NOT Refund)THEN
+            IF GSTApplicationManagement.FillGSTApplicationBufferPurchase(PurchaseHeader,VendLedgEntryToUpdate) THEN BEGIN
+              GSTGroupRemAmount :=
+                GSTApplicationManagement.GetApplicationRemainingAmount(
+                  TransactionType1::Purchase,PurchaseHeader."Document Type",
+                  PurchaseHeader."No.",VendLedgEntryToUpdate."Vendor No.",VendLedgEntryToUpdate."GST Group Code",
+                  VendLedgEntryToUpdate."Amount to Apply",VendLedgEntryToUpdate."Remaining Amount",
+                  VendLedgEntryToUpdate."Entry No.",FALSE,
+                  InvoiceGSTAmount,AppliedGSTAmount,InvoiceBase);
+              IF (VendEntryApplID <> '') AND (VendLedgEntryToUpdate."Amount to Apply" <> 0) THEN BEGIN
+                GSTApplicationManagement.CheckAppliedAmount(
+                  TransactionType1::Purchase,VendLedgEntryToUpdate."Entry No.",VendLedgEntryToUpdate."Vendor No.",
+                  InvoiceBase,GSTGroupRemAmount,VendLedgEntryToUpdate."GST Group Code",FALSE);
+                VendLedgEntryToUpdate."Amount to Apply" := GSTGroupRemAmount;
+              END;
+                GSTApplicationManagement.CheckGroupAmount(
+                  PurchaseHeader."Document Type",
+                PurchaseHeader."No.",VendLedgEntryToUpdate."Amount to Apply",InvoiceBase,
+                  VendLedgEntryToUpdate."Remaining Amount",VendLedgEntryToUpdate."GST Group Code");
+              IF VendLedgEntryToUpdate."Amount to Apply" <> 0 THEN
+                GSTApplicationManagement.CheckAppliedAmount(
+                  TransactionType1::Purchase,VendLedgEntryToUpdate."Entry No.",VendLedgEntryToUpdate."Vendor No.",
+                  InvoiceBase,VendLedgEntryToUpdate."Amount to Apply",VendLedgEntryToUpdate."GST Group Code",TRUE);
+              IF VendLedgEntryToUpdate."Amount to Apply" <> 0 THEN
+                GSTGroupRemAmount :=
+                  GSTApplicationManagement.GetApplicationRemainingAmount(
+                    TransactionType1::Purchase,PurchaseHeader."Document Type",
+                    PurchaseHeader."No.",VendLedgEntryToUpdate."Vendor No.",VendLedgEntryToUpdate."GST Group Code",
+                    VendLedgEntryToUpdate."Amount to Apply",VendLedgEntryToUpdate."Remaining Amount",
+                    VendLedgEntryToUpdate."Entry No.",FALSE,
+                    InvoiceGSTAmount,AppliedGSTAmount,InvoiceBase);
+            END;
+
+          IF IsGSTOnAdvancePayment(VendLedgEntryToUpdate) AND (ApplyingVendLedgEntry."Entry No." > 1) THEN BEGIN
+            GSTApplicationManagement.ApplyCurrencyFactorInvoice(TRUE);
+            GSTApplicationManagement.GetPurchaseInvoiceAmountOffline(
+              VendLedgEntryToUpdate,ApplyingVendLedgEntry,ApplyingVendLedgEntry."Total TDS Including SHE CESS");
+            GSTGroupRemAmount :=
+              GSTApplicationManagement.GetApplicationRemainingAmount(
+                TransactionType1::Purchase,ApplyingVendLedgEntry."Document Type",
+                ApplyingVendLedgEntry."Document No.",VendLedgEntryToUpdate."Vendor No.",
+                VendLedgEntryToUpdate."GST Group Code",
+                VendLedgEntryToUpdate."Amount to Apply",VendLedgEntryToUpdate."Remaining Amount",
+                VendLedgEntryToUpdate."Entry No.",FALSE,
+                InvoiceGSTAmount,AppliedGSTAmount,InvoiceBase);
+              IF (VendEntryApplID <> '') AND (VendLedgEntryToUpdate."Amount to Apply" <> 0) THEN BEGIN
+                GSTApplicationManagement.CheckAppliedAmount(
+                  TransactionType1::Purchase,VendLedgEntryToUpdate."Entry No.",VendLedgEntryToUpdate."Vendor No.",
+                  InvoiceBase,GSTGroupRemAmount,VendLedgEntryToUpdate."GST Group Code",FALSE);
+                VendLedgEntryToUpdate."Amount to Apply" := GSTGroupRemAmount;
+              END;
+              GSTApplicationManagement.CheckGroupAmount(
+                ApplyingVendLedgEntry."Document Type",
+                ApplyingVendLedgEntry."Document No.",VendLedgEntryToUpdate."Amount to Apply",InvoiceBase,
+                VendLedgEntryToUpdate."Remaining Amount",VendLedgEntryToUpdate."GST Group Code");
+              IF VendLedgEntryToUpdate."Amount to Apply" <> 0 THEN
+                GSTApplicationManagement.CheckAppliedAmount(
+                  TransactionType1::Purchase,VendLedgEntryToUpdate."Entry No.",VendLedgEntryToUpdate."Vendor No.",
+                  InvoiceBase,VendLedgEntryToUpdate."Amount to Apply",VendLedgEntryToUpdate."GST Group Code",TRUE);
+          END;
+          ApplyingVendLedgEntry.CALCFIELDS("Remaining Amount");
+          IF IsGSTOnAdvancePayment(ApplyingVendLedgEntry) THEN BEGIN
+            GSTApplicationManagement.ApplyCurrencyFactorInvoice(TRUE);
+            GSTApplicationManagement.GetPurchaseInvoiceAmountWithPaymentOffline(
+              VendLedgEntryToUpdate,ApplyingVendLedgEntry,
+              ApplyingVendLedgEntry."Total TDS Including SHE CESS");
+            GSTGroupRemAmount :=
+              GSTApplicationManagement.GetApplicationRemainingAmount(
+                TransactionType1::Purchase,VendLedgEntryToUpdate."Document Type",
+                VendLedgEntryToUpdate."Document No.",ApplyingVendLedgEntry."Vendor No.",
+                ApplyingVendLedgEntry."GST Group Code",
+                ApplyingVendLedgEntry."Amount to Apply",ApplyingVendLedgEntry."Remaining Amount",
+                ApplyingVendLedgEntry."Entry No.",FALSE,InvoiceGSTAmount,
+                AppliedGSTAmount,InvoiceBase);
+             IF VendEntryApplID <> '' THEN
+                VendLedgEntryToUpdate."Amount to Apply" := GSTGroupRemAmount * -1;
+              GSTApplicationManagement.CheckGroupAmount(
+                VendLedgEntryToUpdate."Document Type",
+                VendLedgEntryToUpdate."Document No.",VendLedgEntryToUpdate."Amount to Apply",InvoiceBase,
+                ApplyingVendLedgEntry."Remaining Amount",ApplyingVendLedgEntry."GST Group Code");
+          END;
+          CheckPurchCreditMemoAppOffline(VendLedgEntryToUpdate,ApplyingVendLedgEntry);
+          IF VendLedgEntryToUpdate."Entry No." = ApplyingVendLedgEntry."Entry No." THEN
+            VendLedgEntryToUpdate."Applying Entry" := ApplyingVendLedgEntry."Applying Entry";
+          VendLedgEntryToUpdate.MODIFY;
+        UNTIL TempVendLedgEntry.NEXT = 0;
+    END;
+
+    PROCEDURE SetGSTType@1500000(VAR PurchaseHeader2@1500002 : Record 38);
+    BEGIN
+      PurchaseHeader := PurchaseHeader2;
+    END;
+
+    LOCAL PROCEDURE IsGSTOnAdvancePayment@1500001(VAR VendorLedgerEntry@1500000 : Record 25) : Boolean;
+    BEGIN
+      WITH VendorLedgerEntry DO
+        EXIT(
+          "GST on Advance Payment" AND ("Document Type" = "Document Type"::Payment) AND
+          ("Remaining Amount" <> 0) AND ("Amount to Apply" <> 0));
+    END;
+
+    PROCEDURE SetRefund@1500002();
+    BEGIN
+      Refund := TRUE;
+    END;
+
+    LOCAL PROCEDURE CheckPurchCreditMemoAppOffline@1500022(VendorLedgerEntry@1500001 : Record 25;ApplyingVendorLedgerEntry@1500000 : Record 25);
+    VAR
+      VendorLedgerEntry1@1170000000 : Record 25;
+      GSTApplicationManagement@1500002 : Codeunit 16403;
+    BEGIN
+      WITH VendorLedgerEntry1 DO BEGIN
+        SETCURRENTKEY("Vendor No.","Applies-to ID","Document No.");
+        SETRANGE("Vendor No.",ApplyingVendorLedgerEntry."Vendor No.");
+        SETRANGE("Applies-to ID",ApplyingVendorLedgerEntry."Applies-to ID");
+        SETFILTER("Document No.",'<>%1',ApplyingVendorLedgerEntry."Document No.");
+        SETFILTER("Amount to Apply",'<>%1',0);
+        IF FINDFIRST THEN;
+        IF (ApplyingVendorLedgerEntry."Entry No." > 1) AND (VendEntryApplID <> '') THEN
+          IF ((VendorLedgerEntry."Document Type" = VendorLedgerEntry."Document Type"::"Credit Memo") AND
+            (ApplyingVendorLedgerEntry."Document Type" = ApplyingVendorLedgerEntry."Document Type"::Invoice)) OR
+            ((VendorLedgerEntry."Document Type" = VendorLedgerEntry."Document Type"::Invoice) AND
+            (ApplyingVendorLedgerEntry."Document Type" = ApplyingVendorLedgerEntry."Document Type"::"Credit Memo"))THEN
+              GSTApplicationManagement.CheckGSTPurchCrMemoValidationsOffline(VendorLedgerEntry,
+                ApplyingVendorLedgerEntry,COUNT);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

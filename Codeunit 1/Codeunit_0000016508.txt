@@ -1,0 +1,325 @@
+OBJECT Codeunit 16508 Tax Journal Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=24-04-16;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00.45778;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Text16510@1500002 : TextConst 'ENU=Checking lines        #1######\;ENN=Checking lines        #1######\';
+      Text16511@1500001 : TextConst 'ENU=Posting lines         #2###### @3@@@@@@@@@@@@@\;ENN=Posting lines         #2###### @3@@@@@@@@@@@@@\';
+      Text16512@1500000 : TextConst 'ENU=Journal lines posted successfully.;ENN=Journal lines posted successfully.';
+      GenJnlPostLine@1500003 : Codeunit 12;
+      GenJnlLine@1500005 : Record 81;
+      Text16513@1500007 : TextConst 'ENU=Do you want to post the journal lines?;ENN=Do you want to post the journal lines?';
+      Text16514@1500004 : TextConst 'ENU=Journal Batch Name    #4##########\\;ENN=Journal Batch Name    #4##########\\';
+      Text16515@1500009 : TextConst 'ENU=Posting date is not a valid date.;ENN=Posting date is not a valid date.';
+      VATAdjustmentBuffer@1500010 : Record 16481;
+      LastDocNo@1500011 : Code[20];
+      LastPostedDocNo@1500012 : Code[20];
+      NoSeries@1500013 : TEMPORARY Record 308;
+      NoOfPostingNoSeries@1500014 : Integer;
+      NoSeriesMgt2@1500015 : ARRAY [10] OF Codeunit 396;
+      Text16516@1500016 : TextConst 'ENU=A maximum of %1 posting number series can be used in each journal.;ENN=A maximum of %1 posting number series can be used in each journal.';
+      PostingNoSeriesNo@1500017 : Integer;
+      DocNo@1500019 : Code[20];
+      NoSeriesMgt@1500020 : Codeunit 396;
+      TaxJnlBatch@1500021 : Record 16586;
+
+    PROCEDURE PostTaxJournal@1500024(VAR TJLine@1500000 : Record 16587);
+    VAR
+      TaxJnlLine@1500001 : Record 16587;
+      LineCount@1500002 : Integer;
+      Window@1500003 : Dialog;
+    BEGIN
+      IF NOT TJLine."From Subcon. Order" THEN BEGIN
+        IF NOT CONFIRM(Text16513) THEN
+          ERROR('');
+      END ELSE
+        TJLine.SETRANGE("From Subcon. Order",TRUE);
+
+      CLEARALL;
+      TaxJnlLine.COPY(TJLine);
+      IF TaxJnlLine.FIND('-') THEN BEGIN
+        IF NOT TaxJnlLine."From Subcon. Order" THEN BEGIN
+          Window.OPEN(Text16514 + Text16510 + Text16511);
+          LineCount := 0;
+        END;
+
+        REPEAT
+          CheckLines(TaxJnlLine);
+          IF NOT TaxJnlLine."From Subcon. Order" THEN BEGIN
+            LineCount := LineCount + 1;
+            Window.UPDATE(4,TaxJnlLine."Journal Batch Name");
+            Window.UPDATE(1,LineCount);
+          END;
+        UNTIL TaxJnlLine.NEXT = 0;
+
+        LineCount := 0;
+        IF TaxJnlLine.FIND('-') THEN
+          REPEAT
+            PostGenJnlLine(TaxJnlLine);
+            IF NOT TaxJnlLine."From Subcon. Order" THEN BEGIN
+              LineCount := LineCount + 1;
+              Window.UPDATE(4,TaxJnlLine."Journal Batch Name");
+              Window.UPDATE(2,LineCount);
+              Window.UPDATE(3,ROUND(LineCount / TaxJnlLine.COUNT * 10000,1));
+            END;
+          UNTIL TaxJnlLine.NEXT = 0;
+        CLEAR(GenJnlPostLine);
+
+        VATAdjustmentBuffer.RESET;
+        VATAdjustmentBuffer.SETRANGE("Journal Template Name",TJLine."Journal Template Name");
+        VATAdjustmentBuffer.SETRANGE("Journal Batch Name",TJLine."Journal Batch Name");
+        VATAdjustmentBuffer.SETRANGE("Line No.",TJLine."Line No.");
+        VATAdjustmentBuffer.DELETEALL;
+
+        TaxJnlLine.DELETEALL(TRUE);
+        IF NOT TaxJnlLine."From Subcon. Order" THEN BEGIN
+          Window.CLOSE;
+          MESSAGE(Text16512);
+        END;
+      END;
+      TJLine := TaxJnlLine;
+    END;
+
+    PROCEDURE CheckLines@1500023(VAR TaxJnlLine@1500000 : Record 16587);
+    VAR
+      IncomeTaxAccPeriod@1500002 : Record 13724;
+    BEGIN
+      WITH TaxJnlLine DO BEGIN
+        TESTFIELD("Document No.");
+        TESTFIELD("Posting Date");
+        TESTFIELD("Account No.");
+        TESTFIELD("Bal. Account No.");
+        IF NOT ("VAT Adjustment Entry" OR ("TDS/TCS Transaction No." > 0)) THEN
+          TESTFIELD(Amount);
+        IF "TCS Nature of Collection" <> '' THEN BEGIN
+          IncomeTaxAccPeriod.RESET;
+          IncomeTaxAccPeriod.SETFILTER("Starting Date",'<=%1',"Posting Date");
+          IncomeTaxAccPeriod.SETFILTER("Ending Date",'>=%1',"Posting Date");
+          IF NOT IncomeTaxAccPeriod.FINDFIRST THEN
+            ERROR(Text16515);
+        END;
+      END;
+    END;
+
+    PROCEDURE PostGenJnlLine@1500022(VAR TaxJnlLine@1500012 : Record 16587);
+    BEGIN
+      IF (TaxJnlLine."Journal Batch Name" = '') AND (TaxJnlLine."Journal Template Name" = '') THEN
+        DocNo := TaxJnlLine."Document No."
+      ELSE
+        DocNo := CheckDocumentNo(TaxJnlLine);
+
+      InitGenJnlLine(TaxJnlLine);
+      IF GenJnlLine."VAT Adjustment Entry" THEN
+        RunGenJnlPostLineVatAdjustment(GenJnlLine,TaxJnlLine)
+      ELSE
+        RunGenJnlPostLine(GenJnlLine,TaxJnlLine);
+      IF GenJnlLine."VAT Adjustment Entry" OR GenJnlLine.Adjustment THEN
+        GenJnlLine.DELETE;
+    END;
+
+    PROCEDURE InitGenJnlLine@1500021(VAR TaxJnlLine@1500000 : Record 16587);
+    VAR
+      GenJnlLine2@1500001 : Record 81;
+    BEGIN
+      WITH TaxJnlLine DO BEGIN
+        GenJnlLine.INIT;
+        GenJnlLine."Journal Batch Name" := "Journal Batch Name";
+        GenJnlLine."Journal Template Name" := "Journal Template Name";
+        GenJnlLine."Line No." := "Line No.";
+        GenJnlLine."Account Type" := "Account Type";
+        GenJnlLine."Account No." := "Account No.";
+        GenJnlLine."Posting Date" := "Posting Date";
+        GenJnlLine."Document Type" := "Document Type";
+        // GenJnlLine."Document No." := TaxJnlLine."Document No.";
+        GenJnlLine."Document No." := DocNo;
+        GenJnlLine."Posting No. Series" := "Posting No. Series";
+        GenJnlLine.Description := Description;
+        GenJnlLine.VALIDATE(Amount,Amount);
+        GenJnlLine."Bal. Account Type" := "Bal. Account Type";
+        GenJnlLine."Bal. Account No." := "Bal. Account No.";
+        GenJnlLine."Shortcut Dimension 1 Code" := "Shortcut Dimension 1 Code";
+        GenJnlLine."Shortcut Dimension 2 Code" := "Shortcut Dimension 2 Code";
+        GenJnlLine."Dimension Set ID" := "Dimension Set ID";
+        GenJnlLine."Source Code" := "Source Code";
+        GenJnlLine."Reason Code" := "Reason Code";
+        GenJnlLine."Document Date" := "Document Date";
+        GenJnlLine."External Document No." := "External Document No.";
+        GenJnlLine.PLA := PLA;
+        GenJnlLine.Adjustment := Adjustment;
+        GenJnlLine."Location Code" := "Location Code";
+        GenJnlLine."State Code" := "State Code";
+        GenJnlLine."E.C.C. No." := "E.C.C. No.";
+        GenJnlLine."Excise Charge" := "Excise Charge";
+        GenJnlLine."Source Curr. Excise Amount" := "Source Curr. Excise Amount";
+        GenJnlLine."Source Curr. ADC VAT Amount" := "Source Curr. ADC VAT Amount";
+        GenJnlLine."Excise Amount" := "Excise Amount";
+        GenJnlLine."ADC VAT Amount" := "ADC VAT Amount";
+        // GenJnlLine."System-Created Entry" := TRUE;
+        GenJnlLine."System-Created Entry" := "System-Created Entry";
+        IF "TDS/TCS Base Amount" = 0 THEN
+          GenJnlLine."Allow Zero-Amount Posting" := TRUE;
+        GenJnlLine."VAT Type" := "VAT Type";
+        GenJnlLine."Non ITC Claimable Usage %" := "Non ITC Claimable Usage %";
+        GenJnlLine."Input Credit/Output Tax Amount" := "Input Credit/Output Tax Amount";
+        GenJnlLine."Amount Loaded on Item" := "Amount Loaded on Item";
+        GenJnlLine.Deferment := Deferment;
+        GenJnlLine."VAT Entry" := "VAT Entry";
+        GenJnlLine."Standard Deduction Amount" := "Standard Deduction Amount";
+        GenJnlLine."Standard Deduction Amount(ACY)" := "Standard Deduction Amount(ACY)";
+        GenJnlLine."Input/Output Tax Amount" := "Input/Output Tax Amount";
+        GenJnlLine."Tax Amount Loaded on Inventory" := "Tax Amount Loaded on Inventory";
+        GenJnlLine."VAT Adjustment Entry" := "VAT Adjustment Entry";
+        GenJnlLine."Tax Area Code" := "Tax Area Code";
+        GenJnlLine."Tax Liable" := "Tax Liable";
+        GenJnlLine."Tax Group Code" := "Tax Group Code";
+        GenJnlLine."Source Curr. Tax Amount" := "Source Curr. Tax Amount";
+        GenJnlLine."Excise Bus. Posting Group" := "Excise Bus. Posting Group";
+        GenJnlLine."Excise Prod. Posting Group" := "Excise Prod. Posting Group";
+        IF NOT Adjustment THEN
+          GenJnlLine."TDS/TCS Amount" := "TDS/TCS Amount";
+        GenJnlLine."Tax %" := "Tax %";
+        GenJnlLine."Tax Amount" := "Tax Amount";
+        GenJnlLine."Tax Base Amount" := "Tax Base Amount";
+        GenJnlLine."Source Curr. Tax Base Amount" := "Source Curr. Tax Base Amount";
+        GenJnlLine."Tax Amount (LCY)" := "Tax Amount (LCY)";
+        GenJnlLine."Tax Base Amount (LCY)" := "Tax Base Amount (LCY)";
+        GenJnlLine."TDS Nature of Deduction" := "TDS Nature of Deduction";
+        GenJnlLine."Assessee Code" := "Assessee Code";
+        GenJnlLine."Bal. TDS/TCS Including SHECESS" := "Bal. TDS/TCS Including SHECESS";
+        GenJnlLine."Party Type" := "Party Type";
+        GenJnlLine."Party Code" := "Party Code";
+        GenJnlLine."TDS/TCS Amt Incl Surcharge" := "TDS/TCS Amt Incl Surcharge";
+        GenJnlLine."TDS/TCS %" := "TDS/TCS %";
+        GenJnlLine."Form Code" := "Form Code";
+        GenJnlLine."Form No." := "Form No.";
+        GenJnlLine."TDS Category" := "TDS Category";
+        GenJnlLine."Surcharge %" := "Surcharge %";
+        IF NOT Adjustment THEN
+          GenJnlLine."Surcharge Amount" := "Surcharge Amount";
+        GenJnlLine."Concessional Code" := "Concessional Code";
+        GenJnlLine."TDS Entry" := "TDS Entry";
+        GenJnlLine."Challan No." := "Challan No.";
+        GenJnlLine."Challan Date" := "Challan Date";
+        GenJnlLine."TDS/TCS Base Amount" := "TDS/TCS Base Amount";
+        GenJnlLine."Balance Surcharge Amount" := "Balance Surcharge Amount";
+        GenJnlLine."Surcharge Base Amount" := "Surcharge Base Amount";
+        GenJnlLine."TDS Group" := "TDS Group";
+        GenJnlLine."Balance TDS/TCS Amount" := "Balance TDS/TCS Amount";
+        GenJnlLine."Temp TDS/TCS Base" := "Temp TDS/TCS Base";
+        GenJnlLine."eCESS %" := "eCESS %";
+        IF NOT Adjustment THEN
+          GenJnlLine."eCESS on TDS/TCS Amount" := "eCESS on TDS/TCS Amount";
+        GenJnlLine."Total TDS/TCS Incl. SHE CESS" := "Total TDS/TCS Incl. SHE CESS";
+        GenJnlLine."Balance eCESS on TDS/TCS Amt" := "Balance eCESS on TDS/TCS Amt";
+        GenJnlLine."Per Contract" := "Per Contract";
+        GenJnlLine."T.A.N. No." := "T.A.N. No.";
+        GenJnlLine."TCS Entry" := "TCS Entry";
+        GenJnlLine."TCS Type" := "TCS Type";
+        GenJnlLine."T.C.A.N. No." := "T.C.A.N. No.";
+        GenJnlLine."SHE Cess % on TDS/TCS" := "SHE Cess % on TDS/TCS";
+        IF NOT Adjustment THEN
+          GenJnlLine."SHE Cess on TDS/TCS Amount" := "SHE Cess on TDS/TCS Amount";
+        GenJnlLine."Bal. SHE Cess on TDS/TCS Amt" := "Bal. SHE Cess on TDS/TCS Amt";
+        GenJnlLine.Deferred := Deferred;
+
+        GenJnlLine."Work Tax Base Amount" := "Work Tax Base Amount";
+        GenJnlLine."Work Tax %" := "Work Tax %";
+        IF NOT Adjustment THEN
+          GenJnlLine."Work Tax Amount" := "Work Tax Amount";
+        GenJnlLine."Work Tax Paid" := "Work Tax Paid";
+        GenJnlLine."Pay Work Tax" := "Pay Work Tax";
+        GenJnlLine."Balance Work Tax Amount" := "Balance Work Tax Amount";
+        GenJnlLine."Work Tax Nature Of Deduction" := "Work Tax Nature Of Deduction";
+        GenJnlLine."Work Tax Group" := "Work Tax Group";
+        GenJnlLine."Work Tax % Applied" := "Work Tax % Applied";
+        GenJnlLine."W.T Amount" := "W.T Amount";
+        GenJnlLine."Work Tax" := "Work Tax";
+        GenJnlLine."Reverse Work Tax" := "Reverse Work Tax";
+        GenJnlLine."TDS/TCS Base Amount Applied" := "TDS/TCS Base Amount Applied";
+        GenJnlLine."TDS/TCS Base Amount Adjusted" := "TDS/TCS Base Amount Adjusted";
+        GenJnlLine."Work Tax Base Amount Applied" := "Work Tax Base Amount Applied";
+        GenJnlLine."Work Tax Base Amount Adjusted" := "Work Tax Base Amount Adjusted";
+        IF GenJnlLine."VAT Adjustment Entry" OR GenJnlLine.Adjustment THEN BEGIN
+          GenJnlLine2.RESET;
+          GenJnlLine2.SETRANGE("Journal Batch Name","Journal Batch Name");
+          GenJnlLine2.SETRANGE("Journal Template Name","Journal Batch Name");
+          GenJnlLine2.SETRANGE("Line No.","Line No.");
+          GenJnlLine2.SETRANGE("Document No.","Document No.");
+          IF GenJnlLine2.FINDFIRST THEN
+            GenJnlLine.MODIFY
+          ELSE
+            GenJnlLine.INSERT;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE RunGenJnlPostLine@1500012(VAR GenJnlLine@1000 : Record 81;TaxJnlLine@1001 : Record 16587);
+    VAR
+      GenJnlLine2@1500000 : Record 81;
+    BEGIN
+      GenJnlLine2 := GenJnlLine;
+      GenJnlPostLine.SetSalesHeaderNo(TaxJnlLine."Document No.");
+      GenJnlPostLine.RUN(GenJnlLine2);
+    END;
+
+    LOCAL PROCEDURE RunGenJnlPostLineVatAdjustment@1500002(VAR GenJnlLine@1000 : Record 81;VAR TaxJnlLine@1001 : Record 16587);
+    VAR
+      GenJnlLine2@1500000 : Record 81;
+      VATMgt@1500002 : Codeunit 16503;
+    BEGIN
+      GenJnlLine2 := GenJnlLine;
+      VATMgt.AdjustDetailedTaxEntry(GenJnlLine2,TRUE,TaxJnlLine);
+      GenJnlPostLine.SetSalesHeaderNo(TaxJnlLine."Document No.");
+      GenJnlPostLine.RUN(GenJnlLine2);
+    END;
+
+    PROCEDURE CheckDocumentNo@11(TaxJnlLine2@1000 : Record 16587) : Code[20];
+    BEGIN
+      WITH TaxJnlLine2 DO BEGIN
+        IF ("Journal Template Name" = '') AND ("Journal Batch Name" = '') AND ("Document No." <> '') THEN
+          EXIT("Document No.");
+        TaxJnlBatch.GET("Journal Template Name","Journal Batch Name");
+        IF "Posting No. Series" = '' THEN BEGIN
+          "Posting No. Series" := TaxJnlBatch."No. Series";
+          "Document No." := NoSeriesMgt.GetNextNo("Posting No. Series","Posting Date",TRUE);
+        END ELSE
+          IF "Document No." = LastDocNo THEN
+            "Document No." := LastPostedDocNo
+          ELSE BEGIN
+            IF NOT NoSeries.GET("Posting No. Series") THEN BEGIN
+              NoOfPostingNoSeries := NoOfPostingNoSeries + 1;
+              IF NoOfPostingNoSeries > ARRAYLEN(NoSeriesMgt2) THEN
+                ERROR(
+                  Text16516,
+                  ARRAYLEN(NoSeriesMgt2));
+              NoSeries.Code := "Posting No. Series";
+              NoSeries.Description := FORMAT(NoOfPostingNoSeries);
+              NoSeries.INSERT;
+            END;
+            LastDocNo := "Document No.";
+            EVALUATE(PostingNoSeriesNo,NoSeries.Description);
+            "Document No." :=
+              NoSeriesMgt2[PostingNoSeriesNo].GetNextNo("Posting No. Series","Posting Date",TRUE);
+            LastPostedDocNo := "Document No.";
+          END;
+        EXIT("Document No.");
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+
