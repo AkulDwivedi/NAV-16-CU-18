@@ -1,0 +1,383 @@
+OBJECT Codeunit 134092 ERM Consolidation
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryERM@1008 : Codeunit 131300;
+      LibraryRandom@1002 : Codeunit 130440;
+      LibraryJournals@1003 : Codeunit 131306;
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryReportDataset@1009 : Codeunit 131007;
+      LibrarySetupStorage@1000 : Codeunit 131009;
+      LibraryVariableStorage@1005 : Codeunit 131004;
+      LibraryDimension@1006 : Codeunit 131001;
+      IsInitialized@1001 : Boolean;
+      GLEntryErrTagTok@1007 : TextConst 'ENU=ErrorText_Number__Control23';
+      GLEntryDimensionErr@1011 : TextConst '@@@="%1 = G/L Entry No., %2 = Expected Dimension Value, %3 = Dimension Code, %4 = G/L Account No.";ENU=G/L Entry %1: Select Dimension Value Code %2 for the Dimension Code %3 for G/L Account %4.';
+
+    [Test]
+    PROCEDURE ConsolidateLocalDebitCreditGLAccounts@1();
+    VAR
+      DebitGLAcc@1000 : Record 15;
+      CreditGLAcc@1001 : Record 15;
+      BusinessUnit@1002 : Record 220;
+      TempGLEntry@1004 : TEMPORARY Record 17;
+      DocNo@1008 : Code[20];
+      Amount@1003 : Decimal;
+      ExpectedDebitAmount@1005 : Decimal;
+      ExpectedCreditAmount@1006 : Decimal;
+    BEGIN
+      // [SCENARIO 372046] G/L Account with Debit/Credit Balance should be consolidated to Debit/Credit Consolidation Account
+
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2);
+      // [GIVEN] G/L Account "X1" with Debit Balance = 100, "Cons. Debit Acc" = "A1", "Cons. Credit Acc." = "B1"
+      ExpectedDebitAmount :=
+        PostDebitCreditGenJnlLines(DebitGLAcc,TempGLEntry,Amount * LibraryRandom.RandIntInRange(3,5),-Amount);
+      // [GIVEN] G/L Account "X2" with Credit Balance = -100 "Cons. Debit Acc" = "A2", "Cons. Credit Acc." = "B2"
+      ExpectedCreditAmount :=
+        PostDebitCreditGenJnlLines(CreditGLAcc,TempGLEntry,Amount,-Amount * LibraryRandom.RandIntInRange(3,5));
+
+      // [WHEN] Run Consolidation with "Data Source" = "Local Currency"
+      DocNo :=
+        RunConsolidation(TempGLEntry,DebitGLAcc,CreditGLAcc,BusinessUnit."Data Source"::"Local Curr. (LCY)");
+      // [THEN] Consolidation G/L Entry created with "G/L Account No." = "A1" and "Amount" = 100
+      VerifyGLEntryAmount(DocNo,DebitGLAcc."Consol. Debit Acc.",ExpectedDebitAmount);
+      // [THEN] Consolidation G/L Entry created with "G/L Account No." = "B2" and "Amount" = -100
+      VerifyGLEntryAmount(DocNo,CreditGLAcc."Consol. Credit Acc.",ExpectedCreditAmount);
+    END;
+
+    [Test]
+    PROCEDURE ConsolidateACYDebitCreditGLAccounts@3();
+    VAR
+      DebitGLAcc@1000 : Record 15;
+      CreditGLAcc@1001 : Record 15;
+      BusinessUnit@1002 : Record 220;
+      TempGLEntry@1004 : TEMPORARY Record 17;
+      DocNo@1008 : Code[20];
+      Amount@1003 : Decimal;
+      ExpectedDebitAmount@1005 : Decimal;
+      ExpectedCreditAmount@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [ACY]
+      // [SCENARIO 372046] G/L Account with Debit/Credit Add. Currency Balance should be consolidated to Debit/Credit Consolidation Account
+
+      Initialize;
+      UpdateAddnlReportingCurrency(LibraryERM.CreateCurrencyWithExchangeRate(WORKDATE,1,LibraryRandom.RandDec(100,2)));
+      Amount := LibraryRandom.RandDec(100,2);
+      // [GIVEN] G/L Account "X1" with Debit Balance = 100, "Cons. Debit Acc" = "A1", "Cons. Credit Acc." = "B1"
+      ExpectedDebitAmount :=
+        PostDebitCreditGenJnlLines(DebitGLAcc,TempGLEntry,Amount * LibraryRandom.RandIntInRange(3,5),-Amount);
+      // [GIVEN] G/L Account "X2" with Credit Balance = -100 "Cons. Debit Acc" = "A2", "Cons. Credit Acc." = "B2"
+      ExpectedCreditAmount :=
+        PostDebitCreditGenJnlLines(CreditGLAcc,TempGLEntry,Amount,-Amount * LibraryRandom.RandIntInRange(3,5));
+
+      // [WHEN] Run Consolidation with "Data Source" = "Additional Currency"
+      DocNo := RunConsolidation(TempGLEntry,DebitGLAcc,CreditGLAcc,BusinessUnit."Data Source"::"Add. Rep. Curr. (ACY)");
+      // [THEN] Consolidation G/L Entry created with "G/L Account No." = "A1" and "Additional Currency Amount" = 100
+      VerifyGLEntryAmountACY(DocNo,DebitGLAcc."Consol. Debit Acc.",ExpectedDebitAmount);
+      // [THEN] Consolidation G/L Entry created with "G/L Account No." = "B2" and "Additional Currency Amount" = -100
+      VerifyGLEntryAmountACY(DocNo,CreditGLAcc."Consol. Credit Acc.",ExpectedCreditAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConsolidationTestDatabaseReportHandler)]
+    PROCEDURE PrintGLAccountInConsolidationTestDatabaseReport@4();
+    VAR
+      GLAccount@1000 : Record 15;
+    BEGIN
+      // [FEATURE] [Reports]
+      // [SCENARIO 372262] "G/L Account No." should be printed in "Consolidation - Test Database" report if related G/L Entry exists
+
+      Initialize;
+      // [GIVEN] G/L Account = "X" with Consolidation Setup and posted G/L Entry
+      CreateGLAccountWithConsolidationSetup(GLAccount);
+      InsertGLEntry(GLAccount."No.");
+
+      // [WHEN] Run "Consolidation - Test Database" report
+      LibraryVariableStorage.Enqueue('');
+      RunConsolidationTestDatabase;
+
+      // [THEN] G/L Account = "X" is printed
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.MoveToRow(LibraryReportDataset.FindRow('G_L_Account__No__',GLAccount."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(GLConsolidationEliminationsRPH)]
+    PROCEDURE GLConsolidationEliminationsBooleanColumnType@6();
+    BEGIN
+      // [FEATURE] [Reports] [UT]
+      // [SCNEARIO 375924] "G/L Consolidation Eliminations" report dataset uses "0"/"1" for boolean columns
+      Initialize;
+
+      // [WHEN] Run "G/L Consolidation Eliminations" report
+      RunGLConsolidationEliminationsRep(LibraryERM.CreateGLAccountNo);
+
+      // [THEN] Report dataset contains "0"/"1" for boolean columns "FirstLine" and "FirstLine2"
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.AssertElementWithValueExists('FirstLine2','1');
+    END;
+
+    [Test]
+    [HandlerFunctions(ConsolidationTestDatabaseReportHandler)]
+    PROCEDURE PrintErrorAccountDimInConsolidationTestDatabaseReport@7();
+    VAR
+      GLAccount@1000 : Record 15;
+      BusinessUnit@1007 : Record 220;
+      DefaultDimension@1003 : Record 352;
+      DimSetID@1001 : Integer;
+      GLEntryNo@1004 : Integer;
+    BEGIN
+      // [FEATURE] [Reports]
+      Initialize;
+
+      // [GIVEN] G/L Account = "X" with Consolidation Setup
+      CreateGLAccountWithConsolidationSetup(GLAccount);
+
+      // [GIVEN] Business Unit "BU" with current company
+      CreateBusinessUnit(BusinessUnit,BusinessUnit."Data Source"::"Local Curr. (LCY)");
+
+      // [GIVEN] Default Dimension with Dimension Code = "D1", Dimension value = "V1"
+      // [GIVEN] "D1"."Value Posting" = "Value Posting"::"Same Code"
+      // [GIVEN] Dimension Set entry "DS": "DS".Dimension Code = "D1", "DS".Dimension Value = "V2"
+      // [GIVEN] Selected Dimension code for checking in report is "D1"
+      CreateSelectedDim(DefaultDimension,DimSetID,GLAccount."No.");
+
+      // [GIVEN] G/L Entry "GLE": "GLE"."G/L Account" = "X", "GLE".BusinessUnit = "BU", "GLE".Dimension Set = "DS"
+      GLEntryNo := InsertGLEntryWithBusinessUnit(GLAccount."No.",BusinessUnit.Code,DimSetID);
+
+      // [WHEN] Run "Consolidation - Test Database" report filtered on Business Unit "BU"
+      LibraryVariableStorage.Enqueue(DefaultDimension."Dimension Code");
+      COMMIT;
+      REPORT.RUN(REPORT::"Consolidation - Test Database",TRUE,FALSE,BusinessUnit);
+
+      // [THEN] Error "G/L Entry "GLE": Select Dimension Value Code "V1" for the Dimension Code "D1 for G/L Account "X"." has been logged.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.AssertElementTagWithValueExists(
+        GLEntryErrTagTok,
+        STRSUBSTNO(
+          GLEntryDimensionErr,GLEntryNo,DefaultDimension."Dimension Value Code",DefaultDimension."Dimension Code",GLAccount."No."));
+    END;
+
+    LOCAL PROCEDURE Initialize@11();
+    BEGIN
+      LibrarySetupStorage.Restore;
+      IF IsInitialized THEN
+        EXIT;
+
+      LibrarySetupStorage.Save(DATABASE::"General Ledger Setup");
+      IsInitialized := TRUE;
+    END;
+
+    LOCAL PROCEDURE CreateGLAccountWithConsolidationSetup@17(VAR GLAccount@1000 : Record 15);
+    BEGIN
+      LibraryERM.CreateGLAccount(GLAccount);
+      GLAccount.VALIDATE("Consol. Debit Acc.",LibraryERM.CreateGLAccountNo);
+      GLAccount.VALIDATE("Consol. Credit Acc.",LibraryERM.CreateGLAccountNo);
+      GLAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateBusinessUnit@38(VAR BusinessUnit@1000 : Record 220;DataSource@1001 : Option);
+    BEGIN
+      LibraryERM.CreateBusinessUnit(BusinessUnit);
+      BusinessUnit.VALIDATE("Company Name",COMPANYNAME);
+      BusinessUnit.VALIDATE("Residual Account",LibraryERM.CreateGLAccountNo);
+      BusinessUnit.VALIDATE("Data Source",DataSource);
+      BusinessUnit.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSelectedDim@25(VAR DefaultDimension@1009 : Record 352;VAR DimSetID@1006 : Integer;GLAccountCode@1000 : Code[20]);
+    VAR
+      DimensionValue@1004 : Record 349;
+      SelectedDimension@1002 : Record 369;
+      DimensionSelectionBuffer@1001 : Record 368;
+    BEGIN
+      LibraryDimension.CreateDimWithDimValue(DimensionValue);
+      LibraryDimension.CreateDefaultDimension(DefaultDimension,
+        DATABASE::"G/L Account",GLAccountCode,DimensionValue."Dimension Code",DimensionValue.Code);
+      DefaultDimension.VALIDATE("Value Posting",DefaultDimension."Value Posting"::"Same Code");
+      DefaultDimension.MODIFY(TRUE);
+      LibraryDimension.CreateDimensionValue(DimensionValue,DefaultDimension."Dimension Code");
+      DimSetID := CreateNewDimSetID(DimensionValue."Dimension Code",DimensionValue.Code);
+      SelectedDimension.INIT;
+      LibraryDimension.CreateSelectedDimension(SelectedDimension,3,
+        REPORT::"Consolidation - Test Database",'',DefaultDimension."Dimension Code");
+      DimensionSelectionBuffer.INIT;
+      DimensionSelectionBuffer.Code := SelectedDimension."Dimension Code";
+      DimensionSelectionBuffer.Selected := TRUE;
+      DimensionSelectionBuffer.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreateNewDimSetID@18(DimCode@1001 : Code[20];DimValue@1002 : Code[20]) : Integer;
+    VAR
+      DimensionSetEntry@1000 : Record 480;
+    BEGIN
+      DimensionSetEntry.INIT;
+      LibraryUtility.GetNewRecNo(DimensionSetEntry,DimensionSetEntry.FIELDNO("Dimension Set ID"));
+      DimensionSetEntry."Dimension Code" := DimCode;
+      DimensionSetEntry."Dimension Value Code" := DimValue;
+      DimensionSetEntry.INSERT;
+      EXIT(DimensionSetEntry."Dimension Set ID");
+    END;
+
+    LOCAL PROCEDURE InsertGLEntry@15(GLAccNo@1000 : Code[20]) : Integer;
+    VAR
+      GLEntry@1001 : Record 17;
+    BEGIN
+      GLEntry.INIT;
+      GLEntry."Entry No." := LibraryUtility.GetNewRecNo(GLEntry,GLEntry.FIELDNO("Entry No."));
+      GLEntry."G/L Account No." := GLAccNo;
+      GLEntry."Posting Date" := WORKDATE;
+      GLEntry.INSERT;
+      EXIT(GLEntry."Entry No.");
+    END;
+
+    LOCAL PROCEDURE InsertGLEntryWithBusinessUnit@13(GLAccountNo@1000 : Code[20];BusinessUnitCode@1004 : Code[20];DimensionSetID@1002 : Integer) : Integer;
+    VAR
+      GLEntry@1001 : Record 17;
+    BEGIN
+      GLEntry.GET(InsertGLEntry(GLAccountNo));
+      GLEntry."Business Unit Code" := BusinessUnitCode;
+      GLEntry."Dimension Set ID" := DimensionSetID;
+      GLEntry.MODIFY;
+      EXIT(GLEntry."Entry No.");
+    END;
+
+    LOCAL PROCEDURE UpdateAddnlReportingCurrency@94(AdditionalReportingCurrency@1002 : Code[10]);
+    VAR
+      GeneralLedgerSetup@1001 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup."Additional Reporting Currency" := AdditionalReportingCurrency;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE PostDebitCreditGenJnlLines@2(VAR GLAccount@1004 : Record 15;VAR GLEntry@1003 : Record 17;DebitAmount@1001 : Decimal;CreditAmount@1005 : Decimal) : Decimal;
+    BEGIN
+      CreateGLAccountWithConsolidationSetup(GLAccount);
+      PostGenJnlLine(GLEntry,GLAccount."No.",DebitAmount);
+      PostGenJnlLine(GLEntry,GLAccount."No.",CreditAmount);
+      EXIT(DebitAmount + CreditAmount);
+    END;
+
+    LOCAL PROCEDURE PostGenJnlLine@26(VAR GLEntryBuffer@1000 : Record 17;GLAccNo@1001 : Code[20];Amount@1003 : Decimal);
+    VAR
+      GenJnlLine@1004 : Record 81;
+      GLEntry@1002 : Record 17;
+    BEGIN
+      LibraryJournals.CreateGenJournalLineWithBatch(
+        GenJnlLine,0,GenJnlLine."Account Type"::"G/L Account",GLAccNo,Amount);
+      LibraryERM.PostGeneralJnlLine(GenJnlLine);
+      FindGLEntry(GLEntry,GenJnlLine."Account No.",GenJnlLine."Document No.");
+      GLEntryBuffer := GLEntry;
+      GLEntryBuffer.INSERT;
+    END;
+
+    LOCAL PROCEDURE FindGLEntry@9(VAR GLEntry@1003 : Record 17;GLAccNo@1000 : Code[20];DocNo@1001 : Code[20]);
+    BEGIN
+      GLEntry.SETRANGE("G/L Account No.",GLAccNo);
+      GLEntry.SETRANGE("Document No.",DocNo);
+      GLEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE RunConsolidation@5(VAR TempGLEntry@1001 : TEMPORARY Record 17;DebitGLAcc@1003 : Record 15;CreditGLAcc@1002 : Record 15;DateSource@1005 : Option) DocNo : Code[20];
+    VAR
+      BusinessUnit@1000 : Record 220;
+      Consolidate@1004 : Codeunit 432;
+    BEGIN
+      DocNo := LibraryUtility.GenerateGUID;
+      Consolidate.SetDocNo(DocNo);
+      Consolidate.InsertGLAccount(DebitGLAcc);
+      Consolidate.InsertGLAccount(CreditGLAcc);
+      TempGLEntry.FINDSET;
+      REPEAT
+        Consolidate.InsertGLEntry(TempGLEntry);
+      UNTIL TempGLEntry.NEXT = 0;
+      CreateBusinessUnit(BusinessUnit,DateSource);
+      Consolidate.SetGlobals('','',BusinessUnit."Company Name",'','','',0,WORKDATE,WORKDATE);
+      Consolidate.RUN(BusinessUnit);
+    END;
+
+    LOCAL PROCEDURE RunGLConsolidationEliminationsRep@8(GLAccountNo@1002 : Code[20]);
+    VAR
+      GenJournalBatch@1000 : Record 232;
+      GLAccount@1003 : Record 15;
+      GLConsolidationEliminations@1001 : Report 16;
+    BEGIN
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryVariableStorage.Enqueue(GenJournalBatch."Journal Template Name");
+      LibraryVariableStorage.Enqueue(GenJournalBatch.Name);
+      GLAccount.SETRANGE("No.",GLAccountNo);
+
+      COMMIT;
+      CLEAR(GLConsolidationEliminations);
+      GLConsolidationEliminations.SETTABLEVIEW(GLAccount);
+      GLConsolidationEliminations.RUN;
+    END;
+
+    LOCAL PROCEDURE RunConsolidationTestDatabase@16();
+    VAR
+      BusinessUnit@1000 : Record 220;
+    BEGIN
+      CreateBusinessUnit(BusinessUnit,BusinessUnit."Data Source"::"Local Curr. (LCY)");
+      COMMIT;
+      REPORT.RUN(REPORT::"Consolidation - Test Database",TRUE,FALSE,BusinessUnit);
+    END;
+
+    LOCAL PROCEDURE VerifyGLEntryAmount@10(DocNo@1000 : Code[20];GLAccNo@1001 : Code[20];ExpectedAmount@1002 : Decimal);
+    VAR
+      GLEntry@1003 : Record 17;
+    BEGIN
+      FindGLEntry(GLEntry,GLAccNo,DocNo);
+      GLEntry.TESTFIELD(Amount,ExpectedAmount);
+    END;
+
+    LOCAL PROCEDURE VerifyGLEntryAmountACY@19(DocNo@1000 : Code[20];GLAccNo@1001 : Code[20];ExpectedAmount@1002 : Decimal);
+    VAR
+      GLEntry@1003 : Record 17;
+    BEGIN
+      FindGLEntry(GLEntry,GLAccNo,DocNo);
+      GLEntry.TESTFIELD("Additional-Currency Amount",ExpectedAmount);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ConsolidationTestDatabaseReportHandler@350(VAR ConsolidationTestDatabase@1000 : TestRequestPage 14);
+    BEGIN
+      ConsolidationTestDatabase.StartingDate.SETVALUE(WORKDATE);
+      ConsolidationTestDatabase.EndingDate.SETVALUE(WORKDATE);
+      ConsolidationTestDatabase.CopyDimensions.SETVALUE(LibraryVariableStorage.DequeueText);
+      ConsolidationTestDatabase.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE GLConsolidationEliminationsRPH@22(VAR GLConsolidationEliminations@1000 : TestRequestPage 16);
+    BEGIN
+      GLConsolidationEliminations.JournalTemplateName.SETVALUE(LibraryVariableStorage.DequeueText);
+      GLConsolidationEliminations.JournalBatch.SETVALUE(LibraryVariableStorage.DequeueText);
+      GLConsolidationEliminations.StartingDate.SETVALUE(WORKDATE);
+      GLConsolidationEliminations.EndingDate.SETVALUE(WORKDATE);
+      GLConsolidationEliminations.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Consolidation]
+    }
+    END.
+  }
+}
+

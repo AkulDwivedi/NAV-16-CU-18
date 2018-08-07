@@ -1,0 +1,617 @@
+OBJECT Codeunit 144066 TCS Transaction Documents
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      GLSetup@1500001 : Record 98;
+      LibrarySetupStorage@1500010 : Codeunit 131009;
+      LibraryVariableStorage@1500004 : Codeunit 131004;
+      ServiceTaxWithTDSHelper@1500007 : Codeunit 143005;
+      LibraryERM@1500012 : Codeunit 131300;
+      LibraryJournals@1500006 : Codeunit 131306;
+      LibraryRandom@1500013 : Codeunit 130440;
+      LibraryTDS@1500000 : Codeunit 143000;
+      AmountErr@1500009 : TextConst '@@@="%1 and %2 = Amount and Amount";ENU=%1 is incorrect in %2.';
+      LibraryTCS@1500008 : Codeunit 143008;
+      LibrarySales@1500018 : Codeunit 130509;
+      Assert@1500002 : Codeunit 130000;
+      isInitialized@1500011 : Boolean;
+      CreditAmountErr@1500015 : TextConst '@@@="%1 and %2 = Expected Amount and Actual Amount";ENU=The expected value is %1 and the actual value is %2.';
+      RoundingType@1500003 : 'Nearest,Up,Down';
+
+    [Test]
+    PROCEDURE VerifySalesCreditMemoAfterDebitCorrespondingFullReturn@1500055();
+    VAR
+      NodNocHeader@1500000 : Record 13786;
+      TcsNatureOfCollection@1500001 : Record 16507;
+      TCSSetup@1500002 : Record 16508;
+      SalesHeader@1500003 : Record 36;
+      SalesLine@1500007 : Record 37;
+      SalesCrMemoLine@1500004 : Record 115;
+      GLEntry@1500008 : Record 17;
+      Amount@1500005 : Decimal;
+      DocumentNo@1500006 : Code[20];
+      DocumentNo2@1500009 : Code[20];
+    BEGIN
+      // [SCENARIO 163807] TCS - Tax Collection at Source - Check if the program debits the corresponding TCS Payable Account after posting the Sales Return Order(Full Return)
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For Sales Order & Sales Return order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+      Amount := LibraryRandom.RandDec(1000,2);
+
+      // [WHEN] Create Sales Order & Sales Return Order With TCS Nature of collection and post the sales order after that apply it to the sales return document with same amount
+      DocumentNo :=
+        CreateAndPostSalesDocWithTCS(
+          SalesHeader,NodNocHeader."No.",TcsNatureOfCollection.Code,Amount,SalesHeader."Document Type"::Order);
+      DocumentNo2 :=
+        CreateAndPostSalesReturnDocumentWithTCS(NodNocHeader."No.",TcsNatureOfCollection.Code,SalesLine,DocumentNo,Amount);
+
+      // [THEN] Calculated TCS Amounts by using TCS Setup , the G/L Entries impact on the Sales Return order with applied Sales Order
+      SalesCrMemoLine.SETRANGE("Document No.",DocumentNo2);
+      SalesCrMemoLine.FINDFIRST;
+      VerifyGLEntry(GLEntry."Document Type"::"Credit Memo",DocumentNo2,SalesCrMemoLine."Amount To Customer");
+    END;
+
+    [Test]
+    PROCEDURE VerifyTCSSalesReturnOrderAfterPayment@1500004();
+    VAR
+      NodNocHeader@1500003 : Record 13786;
+      TcsNatureOfCollection@1500002 : Record 16507;
+      TCSSetup@1500001 : Record 16508;
+      SalesHeader@1500000 : Record 36;
+      SalesLine@1500009 : Record 37;
+      Amount@1500004 : Decimal;
+      DocumentNo@1500005 : Code[20];
+      DocumentNo2@1500008 : Code[20];
+    BEGIN
+      // [SCENARIO 163808] Check if the program is calculating TCS in case of creating Sales Return Order after depositing tax to Government
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For Sales Invoice& Sales Return order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+      Amount := LibraryRandom.RandDec(1000,2);
+
+      // [WHEN] Create Sales Invoice ,Pay Corresponding TCS through Journals and Post Sales Return Order & Apply the Invoice To the credit memo
+      DocumentNo :=
+        CreateAndPostSalesDocWithTCS(
+          SalesHeader,NodNocHeader."No.",TcsNatureOfCollection.Code,Amount,SalesHeader."Document Type"::Invoice);
+      CreateAndPostPaymentJournalPayTCS(TcsNatureOfCollection.Code,TCSSetup."TCS Account No.");
+      DocumentNo2 :=
+        CreateAndPostSalesReturnDocumentWithTCS(NodNocHeader."No.",TcsNatureOfCollection.Code,SalesLine,DocumentNo,Amount);
+
+      // [THEN] Calculated TCS Entries using TCS Setup and Applied the credit memo to the Invoice
+      VerifyTCSWithZeroBalance(SalesLine,DocumentNo2);
+    END;
+
+    [Test]
+    PROCEDURE VerifyTCSSalesReturnOrderAfterApplyingUpperRoundoff@1500000();
+    VAR
+      NodNocHeader@1500003 : Record 13786;
+      TcsNatureOfCollection@1500002 : Record 16507;
+      TCSSetup@1500001 : Record 16508;
+      SalesHeader@1500000 : Record 36;
+      SalesLine@1500009 : Record 37;
+      ExpectedTCSEntry@1500007 : Record 16514;
+      Amount@1500004 : Decimal;
+      DocumentNo@1500005 : Code[20];
+      DocumentNo2@1500008 : Code[20];
+    BEGIN
+      // [SCENARIO 163809] Check if the system is calculating TCS rounded off(rounding type as Up) on each component (TCS amount, surcharge amount, eCess amount) while preparing Sales return order
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For Sales Order & Sales Return order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+      UpdateTcsRounding(RoundingType::Up);
+      Amount := LibraryRandom.RandDec(1000,2);
+
+      // [WHEN] Create Sales Order With TCS Rounding Type as UP And Create the Sales Return Order With Same Rounding and apply the Invoice document
+      DocumentNo :=
+        CreateAndPostSalesDocWithTCS(
+          SalesHeader,NodNocHeader."No.",TcsNatureOfCollection.Code,Amount,SalesHeader."Document Type"::Order);
+      DocumentNo2 :=
+        CreateAndPostSalesReturnDocumentWithTCS(NodNocHeader."No.",TcsNatureOfCollection.Code,SalesLine,DocumentNo,Amount);
+      CalcExpectedTCSAmounts(ExpectedTCSEntry,TCSSetup,SalesLine.Amount);
+
+      // [THEN] Calculated TCS Entries Using TCS Setup & Verifying the Expected TCS Entries with actual TCS Entries
+      VerifyTCSEntry(ExpectedTCSEntry,DocumentNo2,ExpectedTCSEntry."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE VerifyTCSSalesReturnOrderAfterApplyingLowerRoundoff@1500021();
+    VAR
+      NodNocHeader@1500003 : Record 13786;
+      TcsNatureOfCollection@1500002 : Record 16507;
+      TCSSetup@1500001 : Record 16508;
+      SalesHeader@1500000 : Record 36;
+      SalesLine@1500009 : Record 37;
+      ExpectedTcsEntry@1500007 : Record 16514;
+      Amount@1500004 : Decimal;
+      DocumentNo@1500005 : Code[20];
+      DocumentNo2@1500008 : Code[20];
+    BEGIN
+      // [SCENARIO 163810] Check if the system is calculating TCS rounded off(rounding Type as Down) on each component (TCS amount, surcharge amount, eCess amount) while preparing Sales return order
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For Sales Order & Sales Return order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+      UpdateTcsRounding(RoundingType::Down);
+      Amount := LibraryRandom.RandDec(1000,2);
+
+      // [WHEN] Create Sales Order With TCS Rounding Type as DOWN And Create the Sales Return Order With Same Rounding and apply the Invoice document
+      DocumentNo :=
+        CreateAndPostSalesDocWithTCS(
+          SalesHeader,NodNocHeader."No.",TcsNatureOfCollection.Code,Amount,SalesHeader."Document Type"::Order);
+      DocumentNo2 :=
+        CreateAndPostSalesReturnDocumentWithTCS(NodNocHeader."No.",TcsNatureOfCollection.Code,SalesLine,DocumentNo,Amount);
+      CalcExpectedTCSAmounts(ExpectedTcsEntry,TCSSetup,SalesLine.Amount);
+
+      // [THEN] Calculated TCS Entries Using TCS Setup & Verifying the Expected TCS Entries with actual TCS Entries
+      VerifyTCSEntry(ExpectedTcsEntry,DocumentNo2,ExpectedTcsEntry."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE VerifyTCSSalesReturnOrderAfterApplyingNearestRoundoff@1500022();
+    VAR
+      NodNocHeader@1500003 : Record 13786;
+      TcsNatureOfCollection@1500002 : Record 16507;
+      TCSSetup@1500001 : Record 16508;
+      SalesHeader@1500000 : Record 36;
+      SalesLine@1500009 : Record 37;
+      ExpectedTcsEntry@1500007 : Record 16514;
+      Amount@1500004 : Decimal;
+      DocumentNo@1500005 : Code[20];
+      DocumentNo2@1500008 : Code[20];
+    BEGIN
+      // [SCENARIO 163811] Check if the system is calculating TCS rounded off(Rounding type as Nearest) on each component (TCS amount, surcharge amount, eCess amount) while preparing Sales return order
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For Sales Order & Sales Return order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+      UpdateTcsRounding(RoundingType::Nearest);
+      Amount := LibraryRandom.RandDec(1000,2);
+
+      // [WHEN] Create Sales Order With TCS Rounding Type as Nearest And Create the Sales Return Order With Same Rounding and apply the Invoice document
+      DocumentNo :=
+        CreateAndPostSalesDocWithTCS(
+          SalesHeader,NodNocHeader."No.",TcsNatureOfCollection.Code,Amount,SalesHeader."Document Type"::Order);
+      DocumentNo2 :=
+        CreateAndPostSalesReturnDocumentWithTCS(NodNocHeader."No.",TcsNatureOfCollection.Code,SalesLine,DocumentNo,Amount);
+      CalcExpectedTCSAmounts(ExpectedTcsEntry,TCSSetup,SalesLine.Amount);
+
+      // [THEN] Calculated TCS Entries Using TCS Setup & Verifying the Expected TCS Entries with actual TCS Entries
+      VerifyTCSEntry(ExpectedTcsEntry,DocumentNo2,ExpectedTcsEntry."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE VerifyTCSAmountsInSalesOrder@1500002();
+    VAR
+      NodNocHeader@1500000 : Record 13786;
+      TcsNatureOfCollection@1500001 : Record 16507;
+      TCSSetup@1500002 : Record 16508;
+      SalesHeader@1500005 : Record 36;
+      SalesLine@1500006 : Record 37;
+      ExpectedTCSEntry@1500007 : Record 16514;
+      DocumentNo@1500004 : Code[20];
+    BEGIN
+      // [SCENARIO 163815] TCS - Tax Collection at Source - Check if system is calculating TCS in case of creating Sales Order for the customer
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For Sales Order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+
+      // [WHEN] Create Sales Order With TCS Applied ,Calculate Expected TCS & Post Sales Order
+      CreateSalesOrderWithTCS(SalesHeader,SalesLine,NodNocHeader."No.",TcsNatureOfCollection.Code,LibraryRandom.RandDec(1000,2));
+      CalcExpectedTCSAmounts(ExpectedTCSEntry,TCSSetup,SalesLine.Amount);
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [THEN] Calculated TCS Entries Using TCS Setup & Verifying the Expected TCS Entries with actual TCS Entries
+      VerifyTCSEntry(ExpectedTCSEntry,DocumentNo,ExpectedTCSEntry."Document Type"::Invoice);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesOrderStatistics)]
+    PROCEDURE VerifyTCSAmountAfterApplyingAdvancepaymentLessThanInvoice@1500003();
+    VAR
+      NodNocHeader@1500003 : Record 13786;
+      TcsNatureOfCollection@1500002 : Record 16507;
+      TCSSetup@1500001 : Record 16508;
+      ExpectedTCSEntry@1500007 : Record 16514;
+      GenJournalLine@1500004 : Record 81;
+      SalesHeader@1500005 : Record 36;
+      SalesLine@1500006 : Record 37;
+      Amount@1500000 : Decimal;
+      DocumentNo@1500009 : Code[20];
+    BEGIN
+      // [SCENARIO 163816] Check if system is calculating TCS in case of creating Sales Order for customer against an advance payment
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For General Journals & Sales Order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+      Amount := LibraryRandom.RandDec(1000,0);
+
+      // [WHEN] Create a General Journal With TCS And Apply the Advance Payment incase of Sales Order
+      CreateAndPostGeneralJournalsWithTCS(GenJournalLine,TcsNatureOfCollection.Code,NodNocHeader."No.");
+      CreateSalesOrderWithTCSAndApplyPayDoc(
+        SalesHeader,SalesLine,NodNocHeader."No.",TcsNatureOfCollection.Code,GenJournalLine."Document No.",Amount);
+      CalcExpectedTCSAmounts(ExpectedTCSEntry,TCSSetup,0);
+      SalesLine.CalculateTCS(SalesHeader);
+
+      // [THEN] Calculated TCS Amounts and verifying the Statistics from Expected TCS Entry
+      VerifySalesStatistics(SalesHeader,ExpectedTCSEntry."Total TCS Including SHE CESS");
+
+      // [WHEN]  Post the Sales Document Ship & Invoice
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [THEN] Calculated TCS Entries Using TCS Setup & Verifying the Expected TCS Entries with actual TCS Entries
+      VerifyTCSEntry(ExpectedTCSEntry,DocumentNo,ExpectedTCSEntry."Document Type"::Invoice);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesOrderStatistics)]
+    PROCEDURE VerifyTCSAmountAfterApplyingAdvancepaymentGreaterThanInvoice@1500008();
+    VAR
+      NodNocHeader@1500003 : Record 13786;
+      TcsNatureOfCollection@1500002 : Record 16507;
+      TCSSetup@1500001 : Record 16508;
+      ExpectedTCSEntry@1500007 : Record 16514;
+      TCSEntry@1500008 : Record 16514;
+      GenJournalLine@1500004 : Record 81;
+      SalesHeader@1500005 : Record 36;
+      SalesLine@1500006 : Record 37;
+      DocumentNo@1500009 : Code[20];
+    BEGIN
+      // [SCENARIO 163817] Check if system is calculating TCS in case of creating Sales Order for customer against a partial advance payment
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For General Journals & Sales Order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+
+      // [WHEN] Create a General Journal With TCS And Apply the Advance Payment incase of Sales Order
+      CreateAndPostGeneralJournalsWithTCS(GenJournalLine,TcsNatureOfCollection.Code,NodNocHeader."No.");
+      CreateSalesOrderWithTCSAndApplyPayDoc(
+        SalesHeader,SalesLine,NodNocHeader."No.",TcsNatureOfCollection.Code,GenJournalLine."Document No.",LibraryRandom.RandDec(1000,0));
+      TCSEntry.SETRANGE("Document No.",GenJournalLine."Document No.");
+      TCSEntry.FINDLAST;
+      SalesLine.CalculateTCS(SalesHeader);
+      CalcExpectedTCSAmounts(
+        ExpectedTCSEntry,TCSSetup,SalesLine.Amount - (TCSEntry."TCS Base Amount" + TCSEntry."Total TCS Including SHE CESS"));
+
+      // [THEN] Calculated TCS Amounts and verifying the Statistics from Expected TCS Entry
+      VerifySalesStatistics(SalesHeader,ExpectedTCSEntry."Total TCS Including SHE CESS");
+
+      // [WHEN] Post the Sales Document Ship & Invoice
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [THEN] Calculated TCS Entries Using TCS Setup & Verifying the Expected TCS Entries with actual TCS Entries
+      VerifyTCSEntry(ExpectedTCSEntry,DocumentNo,ExpectedTCSEntry."Document Type"::Invoice);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesOrderStatistics)]
+    PROCEDURE VerifyPostedSalesInvoiceAfterShippingInclTCS@1500015();
+    VAR
+      NodNocHeader@1500002 : Record 13786;
+      TcsNatureOfCollection@1500001 : Record 16507;
+      TCSSetup@1500000 : Record 16508;
+      ExpectedTCSEntry@1500007 : Record 16514;
+      SalesHeader@1500005 : Record 36;
+      SalesLine@1500004 : Record 37;
+      DocumentNo@1500006 : Code[20];
+    BEGIN
+      // [SCENARIO 163818] Check if the system is calculating TCS in case of creating Sales Order for customer involving partial shipments and invoicing with no line posted
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For Sales Order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+
+      // [WHEN]  Create Sales Order With TCS ,Calculate the TCS and Verify the Sales Order Statistics
+      CreateSalesOrderWithTCS(SalesHeader,SalesLine,NodNocHeader."No.",TcsNatureOfCollection.Code,LibraryRandom.RandDec(2000,2));
+      CalcExpectedTCSAmounts(ExpectedTCSEntry,TCSSetup,SalesLine.Amount);
+      SalesLine.CalculateTCS(SalesHeader);
+
+      // [THEN] Calculated TCS Amounts and verifying the Statistics from Expected TCS Entry
+      VerifySalesStatistics(SalesHeader,ExpectedTCSEntry."Total TCS Including SHE CESS");
+
+      // [WHEN] Post the Sales Document Ship
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // [THEN] Created Posted Sales Shipments And checking whether Posted Sales Invoice Document created or not
+      VerifyPostedSalesInvoiceCount(DocumentNo,0);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesOrderStatisticsPartialQty)]
+    PROCEDURE VerifyTCSAmountAfterPostingPartialSalesInvoice@1500016();
+    VAR
+      NodNocHeader@1500002 : Record 13786;
+      TcsNatureOfCollection@1500001 : Record 16507;
+      TCSSetup@1500000 : Record 16508;
+      ExpectedTCSEntry@1500007 : Record 16514;
+      GLEntry@1500008 : Record 17;
+      SalesHeader@1500005 : Record 36;
+      SalesLine@1500004 : Record 37;
+      DocumentNo@1500006 : Code[20];
+    BEGIN
+      // [SCENARIO 163819] Check if the system is calculating TCS in case of creating Sales Order for customer involving partial shipments and invoicing
+      // [FEATURE] [TCS Transaction Documents]
+
+      // [GIVEN] Created NODNOC ,TCS Nature of Collection,Assesse Code & TCS Setup For Sales Order
+      InitializeSetup(NodNocHeader,TcsNatureOfCollection,TCSSetup,TRUE,TRUE,TRUE);
+
+      // [WHEN] Create Sales Order with TCS ,Calculate TCS And Post Partial Invoice Qty
+      CreateSalesOrderWithTCS(SalesHeader,SalesLine,NodNocHeader."No.",TcsNatureOfCollection.Code,LibraryRandom.RandDec(2000,2));
+      SalesLine.VALIDATE("Qty. to Ship",LibraryRandom.RandDec(5,0));
+      SalesLine.MODIFY(TRUE);
+      CalcExpectedTCSAmounts(ExpectedTCSEntry,TCSSetup,SalesLine."Unit Price" * SalesLine."Qty. to Ship");
+      SalesLine.CalculateTCS(SalesHeader);
+
+      // [THEN] Calculated TCS Amounts and verifying the Statistics from Expected TCS Entry
+      VerifySalesStatistics(SalesHeader,ExpectedTCSEntry."Total TCS Including SHE CESS");
+
+      // [WHEN] Post the Sales Document Ship & Invoice
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [THEN] Created GL Entries,TCS Entries And Verifying the Actual Amount with Expected Amount
+      VerifyGLEntry(GLEntry."Document Type"::Invoice,
+        DocumentNo,(SalesLine."Unit Price" * SalesLine."Qty. to Ship") + ExpectedTCSEntry."Total TCS Including SHE CESS");
+    END;
+
+    LOCAL PROCEDURE Initialize@1500039();
+    BEGIN
+      LibrarySetupStorage.Restore;
+      IF isInitialized THEN
+        EXIT;
+      ServiceTaxWithTDSHelper.CreateDeductoryCodeAndUpdateOnCompanyInformation;
+      GLSetup.GET;
+      isInitialized := TRUE;
+      LibrarySetupStorage.Save(DATABASE::"Company Information");
+    END;
+
+    LOCAL PROCEDURE InitializeSetup@1500074(VAR NodNocHeader@1500001 : Record 13786;VAR TcsNatureOfCollection@1500003 : Record 16507;VAR TCSSetup@1500002 : Record 16508;ThresholdOverlook@1500006 : Boolean;SurchargeOverlook@1500005 : Boolean;MonthlyCert@1500004 : Boolean);
+    VAR
+      AssesseeCode@1500000 : Record 13727;
+    BEGIN
+      Initialize;
+      LibraryTCS.CreateIncomeTaxAccountingPeriod;
+      LibraryERM.CreateAssesseeCode(AssesseeCode);
+      LibraryTCS.CreateTCSNatureCollectionAndTCSSetup(TcsNatureOfCollection,TCSSetup,TCSSetup."TCS Type"::E,AssesseeCode.Code);
+      TCSSetup.VALIDATE("TCS Account No.",LibraryERM.CreateGLAccountNo);
+      TCSSetup.VALIDATE("Surcharge %",0);
+      TCSSetup.MODIFY(TRUE);
+      LibraryTCS.CreateNODNOCSetup(NodNocHeader,NodNocHeader.Type::Customer,LibraryTCS.CreateCustomer,AssesseeCode.Code,
+        TcsNatureOfCollection.Code,ThresholdOverlook,SurchargeOverlook,MonthlyCert);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesDocWithTCS@1500062(VAR SalesHeader@1500001 : Record 36;NodNocCode@1500002 : Code[20];TCSNatureCode@1500003 : Code[10];Amount@1500004 : Decimal;DocumentType@1500005 : Option) : Code[20];
+    VAR
+      SalesLine@1500000 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,NodNocCode);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,'',LibraryRandom.RandInt(10));
+      SalesLine.VALIDATE("Unit Price",Amount);
+      SalesLine.VALIDATE("TCS Nature of Collection",TCSNatureCode);
+      SalesLine.MODIFY(TRUE);
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE));
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesReturnDocumentWithTCS@1500067(NodNocCode@1500002 : Code[20];TCSNatureCode@1500003 : Code[10];VAR SalesLine@1500000 : Record 37;DocumentNo@1500004 : Code[20];Amount@1500005 : Decimal) : Code[20];
+    VAR
+      SalesHeader@1500001 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",NodNocCode);
+      SalesHeader.VALIDATE("Applies-to Doc. Type",SalesHeader."Applies-to Doc. Type"::Invoice);
+      SalesHeader.VALIDATE("Applies-to Doc. No.",DocumentNo);
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,'',LibraryRandom.RandInt(10));
+      SalesLine.VALIDATE("Unit Price",Amount);
+      SalesLine.VALIDATE("TCS Nature of Collection",TCSNatureCode);
+      SalesLine.MODIFY(TRUE);
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE));
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithTCS@1500014(VAR SalesHeader@1500000 : Record 36;VAR SalesLine@1500001 : Record 37;NodNocCode@1500003 : Code[20];TcsNatureCode@1500004 : Code[10];Amount@1500005 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,NodNocCode);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,'',LibraryRandom.RandInt(10));
+      SalesLine.VALIDATE("Unit Price",Amount);
+      SalesLine.VALIDATE("TCS Nature of Collection",TcsNatureCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostGeneralJournalsWithTCS@1500005(VAR GenJournalLine@1500000 : Record 81;TcsNatureCode@1500001 : Code[10];NodNocCode@1500004 : Code[20]);
+    BEGIN
+      WITH GenJournalLine DO BEGIN
+        LibraryJournals.CreateGenJournalLineWithBatch(
+          GenJournalLine,"Document Type"::Payment,"Account Type"::Customer,NodNocCode,-LibraryRandom.RandDec(1000,0));
+        VALIDATE("Party Type","Party Type"::Customer);
+        VALIDATE("Party Code",NodNocCode);
+        VALIDATE("Bal. Account Type","Bal. Account Type"::"G/L Account");
+        VALIDATE("Bal. Account No.",LibraryERM.CreateGLAccountNo);
+        VALIDATE("TCS Nature of Collection",TcsNatureCode);
+        MODIFY(TRUE);
+      END;
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPaymentJournalPayTCS@1500007(TCSNatureCode@1500004 : Code[10];GLAccountNo@1500003 : Code[20]);
+    VAR
+      GenJournalTemplate@1500001 : Record 80;
+      GenJournalBatch@1500002 : Record 232;
+      GenJournalLine@1500000 : Record 81;
+      TCSEntry@1500005 : Record 16514;
+      PaymentDocNo@1500006 : Code[20];
+    BEGIN
+      TCSEntry.SETRANGE("TCS Nature of Collection",TCSNatureCode);
+      TCSEntry.FINDLAST;
+      LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+      GenJournalTemplate.VALIDATE(Type,GenJournalTemplate.Type::Payments);
+      GenJournalTemplate.MODIFY(TRUE);
+      LibraryERM.CreateGenJournalBatch(GenJournalBatch,GenJournalTemplate.Name);
+      LibraryERM.CreateGeneralJnlLineWithBalAcc(
+        GenJournalLine,GenJournalTemplate.Name,GenJournalBatch.Name,GenJournalLine."Document Type"::Payment,
+        GenJournalLine."Account Type"::"G/L Account",GLAccountNo,
+        GenJournalLine."Bal. Account Type"::"Bank Account",LibraryERM.CreateBankAccountNo,TCSEntry."Bal. TCS Including SHE CESS");
+      GenJournalLine.VALIDATE("T.C.A.N. No.",TCSEntry."T.C.A.N. No.");
+      GenJournalLine.VALIDATE("Pay TCS",TRUE);
+      GenJournalLine.MODIFY(TRUE);
+      PaymentDocNo := GenJournalLine."Document No.";
+      TCSEntry."Pay TCS Document No." := PaymentDocNo;
+      TCSEntry.MODIFY;
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithTCSAndApplyPayDoc@1500009(VAR SalesHeader@1500000 : Record 36;VAR SalesLine@1500001 : Record 37;NodNocCode@1500003 : Code[20];TcsNatureCode@1500004 : Code[10];DocumentNo@1500002 : Code[20];Amount@1500005 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,NodNocCode);
+      SalesHeader.VALIDATE("Applies-to Doc. Type",SalesHeader."Applies-to Doc. Type"::Payment);
+      SalesHeader.VALIDATE("Applies-to Doc. No.",DocumentNo);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,'',1);
+      SalesLine.VALIDATE("Unit Price",Amount);
+      SalesLine.VALIDATE("TCS Nature of Collection",TcsNatureCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CalcExpectedTCSAmounts@1500063(VAR ExpectedTCSEntry@1500009 : Record 16514;TCSSetup@1500001 : Record 16508;TaxBaseAmount@1500007 : Decimal);
+    BEGIN
+      WITH ExpectedTCSEntry DO BEGIN
+        "TCS Base Amount" := TaxBaseAmount;
+        "TCS %" := TCSSetup."TCS %";
+        "TCS Amount" := LibraryTDS.RoundTCSAmount(TCSSetup."TCS %" / 100 * "TCS Base Amount");
+        "Surcharge %" := TCSSetup."Surcharge %";
+        "Surcharge Amount" := LibraryTDS.RoundTCSAmount(TCSSetup."Surcharge %" / 100 * "TCS Amount");
+        "eCESS %" := TCSSetup."eCESS %";
+        "eCESS Amount" := LibraryTDS.RoundTCSAmount(TCSSetup."eCESS %" / 100 * ("TCS Amount" + "Surcharge Amount"));
+        "SHE Cess %" := TCSSetup."SHE Cess %";
+        "SHE Cess Amount" := LibraryTDS.RoundTCSAmount(TCSSetup."SHE Cess %" / 100 * ("TCS Amount" + "Surcharge Amount"));
+        "Total TCS Including SHE CESS" := "TCS Amount" + "eCESS Amount" + "SHE Cess Amount" + "Surcharge Amount";
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyTCSWithZeroBalance@1500001(SalesLine@1500001 : Record 37;DocumentNo@1500002 : Code[20]);
+    VAR
+      TCSEntry@1500000 : Record 16514;
+    BEGIN
+      TCSEntry.SETRANGE("Document No.",DocumentNo);
+      TCSEntry.FINDLAST;
+      Assert.AreEqual(
+        SalesLine.Amount,TCSEntry."TCS Base Amount",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("TCS Base Amount"),TCSEntry.TABLECAPTION));
+      Assert.AreEqual(
+        0,TCSEntry."TCS Amount",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("TCS Amount"),TCSEntry.TABLECAPTION));
+    END;
+
+    LOCAL PROCEDURE VerifyGLEntry@1500048(DocumentType@1500002 : Option;DocumentNo@1500001 : Code[20];Amount@1500000 : Decimal);
+    VAR
+      GLEntry@1500004 : Record 17;
+      CreditAmount@1500003 : Decimal;
+    BEGIN
+      FindGLEntry(GLEntry,DocumentType,DocumentNo);
+      REPEAT
+        CreditAmount += GLEntry."Credit Amount"
+      UNTIL GLEntry.NEXT = 0;
+      Assert.AreEqual(CreditAmount,Amount,STRSUBSTNO(CreditAmountErr,CreditAmount,Amount));
+    END;
+
+    LOCAL PROCEDURE FindGLEntry@1500045(VAR GLEntry@1500002 : Record 17;DocumentType@1500001 : Option;DocumentNo@1500000 : Code[20]);
+    BEGIN
+      GLEntry.SETRANGE("Document Type",DocumentType);
+      GLEntry.SETRANGE("Document No.",DocumentNo);
+      GLEntry.FINDSET;
+    END;
+
+    LOCAL PROCEDURE VerifyPostedSalesInvoiceCount@1500038(DocumentNo@1500000 : Code[20];ExpectedCount@1500002 : Integer);
+    VAR
+      DummySalesInvoiceHeader@1500001 : Record 112;
+    BEGIN
+      DummySalesInvoiceHeader.SETRANGE("No.",DocumentNo);
+      Assert.RecordCount(DummySalesInvoiceHeader,ExpectedCount);
+    END;
+
+    LOCAL PROCEDURE VerifyTCSEntry@1500066(ExpectedTCSEntry@1500003 : Record 16514;DocumentNo@1500002 : Code[20];DocumentType@1500001 : Option);
+    VAR
+      TCSEntry@1500005 : Record 16514;
+    BEGIN
+      TCSEntry.SETRANGE("Document No.",DocumentNo);
+      TCSEntry.SETRANGE("Document Type",DocumentType);
+      TCSEntry.FINDLAST;
+
+      Assert.AreEqual(
+        ExpectedTCSEntry."TCS Base Amount",TCSEntry."TCS Base Amount",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("TCS Base Amount"),TCSEntry.TABLECAPTION));
+      Assert.AreEqual(
+        ExpectedTCSEntry."TCS %",TCSEntry."TCS %",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("TCS %"),TCSEntry.TABLECAPTION));
+      Assert.AreEqual(
+        ExpectedTCSEntry."TCS Amount",TCSEntry."TCS Amount",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("TCS Amount"),TCSEntry.TABLECAPTION));
+      Assert.AreEqual(
+        ExpectedTCSEntry."Surcharge %",TCSEntry."Surcharge %",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("Surcharge %"),TCSEntry.TABLECAPTION));
+      Assert.AreEqual(
+        ExpectedTCSEntry."Surcharge Amount",TCSEntry."Surcharge Amount",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("Surcharge Amount"),TCSEntry.TABLECAPTION));
+      Assert.AreEqual(
+        ExpectedTCSEntry."eCESS %",TCSEntry."eCESS %",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("eCESS %"),TCSEntry.TABLECAPTION));
+      Assert.AreEqual(
+        ExpectedTCSEntry."eCESS Amount",TCSEntry."eCESS Amount",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("eCESS Amount"),TCSEntry.TABLECAPTION));
+      Assert.AreEqual(
+        ExpectedTCSEntry."SHE Cess %",TCSEntry."SHE Cess %",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("SHE Cess %"),TCSEntry.TABLECAPTION));
+      Assert.AreEqual(
+        ExpectedTCSEntry."SHE Cess Amount",TCSEntry."SHE Cess Amount",
+        STRSUBSTNO(AmountErr,TCSEntry.FIELDNAME("SHE Cess Amount"),TCSEntry.TABLECAPTION));
+    END;
+
+    LOCAL PROCEDURE VerifySalesStatistics@1500026(SalesHeader@1500121 : Record 36;Amount@1500122 : Decimal);
+    BEGIN
+      LibraryVariableStorage.Enqueue(Amount);
+      PAGE.RUNMODAL(PAGE::"Sales Order Statistics",SalesHeader);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SalesOrderStatistics@1500030(VAR SalesOrderStatistics@1500130 : TestPage 402);
+    VAR
+      Value@1500131 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(Value);
+      SalesOrderStatistics.Control1500015.ASSERTEQUALS(Value);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SalesOrderStatisticsPartialQty@1500011(VAR SalesOrderStatistics@1500130 : TestPage 402);
+    VAR
+      Value@1500131 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(Value);
+      SalesOrderStatistics.Control1500030.ASSERTEQUALS(Value);
+    END;
+
+    LOCAL PROCEDURE UpdateTcsRounding@1500006(RoundingType@1500000 : Option);
+    BEGIN
+      GLSetup.VALIDATE("TCS Rounding Type",RoundingType);
+      GLSetup.VALIDATE("TCS Rounding Precision",1);
+      GLSetup.MODIFY(TRUE);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

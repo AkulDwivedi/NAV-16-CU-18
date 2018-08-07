@@ -1,0 +1,1607 @@
+OBJECT Codeunit 137925 SCM Assembly Reservation II
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1000 : Codeunit 130000;
+      IsInitialized@1001 : Boolean;
+
+    LOCAL PROCEDURE Initialize@29();
+    BEGIN
+      IF IsInitialized THEN
+        EXIT;
+
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    PROCEDURE TestAsmHdrCalcFieldsReservQty@6();
+    VAR
+      AssemblyHeader@1007 : Record 900;
+      AssemblyHeader2@1001 : Record 900;
+      ReservEntry@1006 : Record 337;
+      Qty@1003 : Decimal;
+      QtyBase@1002 : Decimal;
+      Qty2@1005 : Decimal;
+      QtyBase2@1004 : Decimal;
+    BEGIN
+      Initialize;
+
+      MockAsmOrderHeader(AssemblyHeader,IDcode20('asm'),'','','',0D,0,0,1);
+      Qty := 500;
+      QtyBase := 100;
+      Qty2 := 50;
+      QtyBase2 := 10;
+
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Header",
+        AssemblyHeader."No.",AssemblyHeader."Document Type",0,
+        QtyBase,Qty);
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Header",
+        AssemblyHeader."No.",AssemblyHeader."Document Type",0,
+        QtyBase2,Qty2);
+
+      // Insert entries that are not from Assembly Order to test filters
+      // Another Assembly Order
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Header",
+        IDcode20('any'),AssemblyHeader."Document Type",0,
+        11,33);
+      // Assembly Line Table
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Line",
+        AssemblyHeader."No.",AssemblyHeader."Document Type",0,
+        12,44);
+      // Assembly Qoute
+      AssemblyHeader2."Document Type" := AssemblyHeader2."Document Type"::Quote;
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Header",
+        AssemblyHeader."No.",AssemblyHeader2."Document Type",0,
+        5,22);
+
+      // Test calculated fields
+      AssemblyHeader.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(Qty + Qty2,AssemblyHeader."Reserved Quantity",QtyBase + QtyBase2,AssemblyHeader."Reserved Qty. (Base)");
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestSummEntryNoAsmOrder@4();
+    VAR
+      AssemblyHeader@1007 : Record 900;
+      ReservEntry@1006 : Record 337;
+    BEGIN
+      Initialize;
+
+      // Test procedure SummEntryNo on TAB337
+      AssemblyHeader."Document Type" := AssemblyHeader."Document Type"::Order;
+
+      MockReservEntry(ReservEntry,DATABASE::"Assembly Header",'ANY',AssemblyHeader."Document Type",0,0,0);
+
+      // Offset for Assembly Header is 141 and subtype (as integer) is added
+      Assert.AreEqual(142,ReservEntry.SummEntryNo,'Assembly Header has the wrong offset in Reservation');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestCreateReservEntryForAsmHdr@25();
+    VAR
+      AssemblyHeader@1007 : Record 900;
+      SalesLine@1002 : Record 37;
+      ReservEntry@1006 : Record 337;
+      AsmHeaderReserve@1000 : Codeunit 925;
+      ReservEntryFoundByLinkToSource@1008 : Boolean;
+    BEGIN
+      Initialize;
+
+      // Test Procedure CreateReservation, CreateReservationSetFrom and DeleteLine in codeunit 925 Assembly Header-Reserve
+      CreateAsmHdrResFromSalesLine(AssemblyHeader,SalesLine);
+
+      // Verification
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order'); // Verifies link
+
+      VerifyReservationEntryFields(
+        ReservEntry,TRUE,
+        AssemblyHeader."Item No.",AssemblyHeader."Variant Code",AssemblyHeader."Location Code",
+        AssemblyHeader."Due Date",
+        AssemblyHeader."Quantity (Base)",AssemblyHeader."Remaining Quantity",AssemblyHeader."Qty. per Unit of Measure");
+
+      AssemblyHeader.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AssemblyHeader.Quantity,AssemblyHeader."Reserved Quantity",
+        AssemblyHeader."Quantity (Base)",AssemblyHeader."Reserved Qty. (Base)");
+
+      // Verification - Delete Line
+      AsmHeaderReserve.DeleteLine(AssemblyHeader);
+
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsFalse(ReservEntryFoundByLinkToSource,'Reservation Entry NOT deleted for Assembly Order');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestCreateReservEntryNotEnough@22();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      SalesLine@1002 : Record 37;
+      TrackingSpecification@1006 : Record 336;
+      AsmHeaderReserve@1000 : Codeunit 925;
+      ReservMgt@1005 : Codeunit 99000845;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      AvailableToReserve@1011 : Decimal;
+      LocationCode@1009 : Code[10];
+      VariantCode@1010 : Code[10];
+    BEGIN
+      Initialize;
+
+      // Test Procedure CreateReservation and CreateReservationSetFrom in codeunit 925 Assembly Header-Reserve
+      // when not enough available to reserve for
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 23;
+      AvailableToReserve := 10;
+
+      // Line to Reserv from
+      MockSalesOrderLine(SalesLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Line to Reserv for
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,AvailableToReserve,AvailableToReserve,1);
+
+      // Create Reservation Entry
+      ReservMgt.CreateTrackingSpecification(TrackingSpecification,
+        DATABASE::"Sales Line",
+        SalesLine."Document Type",
+        SalesLine."Document No.",
+        '',
+        0,SalesLine."Line No.",
+        SalesLine."Variant Code",
+        SalesLine."Location Code",'','',
+        SalesLine."Qty. per Unit of Measure");
+      AsmHeaderReserve.CreateReservationSetFrom(TrackingSpecification);
+      ASSERTERROR
+        AsmHeaderReserve.CreateReservation(
+          AssemblyHeader,
+          'Test',
+          AvailabilityDate,
+          0,QtyToReserve,
+          '','');
+
+      // Verification
+      Assert.AreEqual(GETLASTERRORTEXT,STRSUBSTNO('Reserved quantity cannot be greater than %1.',AvailableToReserve),'');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestCreateReservEntryForSOL@7();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      SalesLine@1002 : Record 37;
+      ReservEntry@1006 : Record 337;
+      ReservEntry2@1005 : Record 337;
+      TrackingSpecification@1012 : Record 336;
+      SalesLineReserve@1000 : Codeunit 99000832;
+      ReservMgt@1011 : Codeunit 99000845;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      ReservEntryFoundByLinkToSource@1008 : Boolean;
+      LocationCode@1009 : Code[10];
+      VariantCode@1010 : Code[10];
+    BEGIN
+      Initialize;
+
+      // Show how to use procedures in codeunit 99000832 Sales Line-Reserve to create reservations between
+      // Assembly Header and Sales Order Lines (SOL) - Assemble to Order
+      // This test will also verify Order Binding
+
+      // Sales order line
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 23;
+
+      // Line to Reserv from
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Line to Reserv for
+      MockSalesOrderLine(SalesLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Create Reservation Entry
+      SalesLineReserve.SetBinding(ReservEntry2.Binding::"Order-to-Order");
+      ReservMgt.CreateTrackingSpecification(TrackingSpecification,
+        DATABASE::"Assembly Header",
+        AssemblyHeader."Document Type",
+        AssemblyHeader."No.",
+        '',
+        0,0,
+        AssemblyHeader."Variant Code",
+        AssemblyHeader."Location Code",'','',
+        AssemblyHeader."Qty. per Unit of Measure");
+      SalesLineReserve.CreateReservationSetFrom(TrackingSpecification);
+      SalesLineReserve.CreateReservation(
+        SalesLine,
+        AssemblyHeader.Description,
+        AssemblyHeader."Due Date",
+        0,QtyToReserve,
+        '','');
+
+      // Verification
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order'); // Verifies link
+      Assert.AreEqual(ReservEntry2.Binding::"Order-to-Order",ReservEntry.Binding,'Order binding is not set');
+
+      VerifyReservationEntryFields(
+        ReservEntry,TRUE,
+        AssemblyHeader."Item No.",AssemblyHeader."Variant Code",AssemblyHeader."Location Code",
+        AssemblyHeader."Due Date",
+        AssemblyHeader."Quantity (Base)",AssemblyHeader."Remaining Quantity",AssemblyHeader."Qty. per Unit of Measure");
+
+      AssemblyHeader.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AssemblyHeader.Quantity,AssemblyHeader."Reserved Quantity",
+        AssemblyHeader."Quantity (Base)",AssemblyHeader."Reserved Qty. (Base)");
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoReservOneLineAsmHdr@32();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      SalesLine@1002 : Record 37;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      QtyToReserve2@1005 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      ReservEntryFoundByLinkToSource@1009 : Boolean;
+      LocationCode@1011 : Code[10];
+      VariantCode@1010 : Code[10];
+      ReservSummEntryNo@1012 : Integer;
+    BEGIN
+      Initialize;
+
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+      ReservSummEntryNo := 32; // Sales Order Line - Reserv From
+
+      // Line to Reserv from
+      MockSalesOrderLine(SalesLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Line to Reserv for
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyHeader(AssemblyHeader);
+      RemainingQtyToReserve := QtyToReserve;
+      ReservMgt.AutoReserveOneLine(ReservSummEntryNo,QtyToReserve2,RemainingQtyToReserve,'Test',AvailabilityDate);
+
+      // Verify
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order');
+
+      AssemblyHeader.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AssemblyHeader.Quantity,AssemblyHeader."Reserved Quantity",
+        AssemblyHeader."Quantity (Base)",AssemblyHeader."Reserved Qty. (Base)");
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoReservFullAsmHdr@28();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      SalesLine@1002 : Record 37;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      FullAutoReservation@1005 : Boolean;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      ReservEntryFoundByLinkToSource@1009 : Boolean;
+      LocationCode@1011 : Code[10];
+      VariantCode@1010 : Code[10];
+    BEGIN
+      Initialize;
+
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+
+      // Line to Reserv from
+      MockSalesOrderLine(SalesLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Line to Reserv for
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyHeader(AssemblyHeader);
+      RemainingQtyToReserve := QtyToReserve;
+      ReservMgt.AutoReserve(FullAutoReservation,'Test',AvailabilityDate,0,RemainingQtyToReserve);
+
+      // Verify
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order');
+
+      VerifyReservationEntryFields(
+        ReservEntry,TRUE,
+        AssemblyHeader."Item No.",AssemblyHeader."Variant Code",AssemblyHeader."Location Code",
+        AssemblyHeader."Due Date",
+        AssemblyHeader."Quantity (Base)",AssemblyHeader."Remaining Quantity",AssemblyHeader."Qty. per Unit of Measure");
+
+      AssemblyHeader.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AssemblyHeader.Quantity,AssemblyHeader."Reserved Quantity",
+        AssemblyHeader."Quantity (Base)",AssemblyHeader."Reserved Qty. (Base)");
+
+      Assert.IsTrue(FullAutoReservation,'The quantity is NOT fully reserved');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoReservFullLoopSOLines@21();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      SalesLine@1002 : Record 37;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      FullAutoReservation@1005 : Boolean;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      AvailableQtyNotEnough@1012 : Decimal;
+      ReservEntryFoundByLinkToSource@1009 : Boolean;
+      LocationCode@1011 : Code[10];
+      VariantCode@1010 : Code[10];
+    BEGIN
+      Initialize;
+
+      // Loop more lines to make Reservation
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+      AvailableQtyNotEnough := 4;
+
+      // Line to Reserv from
+      MockSalesOrderLine(
+        SalesLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,
+        AvailableQtyNotEnough,AvailableQtyNotEnough,1,10000);
+      MockSalesOrderLine(
+        SalesLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,
+        QtyToReserve - AvailableQtyNotEnough,QtyToReserve - AvailableQtyNotEnough,1,20000);
+
+      // Line to Reserv for
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyHeader(AssemblyHeader);
+      RemainingQtyToReserve := QtyToReserve;
+      ReservMgt.AutoReserve(FullAutoReservation,'Test',AvailabilityDate,0,RemainingQtyToReserve);
+
+      // Verify
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order');
+
+      AssemblyHeader.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AssemblyHeader.Quantity,AssemblyHeader."Reserved Quantity",
+        AssemblyHeader."Quantity (Base)",AssemblyHeader."Reserved Qty. (Base)");
+
+      Assert.IsTrue(FullAutoReservation,'The quantity is NOT fully reserved');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoReservNotFullAsmHdr@5();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      SalesLine@1002 : Record 37;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      FullAutoReservation@1005 : Boolean;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      AvailableToReserve@1009 : Decimal;
+      ReservEntryFoundByLinkToSource@1010 : Boolean;
+      LocationCode@1012 : Code[10];
+      VariantCode@1011 : Code[10];
+    BEGIN
+      Initialize;
+
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+      AvailableToReserve := 6;
+
+      // Line to Reserv from
+      MockSalesOrderLine(SalesLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,AvailableToReserve,AvailableToReserve,1,10000);
+
+      // Line to Reserv for
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyHeader(AssemblyHeader);
+      RemainingQtyToReserve := QtyToReserve;
+      ReservMgt.AutoReserve(FullAutoReservation,'Test',AvailabilityDate,0,RemainingQtyToReserve);
+
+      // Verify
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order');
+
+      VerifyReservationEntryFields(
+        ReservEntry,TRUE,
+        AssemblyHeader."Item No.",AssemblyHeader."Variant Code",AssemblyHeader."Location Code",
+        AssemblyHeader."Due Date",
+        AvailableToReserve,AvailableToReserve,AssemblyHeader."Qty. per Unit of Measure");
+
+      AssemblyHeader.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AvailableToReserve,AssemblyHeader."Reserved Quantity",
+        AvailableToReserve,AssemblyHeader."Reserved Qty. (Base)");
+
+      Assert.IsFalse(FullAutoReservation,'The quantity should NOT be fully reserved');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoReservNotFullWithAsmLi@12();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      AssemblyLine@1010 : Record 901;
+      SalesLine@1002 : Record 37;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      FullAutoReservation@1005 : Boolean;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      AvailableToReserve@1009 : Decimal;
+      ReservEntryFoundByLinkToSource@1011 : Boolean;
+      LocationCode@1013 : Code[10];
+      VariantCode@1012 : Code[10];
+      AnotherLocationCode@1014 : Code[10];
+    BEGIN
+      Initialize;
+
+      // Verify that correct filters are set on Assembly Order Line
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      AnotherLocationCode := IDcode10('l2');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+      AvailableToReserve := 6;
+
+      // Line to Reserv from
+      MockSalesOrderLine(SalesLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,AvailableToReserve,AvailableToReserve,1,10000);
+
+      // Line to Reserv for
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Line NOT to reserve from
+      // Assembly Line with different Location, Variant etc. should not be considered in Auto Reservation
+      MockAsmOrderLine(
+        AssemblyLine,IDcode20('asml'),Item."No.",AnotherLocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+      MockAsmOrderLine(
+        AssemblyLine,IDcode20('asml'),Item."No.",'','',AvailabilityDate,QtyToReserve,QtyToReserve,1,20000);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyHeader(AssemblyHeader);
+      RemainingQtyToReserve := QtyToReserve;
+      ReservMgt.AutoReserve(FullAutoReservation,'Test',AvailabilityDate,0,RemainingQtyToReserve);
+
+      // Verify
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order');
+
+      VerifyReservationEntryFields(
+        ReservEntry,TRUE,
+        AssemblyHeader."Item No.",AssemblyHeader."Variant Code",AssemblyHeader."Location Code",
+        AssemblyHeader."Due Date",
+        AvailableToReserve,AvailableToReserve,AssemblyHeader."Qty. per Unit of Measure");
+
+      Assert.IsFalse(FullAutoReservation,'The quantity should NOT be fully reserved');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAsmLineCalcFieldsReservQty@31();
+    VAR
+      AssemblyLine@1007 : Record 901;
+      AssemblyLine2@1001 : Record 901;
+      ReservEntry@1006 : Record 337;
+      Qty@1002 : Decimal;
+      QtyBase@1003 : Decimal;
+      Qty2@1005 : Decimal;
+      QtyBase2@1004 : Decimal;
+    BEGIN
+      Initialize;
+
+      MockAsmOrderLine(AssemblyLine,IDcode20('asml'),'','','',0D,0,0,1,10000);
+      Qty := -500;
+      QtyBase := -100;
+      Qty2 := -50;
+      QtyBase2 := -10;
+
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Line",
+        AssemblyLine."Document No.",AssemblyLine."Document Type",AssemblyLine."Line No.",
+        QtyBase,Qty);
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Line",
+        AssemblyLine."Document No.",AssemblyLine."Document Type",AssemblyLine."Line No.",
+        QtyBase2,Qty2);
+
+      // Insert entries that are not from Assembly Order to test filters
+      // Another Assembly Line
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Line",
+        AssemblyLine."Document No.",AssemblyLine."Document Type",20000,
+        3,21);
+      // Another Assembly Order
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Line",
+        IDcode20('any'),AssemblyLine."Document Type",AssemblyLine."Line No.",
+        4,16);
+      // Assembly Header Table
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Header",
+        AssemblyLine."Document No.",AssemblyLine."Document Type",AssemblyLine."Line No.",
+        12,45);
+      // Assembly Qoute
+      AssemblyLine2."Document Type" := AssemblyLine2."Document Type"::Quote;
+      MockReservEntry(
+        ReservEntry,DATABASE::"Assembly Line",
+        AssemblyLine."Document No.",AssemblyLine2."Document Type",AssemblyLine."Line No.",
+        27,77);
+
+      // Test calculated fields
+      AssemblyLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+
+      VerifyCalculatedFields(-(Qty + Qty2),AssemblyLine."Reserved Quantity",-(QtyBase + QtyBase2),AssemblyLine."Reserved Qty. (Base)");
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestSummEntryNoAsmOrderLine@30();
+    VAR
+      AssemblyLine@1007 : Record 901;
+      ReservEntry@1006 : Record 337;
+    BEGIN
+      Initialize;
+
+      // Test procedure SummEntryNo on TAB337
+      AssemblyLine."Document Type" := AssemblyLine."Document Type"::Order;
+
+      MockReservEntry(ReservEntry,DATABASE::"Assembly Line",'ANY',AssemblyLine."Document Type",0,0,0);
+
+      // Offset for Assembly Line is 151 and subtype (as integer) is added
+      Assert.AreEqual(152,ReservEntry.SummEntryNo,'Assembly Line has the wrong offset in Reservation');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestCreateReservEntForAsmLine@24();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      AssemblyLine@1002 : Record 901;
+      ReservEntry@1006 : Record 337;
+      TrackingSpecification@1005 : Record 336;
+      AssemblyLineReserve@1000 : Codeunit 926;
+      ReservMgt@1011 : Codeunit 99000845;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      ReservEntryFoundByLinkToSource@1008 : Boolean;
+      LocationCode@1009 : Code[10];
+      VariantCode@1010 : Code[10];
+    BEGIN
+      Initialize;
+
+      // Test Procedure CreateReservation, CreateReservationSetFrom and DeleteLine in codeunit 926 Assembly Line-Reserve
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 23;
+
+      // Line to Reserv from
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Line to Reserv for
+      MockAsmOrderLine(
+        AssemblyLine,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Create Reservation Entry
+      ReservMgt.CreateTrackingSpecification(TrackingSpecification,
+        DATABASE::"Assembly Header",
+        AssemblyHeader."Document Type",
+        AssemblyHeader."No.",
+        '',
+        0,0,
+        AssemblyHeader."Variant Code",
+        AssemblyHeader."Location Code",'','',
+        AssemblyHeader."Qty. per Unit of Measure");
+      AssemblyLineReserve.CreateReservationSetFrom(TrackingSpecification);
+      AssemblyLineReserve.CreateReservation(
+        AssemblyLine,
+        AssemblyHeader.Description,
+        AssemblyHeader."Due Date",
+        0,
+        QtyToReserve,
+        '','');
+
+      // Verification
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order Line'); // Verifies link
+
+      VerifyReservationEntryFields(
+        ReservEntry,FALSE,
+        AssemblyLine."No.",AssemblyLine."Variant Code",AssemblyLine."Location Code",
+        AssemblyLine."Due Date",
+        -AssemblyLine."Quantity (Base)",-AssemblyLine."Remaining Quantity",AssemblyLine."Qty. per Unit of Measure");
+
+      AssemblyLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AssemblyLine.Quantity,AssemblyLine."Reserved Quantity",
+        AssemblyLine."Quantity (Base)",AssemblyLine."Reserved Qty. (Base)");
+
+      // Verification - Delete Line
+      AssemblyLineReserve.DeleteLine(AssemblyLine);
+
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsFalse(ReservEntryFoundByLinkToSource,'Reservation Entry NOT deleted for Assembly Order');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoReservOneLineAsmLine@33();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      AssemblyLine@1002 : Record 901;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      QtyToReserve2@1005 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      ReservEntryFoundByLinkToSource@1009 : Boolean;
+      LocationCode@1011 : Code[10];
+      VariantCode@1010 : Code[10];
+      ReservSummEntryNo@1012 : Integer;
+    BEGIN
+      Initialize;
+
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+      ReservSummEntryNo := 142; // Assembly Header - Reserv From
+
+      // Line to Reserv from
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Line to Reserv for
+      MockAsmOrderLine(
+        AssemblyLine,IDcode20('asml'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyLine(AssemblyLine);
+      RemainingQtyToReserve := QtyToReserve;
+      QtyToReserve2 := ROUND(QtyToReserve / AssemblyLine."Qty. per Unit of Measure",0.00001);
+      ReservMgt.AutoReserveOneLine(ReservSummEntryNo,QtyToReserve2,RemainingQtyToReserve,'Test',AvailabilityDate);
+
+      // Verify
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order');
+
+      AssemblyLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AssemblyLine.Quantity,AssemblyLine."Reserved Quantity",
+        AssemblyLine."Quantity (Base)",AssemblyLine."Reserved Qty. (Base)");
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoReservFullAsmLine@37();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      AssemblyLine@1002 : Record 901;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      FullAutoReservation@1005 : Boolean;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      ReservEntryFoundByLinkToSource@1009 : Boolean;
+      LocationCode@1011 : Code[10];
+      VariantCode@1010 : Code[10];
+    BEGIN
+      Initialize;
+
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+
+      // Line to Reserv from
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Line to Reserv for
+      MockAsmOrderLine(
+        AssemblyLine,IDcode20('asml'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyLine(AssemblyLine);
+      RemainingQtyToReserve := QtyToReserve;
+      ReservMgt.AutoReserve(FullAutoReservation,'Test',AvailabilityDate,0,RemainingQtyToReserve);
+
+      // Verify
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order');
+
+      VerifyReservationEntryFields(
+        ReservEntry,FALSE,
+        AssemblyLine."No.",AssemblyLine."Variant Code",AssemblyLine."Location Code",
+        AssemblyLine."Due Date",
+        -AssemblyLine."Quantity (Base)",-AssemblyLine."Remaining Quantity",AssemblyLine."Qty. per Unit of Measure");
+
+      AssemblyLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AssemblyLine.Quantity,AssemblyLine."Reserved Quantity",
+        AssemblyLine."Quantity (Base)",AssemblyLine."Reserved Qty. (Base)");
+
+      Assert.IsTrue(FullAutoReservation,'The quantity is NOT fully reserved');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoReservFullAsmHeaders@36();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      AssemblyLine@1002 : Record 901;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      FullAutoReservation@1005 : Boolean;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      ReservEntryFoundByLinkToSource@1009 : Boolean;
+      LocationCode@1011 : Code[10];
+      VariantCode@1010 : Code[10];
+      AvailableQtyNotEnough@1012 : Decimal;
+    BEGIN
+      Initialize;
+
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+      AvailableQtyNotEnough := 5;
+
+      // Line to Reserv from
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",
+        LocationCode,VariantCode,AvailabilityDate,AvailableQtyNotEnough,AvailableQtyNotEnough,1);
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm2'),Item."No.",
+        LocationCode,VariantCode,AvailabilityDate,
+        QtyToReserve - AvailableQtyNotEnough,QtyToReserve - AvailableQtyNotEnough,1);
+
+      // Line to Reserv for
+      MockAsmOrderLine(
+        AssemblyLine,IDcode20('asml'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyLine(AssemblyLine);
+      RemainingQtyToReserve := QtyToReserve;
+      ReservMgt.AutoReserve(FullAutoReservation,'Test',AvailabilityDate,0,RemainingQtyToReserve);
+
+      // Verify
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order');
+
+      AssemblyLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AssemblyLine.Quantity,AssemblyLine."Reserved Quantity",
+        AssemblyLine."Quantity (Base)",AssemblyLine."Reserved Qty. (Base)");
+
+      Assert.IsTrue(FullAutoReservation,'The quantity is NOT fully reserved');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoReservNotFullAsmLine@34();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      AssemblyLine@1002 : Record 901;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      FullAutoReservation@1005 : Boolean;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      AvailableToReserve@1009 : Decimal;
+      ReservEntryFoundByLinkToSource@1010 : Boolean;
+      LocationCode@1012 : Code[10];
+      VariantCode@1011 : Code[10];
+    BEGIN
+      Initialize;
+
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+      AvailableToReserve := 6;
+
+      // Line to Reserv from
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,AvailableToReserve,AvailableToReserve,1);
+
+      // Line to Reserv for
+      MockAsmOrderLine(
+        AssemblyLine,IDcode20('asml'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyLine(AssemblyLine);
+      RemainingQtyToReserve := QtyToReserve;
+      ReservMgt.AutoReserve(FullAutoReservation,'Test',AvailabilityDate,0,RemainingQtyToReserve);
+
+      // Verify
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Order');
+
+      VerifyReservationEntryFields(
+        ReservEntry,FALSE,
+        AssemblyLine."No.",AssemblyLine."Variant Code",AssemblyLine."Location Code",
+        AssemblyLine."Due Date",
+        -AvailableToReserve,-AvailableToReserve,AssemblyLine."Qty. per Unit of Measure");
+
+      AssemblyLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AvailableToReserve,AssemblyLine."Reserved Quantity",
+        AvailableToReserve,AssemblyLine."Reserved Qty. (Base)");
+
+      Assert.IsFalse(FullAutoReservation,'The quantity should NOT be fully reserved');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestAutoResNotFullWithAsmHdr@38();
+    VAR
+      Item@1001 : Record 27;
+      AssemblyHeader@1007 : Record 900;
+      AssemblyLine@1002 : Record 901;
+      ReservEntry@1006 : Record 337;
+      ReservMgt@1000 : Codeunit 99000845;
+      FullAutoReservation@1005 : Boolean;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      RemainingQtyToReserve@1008 : Decimal;
+      AvailableToReserve@1009 : Decimal;
+      ReservEntryFoundByLinkToSource@1010 : Boolean;
+      LocationCode@1012 : Code[10];
+      VariantCode@1011 : Code[10];
+      AnotherLocationCode@1013 : Code[10];
+    BEGIN
+      Initialize;
+
+      // Verify that correct filters are set on Assembly Order
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      AnotherLocationCode := IDcode10('l2');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 10;
+      AvailableToReserve := 6;
+
+      // Line to Reserv from
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,AvailableToReserve,AvailableToReserve,1);
+
+      // Line to Reserv for
+      MockAsmOrderLine(
+        AssemblyLine,IDcode20('asml'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Line NOT to reserve from
+      // Assembly Header with different Location, Variant etc. should not be considered in Auto Reservation
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm1'),Item."No.",
+        AnotherLocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm2'),Item."No.",
+        '','',AvailabilityDate,
+        QtyToReserve,QtyToReserve,1);
+
+      // Auto Reserve
+      ReservMgt.SetAssemblyLine(AssemblyLine);
+      RemainingQtyToReserve := QtyToReserve;
+      ReservMgt.AutoReserve(FullAutoReservation,'Test',AvailabilityDate,0,RemainingQtyToReserve);
+
+      // Verify Test
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+
+      VerifyReservationEntryFields(
+        ReservEntry,FALSE,
+        AssemblyLine."No.",AssemblyLine."Variant Code",AssemblyLine."Location Code",
+        AssemblyLine."Due Date",
+        -AvailableToReserve,-AvailableToReserve,AssemblyLine."Qty. per Unit of Measure");
+
+      AssemblyLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+      VerifyCalculatedFields(
+        AvailableToReserve,AssemblyLine."Reserved Quantity",
+        AvailableToReserve,AssemblyLine."Reserved Qty. (Base)");
+
+      Assert.IsFalse(FullAutoReservation,'The quantity should NOT be fully reserved');
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestDateConflictAsmHdr@45();
+    VAR
+      SalesLine@1007 : Record 37;
+      AssemblyHeader@1002 : Record 900;
+      ReservEntry@1006 : Record 337;
+      ReservationCheckDateConfl@1011 : Codeunit 99000815;
+      ReservEntryFoundByLinkToSource@1008 : Boolean;
+      ErrorMessage@1000 : Text[250];
+    BEGIN
+      Initialize;
+
+      // Test Procedure AsssemblyHeaderCheck in codeunit 99000815 Reservation-Check Date Confl.
+      CreateAsmHdrResFromSalesLine(AssemblyHeader,SalesLine);
+
+      // Verify Test
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+
+      // Due Date moved before Shipment Date in sales
+      AssemblyHeader."Due Date" := CALCDATE('<-10D>',SalesLine."Shipment Date");
+      ReservationCheckDateConfl.AssemblyHeaderCheck(AssemblyHeader,TRUE);
+
+      // Verify date is moved in Reservation Entry
+      FindLastRerservationByLink(
+        DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.AreEqual(
+        AssemblyHeader."Due Date",ReservEntry."Expected Receipt Date",
+        STRSUBSTNO('Reservation date should be moved to %1.',AssemblyHeader."Due Date"));
+
+      // Date is moved after Shipment Date in sales
+      AssemblyHeader."Due Date" := CALCDATE('<10D>',SalesLine."Shipment Date");
+      ASSERTERROR ReservationCheckDateConfl.AssemblyHeaderCheck(AssemblyHeader,TRUE);
+
+      // Verifify error
+      ErrorMessage := STRSUBSTNO('Reserved quantity (Base): %1, Date %2',AssemblyHeader."Quantity (Base)",AssemblyHeader."Due Date");
+      Assert.IsTrue(Contains(GETLASTERRORTEXT,ErrorMessage),ErrorMessage);
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestVerifyQtyUpAsmHdr@17();
+    VAR
+      SalesLine@1007 : Record 37;
+      AssemblyHeader@1002 : Record 900;
+      OldAssemblyHeader@1011 : Record 900;
+      NewAssemblyHeader@1012 : Record 900;
+      ReservEntry@1006 : Record 337;
+      AssemblyHeaderReserve@1005 : Codeunit 925;
+      ReservEntryFoundByLinkToSource@1008 : Boolean;
+    BEGIN
+      Initialize;
+
+      // Test Procedure VerifyQuantity in codeunit 925 Assembly Header-Reserve
+      CreateAsmHdrResFromSalesLine(AssemblyHeader,SalesLine);
+
+      // Verify Test
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+
+      // Change quantity up
+      OldAssemblyHeader := AssemblyHeader;
+      NewAssemblyHeader := OldAssemblyHeader;
+      NewAssemblyHeader.Quantity := NewAssemblyHeader.Quantity + 2;
+      NewAssemblyHeader."Quantity (Base)" := NewAssemblyHeader.Quantity;
+      NewAssemblyHeader."Remaining Quantity" := NewAssemblyHeader.Quantity;
+      NewAssemblyHeader."Remaining Quantity (Base)" := NewAssemblyHeader.Quantity;
+      AssemblyHeaderReserve.VerifyQuantity(NewAssemblyHeader,OldAssemblyHeader);
+
+      // Verify quantity is NOT changed in Reservation Entry
+      CLEAR(ReservEntry);
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+      Assert.AreEqual(
+        OldAssemblyHeader.Quantity,ReservEntry.Quantity,
+        STRSUBSTNO('Reservation should not be changed'));
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestVerifyQtyDownAsmHdr@43();
+    VAR
+      SalesLine@1007 : Record 37;
+      AssemblyHeader@1002 : Record 900;
+      OldAssemblyHeader@1011 : Record 900;
+      NewAssemblyHeader@1012 : Record 900;
+      ReservEntry@1006 : Record 337;
+      AssemblyHeaderReserve@1005 : Codeunit 925;
+      ReservEntryFoundByLinkToSource@1008 : Boolean;
+    BEGIN
+      Initialize;
+
+      // Test Procedure VerifyQuantity in codeunit 925 Assembly Header-Reserve
+      CreateAsmHdrResFromSalesLine(AssemblyHeader,SalesLine);
+
+      // Verify Test
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+
+      // Change quantity down
+      OldAssemblyHeader := AssemblyHeader;
+      NewAssemblyHeader := OldAssemblyHeader;
+      NewAssemblyHeader.Quantity := NewAssemblyHeader.Quantity - 1;
+      NewAssemblyHeader."Quantity (Base)" := NewAssemblyHeader.Quantity;
+      NewAssemblyHeader."Remaining Quantity" := NewAssemblyHeader.Quantity;
+      NewAssemblyHeader."Remaining Quantity (Base)" := NewAssemblyHeader.Quantity;
+      AssemblyHeaderReserve.VerifyQuantity(NewAssemblyHeader,OldAssemblyHeader);
+
+      // Verify quantity is changed in Reservation Entry
+      CLEAR(ReservEntry);
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Header",AssemblyHeader."Document Type",AssemblyHeader."No.",0,ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+      Assert.AreEqual(
+        NewAssemblyHeader.Quantity,ReservEntry.Quantity,
+        STRSUBSTNO('Reservation should be changed to %1.',NewAssemblyHeader.Quantity));
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestDateConflictAsmLine@35();
+    VAR
+      PurchLine@1007 : Record 39;
+      AssemblyLine@1002 : Record 901;
+      ReservEntry@1006 : Record 337;
+      ReservationCheckDateConfl@1011 : Codeunit 99000815;
+      ReservEntryFoundByLinkToSource@1008 : Boolean;
+      ErrorMessage@1012 : Text[250];
+    BEGIN
+      Initialize;
+
+      // Test Procedure AsssemblyLineCheck in codeunit 99000815 Reservation-Check Date Confl.
+      CreateAsmLineResFromPurch(AssemblyLine,PurchLine);
+
+      // Verify Test
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+
+      // Date is moved after expected receipt date in purchase
+      AssemblyLine."Due Date" := CALCDATE('<10D>',PurchLine."Expected Receipt Date");
+      ReservationCheckDateConfl.AssemblyLineCheck(AssemblyLine,TRUE);
+
+      // Verify date is moved in Reservation Entry
+      FindLastRerservationByLink(
+        DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.AreEqual(
+        AssemblyLine."Due Date",ReservEntry."Shipment Date",
+        STRSUBSTNO('Reservation date should be moved to %1.',AssemblyLine."Due Date"));
+
+      // Date is moved before expected receipt date in purchase
+      AssemblyLine."Due Date" := CALCDATE('<-10D>',PurchLine."Expected Receipt Date");
+      ASSERTERROR ReservationCheckDateConfl.AssemblyLineCheck(AssemblyLine,TRUE);
+
+      // Verify error
+      ErrorMessage := STRSUBSTNO('Reserved quantity (Base): %1, Date %2',AssemblyLine."Quantity (Base)",AssemblyLine."Due Date");
+      Assert.IsTrue(Contains(GETLASTERRORTEXT,ErrorMessage),ErrorMessage);
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestVerifyQtyUpAsmLine@46();
+    VAR
+      PurchLine@1007 : Record 39;
+      AssemblyLine@1002 : Record 901;
+      OldAssemblyLine@1011 : Record 901;
+      NewAssemblyLine@1012 : Record 901;
+      ReservEntry@1006 : Record 337;
+      AssemblyLineReserve@1005 : Codeunit 926;
+      ReservEntryFoundByLinkToSource@1008 : Boolean;
+    BEGIN
+      Initialize;
+
+      // Test Procedure VerifyQuantity in codeunit 926 Assembly Line-Reserve
+      CreateAsmLineResFromPurch(AssemblyLine,PurchLine);
+
+      // Verify Test
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+
+      // Change quantity up
+      OldAssemblyLine := AssemblyLine;
+      NewAssemblyLine := OldAssemblyLine;
+      NewAssemblyLine.Quantity := NewAssemblyLine.Quantity + 2;
+
+      NewAssemblyLine.Quantity := NewAssemblyLine.Quantity - 1;
+      NewAssemblyLine."Quantity (Base)" := NewAssemblyLine.Quantity;
+      NewAssemblyLine."Remaining Quantity" := NewAssemblyLine.Quantity;
+      NewAssemblyLine."Remaining Quantity (Base)" := NewAssemblyLine.Quantity;
+      AssemblyLineReserve.VerifyQuantity(NewAssemblyLine,OldAssemblyLine);
+
+      // Verify quantity is NOT changed in Reservation Entry
+      CLEAR(ReservEntry);
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+      Assert.AreEqual(
+        -OldAssemblyLine.Quantity,ReservEntry.Quantity,
+        STRSUBSTNO('Reservation should not be changed'));
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    [Test]
+    PROCEDURE TestVerifyQtyDownAsmLine@44();
+    VAR
+      PurchLine@1012 : Record 39;
+      AssemblyLine@1011 : Record 901;
+      OldAssemblyLine@1007 : Record 901;
+      NewAssemblyLine@1002 : Record 901;
+      ReservEntry@1006 : Record 337;
+      AssemblyLineReserve@1005 : Codeunit 926;
+      ReservEntryFoundByLinkToSource@1008 : Boolean;
+    BEGIN
+      Initialize;
+
+      // Test Procedure VerifyQuantity in codeunit 926 Assembly Line-Reserve
+      CreateAsmLineResFromPurch(AssemblyLine,PurchLine);
+
+      // Verify Test
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+
+      // Change quantity down
+      OldAssemblyLine := AssemblyLine;
+      NewAssemblyLine := OldAssemblyLine;
+      NewAssemblyLine.Quantity := NewAssemblyLine.Quantity - 1;
+
+      NewAssemblyLine.Quantity := NewAssemblyLine.Quantity - 1;
+      NewAssemblyLine."Quantity (Base)" := NewAssemblyLine.Quantity;
+      NewAssemblyLine."Remaining Quantity" := NewAssemblyLine.Quantity;
+      NewAssemblyLine."Remaining Quantity (Base)" := NewAssemblyLine.Quantity;
+      AssemblyLineReserve.VerifyQuantity(NewAssemblyLine,OldAssemblyLine);
+
+      // Verify quantity is changed in Reservation Entry
+      CLEAR(ReservEntry);
+      ReservEntryFoundByLinkToSource :=
+        FindLastRerservationByLink(
+          DATABASE::"Assembly Line",AssemblyLine."Document Type",AssemblyLine."Document No.",AssemblyLine."Line No.",ReservEntry);
+      Assert.IsTrue(ReservEntryFoundByLinkToSource,'Reservation Entry NOT created for Assembly Line');
+      Assert.AreEqual(
+        -NewAssemblyLine.Quantity,ReservEntry.Quantity,
+        STRSUBSTNO('Reservation should be changed to %1.',-NewAssemblyLine.Quantity));
+
+      ASSERTERROR ERROR('') // roll back
+    END;
+
+    LOCAL PROCEDURE VerifyReservationEntryFields@27(ReservEntry@1006 : Record 337;Positive@1003 : Boolean;ItemNo@1001 : Code[20];VariantCode@1005 : Code[10];LocationCode@1000 : Code[10];Date@1004 : Date;QtyBase@1010 : Decimal;Qty@1009 : Decimal;QtyPrUnit@1007 : Decimal);
+    BEGIN
+      // Key
+      Assert.AreEqual(Positive,ReservEntry.Positive,'Wrong value in key field Positive');
+
+      // Supply/Demand Fields
+      Assert.AreEqual(ItemNo,ReservEntry."Item No.",'Wrong value in Item No');
+      Assert.AreEqual(LocationCode,ReservEntry."Location Code",'Wrong value in Location Code');
+      Assert.AreEqual(VariantCode,ReservEntry."Variant Code",'Wrong value in Variant Code');
+      Assert.AreEqual(Date,ReservEntry."Shipment Date",'Wrong value in Shipment Date');
+      Assert.AreEqual(QtyBase,ReservEntry."Quantity (Base)",'Wrong value in Qty (Base)');
+      Assert.AreEqual(Qty,ReservEntry.Quantity,'Wrong value in Quantity');
+      Assert.AreEqual(QtyPrUnit,ReservEntry."Qty. per Unit of Measure",'Wrong value in Qty per UOM');
+
+      // Reservation Status
+      Assert.AreEqual(
+        ReservEntry."Reservation Status"::Reservation,ReservEntry."Reservation Status",
+        'Reservation Status should be Reservation');
+    END;
+
+    LOCAL PROCEDURE VerifyCalculatedFields@18(QtyExpected@1000 : Decimal;QtyActual@1002 : Decimal;QtyBaseExpected@1001 : Decimal;QtyBaseActual@1003 : Decimal);
+    BEGIN
+      Assert.AreEqual(QtyExpected,QtyActual,'The value in calculated field Reserved Quantity is wrong');
+      Assert.AreEqual(QtyBaseExpected,QtyBaseActual,'The value in calculated field Reserved Qty (Base) is wrong');
+    END;
+
+    LOCAL PROCEDURE CreateAsmLineResFromPurch@15(VAR AssemblyLine@1000 : Record 901;VAR PurchLine@1011 : Record 39);
+    VAR
+      Item@1009 : Record 27;
+      TrackingSpecification@1002 : Record 336;
+      AssemblyLineReserve@1005 : Codeunit 926;
+      ReservMgt@1006 : Codeunit 99000845;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      LocationCode@1001 : Code[10];
+      VariantCode@1010 : Code[10];
+    BEGIN
+      // Assembly Line reserved from Purchase Order Line
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+      AvailabilityDate := TODAY;
+      QtyToReserve := 23;
+
+      // Line to Reserv from
+      MockPurchOrderLine(
+        PurchLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Line to Reserv for
+      MockAsmOrderLine(
+        AssemblyLine,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Create Reservation Entry
+      ReservMgt.CreateTrackingSpecification(TrackingSpecification,
+        DATABASE::"Purchase Line",
+        PurchLine."Document Type",
+        PurchLine."Document No.",
+        '',
+        0,PurchLine."Line No.",
+        PurchLine."Variant Code",
+        PurchLine."Location Code",'','',
+        PurchLine."Qty. per Unit of Measure");
+      AssemblyLineReserve.CreateReservationSetFrom(TrackingSpecification);
+      AssemblyLineReserve.CreateReservation(
+        AssemblyLine,
+        PurchLine.Description,
+        PurchLine."Expected Receipt Date",
+        ROUND(QtyToReserve / AssemblyLine."Qty. per Unit of Measure",0.00001),
+        QtyToReserve,
+        '','');
+    END;
+
+    LOCAL PROCEDURE CreateAsmHdrResFromSalesLine@19(VAR AssemblyHeader@1000 : Record 900;VAR SalesLine@1011 : Record 37);
+    VAR
+      Item@1009 : Record 27;
+      TrackingSpecification@1002 : Record 336;
+      AsmHeaderReserve@1005 : Codeunit 925;
+      ReservMgt@1006 : Codeunit 99000845;
+      AvailabilityDate@1004 : Date;
+      QtyToReserve@1003 : Decimal;
+      LocationCode@1001 : Code[10];
+      VariantCode@1010 : Code[10];
+    BEGIN
+      // Assembly Header reserved from Sales Line
+      MockItem(Item);
+      LocationCode := IDcode10('l');
+      VariantCode := IDcode10('v');
+
+      AvailabilityDate := TODAY;
+      QtyToReserve := 23;
+
+      // Line to Reserv from
+      MockSalesOrderLine(SalesLine,Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1,10000);
+
+      // Line to Reserv for
+      MockAsmOrderHeader(
+        AssemblyHeader,IDcode20('asm'),Item."No.",LocationCode,VariantCode,AvailabilityDate,QtyToReserve,QtyToReserve,1);
+
+      // Create Reservation Entry
+      ReservMgt.CreateTrackingSpecification(TrackingSpecification,
+        DATABASE::"Sales Line",
+        SalesLine."Document Type",
+        SalesLine."Document No.",
+        '',
+        0,SalesLine."Line No.",
+        SalesLine."Variant Code",
+        SalesLine."Location Code",'','',
+        SalesLine."Qty. per Unit of Measure");
+      AsmHeaderReserve.CreateReservationSetFrom(TrackingSpecification);
+      AsmHeaderReserve.CreateReservation(
+        AssemblyHeader,
+        'Test',
+        AvailabilityDate,
+        0,
+        QtyToReserve,
+        '','');
+    END;
+
+    LOCAL PROCEDURE MockItem@2(VAR Item@1000 : Record 27);
+    BEGIN
+      Item.INIT;
+      Item."No." := IDcode20('Kit');
+      Item.INSERT;
+    END;
+
+    LOCAL PROCEDURE MockSalesOrderLine@16(VAR SalesLine@1006 : Record 37;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];VariantCode@1005 : Code[10];Date@1004 : Date;Qty@1000 : Decimal;RemainingQty@1008 : Decimal;QtyPrUnit@1007 : Decimal;LineNo@1003 : Integer);
+    BEGIN
+      SalesLine.INIT;
+      SalesLine."Document Type" := SalesLine."Document Type"::Order;
+      SalesLine."Document No." := IDcode20('so');
+      SalesLine."Line No." := LineNo;
+      SalesLine.Type := SalesLine.Type::Item;
+      SalesLine."No." := ItemNo;
+      SalesLine."Location Code" := LocationCode;
+      SalesLine."Variant Code" := VariantCode;
+      SalesLine.Quantity := Qty;
+      SalesLine."Outstanding Quantity" := RemainingQty;
+      SalesLine."Quantity (Base)" := CalcBaseQty(SalesLine.Quantity,QtyPrUnit);
+      SalesLine."Outstanding Qty. (Base)" := CalcBaseQty(SalesLine."Outstanding Quantity",QtyPrUnit);
+      SalesLine."Shipment Date" := Date;
+      SalesLine."Qty. per Unit of Measure" := QtyPrUnit;
+      SalesLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE MockPurchOrderLine@3(VAR PurchLine@1006 : Record 39;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];VariantCode@1005 : Code[10];Date@1004 : Date;Qty@1000 : Decimal;RemainingQty@1008 : Decimal;QtyPrUnit@1007 : Decimal;LineNo@1003 : Integer);
+    BEGIN
+      PurchLine.INIT;
+      PurchLine."Document Type" := PurchLine."Document Type"::Order;
+      PurchLine."Document No." := IDcode20('pol');
+      PurchLine."Line No." := LineNo;
+      PurchLine.Type := PurchLine.Type::Item;
+      PurchLine."No." := ItemNo;
+      PurchLine."Location Code" := LocationCode;
+      PurchLine."Variant Code" := VariantCode;
+      PurchLine.Quantity := Qty;
+      PurchLine."Outstanding Quantity" := RemainingQty;
+      PurchLine."Quantity (Base)" := CalcBaseQty(PurchLine.Quantity,QtyPrUnit);
+      PurchLine."Outstanding Qty. (Base)" := CalcBaseQty(PurchLine."Outstanding Quantity",QtyPrUnit);
+      PurchLine."Expected Receipt Date" := Date;
+      PurchLine."Qty. per Unit of Measure" := QtyPrUnit;
+      PurchLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE MockAsmOrderHeader@9(VAR AssemblyHeader@1009 : Record 900;DocNo@1001 : Code[20];ItemNo@1008 : Code[20];LocationCode@1007 : Code[10];VariantCode@1006 : Code[10];Date@1005 : Date;Qty@1004 : Decimal;RemainingQty@1003 : Decimal;QtyPrUnit@1002 : Decimal);
+    BEGIN
+      MockAsmHeader(
+        AssemblyHeader,DocNo,AssemblyHeader."Document Type"::Order,
+        ItemNo,LocationCode,VariantCode,Date,Qty,RemainingQty,QtyPrUnit);
+    END;
+
+    LOCAL PROCEDURE MockAsmHeader@23(VAR AssemblyHeader@1009 : Record 900;DocNo@1010 : Code[20];DocumentType@1001 : Integer;ItemNo@1008 : Code[20];LocationCode@1007 : Code[10];VariantCode@1006 : Code[10];Date@1005 : Date;Qty@1004 : Decimal;RemainingQty@1003 : Decimal;QtyPrUnit@1002 : Decimal);
+    BEGIN
+      AssemblyHeader.INIT;
+      AssemblyHeader."Document Type" := DocumentType;
+      AssemblyHeader."No." := DocNo;
+      AssemblyHeader."Item No." := ItemNo;
+      AssemblyHeader."Location Code" := LocationCode;
+      AssemblyHeader."Variant Code" := VariantCode;
+      AssemblyHeader."Due Date" := Date;
+      AssemblyHeader.Quantity := Qty;
+      AssemblyHeader."Remaining Quantity" := RemainingQty;
+      AssemblyHeader."Quantity (Base)" := CalcBaseQty(AssemblyHeader.Quantity,QtyPrUnit);
+      AssemblyHeader."Remaining Quantity (Base)" := CalcBaseQty(AssemblyHeader."Remaining Quantity",QtyPrUnit);
+      AssemblyHeader."Qty. per Unit of Measure" := QtyPrUnit;
+      AssemblyHeader.INSERT;
+    END;
+
+    LOCAL PROCEDURE MockAsmOrderLine@13(VAR AssemblyLine@1009 : Record 901;DocNo@1000 : Code[20];ItemNo@1008 : Code[20];LocationCode@1007 : Code[10];VariantCode@1006 : Code[10];Date@1005 : Date;Qty@1004 : Decimal;RemainingQty@1003 : Decimal;QtyPrUnit@1002 : Decimal;LineNo@1001 : Integer);
+    BEGIN
+      AssemblyLine.INIT;
+      AssemblyLine."Document Type" := AssemblyLine."Document Type"::Order;
+      AssemblyLine."Document No." := DocNo;
+      AssemblyLine."Line No." := LineNo;
+      AssemblyLine.Type := AssemblyLine.Type::Item;
+      AssemblyLine."No." := ItemNo;
+      AssemblyLine."Location Code" := LocationCode;
+      AssemblyLine."Variant Code" := VariantCode;
+      AssemblyLine."Due Date" := Date;
+      AssemblyLine.Quantity := Qty;
+      AssemblyLine."Remaining Quantity" := RemainingQty;
+      AssemblyLine."Quantity (Base)" := CalcBaseQty(AssemblyLine.Quantity,QtyPrUnit);
+      AssemblyLine."Remaining Quantity (Base)" := CalcBaseQty(AssemblyLine."Remaining Quantity",QtyPrUnit);
+      AssemblyLine."Qty. per Unit of Measure" := QtyPrUnit;
+      AssemblyLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE MockReservEntry@10(VAR ReservEntry@1001 : Record 337;SourceType@1008 : '0,1,2,3,4,5,6,7,8,9,10';SourceID@1007 : Code[20];SourceSubType@1006 : Integer;SourceRefNo@1000 : Integer;QtyBase@1005 : Decimal;Qty@1004 : Decimal);
+    BEGIN
+      ReservEntry.INIT;
+      ReservEntry."Source Type" := SourceType;
+      ReservEntry."Source ID" := SourceID;
+      ReservEntry."Source Subtype" := SourceSubType;
+      ReservEntry."Source Ref. No." := SourceRefNo;
+      ReservEntry."Quantity (Base)" := QtyBase;
+      ReservEntry.Quantity := Qty;
+      ReservEntry."Reservation Status" := ReservEntry."Reservation Status"::Reservation;
+      ReservEntry."Entry No." := 0;
+      ReservEntry.INSERT;
+    END;
+
+    LOCAL PROCEDURE FindLastRerservationByLink@26(SourceType@1003 : Integer;SourceSubType@1001 : Integer;SourceID@1004 : Code[20];SourceRefNo@1002 : Integer;VAR ReservEntry@1000 : Record 337) : Boolean;
+    BEGIN
+      ReservEntry.SETRANGE("Source Type",SourceType);
+      ReservEntry.SETRANGE("Source Subtype",SourceSubType);
+      ReservEntry.SETRANGE("Source ID",SourceID);
+      ReservEntry.SETRANGE("Source Ref. No.",SourceRefNo);
+      EXIT(ReservEntry.FINDLAST);
+    END;
+
+    LOCAL PROCEDURE CalcBaseQty@14(Qty@1000 : Decimal;QtyPerUnit@1001 : Decimal) : Decimal;
+    BEGIN
+      IF QtyPerUnit = 0 THEN
+        EXIT(1);
+
+      EXIT(ROUND(Qty * QtyPerUnit,0.00001));
+    END;
+
+    LOCAL PROCEDURE IDcode20@8(Prefix@1000 : Code[5]) : Code[20];
+    BEGIN
+      // ID for test methods and mocking data.
+      EXIT(Prefix + ID);
+    END;
+
+    LOCAL PROCEDURE IDcode10@1(Prefix@1000 : Code[2]) : Code[10];
+    BEGIN
+      // ID for test methods and mocking data.
+      EXIT(Prefix + ID);
+    END;
+
+    LOCAL PROCEDURE ID@39() : Code[8];
+    BEGIN
+      // ID is build on Day of the week and current time in XML format to make it independent of regional settings and locale
+      EXIT(CurrentDayInWeek1to7 + CurrentTimeXMLFormat);
+    END;
+
+    LOCAL PROCEDURE CurrentDayInWeek1to7@40() : Code[1];
+    BEGIN
+      EXIT(FORMAT(DATE2DWY(TODAY,1)));
+    END;
+
+    LOCAL PROCEDURE CurrentTimeXMLFormat@42() : Code[7];
+    VAR
+      TimeStrXML@1000 : Text[30];
+    BEGIN
+      TimeStrXML := FORMAT(TIME,0,XMLFormat); // Format: hh:mm::ss.milliseconds (16:55:48.253)
+
+      EXIT(COPYSTR(DELCHR(TimeStrXML,'=',':.'),1,7)); // Format: hhmmssmilliseconds (1655482)
+    END;
+
+    LOCAL PROCEDURE XMLFormat@41() : Integer;
+    BEGIN
+      EXIT(9);
+    END;
+
+    LOCAL PROCEDURE Contains@20(String@1001 : Text[250];SubString@1000 : Text[250]) : Boolean;
+    BEGIN
+      EXIT(STRPOS(String,SubString) > 0);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Assembly] [Reservation] [SCM]
+    }
+    END.
+  }
+}
+

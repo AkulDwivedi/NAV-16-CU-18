@@ -1,0 +1,1501 @@
+OBJECT Codeunit 143006 Reverse Service Tax Helper
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryERM@1500007 : Codeunit 131300;
+      LibraryPurchase@1500005 : Codeunit 130512;
+      LibraryServiceTax@1500004 : Codeunit 143001;
+      LibraryUtility@1500001 : Codeunit 131000;
+      LibrarySales@1500002 : Codeunit 130509;
+      LibraryWarehouse@1500008 : Codeunit 132204;
+      LibraryRandom@1500000 : Codeunit 130440;
+      ReverseChargeTypeOption@1500009 : ' ,Standard,GTA';
+      PurchInvAmountVsAppliedDocAmt@1500006 : 'InvoiceAmountEqual,InvoiceAmountGreater,InvoiceAmountSmaller';
+      InvalidDocumentTypeErr@1500015 : TextConst 'ENU=The Document Type %1 is not valid';
+      InvalidValueErr@1500014 : TextConst 'ENU=Not a valid value for Field %1 from Table %2.';
+
+    LOCAL PROCEDURE AdjustServTaxBaseAmount@1500025(VAR BaseAmount@1500000 : Decimal;Amount@1500001 : Decimal;ServiceTaxSetup@1500002 : Record 16472;Percentage@1500006 : Integer);
+    VAR
+      TaxAmount@1500003 : Decimal;
+      eCessAmount@1500004 : Decimal;
+      SHECessAmount@1500005 : Decimal;
+      SBCAmount@1500007 : Decimal;
+      KKCAmount@1500008 : Decimal;
+    BEGIN
+      TaxAmount := RoundServTax(BaseAmount * ServiceTaxSetup."Service Tax %" * (1 - ServiceTaxSetup."Abatement %" / 100) / 100);
+      SBCAmount := RoundServTax(BaseAmount * ServiceTaxSetup."SB Cess%" * (1 - ServiceTaxSetup."Abatement %" / 100) / 100);
+      KKCAmount := RoundServTax(BaseAmount * ServiceTaxSetup."KK Cess%" * (1 - ServiceTaxSetup."Abatement %" / 100) / 100);
+      eCessAmount := RoundServTax(TaxAmount * ServiceTaxSetup."eCess %" / 100);
+      SHECessAmount := RoundServTax(TaxAmount * ServiceTaxSetup."SHE Cess %" / 100);
+
+      TaxAmount := RoundServTax(TaxAmount * (1 - Percentage / 100));
+      SBCAmount := RoundServTax(SBCAmount * (1 - Percentage / 100));
+      KKCAmount := RoundServTax(KKCAmount * (1 - Percentage / 100));
+      eCessAmount := RoundServTax(eCessAmount * (1 - Percentage / 100));
+      SHECessAmount := RoundServTax(SHECessAmount * (1 - Percentage / 100));
+
+      IF BaseAmount + TaxAmount + eCessAmount + SHECessAmount + SBCAmount + KKCAmount <> Amount THEN
+        BaseAmount += Amount - (BaseAmount + TaxAmount + eCessAmount + SHECessAmount + SBCAmount + KKCAmount);
+    END;
+
+    PROCEDURE AlterServiceTaxGrpInJnlLine@1500067(VAR GenJournalLine@1500000 : Record 81);
+    VAR
+      ServiceTaxGroup@1500001 : Record 16471;
+    BEGIN
+      CreateServiceTaxGroupSetup(ServiceTaxGroup);
+      GenJournalLine."Service Tax Group Code" := ServiceTaxGroup.Code;
+      CreateSTRevChrgSetupFromJnl(GenJournalLine,ReverseChargeTypeOption::Standard,100);
+    END;
+
+    PROCEDURE AlterServiceTaxRegNoInJnlLine@1500064(VAR GenJournalLine@1500000 : Record 81);
+    VAR
+      ServiceTaxRegistrationNos@1500001 : Record 16475;
+    BEGIN
+      LibraryServiceTax.CreateServiceTaxRegistrationNo(ServiceTaxRegistrationNos);
+      GenJournalLine."Service Tax Registration No." := ServiceTaxRegistrationNos.Code;
+      CreateSTRevChrgSetupFromJnl(GenJournalLine,ReverseChargeTypeOption::Standard,100);
+    END;
+
+    LOCAL PROCEDURE ApplyAdvancePaymentOnline@1500046(VAR PurchaseHeader@1500000 : Record 38;AppliesToDocNo@1500001 : Code[20]);
+    BEGIN
+      PurchaseHeader.VALIDATE("Applies-to Doc. Type",PurchaseHeader."Applies-to Doc. Type"::Payment);
+      PurchaseHeader.VALIDATE("Applies-to Doc. No.",AppliesToDocNo);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    PROCEDURE ApplyAndPostVendorEntry@1500055(DocumentType@1500002 : Option;PostedDocNo@1500000 : Code[20];AppliedDocumentType@1500005 : Option;AppliedDocNo@1500004 : Code[20]);
+    VAR
+      VendorLedgerEntry@1500001 : Record 25;
+      AppliedVendorLedgerEntry@1500003 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,DocumentType,PostedDocNo);
+      VendorLedgerEntry.CALCFIELDS("Remaining Amount");
+      LibraryERM.SetApplyVendorEntry(VendorLedgerEntry,VendorLedgerEntry."Remaining Amount");
+
+      LibraryERM.FindVendorLedgerEntry(AppliedVendorLedgerEntry,AppliedDocumentType,AppliedDocNo);
+      LibraryERM.SetAppliestoIdVendor(AppliedVendorLedgerEntry);
+
+      LibraryERM.PostVendLedgerApplication(VendorLedgerEntry);
+    END;
+
+    PROCEDURE CalcDocPoTTotalTaxAmount@1500007(BaseAmount@1500003 : Decimal;PoTFactor@1500004 : Decimal;ServiceTaxSetup@1500005 : Record 16472) : Decimal;
+    VAR
+      ServTaxAmount@1500000 : Decimal;
+      ECessAmount@1500001 : Decimal;
+      SHECessAmount@1500002 : Decimal;
+    BEGIN
+      ServTaxAmount := ROUND(BaseAmount * ServiceTaxSetup."Service Tax %" / 100);
+      ECessAmount := ROUND(ServTaxAmount * ServiceTaxSetup."eCess %" / 100);
+      SHECessAmount := ROUND(ServTaxAmount * ServiceTaxSetup."SHE Cess %" / 100);
+      EXIT(ROUND((ServTaxAmount + ECessAmount + SHECessAmount) * PoTFactor));
+    END;
+
+    LOCAL PROCEDURE CalcFullTaxAmountOnDoc@1500028(DocumentNo@1500002 : Code[20];CorrectiveEntriesOnly@1500000 : Boolean) TotalFullTaxAmount : Decimal;
+    VAR
+      STEntry@1500001 : Record 16473;
+    BEGIN
+      WITH STEntry DO BEGIN
+        SETRANGE("Document No.",DocumentNo);
+        IF CorrectiveEntriesOnly THEN
+          SETFILTER("Corrected Appln. Entry No.",'>0')
+        ELSE
+          SETRANGE("Corrected Appln. Entry No.",0);
+        IF FINDSET THEN
+          REPEAT
+            TotalFullTaxAmount += FullTaxAmount;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    PROCEDURE CalcRemFullTaxAmountOnDocs@1500023(PmtDocumentNo@1500002 : Code[20];InvDocumentNo@1500000 : Code[20]) RemainingServiceTaxAmount : Decimal;
+    VAR
+      ReversedTaxAmount@1500003 : Decimal;
+      PmtTaxAmount@1500001 : Decimal;
+      InvTaxAmount@1500004 : Decimal;
+      TotalTaxAmount@1500005 : Decimal;
+    BEGIN
+      PmtTaxAmount := CalcFullTaxAmountOnDoc(PmtDocumentNo,FALSE);
+      InvTaxAmount := CalcFullTaxAmountOnDoc(InvDocumentNo,FALSE);
+      ReversedTaxAmount := CalcFullTaxAmountOnDoc(InvDocumentNo,TRUE);
+      IF PmtTaxAmount > InvTaxAmount THEN
+        TotalTaxAmount := PmtTaxAmount
+      ELSE
+        TotalTaxAmount := InvTaxAmount;
+      RemainingServiceTaxAmount := TotalTaxAmount + ReversedTaxAmount;
+    END;
+
+    PROCEDURE CalcGenJournalLineServTaxBase@1500024(Base@1500000 : Decimal;DocumentType@1500002 : Option) : Decimal;
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      Sign@1500003 : Integer;
+    BEGIN
+      Sign := 1;
+      IF (DocumentType = GenJournalLine."Document Type"::Refund) OR
+         (DocumentType = GenJournalLine."Document Type"::"Credit Memo")
+      THEN
+        Sign := -1;
+      EXIT(Sign * Base);
+    END;
+
+    PROCEDURE CalcServTaxAmounts@1500092(GenJournalLine@1500000 : Record 81;VAR BaseAmount@1500002 : Decimal;VAR PoTAmount@1500003 : Decimal;ServiceTaxSetup@1500005 : Record 16472);
+    VAR
+      PoTPart@1500004 : Decimal;
+    BEGIN
+      IF BaseAmount = 0 THEN
+        BaseAmount := GetBaseAmountFromGenJnlLine(GenJournalLine);
+
+      PoTPart := (100 - GetRevChrgPercent(GenJournalLine)) / 100;
+      PoTAmount := CalculatePoTTotalTaxAmount(BaseAmount,PoTPart,ServiceTaxSetup);
+    END;
+
+    PROCEDURE CalcSBCandKKCAmounts@1500111(GenJournalLine@1500000 : Record 81;BaseAmount@1500002 : Decimal;VAR PoTAmount@1500003 : Decimal;ServiceTaxSetup@1500005 : Record 16472);
+    VAR
+      PoTPart@1500004 : Decimal;
+    BEGIN
+      BaseAmount := GetBaseAmountFromGenJnlLineWithKKC(GenJournalLine);
+
+      PoTPart := (100 - GetRevChrgPercent(GenJournalLine)) / 100;
+      PoTAmount := CalculatePoTTotalTaxAmount(BaseAmount,PoTPart,ServiceTaxSetup);
+    END;
+
+    PROCEDURE CalcServTaxBaseAmountBackward@1500014(Amount@1500000 : Decimal;ServiceTaxSetup@1500001 : Record 16472;RevChrgPercentage@1500002 : Integer) BaseAmount : Decimal;
+    VAR
+      TotalPercent@1500003 : Decimal;
+    BEGIN
+      IF RevChrgPercentage = 100 THEN
+        RevChrgPercentage := 0; // if not split case, the calculation should not be affected by Percentage
+
+      // Given the amount and the service tax setup, calculate the base amount and round it
+      WITH ServiceTaxSetup DO BEGIN
+        TotalPercent := "Service Tax %" + "SB Cess%" + "KK Cess%";
+        BaseAmount :=
+          RoundAmount(
+            Amount / (1 + (TotalPercent * (1 - RevChrgPercentage / 100) * (1 - "Abatement %" / 100) / 100)));
+        AdjustServTaxBaseAmount(BaseAmount,Amount,ServiceTaxSetup,RevChrgPercentage);
+      END;
+    END;
+
+    PROCEDURE CalcServTaxBaseAmountBackwardWithKKC@1500113(Amount@1500000 : Decimal;ServiceTaxSetup@1500001 : Record 16472;RevChrgPercentage@1500002 : Integer) BaseAmount : Decimal;
+    VAR
+      TotalPercent@1500003 : Decimal;
+    BEGIN
+      IF RevChrgPercentage = 100 THEN
+        RevChrgPercentage := 0; // if not split case, the calculation should not be affected by Percentage
+
+      // Given the amount and the service tax setup, calculate the base amount and round it
+      WITH ServiceTaxSetup DO BEGIN
+        TotalPercent := "Service Tax %" + "SB Cess%" + "KK Cess%";
+        BaseAmount :=
+          RoundAmount(
+            Amount / (1 + (TotalPercent * (1 - RevChrgPercentage / 100) * (1 - "Abatement %" / 100) / 100)));
+      END;
+    END;
+
+    PROCEDURE CalcServTaxBaseAmountBackwardNonKKC@1500107(Amount@1500000 : Decimal;ServiceTaxSetup@1500001 : Record 16472;RevChrgPercentage@1500002 : Integer) BaseAmount : Decimal;
+    BEGIN
+      IF RevChrgPercentage = 100 THEN
+        RevChrgPercentage := 0; // if not split case, the calculation should not be affected by Percentage
+
+      // Given the amount and the service tax setup, calculate the base amount and round it
+      WITH ServiceTaxSetup DO
+        BaseAmount :=
+          RoundAmount(
+            Amount / (1 + ("Service Tax %" * (1 - RevChrgPercentage / 100) * (1 - "Abatement %" / 100) / 100)));
+    END;
+
+    PROCEDURE CalcSplitAmounts@1500018(GenJournalLine@1500000 : Record 81;VAR BaseAmount@1500007 : Decimal;VAR PoTAmount@1500003 : Decimal;VAR RevChrgAmount@1500006 : Decimal;VAR Percentage@1500008 : Integer;ServiceTaxSetup@1500005 : Record 16472);
+    VAR
+      TotalTaxAmount@1500001 : Decimal;
+    BEGIN
+      Percentage := GetRevChrgPercent(GenJournalLine);
+      BaseAmount := GetBaseAmountFromGenJnlLine(GenJournalLine);
+      TotalTaxAmount := CalculateServTaxTotal(BaseAmount,ServiceTaxSetup);
+      PoTAmount := CalculatePoTTotalTaxAmount(BaseAmount,(100 - Percentage) / 100,ServiceTaxSetup);
+      RevChrgAmount := TotalTaxAmount - PoTAmount;
+    END;
+
+    PROCEDURE CalcSplitAmountsKKC@1500115(GenJournalLine@1500000 : Record 81;VAR BaseAmount@1500007 : Decimal;VAR PoTAmount@1500003 : Decimal;VAR RevChrgAmount@1500006 : Decimal;VAR Percentage@1500008 : Integer;ServiceTaxSetup@1500005 : Record 16472);
+    VAR
+      TotalTaxAmount@1500001 : Decimal;
+    BEGIN
+      Percentage := GetRevChrgPercent(GenJournalLine);
+      BaseAmount := GetBaseAmountFromGenJnlLineWithKKC(GenJournalLine);
+      TotalTaxAmount := CalculateServTaxTotal(BaseAmount,ServiceTaxSetup);
+      PoTAmount := CalculatePoTTotalTaxAmountKKC(BaseAmount,(100 - Percentage) / 100,ServiceTaxSetup);
+      RevChrgAmount := TotalTaxAmount - PoTAmount;
+    END;
+
+    PROCEDURE CalculateECess@1500026(Base@1500000 : Decimal;ServiceTaxSetup@1500001 : Record 16472) : Decimal;
+    VAR
+      ServiceTax@1500005 : Decimal;
+    BEGIN
+      ServiceTax := CalculateServTax(Base,ServiceTaxSetup);
+      EXIT(RoundServTax(ServiceTax * ServiceTaxSetup."eCess %" / 100));
+    END;
+
+    PROCEDURE CalculatePayment@1500056(DocumentType@1500001 : Option;LineAmount@1500005 : Decimal;ServiceTaxSetup@1500002 : Record 16472;RevChrgPercentage@1500000 : Integer) : Decimal;
+    VAR
+      PurchaseLine@1500003 : Record 39;
+      Sign@1500004 : Integer;
+    BEGIN
+      Sign := 1;
+      IF (DocumentType = PurchaseLine."Document Type"::"Credit Memo") OR
+         (DocumentType = PurchaseLine."Document Type"::"Return Order")
+      THEN
+        Sign := -1;
+      EXIT(Sign * (LineAmount + ABS(CalculatePoTTotalTaxAmount(LineAmount,(100 - RevChrgPercentage) / 100,ServiceTaxSetup))));
+    END;
+
+    PROCEDURE CalculatePoTTotalTaxAmount@1500062(BaseAmount@1500003 : Decimal;PoTFactor@1500004 : Decimal;ServiceTaxSetup@1500005 : Record 16472) : Decimal;
+    VAR
+      ServTaxAmount@1500000 : Decimal;
+      ECessAmount@1500001 : Decimal;
+      SHECessAmount@1500002 : Decimal;
+      SBCAmount@1500006 : Decimal;
+      KKCessAmount@1500007 : Decimal;
+    BEGIN
+      ServTaxAmount := CalculateServTax(BaseAmount,ServiceTaxSetup);
+      ECessAmount := CalculateECess(BaseAmount,ServiceTaxSetup);
+      SHECessAmount := CalculateSHECess(BaseAmount,ServiceTaxSetup);
+      SBCAmount := CalculateSBC(BaseAmount,ServiceTaxSetup);
+      KKCessAmount := CalculateKKCess(BaseAmount,ServiceTaxSetup);
+      EXIT(RoundServTax(ServTaxAmount * PoTFactor) + RoundServTax(ECessAmount * PoTFactor) + RoundServTax(SHECessAmount * PoTFactor) +
+        RoundServTax(SBCAmount * PoTFactor) + RoundServTax(KKCessAmount * PoTFactor));
+    END;
+
+    PROCEDURE CalculatePoTTotalTaxAmountKKC@1500087(BaseAmount@1500003 : Decimal;PoTFactor@1500004 : Decimal;ServiceTaxSetup@1500005 : Record 16472) : Decimal;
+    VAR
+      ServTaxAmount@1500000 : Decimal;
+      ECessAmount@1500001 : Decimal;
+      SHECessAmount@1500002 : Decimal;
+    BEGIN
+      ServTaxAmount := CalculateServTax(BaseAmount,ServiceTaxSetup);
+      ECessAmount := CalculateECess(BaseAmount,ServiceTaxSetup);
+      SHECessAmount := CalculateSHECess(BaseAmount,ServiceTaxSetup);
+      EXIT(RoundServTax(ServTaxAmount * PoTFactor) + RoundServTax(ECessAmount * PoTFactor) + RoundServTax(SHECessAmount * PoTFactor));
+    END;
+
+    PROCEDURE CalculatePoTSBCandKKCAmount@1500108(BaseAmount@1500003 : Decimal;PoTFactor@1500004 : Decimal;ServiceTaxSetup@1500005 : Record 16472) : Decimal;
+    VAR
+      PoTSBCAmount@1500001 : Decimal;
+      PoTKKCessAmount@1500000 : Decimal;
+    BEGIN
+      PoTSBCAmount := CalculateSBC(BaseAmount,ServiceTaxSetup);
+      PoTKKCessAmount := CalculateKKCess(BaseAmount,ServiceTaxSetup);
+      EXIT(RoundServTax(PoTSBCAmount * PoTFactor) + RoundServTax(PoTKKCessAmount * PoTFactor));
+    END;
+
+    PROCEDURE CalculateServTax@1500020(Base@1500000 : Decimal;ServiceTaxSetup@1500001 : Record 16472) : Decimal;
+    BEGIN
+      EXIT(RoundServTax(Base * ServiceTaxSetup."Service Tax %" / 100));
+    END;
+
+    PROCEDURE CalculateSBC@1500085(Base@1500000 : Decimal;ServiceTaxSetup@1500001 : Record 16472) : Decimal;
+    BEGIN
+      EXIT(RoundServTax(Base * ServiceTaxSetup."SB Cess%" / 100));
+    END;
+
+    PROCEDURE CalculateKKCess@1500083(Base@1500000 : Decimal;ServiceTaxSetup@1500001 : Record 16472) : Decimal;
+    BEGIN
+      EXIT(RoundServTax(Base * ServiceTaxSetup."KK Cess%" / 100));
+    END;
+
+    PROCEDURE CalculateServTaxAmount@1500051(ServiceTaxSetup@1500001 : Record 16472;Amount@1500000 : Decimal;DocumentType@1500002 : Option) : Decimal;
+    VAR
+      ServiceTaxBase@1500005 : Decimal;
+    BEGIN
+      ServiceTaxBase := CalculateServTaxBase(Amount,DocumentType);
+      EXIT(CalculateServTaxTotal(ServiceTaxBase,ServiceTaxSetup));
+    END;
+
+    PROCEDURE CalculateServTaxSBCAmount@1500105(ServiceTaxSetup@1500001 : Record 16472;Amount@1500000 : Decimal;DocumentType@1500002 : Option) : Decimal;
+    VAR
+      ServiceTaxBase@1500005 : Decimal;
+    BEGIN
+      ServiceTaxBase := CalculateServTaxBase(Amount,DocumentType);
+      EXIT(CalculateSBC(ServiceTaxBase,ServiceTaxSetup));
+    END;
+
+    PROCEDURE CalculateKKCAmount@1500106(ServiceTaxSetup@1500001 : Record 16472;Amount@1500000 : Decimal;DocumentType@1500002 : Option) : Decimal;
+    VAR
+      ServiceTaxBase@1500005 : Decimal;
+    BEGIN
+      ServiceTaxBase := CalculateServTaxBase(Amount,DocumentType);
+      EXIT(CalculateKKCess(ServiceTaxBase,ServiceTaxSetup));
+    END;
+
+    PROCEDURE CalculateServTaxBase@1500057(Base@1500000 : Decimal;DocumentType@1500002 : Option) : Decimal;
+    VAR
+      PurchaseHeader@1500003 : Record 38;
+      Sign@1500004 : Integer;
+    BEGIN
+      Sign := 1;
+      IF (DocumentType = PurchaseHeader."Document Type"::"Credit Memo") OR
+         (DocumentType = PurchaseHeader."Document Type"::"Return Order")
+      THEN
+        Sign := -1;
+      EXIT(Sign * Base);
+    END;
+
+    PROCEDURE CalculateServTaxTotal@1500033(Base@1500000 : Decimal;ServiceTaxSetup@1500001 : Record 16472) : Decimal;
+    VAR
+      ServiceTax@1500005 : Decimal;
+      ECess@1500006 : Decimal;
+      SHECess@1500007 : Decimal;
+    BEGIN
+      ServiceTax := CalculateServTax(Base,ServiceTaxSetup);
+      ECess := CalculateECess(Base,ServiceTaxSetup);
+      SHECess := CalculateSHECess(Base,ServiceTaxSetup);
+      EXIT(ServiceTax + ECess + SHECess);
+    END;
+
+    PROCEDURE CalculateSHECess@1500027(Base@1500000 : Decimal;ServiceTaxSetup@1500001 : Record 16472) : Decimal;
+    VAR
+      ServiceTax@1500005 : Decimal;
+    BEGIN
+      ServiceTax := CalculateServTax(Base,ServiceTaxSetup);
+      EXIT(RoundServTax(ServiceTax * ServiceTaxSetup."SHE Cess %" / 100));
+    END;
+
+    PROCEDURE ConvertDocToJnlLine@1500075(PurchaseHeader@1500000 : Record 38;PurchaseLine@1500002 : Record 39;PostedDocNo@1500003 : Code[20];VAR GenJnlLine@1500001 : Record 81);
+    BEGIN
+      WITH GenJnlLine DO BEGIN
+        INIT;
+        "Document Type" := GetPostingDocType(PurchaseHeader."Document Type");
+        "Document No." := PostedDocNo;
+        "Posting Date" := PurchaseHeader."Posting Date";
+        "Account Type" := "Account Type"::Vendor;
+        "Account No." := PurchaseHeader."Pay-to Vendor No.";
+        Amount := PurchaseLine."Line Amount";
+        "Bal. Account No." := PurchaseLine."No.";
+        "Service Tax Group Code" := PurchaseLine."Service Tax Group";
+        "Service Tax Registration No." := PurchaseLine."Service Tax Registration No.";
+        "Service Type (Rev. Chrg.)" := PurchaseHeader."Service Type (Rev. Chrg.)";
+        PoT := PurchaseHeader.PoT;
+        "Service Tax Type" := "Service Tax Type"::Purchase;
+      END;
+    END;
+
+    LOCAL PROCEDURE ConvertSTReverseCharge@1500034(ServiceTaxType@1500000 : Option) : Integer;
+    VAR
+      STReverseChargeSetup@1500001 : Record 16461;
+    BEGIN
+      CASE ServiceTaxType OF
+        ReverseChargeTypeOption::Standard:
+          EXIT(STReverseChargeSetup."Reverse Charge Tax Type"::Standard);
+        ReverseChargeTypeOption::GTA:
+          EXIT(STReverseChargeSetup."Reverse Charge Tax Type"::GTA)
+        ELSE
+          ERROR(STRSUBSTNO(InvalidValueErr,
+              STReverseChargeSetup.FIELDNO("Reverse Charge Tax Type"),STReverseChargeSetup.TABLENAME))
+      END
+    END;
+
+    PROCEDURE CreateAdvancePayment@1500031(VAR GenJournalLine@1500006 : Record 81;DocumentType@1500002 : Option;PoT@1500007 : Boolean;RevChargeServiceType@1500017 : Option;RevChargeType@1500018 : Option;ReverseChargePercentage@1500003 : Integer);
+    VAR
+      GenJournalBatch@1500001 : Record 232;
+    BEGIN
+      CreateGenJournalBatch(GenJournalBatch);
+      CreateJnlLineWithServiceTax(GenJournalLine,GenJournalBatch,DocumentType,
+        RevChargeServiceType,RevChargeType,ReverseChargePercentage);
+      GenJournalLine.VALIDATE(PoT,PoT);
+      GenJournalLine.VALIDATE("Serv. Tax on Advance Payment",TRUE);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateAndPostAdvancePayment@1500030(VAR GenJournalLine@1500006 : Record 81;PoT@1500007 : Boolean;RevChargeServiceType@1500017 : Option;RevChargeType@1500018 : Option;ReverseChargePercentage@1500001 : Integer) : Code[20];
+    VAR
+      DocumentType@1500000 : Option;
+    BEGIN
+      IF GenJournalLine."Document Type" = GenJournalLine."Document Type"::" " THEN
+        DocumentType := GenJournalLine."Document Type"::Payment
+      ELSE
+        DocumentType := GenJournalLine."Document Type";
+      CreateAdvancePayment(GenJournalLine,DocumentType,PoT,RevChargeServiceType,RevChargeType,ReverseChargePercentage);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      EXIT(GenJournalLine."Document No.")
+    END;
+
+    PROCEDURE CreateCustomer@1500079() : Code[20];
+    VAR
+      Customer@1500001 : Record 18;
+      GeneralPostingSetup@1500000 : Record 252;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.FindGeneralPostingSetup(GeneralPostingSetup);
+      Customer.VALIDATE("Gen. Bus. Posting Group",GeneralPostingSetup."Gen. Bus. Posting Group");
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    PROCEDURE CreateDocAndApplyAdvPayment@1500032(VAR PurchaseHeader@1500000 : Record 38;VAR PurchaseLine@1500011 : Record 39;GenJournalLine@1500001 : Record 81;DocumentType@1500002 : Option;ReverseChargeType@1500006 : Option;ReverseChargePercentage@1500003 : Integer;PoT@1500009 : Boolean;Amount@1500007 : Decimal);
+    BEGIN
+      CreatePurchaseDocForAdvPayment(PurchaseHeader,PurchaseLine,GenJournalLine,
+        DocumentType,ReverseChargeType,ReverseChargePercentage,PoT,Amount);
+
+      ApplyAdvancePaymentOnline(PurchaseHeader,GenJournalLine."Document No.");
+    END;
+
+    PROCEDURE CreateGenJnllBatchWithBalAcc@1500010(VAR GenJournalBatch@1500000 : Record 232);
+    VAR
+      GLAccount@1500003 : Record 15;
+    BEGIN
+      CreateGenJournalBatch(GenJournalBatch);
+      GenJournalBatch.VALIDATE("Bal. Account Type",GenJournalBatch."Bal. Account Type"::"G/L Account");
+      LibraryERM.CreateGLAccount(GLAccount);
+      GenJournalBatch.VALIDATE("Bal. Account No.",GLAccount."No.");
+      GenJournalBatch.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateGenJournalBatch@1500003(VAR GenJournalBatch@1500000 : Record 232);
+    VAR
+      GenJournalTemplate@1500001 : Record 80;
+    BEGIN
+      LibraryERM.CreateGenJournalTemplate(GenJournalTemplate);
+      LibraryERM.CreateGenJournalBatch(GenJournalBatch,GenJournalTemplate.Name);
+    END;
+
+    PROCEDURE CreateGLAccountForSales@1500086(ServiceTaxGroupCode@1500002 : Code[10]) : Code[20];
+    VAR
+      GLAccount@1500001 : Record 15;
+      GeneralPostingSetup@1500000 : Record 252;
+    BEGIN
+      LibraryERM.FindGeneralPostingSetup(GeneralPostingSetup);
+      LibraryERM.CreateGLAccount(GLAccount);
+      GLAccount.VALIDATE("Income/Balance",GLAccount."Income/Balance"::"Balance Sheet");
+      GLAccount.VALIDATE("Direct Posting",TRUE);
+      GLAccount.VALIDATE("Gen. Posting Type",GLAccount."Gen. Posting Type"::Sale);
+      GLAccount.VALIDATE("Gen. Prod. Posting Group",GeneralPostingSetup."Gen. Prod. Posting Group");
+      GLAccount.VALIDATE("Service Tax Group Code",ServiceTaxGroupCode);
+      GLAccount.MODIFY(TRUE);
+      EXIT(GLAccount."No.");
+    END;
+
+    PROCEDURE CreateGLAccount@1(ServiceTaxGroupCode@1500000 : Code[20]) : Code[20];
+    VAR
+      GLAccount@1065 : Record 15;
+      GeneralPostingSetup@1066 : Record 252;
+    BEGIN
+      LibraryERM.FindGeneralPostingSetup(GeneralPostingSetup);
+      LibraryERM.CreateGLAccount(GLAccount);
+      GLAccount.VALIDATE("Income/Balance",GLAccount."Income/Balance"::"Balance Sheet");
+      GLAccount.VALIDATE("Direct Posting",TRUE);
+      GLAccount.VALIDATE("Gen. Posting Type",GLAccount."Gen. Posting Type"::Purchase); // important for Service Tax Calculation
+      GLAccount.VALIDATE("Gen. Prod. Posting Group",GeneralPostingSetup."Gen. Prod. Posting Group");
+      GLAccount.VALIDATE("Service Tax Group Code",ServiceTaxGroupCode);
+      GLAccount.MODIFY(TRUE);
+      EXIT(GLAccount."No.");
+    END;
+
+    PROCEDURE CreateJnlLineWithServiceTax@1170000002(VAR GenJournalLine@1170000001 : Record 81;GenJournalBatch@1500000 : Record 232;DocumentType@1500002 : Option;RevChargeServiceType@1500008 : Option;RevChargeType@1500006 : Option;ReverseChargePercentage@1500007 : Integer);
+    VAR
+      ServiceTaxRegNo@1500005 : Record 16475;
+      ServiceTaxGroup@1500004 : Record 16471;
+      ServiceTaxReturnPeriod@1500001 : Record 16588;
+      CompanyInfo@1500009 : Record 79;
+      Amount@1500003 : Decimal;
+    BEGIN
+      IF GenJournalLine.Amount = 0 THEN
+        Amount := GetAmountSignInJournalLine(DocumentType) * LibraryRandom.RandInt(200000)
+      ELSE
+        Amount := GetAmountSignInJournalLine(DocumentType) * GenJournalLine.Amount;
+
+      CompanyInfo.GET;
+      ServiceTaxRegNo.GET(CompanyInfo."Service Tax Registration No.");
+      CreateServiceTaxGroupSetup(ServiceTaxGroup);
+      GetServiceTaxReturnPeriod(ServiceTaxReturnPeriod);
+      CreateJnlLineWithSTNoSetup(GenJournalLine,GenJournalBatch,DocumentType,RevChargeServiceType,CreateVendor,Amount,
+        LibraryServiceTax.GetDateWithinSrvTaxPeriod(ServiceTaxReturnPeriod),ServiceTaxRegNo.Code,ServiceTaxGroup.Code);
+      CreateSTRevChrgSetupFromJnl(GenJournalLine,RevChargeType,ReverseChargePercentage);
+    END;
+
+    PROCEDURE CreateJnlLineWithSTNoSetup@1500045(VAR GenJournalLine@1170000001 : Record 81;GenJournalBatch@1500000 : Record 232;DocumentType@1500002 : Option;RevChargeServiceType@1500008 : Option;VendorNo@1500007 : Code[20];Amount@1500003 : Decimal;PostingDate@1500005 : Date;ServiceTaxRegNo@1500001 : Code[20];ServiceTaxGroup@1500004 : Code[20]);
+    VAR
+      BankAccount@1500009 : Record 270;
+    BEGIN
+      LibraryERM.CreateGeneralJnlLine(GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        DocumentType,GenJournalLine."Account Type"::Vendor,VendorNo,Amount);
+      WITH GenJournalLine DO BEGIN
+        IF DocumentType IN ["Document Type"::Payment,"Document Type"::Refund] THEN BEGIN
+          VALIDATE("Bal. Account Type","Bal. Account Type"::"Bank Account");
+          LibraryERM.FindBankAccount(BankAccount);
+          VALIDATE("Bal. Account No.",BankAccount."No.");
+          VALIDATE("Service Tax Group Code",ServiceTaxGroup);
+        END ELSE BEGIN
+          VALIDATE("Bal. Account Type","Bal. Account Type"::"G/L Account");
+          VALIDATE("Bal. Account No.",CreateGLAccount(ServiceTaxGroup));
+        END;
+        VALIDATE("Service Tax Registration No.",ServiceTaxRegNo);
+        VALIDATE("Posting Date",PostingDate);
+        VALIDATE("Document No.",LibraryUtility.GenerateRandomCode(FIELDNO("Document No."),DATABASE::"Gen. Journal Line"));
+        VALIDATE("External Document No.","Document No.");
+        VALIDATE("Consignment Note No.","Document No.");
+        VALIDATE("Service Type (Rev. Chrg.)",RevChargeServiceType);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateJournalLine@1500011(VAR GenJournalLine@1170000001 : Record 81;GenJournalBatch@1500000 : Record 232;DocumentType@1500001 : Option;AccountType@1500002 : Option;AccountNo@1500003 : Code[20];Amount@1500006 : Decimal;PostingDate@1170000003 : Date);
+    BEGIN
+      LibraryERM.CreateGeneralJnlLine(GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        DocumentType,AccountType,AccountNo,Amount);
+      GenJournalLine.VALIDATE("Posting Date",PostingDate);
+      GenJournalLine.VALIDATE("Document No.",
+        LibraryUtility.GenerateRandomCode(GenJournalLine.FIELDNO("Document No."),DATABASE::"Gen. Journal Line"));
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateLocation@2(VAR Location@1500000 : Record 14);
+    VAR
+      ServiceTaxRegNo@1500002 : Record 16475;
+    BEGIN
+      LibraryServiceTax.CreateServiceTaxRegistrationNo(ServiceTaxRegNo);
+
+      LibraryWarehouse.CreateLocation(Location);
+      Location.VALIDATE("Input Service Distributor",FALSE);
+      Location.VALIDATE("Service Tax Registration No.",ServiceTaxRegNo.Code);
+      Location.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreateNewServGrpForRevChPLine@1500070(PurchaseLine@1500000 : Record 39;VAR ServiceTaxGroup@1500002 : Record 16471);
+    BEGIN
+      CreateServiceTaxGroupSetup(ServiceTaxGroup);
+      PurchaseLine."Service Tax Group" := ServiceTaxGroup.Code;
+      CreateSTRevChrgSetupFromPurch(PurchaseLine,ReverseChargeTypeOption::Standard,100);
+    END;
+
+    PROCEDURE CreateNewSRegNoForRevChPLine@1500069(PurchaseLine@1500000 : Record 39;VAR ServiceTaxRegistrationNos@1500002 : Record 16475);
+    BEGIN
+      LibraryServiceTax.CreateServiceTaxRegistrationNo(ServiceTaxRegistrationNos);
+      PurchaseLine."Service Tax Registration No." := ServiceTaxRegistrationNos.Code;
+      CreateSTRevChrgSetupFromPurch(PurchaseLine,ReverseChargeTypeOption::Standard,100);
+    END;
+
+    PROCEDURE CreatePayment@1500151(VAR GenJournalLine@1500006 : Record 81;VendorNo@1500003 : Code[20];Amount@1500002 : Decimal;PostingDate@1500001 : Date;DocumentType@1500000 : Option);
+    VAR
+      GenJournalBatch@1500004 : Record 232;
+    BEGIN
+      CreateGenJnllBatchWithBalAcc(GenJournalBatch);
+      CreateJournalLine(
+        GenJournalLine,GenJournalBatch,DocumentType,GenJournalLine."Account Type"::Vendor,
+        VendorNo,Amount,PostingDate);
+    END;
+
+    PROCEDURE CreatePaymentWithOnlineAppl@1500063(VAR GenJournalLine@1500006 : Record 81;DocumentType@1500002 : Option;Amount@1500000 : Decimal);
+    VAR
+      GenJournalBatch@1500001 : Record 232;
+      BankAccount@1500003 : Record 270;
+      ApplyToDocumentType@1500004 : Option;
+      ApplyToDocumentNo@1500005 : Code[20];
+      CurrencyCode@1500007 : Code[10];
+      PostingDate@1500008 : Date;
+    BEGIN
+      ApplyToDocumentType := GenJournalLine."Document Type";
+      ApplyToDocumentNo := GenJournalLine."Document No.";
+      LibraryERM.FindBankAccount(BankAccount);
+      CreateGenJnllBatchWithBalAcc(GenJournalBatch);
+      CurrencyCode := GenJournalLine."Currency Code";
+      PostingDate := GenJournalLine."Posting Date";
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        DocumentType,GenJournalLine."Account Type",GenJournalLine."Account No.",Amount);
+      GenJournalLine.VALIDATE("Document No.",
+        LibraryUtility.GenerateRandomCode(GenJournalLine.FIELDNO("Document No."),DATABASE::"Gen. Journal Line"));
+      GenJournalLine.VALIDATE("Posting Date",PostingDate);
+      GenJournalLine.VALIDATE("Bal. Account Type",GenJournalLine."Bal. Account Type"::"Bank Account");
+      GenJournalLine.VALIDATE("Bal. Account No.",BankAccount."No.");
+      GenJournalLine.VALIDATE("Currency Code",CurrencyCode);
+      GenJournalLine.VALIDATE("Applies-to Doc. Type",ApplyToDocumentType);
+      GenJournalLine.VALIDATE("Applies-to Doc. No.",ApplyToDocumentNo);
+      GenJournalLine.MODIFY;
+    END;
+
+    PROCEDURE CreatePurchaseDoc@1500038(VAR PurchaseHeader@1500000 : Record 38;VAR PurchaseLine@1500004 : Record 39;DocumentType@1500001 : Option;ReverseChargeType@1500002 : Option;ReverseChargePercentage@1500006 : Integer;PoT@1500003 : Boolean) : Code[20];
+    BEGIN
+      EXIT(CreatePurchaseDocForVendor(PurchaseHeader,PurchaseLine,CreateVendor,DocumentType,
+          ReverseChargeType,ReverseChargePercentage,PoT))
+    END;
+
+    PROCEDURE CreatePurchaseDocForAdvPayment@1500048(VAR PurchaseHeader@1500006 : Record 38;VAR PurchaseLine@1500005 : Record 39;GenJournalLine@1500004 : Record 81;DocumentType@1500003 : Option;ReverseChargeType@1500002 : Option;ReverseChargePercentage@1500007 : Integer;PoT@1500001 : Boolean;Amount@1500000 : Decimal);
+    BEGIN
+      CreatePurchaseHeaderByVendor(PurchaseHeader,DocumentType,GenJournalLine."Service Type (Rev. Chrg.)",
+        PoT,GenJournalLine."Account No.");
+      PurchaseHeader.VALIDATE("Posting Date",GenJournalLine."Posting Date");
+      PurchaseHeader.VALIDATE("Currency Code",GenJournalLine."Currency Code");
+      PurchaseHeader.MODIFY(TRUE);
+      CreatePurchaseLineWithAmount(PurchaseLine,PurchaseHeader,GenJournalLine."Service Tax Group Code",
+        GenJournalLine."Service Tax Registration No.",ReverseChargeType,ReverseChargePercentage,Amount);
+      PurchaseLine.VALIDATE("Posting Group",GenJournalLine."Posting Group");
+      PurchaseLine.MODIFY;
+    END;
+
+    PROCEDURE CreatePurchaseDocForVendor@1500036(VAR PurchaseHeader@1500004 : Record 38;VAR PurchaseLine@1500003 : Record 39;VendorNo@1500005 : Code[20];DocumentType@1500002 : Option;ReverseChargeType@1500001 : Option;ReverseChargePercentage@1500007 : Integer;PoT@1500000 : Boolean) : Code[20];
+    VAR
+      ServiceTaxGroup@1500006 : Record 16471;
+    BEGIN
+      CreateServiceTaxGroupSetup(ServiceTaxGroup);
+      CreatePurchaseHeaderByVendor(PurchaseHeader,DocumentType,GetReverseChargeServType(ReverseChargeType),PoT,VendorNo);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ServiceTaxGroup.Code,CreateServTaxRegNo,
+        ReverseChargeType,ReverseChargePercentage);
+      EXIT(ServiceTaxGroup.Code);
+    END;
+
+    PROCEDURE CreatePurchaseDocFromGenJnl@1500071(VAR GenJournalLine@1500000 : Record 81;DocumentType@1500001 : Option;ServiceTypeRevChrg@1500002 : Option;ReverseChargeType@1500006 : Option;PoT@1500004 : Boolean;Percentage@1500005 : Integer);
+    VAR
+      GenJournalBatch@1500003 : Record 232;
+    BEGIN
+      CreateGenJournalBatch(GenJournalBatch);
+      CreateJnlLineWithServiceTax(GenJournalLine,GenJournalBatch,DocumentType,
+        ServiceTypeRevChrg,ReverseChargeType,Percentage);
+      GenJournalLine.VALIDATE(PoT,PoT);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreatePurchaseHeader@1500035(VAR PurchaseHeader@1500000 : Record 38;DocumentType@1500004 : Option;ReverseChargeServiceType@1500001 : Option;PoT@1500005 : Boolean);
+    BEGIN
+      CreatePurchaseHeaderByVendor(PurchaseHeader,DocumentType,ReverseChargeServiceType,PoT,CreateVendor)
+    END;
+
+    PROCEDURE CreatePurchaseHeaderByVendor@1500041(VAR PurchaseHeader@1500000 : Record 38;DocumentType@1500004 : Option;ReverseChargeServiceType@1500001 : Option;PoT@1500005 : Boolean;VendorNo@1500006 : Code[20]);
+    VAR
+      StructureHeader@1500003 : Record 13792;
+      ServiceTaxReturnPeriod@1500002 : Record 16588;
+      CurrencyCode@1500007 : Code[10];
+    BEGIN
+      GetServiceTaxReturnPeriod(ServiceTaxReturnPeriod);
+      LibraryServiceTax.CreateServiceTaxStructure(StructureHeader);
+
+      CurrencyCode := PurchaseHeader."Currency Code";
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocumentType,VendorNo);
+      PurchaseHeader.VALIDATE("Posting Date",LibraryServiceTax.GetDateWithinSrvTaxPeriod(ServiceTaxReturnPeriod));
+      PurchaseHeader.VALIDATE("Currency Code",CurrencyCode);
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",PurchaseHeader."No.");
+      PurchaseHeader.VALIDATE("Vendor Cr. Memo No.",PurchaseHeader."No.");
+      PurchaseHeader.VALIDATE("Consignment Note No.",PurchaseHeader."No.");
+      PurchaseHeader.VALIDATE(Structure,StructureHeader.Code);
+      PurchaseHeader.VALIDATE("Service Type (Rev. Chrg.)",ReverseChargeServiceType);
+      PurchaseHeader.VALIDATE("Location Code",'');
+      PurchaseHeader.VALIDATE(PoT,PoT);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    PROCEDURE CreatePurchaseLine@5(VAR PurchaseLine@1500001 : Record 39;PurchaseHeader@1500000 : Record 38;ServiceTaxGroupCode@1500003 : Code[20];ServiceTaxRegNo@1500005 : Code[20];RevChargeType@1500002 : Option;ReverseChargePercentage@1500006 : Integer);
+    BEGIN
+      CreatePurchaseLineWithAmount(
+        PurchaseLine,PurchaseHeader,ServiceTaxGroupCode,ServiceTaxRegNo,RevChargeType,ReverseChargePercentage,
+        LibraryRandom.RandInt(20000));
+    END;
+
+    PROCEDURE CreatePurchaseLineWithAmount@1500043(VAR PurchaseLine@1500001 : Record 39;PurchaseHeader@1500000 : Record 38;ServiceTaxGroupCode@1500003 : Code[20];ServiceTaxRegNo@1500005 : Code[20];RevChargeType@1500002 : Option;ReverseChargePercentage@1500007 : Integer;Amount@1500006 : Decimal);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,
+        PurchaseLine.Type::"G/L Account",CreateGLAccount(ServiceTaxGroupCode),1);
+      PurchaseLine.VALIDATE("Service Tax Registration No.",ServiceTaxRegNo);
+      PurchaseLine.VALIDATE("Direct Unit Cost",Amount);
+      PurchaseLine.MODIFY(TRUE);
+
+      CreateSTRevChrgSetupFromPurch(PurchaseLine,RevChargeType,ReverseChargePercentage);
+    END;
+
+    PROCEDURE CreateSalesDocFromGenJnl@1500093(VAR GenJournalLine@1500004 : Record 81;DocumentType@1500003 : Option;Amount@1500006 : Decimal;PostingDate@1500007 : Date;ServiceTaxGroupCode@1500008 : Code[20];ServiceTaxRegistrationNo@1500009 : Code[20]);
+    VAR
+      GenJournalBatch@1500005 : Record 232;
+    BEGIN
+      CreateGenJournalBatch(GenJournalBatch);
+      CreateSalesJnlLineWithST(
+        GenJournalLine,GenJournalBatch,DocumentType,Amount,PostingDate,ServiceTaxGroupCode,ServiceTaxRegistrationNo);
+    END;
+
+    PROCEDURE CreateSalesJnlLineNormalPmt@1500061(VAR GenJournalLine@1170000001 : Record 81;DocumentType@1500002 : Option;CustomerNo@1500007 : Code[20];Amount@1500003 : Decimal;PostingDate@1500005 : Date);
+    VAR
+      BankAccount@1500009 : Record 270;
+      GenJournalBatch@1500000 : Record 232;
+    BEGIN
+      CreateGenJournalBatch(GenJournalBatch);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        DocumentType,GenJournalLine."Account Type"::Customer,CustomerNo,Amount);
+      WITH GenJournalLine DO BEGIN
+        VALIDATE("Bal. Account Type","Bal. Account Type"::"Bank Account");
+        LibraryERM.FindBankAccount(BankAccount);
+        VALIDATE("Bal. Account No.",BankAccount."No.");
+        VALIDATE("Posting Date",PostingDate);
+        VALIDATE("Document No.",LibraryUtility.GenerateRandomCode(FIELDNO("Document No."),DATABASE::"Gen. Journal Line"));
+        VALIDATE("External Document No.","Document No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateSalesJnlLineWithST@1500078(VAR GenJournalLine@1500001 : Record 81;GenJournalBatch@1500000 : Record 232;DocumentType@1500002 : Option;Amount@1500005 : Decimal;PostingDate@1500004 : Date;ServiceTaxGroupCode@1500003 : Code[20];ServiceTaxRegistrationNo@1500006 : Code[20]);
+    VAR
+      NewPoT@1500007 : Boolean;
+    BEGIN
+      NewPoT := GenJournalLine.PoT;
+      IF GenJournalLine."Account No." = '' THEN
+        GenJournalLine."Account No." := CreateCustomer;
+      CreateJournalLine(
+        GenJournalLine,GenJournalBatch,DocumentType,
+        GenJournalLine."Account Type"::Customer,GenJournalLine."Account No.",Amount,PostingDate);
+
+      WITH GenJournalLine DO BEGIN
+        VALIDATE("Bal. Account Type","Bal. Account Type"::"G/L Account");
+        VALIDATE("Bal. Account No.",CreateGLAccountForSales(ServiceTaxGroupCode));
+        VALIDATE("Service Tax Group Code",ServiceTaxGroupCode);
+        VALIDATE("Service Tax Registration No.",ServiceTaxRegistrationNo);
+        VALIDATE(PoT,NewPoT);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    PROCEDURE CreateSalesJnlLineWithServTax@1500058(VAR GenJournalLine@1170000001 : Record 81;DocumentType@1500002 : Option);
+    VAR
+      ServiceTaxSetup@1500007 : Record 16472;
+      ServiceTaxRegNoCode@1500006 : Code[20];
+      BaseAmount@1500000 : Decimal;
+      LineAmount@1500001 : Decimal;
+      PoT@1500003 : Boolean;
+    BEGIN
+      CreateServiceTaxSetup(ServiceTaxSetup,ServiceTaxRegNoCode);
+      BaseAmount := RandomAmountForSalesDocType(DocumentType);
+      IF DocumentType IN [GenJournalLine."Document Type"::Payment,GenJournalLine."Document Type"::Refund] THEN
+        LineAmount := BaseAmount + CalculateServTaxTotal(BaseAmount,ServiceTaxSetup)
+      ELSE
+        LineAmount := BaseAmount;
+      PoT := GenJournalLine.PoT;
+      CreateSalesJnlLineNormalPmt(
+        GenJournalLine,DocumentType,CreateCustomer,LineAmount,ServiceTaxSetup."From Date");
+      GenJournalLine.VALIDATE("Posting Date",ServiceTaxSetup."From Date");
+      GenJournalLine.VALIDATE("Service Tax Group Code",ServiceTaxSetup.Code);
+      GenJournalLine.VALIDATE("Service Tax Registration No.",ServiceTaxRegNoCode);
+      IF DocumentType IN [GenJournalLine."Document Type"::Payment,GenJournalLine."Document Type"::Refund] THEN
+        GenJournalLine.VALIDATE("Serv. Tax on Advance Payment",TRUE);
+      GenJournalLine.VALIDATE("Service Tax Base Amount (LCY)",BaseAmount);
+      GenJournalLine.VALIDATE(PoT,PoT);
+    END;
+
+    PROCEDURE CreateServiceTaxGroupSetup@1500017(VAR ServiceTaxGroup@1500001 : Record 16471);
+    VAR
+      ServiceTaxReturnPeriod@1500000 : Record 16588;
+    BEGIN
+      GetServiceTaxReturnPeriod(ServiceTaxReturnPeriod);
+      LibraryServiceTax.CreateServiceTaxGroup(ServiceTaxGroup);
+      LibraryServiceTax.CreateServiceTaxSetup(
+        ServiceTaxGroup.Code,
+        LibraryServiceTax.GetSrvTaxReturnPeriodStartDate(ServiceTaxReturnPeriod));
+    END;
+
+    PROCEDURE CreateServiceTaxGroupAndSetup@1500099(VAR ServiceTaxGroup@1500001 : Record 16471;VAR ServiceTaxSetup@1500002 : Record 16472);
+    VAR
+      ServiceTaxReturnPeriod@1500000 : Record 16588;
+      FromDate@1500004 : Date;
+    BEGIN
+      GetServiceTaxReturnPeriod(ServiceTaxReturnPeriod);
+      LibraryServiceTax.CreateServiceTaxGroup(ServiceTaxGroup);
+
+      FromDate := LibraryServiceTax.GetSrvTaxReturnPeriodStartDate(ServiceTaxReturnPeriod);
+      LibraryServiceTax.CreateServiceTaxSetup(ServiceTaxGroup.Code,FromDate);
+      ServiceTaxSetup.FindOnDate(ServiceTaxGroup.Code,FromDate);
+    END;
+
+    PROCEDURE CreateServiceTaxSetup@1500059(VAR ServiceTaxSetup@1500000 : Record 16472;VAR ServiceTaxRegNoCode@1500001 : Code[20]);
+    VAR
+      ServiceTaxRegNo@1500004 : Record 16475;
+      ServiceTaxGroup@1500003 : Record 16471;
+    BEGIN
+      LibraryServiceTax.CreateServiceTaxRegistrationNo(ServiceTaxRegNo);
+      ServiceTaxRegNoCode := ServiceTaxRegNo.Code;
+      CreateServiceTaxGroupSetup(ServiceTaxGroup);
+      ServiceTaxSetup.SETRANGE(Code,ServiceTaxGroup.Code);
+      ServiceTaxSetup.FINDFIRST;
+    END;
+
+    PROCEDURE CreateServTaxRegNo@1500019() : Code[20];
+    VAR
+      ServTaxRegNo@1500000 : Record 16475;
+    BEGIN
+      LibraryServiceTax.CreateServiceTaxRegistrationNo(ServTaxRegNo);
+      EXIT(ServTaxRegNo.Code);
+    END;
+
+    PROCEDURE CreateSplitDocJnlLine@1500074(VAR GenJournalLine@1500000 : Record 81;DocumentType@1500001 : Option);
+    VAR
+      Percentage@1500002 : Integer;
+    BEGIN
+      Percentage := LibraryRandom.RandIntInRange(10,90);
+      CreatePurchaseDocFromGenJnl(
+        GenJournalLine,DocumentType,GenJournalLine."Service Type (Rev. Chrg.)"::Inward,
+        ReverseChargeTypeOption::Standard,TRUE,Percentage);
+    END;
+
+    PROCEDURE CreateSTRevChrgSetupFromPurch@1500016(PurchaseLine@1500000 : Record 39;RevChargeType@1500001 : Option;ReverseChargePercentage@1500004 : Integer);
+    VAR
+      Vendor@1500002 : Record 23;
+      ServiceTaxRegNo@1500003 : Record 16475;
+    BEGIN
+      IF RevChargeType = ReverseChargeTypeOption::" " THEN
+        EXIT;
+
+      Vendor.GET(PurchaseLine."Buy-from Vendor No.");
+      LibraryServiceTax.CreateSrvTaxReverseChargeSetup(
+        PurchaseLine."Service Tax Group",
+        Vendor."Service Entity Type",
+        ServiceTaxRegNo.GetServiceEntityType(PurchaseLine."Service Tax Registration No."),
+        ConvertSTReverseCharge(RevChargeType),ReverseChargePercentage);
+    END;
+
+    PROCEDURE CreateSTRevChrgSetupFromJnl@1500004(GenJournalLine@1500001 : Record 81;RevChargeType@1500002 : Option;ReverseChargePercentage@1500004 : Integer);
+    VAR
+      ServiceTaxRegNo@1500003 : Record 16475;
+      Vendor@1500000 : Record 23;
+    BEGIN
+      IF RevChargeType = ReverseChargeTypeOption::" " THEN
+        EXIT;
+
+      Vendor.GET(GenJournalLine."Account No.");
+      LibraryServiceTax.CreateSrvTaxReverseChargeSetup(
+        GenJournalLine."Service Tax Group Code",
+        Vendor."Service Entity Type",
+        ServiceTaxRegNo.GetServiceEntityType(GenJournalLine."Service Tax Registration No."),
+        ConvertSTReverseCharge(RevChargeType),ReverseChargePercentage);
+    END;
+
+    PROCEDURE CreateVendor@8() : Code[20];
+    VAR
+      Location@1500000 : Record 14;
+      ServiceEntityType@1500001 : Record 16460;
+      Vendor@1063 : Record 23;
+      GeneralPostingSetup@1064 : Record 252;
+    BEGIN
+      LibraryServiceTax.CreateServiceEntityType(ServiceEntityType);
+      LibraryERM.FindGeneralPostingSetup(GeneralPostingSetup);
+      CreateLocation(Location);
+
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("Gen. Bus. Posting Group",GeneralPostingSetup."Gen. Bus. Posting Group");
+      Vendor.VALIDATE("Service Entity Type",ServiceEntityType.Code);
+      Vendor.VALIDATE("Location Code",Location.Code);
+      Vendor.MODIFY(TRUE);
+      EXIT(Vendor."No.");
+    END;
+
+    PROCEDURE FillExpectedAmntsFullPurchFlow@1500040(VAR ExpectedServTaxEntryDetails@1500000 : Record 16474;ExpectedServTaxEntry@1500001 : Record 16473);
+    BEGIN
+      WITH ExpectedServTaxEntryDetails DO BEGIN
+        "Service Tax Amount" := ExpectedServTaxEntry."Service Tax Amount";
+        "Service Tax eCess Amount" := ExpectedServTaxEntry."eCess Amount";
+        "Service Tax SHE Cess Amount" := ExpectedServTaxEntry."SHE Cess Amount";
+        "Service Tax SBC Amount" := ExpectedServTaxEntry."Service Tax SBC Amount";
+        "KK Cess Amount" := ExpectedServTaxEntry."KK Cess Amount";
+        "Remaining Credit" := ExpectedServTaxEntry."Service Tax Amount";
+        "Remaining Credit (eCess)" := ExpectedServTaxEntry."eCess Amount";
+        "Remaining Credit (SHECess)" := ExpectedServTaxEntry."SHE Cess Amount";
+        "Remaining Credit (KK Cess)" := ExpectedServTaxEntry."KK Cess Amount";
+        "Rev. Chrg. Remaining Credit" := 0;
+        "Rev. Chrg. Rem. Credit (eCESS)" := 0;
+        "Rev. Chrg. Rem. Cr. (SHECess)" := 0;
+        "Rev. Chrg. Rem. Credit (KKC)" := 0;
+      END;
+    END;
+
+    PROCEDURE FillExpectedAmntsRevChrgAppln@1500039(VAR ExpectedServTaxEntryDetails@1500000 : Record 16474;ExpectedServTaxEntry@1500001 : Record 16473);
+    BEGIN
+      WITH ExpectedServTaxEntryDetails DO BEGIN
+        "Service Tax Amount" := ExpectedServTaxEntry."Service Tax Amount";
+        "Service Tax eCess Amount" := ExpectedServTaxEntry."eCess Amount";
+        "Service Tax SHE Cess Amount" := ExpectedServTaxEntry."SHE Cess Amount";
+        "Service Tax SBC Amount" := ExpectedServTaxEntry."Service Tax SBC Amount";
+        "KK Cess Amount" := ExpectedServTaxEntry."KK Cess Amount";
+        "Remaining Credit" := 0;
+        "Remaining Credit (eCess)" := 0;
+        "Remaining Credit (SHECess)" := 0;
+        "Remaining Credit (KK Cess)" := 0;
+        "Rev. Chrg. Remaining Credit" := ExpectedServTaxEntry."Service Tax Amount";
+        "Rev. Chrg. Rem. Credit (eCESS)" := ExpectedServTaxEntry."eCess Amount";
+        "Rev. Chrg. Rem. Cr. (SHECess)" := ExpectedServTaxEntry."SHE Cess Amount";
+        "Rev. Chrg. Rem. Credit (KKC)" := ExpectedServTaxEntry."KK Cess Amount";
+      END;
+    END;
+
+    PROCEDURE FillExpectedAmntsSTEntry@1500037(GenJnlLine@1500004 : Record 81;BaseAmount@1500010 : Decimal;VAR ServTaxEntry@1500009 : Record 16473);
+    VAR
+      Percentage@1500000 : Decimal;
+      ServTaxSetup@1500006 : Record 16472;
+    BEGIN
+      Percentage := GetRevChrgPercent(GenJnlLine);
+      ServTaxSetup.FindOnDate(GenJnlLine."Service Tax Group Code",GenJnlLine."Posting Date");
+
+      ServTaxEntry."Service Tax Base Amount" := BaseAmount;
+      ServTaxEntry."Service Tax Amount" := CalculateServTax(BaseAmount,ServTaxSetup);
+      ServTaxEntry."eCess Amount" := CalculateECess(BaseAmount,ServTaxSetup);
+      ServTaxEntry."SHE Cess Amount" := CalculateSHECess(BaseAmount,ServTaxSetup);
+      ServTaxEntry."Service Tax SBC Amount" := CalculateSBC(BaseAmount,ServTaxSetup);
+      ServTaxEntry."KK Cess Amount" := CalculateKKCess(BaseAmount,ServTaxSetup);
+      ServTaxEntry."Reverse Charge" := Percentage = 100;
+    END;
+
+    PROCEDURE FindCurrencyCode@1500068() : Code[10];
+    VAR
+      Currency@1500000 : Record 4;
+    BEGIN
+      Currency.SETRANGE("Invoice Rounding Precision",0.01);
+      LibraryERM.FindCurrency(Currency);
+      EXIT(Currency.Code);
+    END;
+
+    PROCEDURE FindPmtMethodWithBalAcc@1500029() : Code[10];
+    VAR
+      PaymentMethod@1500000 : Record 289;
+    BEGIN
+      PaymentMethod.SETFILTER("Bal. Account No.",'<>%1','');
+      PaymentMethod.FINDFIRST;
+      EXIT(PaymentMethod.Code);
+    END;
+
+    PROCEDURE GetAmountSignInJournalLine@1500005(DocumentType@1500000 : Option) : Integer;
+    VAR
+      GenJournalLine@1500001 : Record 81;
+    BEGIN
+      CASE DocumentType OF
+        GenJournalLine."Document Type"::"Credit Memo",
+        GenJournalLine."Document Type"::Payment:
+          EXIT(1);
+        GenJournalLine."Document Type"::"Finance Charge Memo",
+        GenJournalLine."Document Type"::Reminder,
+        GenJournalLine."Document Type"::Refund,
+        GenJournalLine."Document Type"::Invoice:
+          EXIT(-1);
+        ELSE
+          ERROR(STRSUBSTNO(InvalidDocumentTypeErr,DocumentType))
+      END
+    END;
+
+    PROCEDURE GetApplyingDocType@1500012(DocumentType@1500000 : Option) : Integer;
+    VAR
+      PurchaseHeader@1500001 : Record 38;
+      GenJournalLine@1500002 : Record 81;
+    BEGIN
+      IF (DocumentType = PurchaseHeader."Document Type"::Order) OR (DocumentType = PurchaseHeader."Document Type"::Invoice) THEN
+        EXIT(GenJournalLine."Document Type"::Payment);
+      EXIT(GenJournalLine."Document Type"::Refund);
+    END;
+
+    PROCEDURE GetBankAccGLPostingAcc@1500065(BankAccountCode@1500002 : Code[20]) : Code[20];
+    VAR
+      BankAccount@1500000 : Record 270;
+      BankAccPostingGroup@1500001 : Record 277;
+    BEGIN
+      BankAccount.GET(BankAccountCode);
+      BankAccPostingGroup.GET(BankAccount."Bank Acc. Posting Group");
+      EXIT(BankAccPostingGroup."G/L Bank Account No.");
+    END;
+
+    PROCEDURE GetBaseAndTaxAmountFromAdvPmt@1500995(VAR BaseAmount@1500002 : Decimal;VAR TaxAmount@1500003 : Decimal;ServiceTaxSetup@1500004 : Record 16472;Amount@1500000 : Decimal;RevChargeType@1500005 : Option;RevChrgPercentage@1500001 : Integer);
+    BEGIN
+      BaseAmount := GetBaseAmountFromAdvPayment(Amount,RevChrgPercentage,RevChargeType,ServiceTaxSetup);
+      TaxAmount := CalculateServTaxTotal(BaseAmount,ServiceTaxSetup);
+    END;
+
+    PROCEDURE GetKKCAndSBCmountFromAdvPmt@1500109(BaseAmount@1500002 : Decimal;VAR SBCAmount@1500007 : Decimal;VAR KKCAmount@1500006 : Decimal;ServiceTaxSetup@1500004 : Record 16472;Amount@1500000 : Decimal;RevChargeType@1500005 : Option;RevChrgPercentage@1500001 : Integer);
+    BEGIN
+      BaseAmount := GetBaseAmountFromAdvPayment(Amount,RevChrgPercentage,RevChargeType,ServiceTaxSetup);
+      SBCAmount := CalculateSBC(BaseAmount,ServiceTaxSetup);
+      KKCAmount := CalculateKKCess(BaseAmount,ServiceTaxSetup);
+    END;
+
+    PROCEDURE GetBaseAndTaxAmountFromAdvPmtNonKKC@1500098(VAR BaseAmount@1500002 : Decimal;VAR TaxAmount@1500003 : Decimal;VAR SBCAmount@1500006 : Decimal;VAR KKCAmount@1500007 : Decimal;ServiceTaxSetup@1500004 : Record 16472;Amount@1500000 : Decimal;RevChargeType@1500005 : Option;RevChrgPercentage@1500001 : Integer);
+    BEGIN
+      BaseAmount := GetBaseAmountFromAdvPaymentNonKKC(Amount,RevChrgPercentage,RevChargeType,ServiceTaxSetup);
+      TaxAmount := CalculateServTaxTotal(BaseAmount,ServiceTaxSetup);
+      SBCAmount := CalculateSBC(BaseAmount,ServiceTaxSetup);
+      KKCAmount := CalculateKKCess(BaseAmount,ServiceTaxSetup);
+    END;
+
+    PROCEDURE GetBaseAmountFromAdvPayment@1500047(Amount@1500000 : Decimal;RevChrgPercentage@1500003 : Integer;ReverseChargeType@1500001 : Option;ServiceTaxSetup@1500002 : Record 16472) : Decimal;
+    BEGIN
+      IF ReverseChargeType = ReverseChargeTypeOption::" " THEN
+        EXIT(CalcServTaxBaseAmountBackward(Amount,ServiceTaxSetup,RevChrgPercentage));
+      EXIT(Amount)
+    END;
+
+    PROCEDURE GetBaseAmountFromAdvPaymentNonKKC@1500104(Amount@1500000 : Decimal;RevChrgPercentage@1500003 : Integer;ReverseChargeType@1500001 : Option;ServiceTaxSetup@1500002 : Record 16472) : Decimal;
+    BEGIN
+      IF ReverseChargeType = ReverseChargeTypeOption::" " THEN
+        EXIT(CalcServTaxBaseAmountBackwardNonKKC(Amount,ServiceTaxSetup,RevChrgPercentage));
+      EXIT(Amount)
+    END;
+
+    PROCEDURE GetBaseAmountFromGenJnlLine@1500049(GenJournalLine@1500000 : Record 81) : Decimal;
+    VAR
+      ServiceTaxSetup@1500001 : Record 16472;
+      AmountLCY@1500004 : Decimal;
+      Percentage@1500002 : Decimal;
+      ServiceTaxType@1500003 : Option;
+    BEGIN
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      Percentage := GetRevChrgPercent(GenJournalLine);
+      IF GenJournalLine."Currency Code" = '' THEN
+        AmountLCY := GenJournalLine.Amount
+      ELSE
+        AmountLCY := GenJournalLine."Amount (LCY)";
+
+      IF GenJournalLine."Document Type" IN [GenJournalLine."Document Type"::Invoice,
+                                            GenJournalLine."Document Type"::"Credit Memo"]
+      THEN
+        EXIT(CalculateServTaxBase(ABS(AmountLCY),GenJournalLine."Document Type"));
+
+      IF (Percentage >= 1) AND (Percentage <= 99) THEN
+        ServiceTaxType := ReverseChargeTypeOption::" "
+      ELSE
+        ServiceTaxType := GetServTaxType(
+            GenJournalLine."Service Tax Group Code",GenJournalLine."Account No.",GenJournalLine."Service Tax Registration No.");
+      EXIT(GetBaseAmountFromAdvPayment(AmountLCY,Percentage,ServiceTaxType,ServiceTaxSetup));
+    END;
+
+    PROCEDURE GetBaseAmountFromGenJnlLineWithKKC@1500112(GenJournalLine@1500000 : Record 81) : Decimal;
+    VAR
+      ServiceTaxSetup@1500001 : Record 16472;
+      AmountLCY@1500004 : Decimal;
+      Percentage@1500002 : Decimal;
+      ServiceTaxType@1500003 : Option;
+    BEGIN
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      Percentage := GetRevChrgPercent(GenJournalLine);
+      IF GenJournalLine."Currency Code" = '' THEN
+        AmountLCY := GenJournalLine.Amount
+      ELSE
+        AmountLCY := GenJournalLine."Amount (LCY)";
+
+      IF GenJournalLine."Document Type" IN [GenJournalLine."Document Type"::Invoice,
+                                            GenJournalLine."Document Type"::"Credit Memo"]
+      THEN
+        EXIT(CalculateServTaxBase(ABS(AmountLCY),GenJournalLine."Document Type"));
+
+      IF (Percentage >= 1) AND (Percentage <= 99) THEN
+        ServiceTaxType := ReverseChargeTypeOption::" "
+      ELSE
+        ServiceTaxType := GetServTaxType(
+            GenJournalLine."Service Tax Group Code",GenJournalLine."Account No.",GenJournalLine."Service Tax Registration No.");
+      IF ServiceTaxType = ReverseChargeTypeOption::" " THEN
+        EXIT(CalcServTaxBaseAmountBackwardWithKKC(AmountLCY,ServiceTaxSetup,Percentage));
+      EXIT(AmountLCY)
+    END;
+
+    PROCEDURE GetBaseAmountFromGenJnlLineNonKKC@1500114(GenJournalLine@1500000 : Record 81) : Decimal;
+    VAR
+      ServiceTaxSetup@1500001 : Record 16472;
+      AmountLCY@1500004 : Decimal;
+      Percentage@1500002 : Decimal;
+      ServiceTaxType@1500003 : Option;
+    BEGIN
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      Percentage := GetRevChrgPercent(GenJournalLine);
+      IF GenJournalLine."Currency Code" = '' THEN
+        AmountLCY := GenJournalLine.Amount
+      ELSE
+        AmountLCY := GenJournalLine."Amount (LCY)";
+
+      IF GenJournalLine."Document Type" IN [GenJournalLine."Document Type"::Invoice,
+                                            GenJournalLine."Document Type"::"Credit Memo"]
+      THEN
+        EXIT(CalculateServTaxBase(ABS(AmountLCY),GenJournalLine."Document Type"));
+
+      IF (Percentage >= 1) AND (Percentage <= 99) THEN
+        ServiceTaxType := ReverseChargeTypeOption::" "
+      ELSE
+        ServiceTaxType := GetServTaxType(
+            GenJournalLine."Service Tax Group Code",GenJournalLine."Account No.",GenJournalLine."Service Tax Registration No.");
+      IF ServiceTaxType = ReverseChargeTypeOption::" " THEN
+        EXIT(CalcServTaxBaseAmountBackwardNonKKC(AmountLCY,ServiceTaxSetup,Percentage));
+      EXIT(AmountLCY)
+    END;
+
+    PROCEDURE GetLastTransactionNo@1500008() : Integer;
+    VAR
+      GLEntry@1500000 : Record 17;
+    BEGIN
+      GLEntry.FINDLAST;
+      EXIT(GLEntry."Transaction No.");
+    END;
+
+    PROCEDURE GetPostingDocType@1500076(DocumentType@1500000 : Option) : Integer;
+    VAR
+      PurchHeader@1500001 : Record 38;
+      GenJnlLine@1500002 : Record 81;
+    BEGIN
+      CASE DocumentType OF
+        PurchHeader."Document Type"::Order,PurchHeader."Document Type"::Invoice:
+          EXIT(GenJnlLine."Document Type"::Invoice);
+        PurchHeader."Document Type"::"Return Order",PurchHeader."Document Type"::"Credit Memo":
+          EXIT(GenJnlLine."Document Type"::"Credit Memo");
+      END;
+    END;
+
+    PROCEDURE GetPurchInvAmountFactor@1500097(AmountRelation@1500000 : Option) : Decimal;
+    VAR
+      PurchInvAmtFactorToAdvPmtAmt@1500001 : Decimal;
+    BEGIN
+      CASE AmountRelation OF
+        PurchInvAmountVsAppliedDocAmt::InvoiceAmountEqual:
+          PurchInvAmtFactorToAdvPmtAmt := 1;
+        PurchInvAmountVsAppliedDocAmt::InvoiceAmountGreater:
+          PurchInvAmtFactorToAdvPmtAmt := 1.5;
+        PurchInvAmountVsAppliedDocAmt::InvoiceAmountSmaller:
+          PurchInvAmtFactorToAdvPmtAmt := 0.75;
+      END;
+      EXIT(PurchInvAmtFactorToAdvPmtAmt);
+    END;
+
+    PROCEDURE GetRemainingAmount@1500157(DocumentType@1500001 : Option;PostedDocNo@1500000 : Code[20]) : Decimal;
+    VAR
+      VendorLedgerEntry@1500002 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,DocumentType,PostedDocNo);
+      VendorLedgerEntry.CALCFIELDS("Remaining Amount");
+      EXIT(VendorLedgerEntry."Remaining Amount");
+    END;
+
+    PROCEDURE GetRevChrgPercent@1500091(GenJournalLine@1500000 : Record 81) : Integer;
+    VAR
+      STReverseChargeSetup@1500001 : Record 16461;
+    BEGIN
+      IF GenJournalLine.TryGetSrvTaxReverseChargeSetup(STReverseChargeSetup) THEN
+        EXIT(STReverseChargeSetup."Reverse Charge %");
+      EXIT(0);
+    END;
+
+    PROCEDURE GetReverseChargeServType@1500066(ReverseChargeType@1500000 : Option) : Integer;
+    VAR
+      PurchaseHeader@1500001 : Record 38;
+    BEGIN
+      IF ReverseChargeType = ReverseChargeTypeOption::" " THEN
+        EXIT(PurchaseHeader."Service Type (Rev. Chrg.)"::" ");
+      EXIT(PurchaseHeader."Service Type (Rev. Chrg.)"::Inward);
+    END;
+
+    PROCEDURE GetServiceTaxEntryDetail@1500084(VAR ServiceTaxEntryDetails@1500001 : Record 16474;DocumentNo@1500000 : Code[20]);
+    VAR
+      ServiceTaxEntry@1500002 : Record 16473;
+    BEGIN
+      ServiceTaxEntryDetails.SETRANGE("Document No.",DocumentNo);
+      ServiceTaxEntryDetails.SETRANGE("Corrective Application Entry",FALSE);
+      IF NOT ServiceTaxEntryDetails.FINDLAST THEN BEGIN
+        ServiceTaxEntry.SETRANGE("Document No.");
+        ServiceTaxEntry.FINDLAST;
+        ServiceTaxEntryDetails.RESET;
+        ServiceTaxEntryDetails.SETRANGE("Service Tax Entry No.",ServiceTaxEntry."Entry No.");
+        ServiceTaxEntryDetails.SETRANGE("Corrective Application Entry",FALSE);
+        IF ServiceTaxEntryDetails.FINDLAST THEN;
+      END;
+    END;
+
+    PROCEDURE GetServTaxExpenseAcc@1170000004(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."Service Tax Expenses Account");
+    END;
+
+    PROCEDURE GetServTaxInterimPayAcc@1500009(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."Payables Account (Interim)");
+    END;
+
+    PROCEDURE GetServTaxInterimRecAcc@1500002(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."Receivables Account (Interim)");
+    END;
+
+    PROCEDURE GetServTaxPayAcc@1500006(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."Service Tax Payable Account");
+    END;
+
+    PROCEDURE GetServTaxRecAcc@1500013(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."Service Tax Receivable Account");
+    END;
+
+    PROCEDURE GetServTaxSBCPayAcc@1500178(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."SB Cess Payable Account");
+    END;
+
+    PROCEDURE GetServTaxSBCRecAcc@1500179(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."SB Cess Expense Account");
+    END;
+
+    PROCEDURE GetServTaxSBCExpenseAcc@1500082(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."SB Cess Expense Account");
+    END;
+
+    PROCEDURE GetServTaxSBCInterimPayAcc@1500081(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."SB Cess Payable Acc.(Interim)");
+    END;
+
+    PROCEDURE GetServTaxSBCInterimRecAcc@1500080(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."SB Cess Acc.(Interim)");
+    END;
+
+    PROCEDURE GetKKCPayAcc@1500077(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."KK Cess Payable Account");
+    END;
+
+    PROCEDURE GetKKCRecAcc@1500073(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."KK Cess Receivable Account");
+    END;
+
+    PROCEDURE GetKKCExpenseAcc@1500096(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."KK Cess Expense Account");
+    END;
+
+    PROCEDURE GetKKCInterimPayAcc@1500094(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."KK Cess Payable Acc. (Interim)");
+    END;
+
+    PROCEDURE GetKKCInterimRecAcc@1500090(ServiceTaxSetup@1500000 : Record 16472) : Code[20];
+    BEGIN
+      EXIT(ServiceTaxSetup."KK Cess Rec. Acc. (Interim)");
+    END;
+
+    PROCEDURE GetServTaxRoundingPrecision@1500044() : Decimal;
+    VAR
+      GLSetup@1500002 : Record 98;
+    BEGIN
+      GLSetup.GET;
+      EXIT(GLSetup."Service Tax Rounding Precision");
+    END;
+
+    PROCEDURE GetServTaxType@1500095(ServTaxGroup@1500000 : Code[10];VendorNo@1500001 : Code[20];ServTaxRegNo@1500002 : Code[20]) : Integer;
+    VAR
+      SrvTaxReverseChrgSetup@1500003 : Record 16461;
+      Vendor@1500004 : Record 23;
+      SrvTaxRegNo@1500005 : Record 16475;
+    BEGIN
+      Vendor.GET(VendorNo);
+      SrvTaxRegNo.GET(ServTaxRegNo);
+      IF SrvTaxReverseChrgSetup.GET(ServTaxGroup,Vendor."Service Entity Type",SrvTaxRegNo."Service Entity Type") THEN
+        EXIT(ReverseChargeTypeOption::Standard);
+      EXIT(ReverseChargeTypeOption::" ");
+    END;
+
+    PROCEDURE GetServiceTaxReturnPeriod@1500015(VAR ServiceTaxReturnPeriod@1500000 : Record 16588);
+    BEGIN
+      ServiceTaxReturnPeriod.FINDLAST;
+    END;
+
+    PROCEDURE GetVendorPostingAccount@1500054(VendorNo@1500000 : Code[20]) : Code[20];
+    VAR
+      VendorPostingGroup@1500001 : Record 93;
+      Vendor@1500002 : Record 23;
+    BEGIN
+      Vendor.GET(VendorNo);
+      VendorPostingGroup.GET(Vendor."Vendor Posting Group");
+      EXIT(VendorPostingGroup."Payables Account");
+    END;
+
+    PROCEDURE InvokeForwardStaxCalculation@1500072(VAR GenJournalLine@1500000 : Record 81);
+    VAR
+      ServiceTaxBaseAmountLCY@1500001 : Decimal;
+    BEGIN
+      ServiceTaxBaseAmountLCY := GenJournalLine."Service Tax Base Amount (LCY)";
+      GenJournalLine.VALIDATE("Service Tax Base Amount (LCY)",0);
+      GenJournalLine.MODIFY(TRUE);
+      GenJournalLine.VALIDATE("Service Tax Base Amount (LCY)",ServiceTaxBaseAmountLCY);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    PROCEDURE PayServiceTax@1500000(ServiceTaxRegNo@1500000 : Code[20];ServiceTaxGroupCode@1500003 : Code[20];ReverseCharge@1500001 : Boolean) : Code[20];
+    BEGIN
+      EXIT(LibraryServiceTax.PayServiceTax(ServiceTaxRegNo,ServiceTaxGroupCode,ReverseCharge))
+    END;
+
+    PROCEDURE PostPayment@1500042(VendorNo@1500003 : Code[20];Amount@1500002 : Decimal;PostingDate@1500001 : Date;DocumentType@1500000 : Option) : Code[20];
+    VAR
+      GenJournalLine@1500005 : Record 81;
+    BEGIN
+      CreatePayment(GenJournalLine,VendorNo,Amount,PostingDate,DocumentType);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      EXIT(GenJournalLine."Document No.")
+    END;
+
+    PROCEDURE PostPurchaseDocForVendor@1500100(VAR PurchaseHeader@1500004 : Record 38;VAR PurchaseLine@1500003 : Record 39;VendorNo@1500005 : Code[20];DocumentType@1500002 : Option;ReverseChargeType@1500001 : Option;PoT@1500000 : Boolean) : Code[20];
+    BEGIN
+      CreatePurchaseDocForVendor(PurchaseHeader,PurchaseLine,VendorNo,DocumentType,ReverseChargeType,100,PoT);
+      EXIT(PostPurchaseDoc(PurchaseHeader))
+    END;
+
+    PROCEDURE PostEqualAmountSalesDoc@1500088(ServiceTaxEntryDetails@1500000 : Record 16474) PostedDocNo : Code[20];
+    VAR
+      GenJournalLine@1500003 : Record 81;
+    BEGIN
+      GenJournalLine.PoT := TRUE;
+      CreateSalesDocFromGenJnl(GenJournalLine,GenJournalLine."Document Type"::Invoice,
+        ServiceTaxEntryDetails."Base Amount",ServiceTaxEntryDetails."Posting Date",
+        ServiceTaxEntryDetails."Service Tax Group Code",ServiceTaxEntryDetails."Service Tax Registration No.");
+
+      PostedDocNo := GenJournalLine."Document No.";
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    PROCEDURE PostPurchaseDoc@1500001(PurchaseHeader@1500000 : Record 38) PostedDocNo : Code[20];
+    VAR
+      NoSeriesManagement@1500001 : Codeunit 396;
+    BEGIN
+      PostedDocNo := NoSeriesManagement.GetNextNo(PurchaseHeader."Posting No. Series",WORKDATE,FALSE);
+      PurchaseHeader.VALIDATE(Ship,TRUE);
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    PROCEDURE PostPurchaseDocForVendWithAmt@1500102(VAR PurchaseHeader@1500004 : Record 38;VAR PurchaseLine@1500003 : Record 39;VendorNo@1500005 : Code[20];DocumentType@1500002 : Option;ServiceTypeReverseCharge@1500009 : Option;ReverseChargeType@1500001 : Option;PoT@1500000 : Boolean;ServRegNo@1500008 : Code[20];ServiceTaxGroupCode@1500007 : Code[20];Amount@1500006 : Decimal) : Code[20];
+    BEGIN
+      CreatePurchaseHeaderByVendor(PurchaseHeader,DocumentType,ServiceTypeReverseCharge,PoT,VendorNo);
+      CreatePurchaseLineWithAmount(PurchaseLine,PurchaseHeader,ServiceTaxGroupCode,ServRegNo,ReverseChargeType,100,Amount);
+      EXIT(PostPurchaseDoc(PurchaseHeader))
+    END;
+
+    PROCEDURE PostPurchaseDocWOServTax@1500103(DocumentType@1500000 : Option;VendorNo@1500001 : Code[20]) : Code[20];
+    VAR
+      PurchaseHeader@1500003 : Record 38;
+      PurchaseLine@1500004 : Record 39;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocumentType,VendorNo);
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",PurchaseHeader."No.");
+      PurchaseHeader.VALIDATE("Vendor Cr. Memo No.",PurchaseHeader."No.");
+      PurchaseHeader.MODIFY(TRUE);
+
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,
+        PurchaseLine.Type::"G/L Account",CreateGLAccount(''),1);
+      PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(1000,2));
+      PurchaseLine.MODIFY(TRUE);
+
+      EXIT(PostPurchaseDoc(PurchaseHeader))
+    END;
+
+    PROCEDURE PostPurchDocFromGenJnl@1500101(VAR GenJournalLine@1500000 : Record 81;ReverseChargeType@1500002 : Option;DocumentType@1500003 : Option;PoT@1500004 : Boolean) : Code[20];
+    BEGIN
+      CreatePurchaseDocFromGenJnl(GenJournalLine,DocumentType,GetReverseChargeServType(ReverseChargeType),ReverseChargeType,PoT,100);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      EXIT(GenJournalLine."Document No.")
+    END;
+
+    PROCEDURE RandomAmountForSalesDocType@1500060(DocumentType@1500000 : Option) : Decimal;
+    BEGIN
+      EXIT(-GetAmountSignInJournalLine(DocumentType) * LibraryRandom.RandInt(100000));
+    END;
+
+    PROCEDURE ReverseDocument@1500052(DocumentNo@1500000 : Code[20]);
+    VAR
+      ReversalEntry@1500001 : Record 179;
+      TempReversalEntry@1500005 : TEMPORARY Record 179;
+      VendLedgEntry@1500004 : Record 25;
+      GenJnlPostReverse@1500003 : Codeunit 17;
+    BEGIN
+      VendLedgEntry.SETRANGE("Document No.",DocumentNo);
+      VendLedgEntry.FINDLAST;
+      ReversalEntry.SetReverseFilter(VendLedgEntry."Transaction No.",ReversalEntry."Reversal Type"::Transaction);
+      // Form179
+      TempReversalEntry.INIT;
+      TempReversalEntry."Reversal Type" := TempReversalEntry."Reversal Type"::Transaction;
+      TempReversalEntry."Transaction No." := VendLedgEntry."Transaction No.";
+      TempReversalEntry.INSERT;
+      // Form179.Post()
+      ReversalEntry.CheckEntries;
+      GenJnlPostReverse.Reverse(ReversalEntry,TempReversalEntry);
+    END;
+
+    PROCEDURE RoundAmount@1500022(Amount@1500000 : Decimal) : Decimal;
+    VAR
+      GLSetup@1500002 : Record 98;
+    BEGIN
+      GLSetup.GET;
+      EXIT(ROUND(Amount,GLSetup."Amount Rounding Precision"));
+    END;
+
+    PROCEDURE RoundServTax@1500021(Amount@1500000 : Decimal) : Decimal;
+    VAR
+      GLSetup@1500002 : Record 98;
+    BEGIN
+      GLSetup.GET;
+      EXIT(ROUND(Amount,GLSetup."Service Tax Rounding Precision"));
+    END;
+
+    PROCEDURE RunGenJnlPostLine@52(VAR GenJnlLine@1000 : Record 81);
+    VAR
+      GenJnlPostLine@1500000 : Codeunit 12;
+    BEGIN
+      GenJnlPostLine.RunWithCheck(GenJnlLine);
+    END;
+
+    PROCEDURE SetupCompanyInfo@13();
+    VAR
+      CompanyInfo@1500000 : Record 79;
+      ServiceTaxRegNo@1500001 : Record 16475;
+    BEGIN
+      LibraryServiceTax.CreateServiceTaxRegistrationNo(ServiceTaxRegNo);
+
+      CompanyInfo.GET;
+      CompanyInfo.VALIDATE("Service Tax Registration No.",ServiceTaxRegNo.Code);
+      CompanyInfo.MODIFY(TRUE);
+    END;
+
+    PROCEDURE UseCreditToPayForSalesDoc@1500050(PostedDocNo@1500000 : Code[20];VAR ServiceTaxEntryDetails@1500001 : Record 16474) : Code[20];
+    VAR
+      PostedSalesInvoiceDocNo@1500002 : Code[20];
+    BEGIN
+      GetServiceTaxEntryDetail(ServiceTaxEntryDetails,PostedDocNo);
+      PostedSalesInvoiceDocNo := PostEqualAmountSalesDoc(ServiceTaxEntryDetails);
+      LibraryServiceTax.PayServiceTax(ServiceTaxEntryDetails."Service Tax Registration No.",ServiceTaxEntryDetails."Service Tax Group Code",FALSE);
+      EXIT(PostedSalesInvoiceDocNo);
+    END;
+
+    PROCEDURE UnapplyTwice@1500053(DocumentNo@1500000 : Code[20]);
+    BEGIN
+      UnapplyVendorLedgerEntry(DocumentNo);
+      UnapplyVendorLedgerEntry(DocumentNo);
+    END;
+
+    PROCEDURE UnapplyVendorLedgerEntry@21(DocumentNo@1500000 : Code[20]);
+    VAR
+      VendorLedgerEntry@1500003 : Record 25;
+      DetailedVendorLedgEntry@1500007 : Record 380;
+      DetailedVendorLedgEntryBuf@1500002 : TEMPORARY Record 380;
+      VendEntryApplyPostedEntries@1500001 : Codeunit 227;
+    BEGIN
+      VendorLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      VendorLedgerEntry.FINDLAST;
+
+      WITH DetailedVendorLedgEntry DO BEGIN
+        SETRANGE("Vendor Ledger Entry No.",VendorLedgerEntry."Entry No.");
+        SETRANGE("Entry Type","Entry Type"::Application);
+        SETRANGE(Unapplied,FALSE);
+        FINDLAST;
+        DetailedVendorLedgEntryBuf.COPY(DetailedVendorLedgEntry);
+        DetailedVendorLedgEntryBuf.INSERT;
+        VendEntryApplyPostedEntries.PostUnApplyVendor(DetailedVendorLedgEntry,"Document No.","Posting Date");
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

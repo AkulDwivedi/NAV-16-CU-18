@@ -1,0 +1,375 @@
+OBJECT Codeunit 134012 ERM Reminder Apply Unapply
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 21=rimd;
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryInventory@1007 : Codeunit 132201;
+      LibrarySales@1006 : Codeunit 130509;
+      LibraryERM@1002 : Codeunit 131300;
+      LibraryRandom@1001 : Codeunit 130440;
+      Assert@1005 : Codeunit 130000;
+      isInitialized@1000 : Boolean;
+      RemainingAmountErr@1003 : TextConst '@@@=.;ENU=%1 must be %2.';
+      UnappliedErr@1004 : TextConst '@@@=.;ENU=%1 %2 field must be true after Unapply entries.';
+
+    [Test]
+    PROCEDURE ReminderAndCustLedgerEntries@19();
+    VAR
+      DummyReminderHeader@1000 : Record 295;
+      GenJournalLine@1007 : Record 81;
+      CurrentDate@1006 : Date;
+      ReminderNo@1011 : Code[20];
+    BEGIN
+      // [SCENARIO 228341] Issue reminder after posted sales invoice and post customer payment
+      // Covers documents TC_ID= 122638 AND 137017.
+      Initialize;
+      CurrentDate := WORKDATE;
+
+      // [GIVEN] Posted sales invoice with Amount = 1000
+      // [GIVEN] Create reminder "R". Suggest, issue reminder (issued reminder no. = "IR")
+      // [WHEN] Post customer payment with Amount = 1000
+      ReminderNo := CreateInvoiceReminder(GenJournalLine);
+
+      // [THEN] Reminder "R" doesn't exist
+      // [THEN] There is a "Payment" customer ledger entry with "Remaining Amount" = 1000
+      DummyReminderHeader.SETRANGE("No.",ReminderNo);
+      Assert.RecordIsEmpty(DummyReminderHeader);
+      VerifyCustLedgerEntryForRemAmt(GenJournalLine);
+
+      // Cleanup: Roll back the previous Workdate.
+      WORKDATE := CurrentDate;
+      ModifyReminderTerms(FALSE);
+    END;
+
+    [Test]
+    PROCEDURE ApplyAndUnapplyCustEntries@12();
+    VAR
+      GenJournalLine@1009 : Record 81;
+      CurrentDate@1000 : Date;
+    BEGIN
+      // Covers documents TC_ID= 122639 AND 137018.
+      // Check Customer Ledger Entry for Remaining Amount, Detailed Ledger Entry for Unapplied Entries after Post General
+      // Journal Lines, Apply and Unapply Customer Ledger Entries.
+
+      // Create Sales Invoice, Reminder and Issue it, Post General Journal Lines, Apply and unapply them and
+      // Take backup for Current Workdate.
+      Initialize;
+      CurrentDate := WORKDATE;
+      CreateInvoiceReminder(GenJournalLine);
+      ApplyAndPostCustomerEntry(GenJournalLine."Document No.",GenJournalLine.Amount);
+      UnapplyCustLedgerEntry(GenJournalLine."Account No.",GenJournalLine."Document No.");
+
+      // Verify: Detailed Ledger Entry for Unapplied Entries and Customer Ledger Entries for Remaining Amount.
+      VerifyUnappliedDtldLedgEntry(GenJournalLine."Account No.",GenJournalLine."Document No.");
+      VerifyCustLedgerEntryForRemAmt(GenJournalLine);
+
+      // Cleanup: Roll back the previous Workdate.
+      WORKDATE := CurrentDate;
+      ModifyReminderTerms(FALSE);
+    END;
+
+    [Test]
+    PROCEDURE IssueSelectedLineUsingIssueReminderReport@5();
+    VAR
+      ReminderHeader@1000 : Record 295;
+      ReminderHeaderNo@1004 : Code[20];
+      ReminderHeaderNo2@1005 : Code[20];
+    BEGIN
+      // Check that Program allows Issuing the selected Reminder Header No.using Reminder No. Filter Field on Issue Reminder Report.
+
+      // Setup: Create and Post Sales Orders and Create Remainder.
+      Initialize;
+      ReminderHeaderNo := CreateReminderForPostedSalesOrder;
+      ReminderHeaderNo2 := CreateReminderForPostedSalesOrder;
+
+      // Exercise: Run Issue Reminder Report for selected Reminder Header.
+      ReminderHeader.SETRANGE("No.",ReminderHeaderNo);
+      RunIssueReminder(ReminderHeader);
+
+      // Verify: Check Selected Reminder is no more after Issuing and Other Reainder Header No. still exist on Reminder Header.
+      ASSERTERROR ReminderHeader.GET(ReminderHeaderNo);
+      ReminderHeader.GET(ReminderHeaderNo2);
+    END;
+
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE ApplyAndPostCustomerEntry@7(DocumentNo@1002 : Code[20];AmountToApply@1003 : Decimal);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+      CustLedgerEntry2@1004 : Record 21;
+    BEGIN
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,CustLedgerEntry."Document Type"::Payment,DocumentNo);
+      LibraryERM.SetApplyCustomerEntry(CustLedgerEntry,AmountToApply);
+      CustLedgerEntry2.SETRANGE("Document Type",CustLedgerEntry2."Document Type"::Invoice);
+      CustLedgerEntry2.SETRANGE("Customer No.",CustLedgerEntry."Customer No.");
+      CustLedgerEntry2.SETRANGE(Open,TRUE);
+      CustLedgerEntry2.FINDSET;
+      REPEAT
+        CustLedgerEntry2.CALCFIELDS("Remaining Amount");
+        CustLedgerEntry2.VALIDATE("Amount to Apply",CustLedgerEntry2."Remaining Amount");
+        CustLedgerEntry2.MODIFY(TRUE);
+      UNTIL CustLedgerEntry2.NEXT = 0;
+
+      LibraryERM.SetAppliestoIdCustomer(CustLedgerEntry2);
+      LibraryERM.PostCustLedgerApplication(CustLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE CreateInvoiceReminder@6(VAR GenJournalLine@1006 : Record 81) ReminderNo : Code[20];
+    VAR
+      SalesHeader@1005 : Record 36;
+      OrderNo@1002 : Code[20];
+    BEGIN
+      // Setup.
+      ModifyReminderTerms(TRUE);
+      CreateSalesInvoice(SalesHeader);
+
+      // Exercise: Post Sales Invoice, Create and Issue Reminder then Create and Post General Journal Lines.
+      OrderNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      CreateReminder(OrderNo,SalesHeader."Sell-to Customer No.");
+      ReminderNo := IssueReminder(OrderNo);
+      CreateGeneralJournalLines(GenJournalLine,SalesHeader."Sell-to Customer No.",-CalculateTotalAmount(OrderNo));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      EXIT(ReminderNo);
+    END;
+
+    LOCAL PROCEDURE CreateSalesInvoice@1(VAR SalesHeader@1001 : Record 36);
+    VAR
+      SalesLine@1000 : Record 37;
+      Counter@1003 : Integer;
+    BEGIN
+      // Random Quantity for Sales Invoice.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,CreateCustomer);
+      FOR Counter := 1 TO 2 * LibraryRandom.RandInt(3) DO
+        LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,CreateItem,LibraryRandom.RandInt(100));
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@16() : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+      PaymentMethod@1002 : Record 289;
+      ReminderTerms@1001 : Record 292;
+      CountryRegion@1003 : Record 9;
+    BEGIN
+      ReminderTerms.FINDFIRST;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreatePaymentMethod(PaymentMethod);
+      LibraryERM.CreateCountryRegion(CountryRegion);
+      Customer.VALIDATE("Payment Method Code",PaymentMethod.Code);
+      Customer.VALIDATE("Reminder Terms Code",ReminderTerms.Code);
+      Customer.VALIDATE("Country/Region Code",CountryRegion.Code);
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalLines@23(VAR GenJournalLine@1000 : Record 81;CustomerNo@1002 : Code[20];Amount@1003 : Decimal);
+    VAR
+      GenJournalBatch@1001 : Record 232;
+    BEGIN
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      LibraryERM.CreateGeneralJnlLine(GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        GenJournalLine."Document Type"::Payment,GenJournalLine."Account Type"::Customer,CustomerNo,Amount);
+    END;
+
+    LOCAL PROCEDURE CreateItem@10() : Code[20];
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Unit Price",LibraryRandom.RandInt(100));
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE ModifyReminderTerms@9(BooleanValue@1001 : Boolean);
+    VAR
+      ReminderTerms@1000 : Record 292;
+    BEGIN
+      ReminderTerms.FINDFIRST;
+      ReminderTerms.VALIDATE("Post Interest",BooleanValue);
+      ReminderTerms.VALIDATE("Post Additional Fee",BooleanValue);
+      ReminderTerms.MODIFY(TRUE);
+      ModifyReminderLevel(BooleanValue,ReminderTerms.Code);
+    END;
+
+    LOCAL PROCEDURE ModifyReminderLevel@22(CalculateInterest@1001 : Boolean;ReminderTermsCode@1003 : Code[20]);
+    VAR
+      ReminderLevel@1002 : Record 293;
+    BEGIN
+      ReminderLevel.SETRANGE("Reminder Terms Code",ReminderTermsCode);
+      ReminderLevel.FINDFIRST;
+      ReminderLevel.VALIDATE("Calculate Interest",CalculateInterest);
+      ReminderLevel.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateReminder@4(DocumentNo@1006 : Code[20];CustomerNo@1002 : Code[20]);
+    VAR
+      ReminderHeader@1004 : Record 295;
+      ReminderLevel@1005 : Record 293;
+      CustLedgerEntry@1000 : Record 21;
+      Customer@1001 : Record 18;
+      CustLedgEntryLineFeeOn@1003 : Record 21;
+      ReminderMake@1007 : Codeunit 392;
+    BEGIN
+      Customer.GET(CustomerNo);
+      ReminderLevel.SETRANGE("Reminder Terms Code",Customer."Reminder Terms Code");
+      ReminderLevel.FINDFIRST;
+
+      // Set Workdate according to Reminder Level with Grace Period and Add 1 day.
+      WORKDATE := CALCDATE('<1D>',CALCDATE(ReminderLevel."Grace Period",WORKDATE));
+      ReminderHeader.INIT;
+      ReminderHeader.INSERT(TRUE);
+      CustLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CustLedgerEntry.FINDFIRST;
+      ReminderMake.Set(Customer,CustLedgerEntry,ReminderHeader,FALSE,FALSE,CustLedgEntryLineFeeOn);
+      ReminderMake.Code;
+    END;
+
+    LOCAL PROCEDURE CreateReminderForPostedSalesOrder@17() : Code[20];
+    VAR
+      SalesHeader@1000 : Record 36;
+      ReminderLine@1001 : Record 296;
+      PostedSalesDocumentNo@1002 : Code[20];
+    BEGIN
+      CreateSalesInvoice(SalesHeader);
+      PostedSalesDocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      CreateReminder(PostedSalesDocumentNo,SalesHeader."Sell-to Customer No.");
+      ReminderLine.SETRANGE("Document Type",ReminderLine."Document Type"::Invoice);
+      ReminderLine.SETRANGE("Document No.",PostedSalesDocumentNo);
+      ReminderLine.FINDFIRST;
+      EXIT(ReminderLine."Reminder No.");
+    END;
+
+    LOCAL PROCEDURE IssueReminder@13(DocumentNo@1003 : Code[20]) : Code[20];
+    VAR
+      ReminderHeader@1004 : Record 295;
+      ReminderLine@1000 : Record 296;
+    BEGIN
+      ReminderLine.SETRANGE("Document Type",ReminderLine."Document Type"::Invoice);
+      ReminderLine.SETRANGE("Document No.",DocumentNo);
+      ReminderLine.FINDFIRST;
+      ReminderHeader.SETRANGE("No.",ReminderLine."Reminder No.");
+      RunIssueReminder(ReminderHeader);
+      EXIT(ReminderLine."Reminder No.");
+    END;
+
+    LOCAL PROCEDURE CalculateTotalAmount@21(OrderNo@1003 : Code[20]) : Decimal;
+    VAR
+      Customer@1000 : Record 18;
+      SalesInvoiceHeader@1002 : Record 112;
+      ReminderLevel@1004 : Record 293;
+    BEGIN
+      SalesInvoiceHeader.GET(OrderNo);
+      Customer.GET(SalesInvoiceHeader."Sell-to Customer No.");
+      ReminderLevel.SETRANGE("Reminder Terms Code",Customer."Reminder Terms Code");
+      ReminderLevel.FINDFIRST;
+      SalesInvoiceHeader.CALCFIELDS(Amount);
+      EXIT(SalesInvoiceHeader.Amount + ReminderLevel."Additional Fee (LCY)");
+    END;
+
+    LOCAL PROCEDURE UnapplyCustLedgerEntry@20(CustomerNo@1003 : Code[20];DocumentNo@1002 : Code[20]);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+    BEGIN
+      CustLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CustLedgerEntry.SETRANGE("Customer No.",CustomerNo);
+      CustLedgerEntry.FINDLAST;
+      LibraryERM.UnapplyCustomerLedgerEntry(CustLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE RunIssueReminder@2(VAR ReminderHeader@1001 : Record 295);
+    VAR
+      IssueReminders@1000 : Report 190;
+    BEGIN
+      IssueReminders.SETTABLEVIEW(ReminderHeader);
+      IssueReminders.USEREQUESTPAGE(FALSE);
+      IssueReminders.RUN;
+    END;
+
+    LOCAL PROCEDURE VerifyUnappliedDtldLedgEntry@11(CustomerNo@1000 : Code[20];DocumentNo@1002 : Code[20]);
+    VAR
+      DetailedCustLedgEntry@1001 : Record 379;
+    BEGIN
+      DetailedCustLedgEntry.SETRANGE("Entry Type",DetailedCustLedgEntry."Entry Type"::Application);
+      DetailedCustLedgEntry.SETRANGE("Document No.",DocumentNo);
+      DetailedCustLedgEntry.SETRANGE("Customer No.",CustomerNo);
+      DetailedCustLedgEntry.FINDSET;
+      REPEAT
+        Assert.IsTrue(DetailedCustLedgEntry.Unapplied,STRSUBSTNO(UnappliedErr,DetailedCustLedgEntry.TABLECAPTION,
+            DetailedCustLedgEntry.Unapplied));
+      UNTIL DetailedCustLedgEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCustLedgerEntryForRemAmt@3(GenJournalLine@1000 : Record 81);
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+      GeneralLedgerSetup@1003 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CustLedgerEntry.SETRANGE("Document Type",GenJournalLine."Document Type");
+      CustLedgerEntry.SETRANGE("Document No.",GenJournalLine."Document No.");
+      CustLedgerEntry.SETRANGE("Customer No.",GenJournalLine."Account No.");
+      CustLedgerEntry.FINDFIRST;
+      CustLedgerEntry.CALCFIELDS("Remaining Amount");
+      Assert.AreNearlyEqual(GenJournalLine.Amount,CustLedgerEntry."Remaining Amount",GeneralLedgerSetup."Amount Rounding Precision",
+        STRSUBSTNO(RemainingAmountErr,CustLedgerEntry."Remaining Amount",GenJournalLine.Amount));
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Reminder] [Sales]
+      Unsupported version tags:
+      NA: Unable to Compile
+
+      Test for ERM - Check Reminder Customer Ledger Entry.
+      1. Check that Reminder does not exist after issue and Customer Ledger Entry for Remaining amount after Post General
+         Journal Lines.
+      2. Check Customer Ledger Entry for Remaining Amount, Detailed Ledger Entry for Unapplied Entries after Post General
+         Journal Lines, Apply and Unapply Customer Ledger Entries.
+      3. Check that Program allows Issuing the selected Reminder Header No.Using Reminder No. Filter on Issue Reminder Report.
+
+      This test code unit replaces Manual Test Suite (TS0161).
+      TFS_TS_ID = 21569
+
+      Cover Test cases:
+        TFS_TC_ID-122638 and 137017 TC_ID= 00868
+        TFS_TC_ID-122639 and 137018 TC_ID= 00869
+
+      Bug_ID = 305284
+      Cover Test cases:
+      --------------------------------------------------------
+      Test Function Name                               TFS ID
+      --------------------------------------------------------
+      IssueSelectedLineUsingIssueReminderReport        301107
+    }
+    END.
+  }
+}
+

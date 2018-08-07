@@ -1,0 +1,329 @@
+OBJECT Codeunit 137009 SCM Availability by Event
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            Initialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1002 : Codeunit 130000;
+      LibraryInventory@1006 : Codeunit 132201;
+      LibraryManufacturing@1001 : Codeunit 132202;
+      LibraryWarehouse@1004 : Codeunit 132204;
+      LibraryUtility@1000 : Codeunit 131000;
+      LibrarySales@1088 : Codeunit 130509;
+      LibraryPurchase@1099 : Codeunit 130512;
+      LibraryPatterns@1005 : Codeunit 132212;
+      LibraryRandom@1007 : Codeunit 130440;
+      Initialized@1003 : Boolean;
+      WrongReservedQtyErr@1008 : TextConst 'ENU=Wrong reserved quantity in Item Availability by Event';
+
+    LOCAL PROCEDURE Initialize@15();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      IF Initialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      NoSeriesSetup;
+
+      COMMIT;
+
+      Initialized := TRUE;
+    END;
+
+    [Test]
+    PROCEDURE CollectEventsCase1@17();
+    VAR
+      Item@1003 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      Initialize;
+
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Reordering Policy",Item."Reordering Policy"::"Lot-for-Lot");
+      EVALUATE(Item."Rescheduling Period",'<5D>');
+      Item.MODIFY(TRUE);
+
+      CreatePurchaseOrder(PurchaseLine,Item."No.",8,CALCDATE('<+5D>',WORKDATE));
+      CreateSalesOrder(SalesLine,Item."No.",7,CALCDATE('<+11D>',WORKDATE));
+      LibraryManufacturing.CalculateWorksheetPlan(Item,CALCDATE('<+2D>',WORKDATE),CALCDATE('<+16D>',WORKDATE));
+
+      // Should give 2 lines + Cancel + New from Planning plus one per Period Type, no excess inventory
+      RunPage(Item,'',FALSE,TRUE,0,6,0);
+    END;
+
+    [Test]
+    PROCEDURE ReservedReceiptIsEqualToPurchaseQtyInAvailByEvent@1();
+    VAR
+      Item@1004 : Record 27;
+      Location@1005 : Record 14;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+      TempInvtPageData@1011 : TEMPORARY Record 5531;
+    BEGIN
+      // [SCENARIO 361672] "Reserved Receipt" in Item Availability by Event is equal to Purchase Line qty. when sales order is reserved against purch. order
+      Initialize;
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryPatterns.MAKEItemSimple(Item,Item."Costing Method"::Standard,LibraryPatterns.RandCost(Item));
+
+      // [GIVEN] Purchase order for item "X", quantity = "Q"
+      LibraryPatterns.MAKEPurchaseOrder(
+        PurchaseHeader,PurchaseLine,Item,Location.Code,'',LibraryRandom.RandInt(100),WORKDATE,Item."Unit Cost");
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+
+      // [GIVEN] Sales order with reservation against purchase order, reserved quantity = "Q"
+      LibraryPatterns.MAKESalesOrder(SalesHeader,SalesLine,Item,Location.Code,'',PurchaseLine.Quantity,WORKDATE,Item."Unit Price");
+
+      SalesLine.VALIDATE("Shipment Date",PurchaseLine."Expected Receipt Date");
+      SalesLine.MODIFY(TRUE);
+      AutoReserveSalesLine(SalesLine);
+
+      // [WHEN] Item availability by event is calculated
+      CalculateAvailabilityByEvent(TempInvtPageData,Item);
+
+      // [THEN] "Reserved Receipt" = "Q"
+      FindInvtPageData(TempInvtPageData,TempInvtPageData.Type::Purchase);
+      Assert.AreEqual(PurchaseLine.Quantity,TempInvtPageData."Reserved Receipt",WrongReservedQtyErr);
+    END;
+
+    [Test]
+    PROCEDURE ReservedRequirementIsEqualToNegativePurchReturnQtyInAvailByEvent@2();
+    VAR
+      Item@1004 : Record 27;
+      Location@1005 : Record 14;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      TempInvtPageData@1010 : TEMPORARY Record 5531;
+      Quantity@1002 : Integer;
+    BEGIN
+      // [SCENARIO 361672] "Reserved Requirement" in Item Availability by Event is equal to negative Purchase Return qty. when return is reserved against inventory
+      Initialize;
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      LibraryPatterns.MAKEItemSimple(Item,Item."Costing Method"::Standard,LibraryPatterns.RandCost(Item));
+
+      // [GIVEN] "Q" units of item "X" on inventory
+      Quantity := LibraryRandom.RandInt(100);
+      LibraryPatterns.POSTPositiveAdjustment(Item,Location.Code,'','',Quantity,WORKDATE,Item."Unit Cost");
+
+      // [GIVEN] Purchase return order with "Q" units of item "X" reserved on inventory
+      LibraryPatterns.MAKEPurchaseReturnOrder(PurchaseHeader,PurchaseLine,Item,Location.Code,'',Quantity,WORKDATE,Item."Unit Cost");
+      AutoReservePurchaseLine(PurchaseLine);
+
+      // [WHEN] Item availability by event is calculated
+      CalculateAvailabilityByEvent(TempInvtPageData,Item);
+
+      // [THEN] "Reserved Requirement" = -"Q"
+      FindInvtPageData(TempInvtPageData,TempInvtPageData.Type::"Purch. Return");
+      Assert.AreEqual(-PurchaseLine.Quantity,TempInvtPageData."Reserved Requirement",WrongReservedQtyErr);
+    END;
+
+    [Test]
+    PROCEDURE ReservedReceiptInAvailByEventShowsInboundAndShippedReservedQtyInTransfer@3();
+    VAR
+      Item@1006 : Record 27;
+      FromLocation@1000 : Record 14;
+      ToLocation@1001 : Record 14;
+      InTransitLocation@1002 : Record 14;
+      TransferHeader@1004 : Record 5740;
+      TransferLine@1005 : Record 5741;
+      SalesHeader@1007 : Record 36;
+      SalesLine@1008 : Record 37;
+      TempInvtPageData@1009 : TEMPORARY Record 5531;
+      Qty@1003 : Decimal;
+    BEGIN
+      // [FEATURE] [Transfer] [Reservation]
+      // [SCENARIO 213103] Shipped and reserved quantity on transfer line should be included in Reserved Receipt in Item Availability by Event.
+      Initialize;
+
+      // [GIVEN] Locations "L1", "L2" and an in-transit location.
+      CreateLocationsForTransfer(FromLocation,ToLocation,InTransitLocation);
+
+      // [GIVEN] "Q" pcs of item "I" is is stock on "L1".
+      LibraryPatterns.MAKEItemSimple(Item,Item."Costing Method"::Standard,LibraryPatterns.RandCost(Item));
+      Qty := LibraryRandom.RandIntInRange(50,100);
+      LibraryPatterns.POSTPositiveAdjustment(Item,FromLocation.Code,'','',Qty,WORKDATE,Item."Unit Cost");
+
+      // [GIVEN] Transfer Order from "L1" to "L2". Quantity = "Q", "Qty. to Ship" = "q" < "Q".
+      LibraryPatterns.MAKETransferOrder(
+        TransferHeader,TransferLine,Item,FromLocation,ToLocation,InTransitLocation,'',Qty,WORKDATE,WORKDATE);
+      TransferLine.VALIDATE("Qty. to Ship",LibraryRandom.RandInt(20));
+      TransferLine.MODIFY(TRUE);
+
+      // [GIVEN] Sales Order for "Q" pcs is reserved from Transfer Order.
+      LibraryPatterns.MAKESalesOrder(SalesHeader,SalesLine,Item,ToLocation.Code,'',Qty,WORKDATE,Item."Unit Price");
+      SalesLine.VALIDATE("Shipment Date",LibraryRandom.RandDate(10));
+      SalesLine.MODIFY(TRUE);
+      AutoReserveSalesLine(SalesLine);
+
+      // [GIVEN] Transfer Order is shipped.
+      // [GIVEN] Reserved Qty. Inbnd. (Base) becomes equal to "Q" - "q", Reserved Qty. Shipped (Base) = "q".
+      LibraryInventory.PostTransferHeader(TransferHeader,TRUE,FALSE);
+      TransferLine.FIND;
+      TransferLine.CALCFIELDS("Reserved Qty. Inbnd. (Base)","Reserved Qty. Shipped (Base)");
+
+      // [WHEN] Calculate item availability by event.
+      CalculateAvailabilityByEvent(TempInvtPageData,Item);
+
+      // [THEN] "Reserved Receipt" on the availability line representing the transfer is equal to "Q".
+      FindInvtPageData(TempInvtPageData,TempInvtPageData.Type::Transfer);
+      Assert.AreEqual(
+        TransferLine."Reserved Qty. Inbnd. (Base)" + TransferLine."Reserved Qty. Shipped (Base)",
+        TempInvtPageData."Reserved Receipt",WrongReservedQtyErr);
+    END;
+
+    LOCAL PROCEDURE AutoReservePurchaseLine@29(PurchaseLine@1000 : Record 39);
+    VAR
+      ReservMgt@1002 : Codeunit 99000845;
+      FullAutoReservation@1001 : Boolean;
+    BEGIN
+      ReservMgt.SetPurchLine(PurchaseLine);
+      ReservMgt.AutoReserve(FullAutoReservation,'',WORKDATE,PurchaseLine.Quantity,PurchaseLine."Quantity (Base)");
+    END;
+
+    LOCAL PROCEDURE AutoReserveSalesLine@28(SalesLine@1000 : Record 37);
+    VAR
+      ReservMgt@1002 : Codeunit 99000845;
+      FullAutoReservation@1001 : Boolean;
+    BEGIN
+      ReservMgt.SetSalesLine(SalesLine);
+      ReservMgt.AutoReserve(FullAutoReservation,'',SalesLine."Shipment Date",SalesLine.Quantity,SalesLine."Quantity (Base)");
+    END;
+
+    LOCAL PROCEDURE RunPage@19(Item@1000 : Record 27;ForecastName@1001 : Code[10];InclBlanketOrders@1002 : Boolean;InclPlan@1003 : Boolean;PeriodType@1012 : Option;ExpectedNoOfLines@1004 : Integer;ExpextedEndBalance@1005 : Decimal);
+    VAR
+      PageTempInvtPageData@1008 : TEMPORARY Record 5531;
+      TempInvtPageData@1007 : TEMPORARY Record 5531;
+      CalcInvtPageData@1006 : Codeunit 5531;
+      RunningBalance@1009 : Decimal;
+      RunningBalanceForecast@1010 : Decimal;
+      RunningBalancePlan@1011 : Decimal;
+    BEGIN
+      // Works more less like Page 5530 except for the view part
+      // Initialize + get events in background table in cu
+      CalcInvtPageData.Initialize(Item,ForecastName,InclBlanketOrders,0D,InclPlan);
+
+      // Create Period aggegation entries in Page background table
+      TempInvtPageData.RESET;
+      TempInvtPageData.DELETEALL;
+      TempInvtPageData.SETCURRENTKEY("Period Start","Line No.");
+      CalcInvtPageData.CreatePeriodEntries(TempInvtPageData,PeriodType);   // got events in background table in cu
+
+      // Get event details
+      TempInvtPageData.SETRANGE(Level,0);
+      IF TempInvtPageData.FIND('-') THEN
+        REPEAT
+          // get one entry per involved period in tempinv
+          CalcInvtPageData.DetailsForPeriodEntry(TempInvtPageData,TRUE);
+          CalcInvtPageData.DetailsForPeriodEntry(TempInvtPageData,FALSE);
+        UNTIL TempInvtPageData.NEXT = 0;
+      TempInvtPageData.SETRANGE(Level);
+
+      // Populate the view table likedon on expandall in the page
+      PageTempInvtPageData.RESET;
+      PageTempInvtPageData.DELETEALL;
+      PageTempInvtPageData.SETCURRENTKEY("Period Start","Line No.");
+      IF TempInvtPageData.FIND('-') THEN
+        REPEAT
+          PageTempInvtPageData := TempInvtPageData;
+          PageTempInvtPageData.UpdateInventorys(RunningBalance,RunningBalanceForecast,RunningBalancePlan);
+          PageTempInvtPageData.INSERT;
+        UNTIL TempInvtPageData.NEXT = 0;
+
+      Assert.AreEqual(ExpectedNoOfLines,PageTempInvtPageData.COUNT,
+        'Asserting that the no. of lines match');
+      Assert.AreEqual(ExpextedEndBalance,PageTempInvtPageData."Suggested Projected Inventory",
+        'Asserting that the ultimo Suggested Projected Inventory match');
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@14();
+    VAR
+      PurchPayablesSetup@1001 : Record 312;
+      SalesReceivablesSetup@1000 : Record 311;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesReceivablesSetup.MODIFY(TRUE);
+
+      PurchPayablesSetup.GET;
+      PurchPayablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchPayablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CalculateAvailabilityByEvent@9(VAR TempInvtPageData@1000 : TEMPORARY Record 5531;Item@1003 : Record 27);
+    VAR
+      CalcInventoryPageData@1002 : Codeunit 5531;
+      PeriodType@1001 : 'Day,Week,Month,Quarter,Year';
+    BEGIN
+      CalcInventoryPageData.Initialize(Item,'',FALSE,0D,FALSE);
+      CalcInventoryPageData.CreatePeriodEntries(TempInvtPageData,PeriodType::Day);
+      TempInvtPageData.SETRANGE(Level,0);
+      TempInvtPageData.FINDSET;
+      REPEAT
+        CalcInventoryPageData.DetailsForPeriodEntry(TempInvtPageData,TRUE);
+        CalcInventoryPageData.DetailsForPeriodEntry(TempInvtPageData,FALSE);
+      UNTIL TempInvtPageData.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateLocationsForTransfer@33(VAR FromLocation@1002 : Record 14;VAR ToLocation@1001 : Record 14;VAR InTransitLocation@1000 : Record 14);
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(FromLocation);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(ToLocation);
+      LibraryWarehouse.CreateInTransitLocation(InTransitLocation);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@12(VAR PurchaseLine@1005 : Record 39;ItemNo@1000 : Code[20];Quantity@1001 : Decimal;AvailableDate@1002 : Date);
+    VAR
+      PurchaseHeader@1008 : Record 38;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Expected Receipt Date",AvailableDate);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@13(VAR SalesLine@1002 : Record 37;ItemNo@1000 : Code[20];Quantity@1004 : Decimal;AvailableDate@1005 : Date);
+    VAR
+      SalesHeader@1003 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Shipment Date",AvailableDate);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE FindInvtPageData@16(VAR InvtPageData@1000 : Record 5531;DataType@1001 : Option);
+    BEGIN
+      InvtPageData.SETRANGE(Level,1);
+      InvtPageData.SETRANGE(Type,DataType);
+      InvtPageData.FINDFIRST;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Item Availability] [SCM]
+      Case 1
+        Simple: 1 PO, 1 SO out of resheduling period, 1 cancel PO (same date), 1 new (same date as sales), no excess inventory;
+    }
+    END.
+  }
+}
+

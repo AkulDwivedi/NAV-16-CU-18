@@ -1,0 +1,3068 @@
+OBJECT Codeunit 137400 SCM Inventory - Orders
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 110=rimd;
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryCosting@1029 : Codeunit 132200;
+      LibraryERM@1025 : Codeunit 131300;
+      LibraryPurchase@1012 : Codeunit 130512;
+      LibrarySales@1003 : Codeunit 130509;
+      LibraryInventory@1004 : Codeunit 132201;
+      LibraryWarehouse@1019 : Codeunit 132204;
+      LibraryRandom@1000 : Codeunit 130440;
+      LibraryUtility@1002 : Codeunit 131000;
+      LibraryDimension@1011 : Codeunit 131001;
+      LibrarySetupStorage@1032 : Codeunit 131009;
+      LibraryVariableStorage@1033 : Codeunit 131004;
+      Assert@1005 : Codeunit 130000;
+      VendorNo@1024 : Code[20];
+      GetShipmentLines@1010 : Boolean;
+      IsInitialized@1001 : Boolean;
+      CostError@1007 : TextConst 'ENU=%1 must be equal to %2 in %3';
+      DescriptionErr@1132 : TextConst 'ENU=Descriptions must be the same.';
+      ExpectedCostPostingDialog@1006 : TextConst 'ENU=If you change the %1, the program must update table %2.This can take several hours.\Do you really want to change the %1?';
+      CalculateInvoiceDiscount@1015 : Boolean;
+      CapableToPromise@1022 : Boolean;
+      RequestedShipmentDate@1023 : Boolean;
+      ConfirmMessage@1008 : Text[1024];
+      InterruptedToRespectError@1017 : TextConst 'ENU=The update has been interrupted to respect the warning.';
+      UnknownError@1009 : TextConst 'ENU=Unknown Error.';
+      PostingDateError@1013 : TextConst 'ENU=Enter the posting date.';
+      DocumentDateError@1014 : TextConst 'ENU=Enter the document date.';
+      SalesReturnOrderMustBeDeletedError@1018 : TextConst '@@@="%1 = Document Type Value, %2 = Document No. Field, %3 = Document No. Value";ENU=Sales %1 must be deleted for %2 : %3';
+      CalculateInvoiceDiscountError@1016 : TextConst '@@@="%1 = Calc. Inv. Discount Field, %2 = False used as No, %3 = Sales & Receivables Setup Page, %4 = True used as Yes";ENU="Validation error for Field: CalcInvDisc,  Message = ''%1 must be equal to ''%2''  in %3: Primary Key=. Current value is ''%4''.''"';
+      RequestedDeliveryDate@1021 : Date;
+      UnavailableQuantity@1020 : Decimal;
+      Quantity2@1026 : Decimal;
+      Amount@1027 : Decimal;
+      ItemRegisterMustBeDeletedError@1028 : TextConst 'ENU=Item Register must be deleted.';
+      DummyConfirmQst@1030 : TextConst 'ENU=The Credit Memo doesn''t have a Corrected Invoice No. Do you want to continue?';
+      VerificationFailureErr@1031 : TextConst 'ENU=Confirmation Message must be similar.';
+      OrderPromisingQtyErr@1034 : TextConst 'ENU=Incorrect Quantity on Order Promising Line.';
+      OrderPromisingUnavailQtyErr@1035 : TextConst 'ENU=Incorrect Unavailable Quantity on Order Promising Line';
+      AmountToAssignItemChargeErr@1036 : TextConst 'ENU=Amount to Assign does not correspond to Qty. to Assign on item charge assignment.';
+
+    [Test]
+    PROCEDURE ItemInventoryWithPurchaseOrder@33();
+    VAR
+      Item@1004 : Record 27;
+      Quantity@1006 : Decimal;
+    BEGIN
+      // Verify that Item Inventory gets increased on posting Purchase Order for that Item.
+
+      // Setup: Create an Item.
+      Initialize;
+      CreateItem(Item);
+
+      // Exercise: Create a Purchase Order for the new Item and post it.
+      Quantity := CreateAndPostPurchaseOrder(Item."No.",FALSE);
+      Item.CALCFIELDS(Inventory);
+
+      // Verify: Verify that Item Inventory gets increased with the quantity of the Purchase Order.
+      Item.TESTFIELD(Inventory,Quantity);
+    END;
+
+    [Test]
+    PROCEDURE ItemInventoryWithSalesOrder@34();
+    VAR
+      Item@1002 : Record 27;
+      SalesHeader@1000 : Record 36;
+      InitialInventory@1003 : Decimal;
+      SalesQuantity@1004 : Decimal;
+    BEGIN
+      // Verify that Item Inventory gets decreased on posting Sales Order after making purchase of that Item.
+
+      // Setup: Create an Item and post a Purchase Order for the same.
+      Initialize;
+      CreateItem(Item);
+      InitialInventory := CreateAndPostPurchaseOrder(Item."No.",FALSE);
+
+      // Exercise: Create and post a Sales Order for the new Item.
+      SalesQuantity := CreateAndPostSalesDocument(Item,SalesHeader."Document Type"::Order,InitialInventory);
+      Item.CALCFIELDS(Inventory);
+
+      // Verify: Verify that Item Inventory gets decreased with the quantity of the Sales Order.
+      Item.TESTFIELD(Inventory,InitialInventory - SalesQuantity);
+    END;
+
+    [Test]
+    PROCEDURE ItemInventoryWithSalesReturnOrder@35();
+    VAR
+      Item@1002 : Record 27;
+      SalesHeader@1007 : Record 36;
+      InitialInventory@1000 : Decimal;
+      SalesQuantity@1001 : Decimal;
+    BEGIN
+      // Verify that Item Inventory gets increased on posting Sales Return Order after making sale of that Item.
+
+      // Setup: Create Item, make Purchase and post Sales Order for the same.
+      Initialize;
+      CreateItem(Item);
+      InitialInventory := CreateAndPostPurchaseOrder(Item."No.",FALSE);
+      InitialInventory -= CreateAndPostSalesDocument(Item,SalesHeader."Document Type"::Order,InitialInventory);
+
+      // Exercise: Create and post Sales Return Order for the new Item.
+      SalesQuantity := CreateAndPostSalesDocument(Item,SalesHeader."Document Type"::"Return Order",InitialInventory);
+      Item.CALCFIELDS(Inventory);
+
+      // Verify: Verify that Item Inventory gets increased with the quantity of the Sales Return Order.
+      Item.TESTFIELD(Inventory,InitialInventory + SalesQuantity);
+    END;
+
+    [Test]
+    PROCEDURE ItemByPage@1();
+    VAR
+      TempItem@1001 : TEMPORARY Record 27;
+    BEGIN
+      // Verify creation of Item by page.
+
+      // Setup: Create Item in Temporary record.
+      Initialize;
+      CreateTempItem(TempItem);
+
+      // Exercise: Create Item by page.
+      CreateItemCard(TempItem);
+
+      // Verify: Verify the data of newly created Item.
+      VerifyItem(TempItem);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateInventoryHandler)]
+    PROCEDURE ItemLedgerEntryAfterPostingPhysicalInventoryJournal@29();
+    VAR
+      Item@1000 : Record 27;
+      ItemJournalLine@1004 : Record 83;
+      Quantity@1002 : Decimal;
+      UnitAmount@1001 : Decimal;
+      DocumentNo@1008 : Code[20];
+      DocumentNo2@1009 : Code[20];
+    BEGIN
+      // Validate Item Ledger Entry after posting Physical Inventory Journal.
+
+      // Setup : Create and Post Item Journal Lines.
+      Initialize;
+      CreateItem(Item);
+      UnitAmount := LibraryRandom.RandDec(15,2); // Use random value for UnitAmount.
+      Quantity := LibraryRandom.RandDec(10,2) + 100; // Use random value for Quantity.
+      CreateAndPostItemJournalLine(ItemJournalLine."Entry Type"::Purchase,Quantity,Item."No.",UnitAmount,'');
+      CreateAndPostItemJournalLine(
+        ItemJournalLine."Entry Type"::Sale,Quantity - LibraryRandom.RandDec(10,2),Item."No.",UnitAmount,''); // Quantity of Sales should be less than quantity of Purchase.
+
+      // Exercise : Calculate Inventory and Post Physical Inventory.
+      RunCalculateInventory(Item."No.");
+      DocumentNo := PostPhysicalInventoryJournal(Quantity,Item."No.");  // Positive adjustment.
+      RunCalculateInventory(Item."No.");
+      DocumentNo2 := PostPhysicalInventoryJournal(-Quantity,Item."No.");  // Negative adjustment.
+
+      // Verify : Verify Item Ledger Entry.
+      VerifyItemLedgerEntry(DocumentNo,Item."No.",ItemJournalLine."Entry Type"::"Positive Adjmt.",Quantity);
+      VerifyItemLedgerEntry(DocumentNo2,Item."No.",ItemJournalLine."Entry Type"::"Negative Adjmt.",-Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateInventoryHandler)]
+    PROCEDURE ValueEntryAfterPostingPhysicalInventoryJournal@28();
+    VAR
+      Item@1001 : Record 27;
+      ItemJournalLine@1024 : Record 83;
+      Quantity@1021 : Decimal;
+      UnitAmount@1020 : Decimal;
+      DocumentNo@1019 : Code[20];
+      DocumentNo2@1018 : Code[20];
+    BEGIN
+      // Validate Value Entry after posting Physical Inventory Journal.
+
+      // Setup : Create and Post Item Journal Lines.
+      Initialize;
+      CreateItem(Item);
+      UnitAmount := LibraryRandom.RandDec(15,2); // Use random value for UnitAmount.
+      Quantity := LibraryRandom.RandDec(10,2) + 100; // Use random value for Quantity.
+      CreateAndPostItemJournalLine(ItemJournalLine."Entry Type"::Purchase,Quantity,Item."No.",UnitAmount,'');
+      CreateAndPostItemJournalLine(
+        ItemJournalLine."Entry Type"::Sale,Quantity - LibraryRandom.RandDec(10,2),Item."No.",UnitAmount,''); // Quantity of Sales should be less than quantity of Purchase.
+
+      // Exercise : Calculate Inventory and Post Physical Inventory.
+      RunCalculateInventory(Item."No.");
+      DocumentNo := PostPhysicalInventoryJournal(Quantity,Item."No.");  // Positive adjustment.
+      RunCalculateInventory(Item."No.");
+      DocumentNo2 := PostPhysicalInventoryJournal(-Quantity,Item."No.");  // Negative adjustment.
+
+      // Verify : Verify Item Value Entry.
+      VerifyItemValueEntry(DocumentNo,Item."No.",ItemJournalLine."Entry Type"::"Positive Adjmt.",Quantity,UnitAmount);
+      VerifyItemValueEntry(DocumentNo2,Item."No.",ItemJournalLine."Entry Type"::"Negative Adjmt.",-Quantity,UnitAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE ExpectedCostPostingToGLTrue@6();
+    BEGIN
+      // Set the Expected Cost Posting to G/L TRUE in Inventory Setup and verify the dialog message.
+      Initialize;
+      SetExpectedCostPostingToGLAndValidateConfirmDialog(FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE ExpectedCostPostingToGLFalse@2();
+    BEGIN
+      // Set the Expected Cost Posting to G/L FALSE in Inventory Setup and verify the dialog message.
+      Initialize;
+      SetExpectedCostPostingToGLAndValidateConfirmDialog(TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE SetExpectedCostPostingToGLAndValidateConfirmDialog@10(ExpectedCostPostingToGL@1002 : Boolean;ExpectedCostPostingToGL2@1003 : Boolean);
+    VAR
+      InventorySetup@1001 : Record 313;
+      PostValueEntrytoGL@1000 : Record 5811;
+    BEGIN
+      // Setup : Get Inventory Setup.
+      InventorySetup.GET;
+      UpdateInventorySetup(ExpectedCostPostingToGL);
+
+      // Exercise : Set Value of Expected Cost Posting to G/L.
+      UpdateInventorySetup(ExpectedCostPostingToGL2);
+
+      // Verify : Verify the Confirm message.
+      Assert.AreEqual(
+        STRSUBSTNO(
+          ExpectedCostPostingDialog,InventorySetup.FIELDCAPTION("Expected Cost Posting to G/L"),PostValueEntrytoGL.TABLECAPTION),
+        ConfirmMessage,UnknownError);
+
+      // Tear Down : Set Default value of Inventory Setup.
+      UpdateInventorySetup(InventorySetup."Expected Cost Posting to G/L");
+    END;
+
+    [Test]
+    [HandlerFunctions(PostedSalesDocumentLinesHandler)]
+    PROCEDURE SalesReturnOrderForPostedDocument@36();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      // Test Get Posted Document Lines To Reverse functionality on Sales Return Order.
+
+      // Setup: Create and post Sales Order.
+      Initialize;
+      CreateAndPostSalesOrder(SalesHeader,SalesLine);
+
+      // Exercise: Create Sales Return Order and get Posted Document Lines to return.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",SalesHeader."Sell-to Customer No.");
+      GetPostedDocumentLinesToReverseOnSalesReturnOrder(SalesHeader."No.");
+
+      // Verify: Verify Apply from Item Entry must not zero.
+      FindSalesLine(SalesLine,SalesHeader."Document Type",SalesHeader."No.",SalesLine.Type::Item,SalesLine."No.");
+      SalesLine.TESTFIELD("Appl.-from Item Entry");
+    END;
+
+    [Test]
+    [HandlerFunctions(PostedSalesDocumentLinesHandler,ItemChargeAssignmentSalesHandler,SalesShipmentLinesHandler)]
+    PROCEDURE NegativeLineOnSalesReturnOrder@43();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1006 : Record 36;
+      SalesLine@1005 : Record 37;
+      ItemChargeNo@1004 : Code[20];
+    BEGIN
+      // Test Create Negative lines with Item Charge Assignment on Sales Return Order.
+
+      // Setup: Create and post Sales Order. Create Sales Return Order and get Posted Document Lines to return.
+      Initialize;
+      CreateAndPostSalesOrder(SalesHeader,SalesLine);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",SalesHeader."Sell-to Customer No.");
+      GetPostedDocumentLinesToReverseOnSalesReturnOrder(SalesHeader."No.");
+
+      // Exercise: Add Negative Line and Item Charge Lines. Apply Item Charges.
+      CreateItem(Item);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",-SalesLine.Quantity);
+      CreateAndAssignItemChargeLine(SalesLine,SalesHeader,-SalesLine.Quantity,TRUE);
+      ItemChargeNo := SalesLine."No.";
+      CreateAndAssignItemChargeLine(SalesLine,SalesHeader,SalesLine.Quantity,FALSE);
+
+      // Verify: Verify Lines on Sales Return Order.
+      VerifySalesLine(SalesHeader."Document Type",SalesHeader."No.",SalesLine.Type::Item,Item."No.",-SalesLine.Quantity,0); // Use 0 for Quantity To Assign.
+      VerifySalesLine(
+        SalesHeader."Document Type",SalesHeader."No.",SalesLine.Type::"Charge (Item)",ItemChargeNo,SalesLine.Quantity,
+        SalesLine.Quantity);
+      VerifySalesLine(
+        SalesHeader."Document Type",SalesHeader."No.",SalesLine.Type::"Charge (Item)",SalesLine."No.",SalesLine.Quantity,
+        SalesLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(PostedSalesDocumentLinesHandler,ItemChargeAssignmentSalesHandler,SalesShipmentLinesHandler,MoveNegativeSalesLinesHandler,ConfirmHandler,SalesOrderHandler)]
+    PROCEDURE MoveNegativeLinesFromSalesReturnOrder@45();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Test Move Negative Lines functionality on Sales Return Order.
+
+      // Setup: Update Sales and Receivable Setup. Create and post Sales Order. Create Sales Return Order and get Posted Document Lines to return. Add Negative Line and Item Charge Lines. Apply Item Charges.
+      Initialize;
+      UpdateSalesReceivableSetup(FALSE,FALSE);
+      CreateAndPostSalesOrder(SalesHeader,SalesLine);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",SalesHeader."Sell-to Customer No.");
+      GetPostedDocumentLinesToReverseOnSalesReturnOrder(SalesHeader."No.");
+      CreateItem(Item);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",-SalesLine.Quantity);
+      CreateAndAssignItemChargeLine(SalesLine,SalesHeader,-SalesLine.Quantity,TRUE);
+      CreateAndAssignItemChargeLine(SalesLine,SalesHeader,SalesLine.Quantity,FALSE);
+
+      // Exercise: Move Negative Lines.
+      MoveNegativeLines(SalesHeader."No.");
+
+      // Verify: Verify Negative Line must be moved in new Sales Order.
+      VerifySalesLine(
+        SalesHeader."Document Type"::Order,FindDocumentNo(SalesHeader."Sell-to Customer No."),SalesLine.Type::Item,Item."No.",
+        SalesLine.Quantity,0); // Use 0 for Quantity To Assign.
+    END;
+
+    [Test]
+    [HandlerFunctions(PostedSalesDocumentLinesHandler,ItemChargeAssignmentSalesHandler,SalesShipmentLinesHandler,MoveNegativeSalesLinesHandler,ConfirmHandler,SalesOrderHandler)]
+    PROCEDURE NavigateSalesReturnOrder@12();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Test Navigate functionality on Sales Return Order.
+
+      // Setup: Update Sales and Receivable Setup. Create and post Sales Order. Create Sales Return Order and get Posted Document Lines to return. Add Negative Line and Item Charge Lines. Apply Item Charges. Move Negative Lines.
+      Initialize;
+      UpdateSalesReceivableSetup(FALSE,FALSE);
+      CreateAndPostSalesOrder(SalesHeader,SalesLine);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",SalesHeader."Sell-to Customer No.");
+      GetPostedDocumentLinesToReverseOnSalesReturnOrder(SalesHeader."No.");
+      CreateItem(Item);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",-SalesLine.Quantity);
+      CreateAndAssignItemChargeLine(SalesLine,SalesHeader,-SalesLine.Quantity,TRUE);
+      CreateAndAssignItemChargeLine(SalesLine,SalesHeader,SalesLine.Quantity,FALSE);
+      MoveNegativeLines(SalesHeader."No.");
+
+      // Exercise: Post Sales Order and Sales Return Order.
+      FindAndPostSalesDocument(SalesHeader."Document Type"::Order,FindDocumentNo(SalesHeader."Sell-to Customer No."));
+      FindAndPostSalesDocument(SalesHeader."Document Type",SalesHeader."No.");
+
+      // Verify: Verify Navigate Lines.
+      VerifyNavigateLines(SalesHeader);
+    END;
+
+    [Test]
+    PROCEDURE CalculateInventoryValueDimension@49();
+    VAR
+      DefaultDimension@1002 : Record 352;
+      DimensionSetID@1003 : Integer;
+    BEGIN
+      // Verify Dimension on Revaluation Journal after Running Calculate Inventory Value Report.
+
+      // Setup: Create Item with Dimension, Create and post Purchase Order.
+      Initialize;
+      CreateAndPostPurchaseOrderWithDimension(DefaultDimension);
+
+      // Exercise: Run Calculate Inventory Value Report.
+      DimensionSetID := RunCalculateInventoryValueReport(DefaultDimension."No.");
+
+      // Verify: Dimension on Revaluation Journal.
+      VerifyDimensionOnRevaluationJournal(DefaultDimension,DimensionSetID);
+    END;
+
+    [Test]
+    PROCEDURE CalculateInventoryValueWithUpdateItemDimension@52();
+    VAR
+      DefaultDimension@1002 : Record 352;
+      DimensionSetID@1003 : Integer;
+    BEGIN
+      // Update Dimension on Item after Posting Purchase Order and Verify Dimension on Revaluation Journal.
+
+      // Setup: Create Item With Dimension, Create and post Purchase Order.
+      Initialize;
+      CreateAndPostPurchaseOrderWithDimension(DefaultDimension);
+
+      // Exercise: Run Calculate Inventory Value Report.
+      UpdateDefaultDimension(DefaultDimension);  // Update Item Dimension after Posting Purchase Order.
+      DimensionSetID := RunCalculateInventoryValueReport(DefaultDimension."No.");
+
+      // Verify: Updated Dimension on Revaluation Journal.
+      VerifyDimensionOnRevaluationJournal(DefaultDimension,DimensionSetID);
+    END;
+
+    [Test]
+    PROCEDURE ItemLedgerEntryAfterPostingPurchaseOrder@57();
+    VAR
+      Item@1000 : Record 27;
+      Quantity@1002 : Decimal;
+    BEGIN
+      // Verify Item Ledger Entry after posting Purchase Order.
+
+      // Setup: Create Item.
+      Initialize;
+      CreateItem(Item);
+
+      // Exercise: Create and Post Purchase Order.
+      Quantity := CreateAndPostPurchaseOrder(Item."No.",TRUE);
+
+      // Verify: Verify Item Ledger Entry.
+      VerifyItemLedgerEntryForPurchaseOrder(Item."No.",Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculateInventoryHandler)]
+    PROCEDURE PhysicalInventoryLedgerEntryAfterPostingPhysicalInventoryJournal@58();
+    VAR
+      ItemJournalLine@1005 : Record 83;
+      Item@1000 : Record 27;
+      DocumentNo@1001 : Code[20];
+      Quantity@1002 : Decimal;
+    BEGIN
+      // Verify Physical Inventory Item Journal after posting Physical Inventory Journal.
+
+      // Setup: Create Item, Item Journal and Post it.
+      Initialize;
+      CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(10,2);  // Use Random value for Quantity.
+      CreateAndPostItemJournalLine(ItemJournalLine."Entry Type"::Purchase,Quantity,Item."No.",LibraryRandom.RandDec(10,2),'');  // Taking Random Unit Amount.
+
+      // Exercise: Run Calculate Inventory and Post Physical Inventory Journal.
+      RunCalculateInventory(Item."No.");
+      DocumentNo := PostPhysicalInventoryJournal(Quantity,Item."No.");
+
+      // Verify: Verify Physical Inventory Item Ledger.
+      VerifyPhysicalInventoryItemLedger(DocumentNo,Item."No.",Quantity);
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderFromSalesBlanketOrder@63();
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+      SalesLine2@1000 : Record 37;
+    BEGIN
+      // Test functionality of Create Sales Order from Sales Blanket Order.
+
+      // Setup: Create Sales Blanket Order.
+      Initialize;
+      UpdateSalesReceivableSetup(FALSE,FALSE);
+      CreateSalesBlanketOrder(SalesHeader,SalesLine);
+
+      // Exercise: Create Sales Order from Blanket Sales Order.
+      CODEUNIT.RUN(CODEUNIT::"Blanket Sales Order to Order",SalesHeader);
+
+      // Verify: Verify Sales Order Line.
+      FindSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,SalesHeader."Sell-to Customer No.");
+      FindSalesLine(SalesLine2,SalesHeader."Document Type",SalesHeader."No.",SalesLine.Type::Item,SalesLine."No.");
+      SalesLine2.TESTFIELD(Quantity,SalesLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListHandler)]
+    PROCEDURE DropShipmentBeforePosting@62();
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+      PurchaseHeader@1007 : Record 38;
+    BEGIN
+      // Test functionality of Drop Shipment before Posting.
+
+      // Setup: Create Sales Order from Sales Blanket Order. Add Drop Shipment Line in Sales Order.
+      Initialize;
+      UpdateSalesReceivableSetup(FALSE,FALSE);
+      CreateSalesOrderForDropShipment(SalesHeader,SalesLine);
+
+      // Exercise: Create Purchase Order and associate with Sales Order.
+      CreatePurchaseOrder(PurchaseHeader,SalesHeader."Sell-to Customer No.");
+      CODEUNIT.RUN(CODEUNIT::"Purch.-Get Drop Shpt.",PurchaseHeader);
+
+      // Verify: Verify Purchase Line for Drop Shipment.
+      VerifyPurchaseLine(PurchaseHeader."Document Type"::Order,PurchaseHeader."No.",SalesLine."No.",SalesLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListHandler)]
+    PROCEDURE DropShipmentAfterPosting@61();
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+      PurchaseHeader@1007 : Record 38;
+      DocumentNo@1001 : Code[20];
+    BEGIN
+      // Test functionality of Drop Shipment after Posting.
+
+      // Setup: Create Sales Order from Sales Blanket Order. Add Drop Shipment Line in Sales Order. Create Purchase Order and associate with Sales Order.
+      Initialize;
+      UpdateSalesReceivableSetup(FALSE,FALSE);
+      CreateSalesOrderForDropShipment(SalesHeader,SalesLine);
+      CreatePurchaseOrder(PurchaseHeader,SalesHeader."Sell-to Customer No.");
+      CODEUNIT.RUN(CODEUNIT::"Purch.-Get Drop Shpt.",PurchaseHeader);
+
+      // Exercise: Post purchase Order as Receive. Post Sales Order as Invoice. Post Purchase Order as Invoice.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+      SalesHeader.GET(SalesHeader."Document Type",SalesHeader."No.");
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,TRUE);
+      PurchaseHeader.GET(PurchaseHeader."Document Type",PurchaseHeader."No.");
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+
+      // Verify: Verify Purchase Invoice Line.
+      VerifyPurchaseInvoiceLine(DocumentNo,SalesLine."No.",SalesLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListHandler)]
+    PROCEDURE DropShipmentDescriptionfromItem@24();
+    VAR
+      Customer@1000 : Record 18;
+      Item@1001 : Record 27;
+      ItemVariant@1006 : Record 5401;
+      PurchaseHeader@1005 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // [FEATURE] [Purchase] [Drop Shipment]
+      // [SCENARIO 378247] Descriptions should be getting from Item when getting Drop Shipment Lines if Item Variant, Item Translation and Item Cross Reference don't exist, and Descriptions on Sales Line are blank.
+      Initialize;
+
+      // [GIVEN] Create Item with "Description" = "D1","Description 2" = "D2".
+      // [GIVEN] Sales Order with Drop Shipment Line, Description and "Description 2" fields are blank.
+      CreateItemWithVariant(Item,ItemVariant);
+      CreateSalesOrderWithItemVariantPurchDesc(SalesHeader,SalesLine,Customer,Item."No.",'','','');
+
+      // [GIVEN] Create Purchase Order associated with Sales Order.
+      CreatePurchaseOrder(PurchaseHeader,SalesHeader."Sell-to Customer No.");
+
+      // [WHEN] Getting Drop Shipment Lines from Sales Lines.
+      GetDropShipmentLine(PurchaseLine,PurchaseHeader);
+
+      // [THEN] "Description" in purchase line is "D1", "Description 2" in purchase line is "D2".
+      VerifyPurchaseLineDescription(PurchaseLine,Item.Description,Item."Description 2");
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListHandler)]
+    PROCEDURE DropShipmentDescriptionfromItemVariant@196();
+    VAR
+      Customer@1005 : Record 18;
+      Item@1004 : Record 27;
+      ItemVariant@1006 : Record 5401;
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      // [FEATURE] [Purchase] [Drop Shipment]
+      // [SCENARIO 378247] Descriptions should be getting from Item Variant when getting Drop Shipment Lines if Item Translation and Item Cross Reference don't exist, and Descriptions on Sales Line are blank.
+      Initialize;
+
+      // [GIVEN] Create Item.
+      // [GIVEN] Create Item Variant with "Description" = "D1","Description 2" = "D2".
+      // [GIVEN] Create Sales Order with Drop Shipment Line and "Variant Code", Description and "Description 2" fields are blank.
+      CreateItemWithVariant(Item,ItemVariant);
+      CreateSalesOrderWithItemVariantPurchDesc(SalesHeader,SalesLine,Customer,Item."No.",ItemVariant.Code,'','');
+
+      // [GIVEN] Create Purchase Order associated with Sales Order.
+      CreatePurchaseOrder(PurchaseHeader,SalesHeader."Sell-to Customer No.");
+
+      // [WHEN] Getting Drop Shipment Lines from Sales Lines.
+      GetDropShipmentLine(PurchaseLine,PurchaseHeader);
+
+      // [THEN] "Description" in purchase line is "D1", "Description 2" in purchase line is "D2".
+      VerifyPurchaseLineDescription(PurchaseLine,ItemVariant.Description,ItemVariant."Description 2");
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListHandler)]
+    PROCEDURE DropShipmentDescriptionfromSalesLine@172();
+    VAR
+      Customer@1000 : Record 18;
+      Item@1001 : Record 27;
+      ItemVariant@1006 : Record 5401;
+      PurchaseHeader@1005 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // [FEATURE] [Purchase] [Drop Shipment]
+      // [SCENARIO 381104] Descriptions should be getting from Sales Line when getting Drop Shipment Lines if Item Translation and Item Cross Reference do not exist.
+      Initialize;
+
+      // [GIVEN] Create Item and Item Variant.
+      // [GIVEN] Sales Order with Drop Shipment Line and "Variant Code", Description = "D1", "Description 2" = "D2".
+      CreateItemWithVariant(Item,ItemVariant);
+      CreateSalesOrderWithItemVariantPurchDesc(
+        SalesHeader,SalesLine,Customer,Item."No.",ItemVariant.Code,LibraryUtility.GenerateGUID,LibraryUtility.GenerateGUID);
+
+      // [GIVEN] Purchase Order associated with Sales Order.
+      CreatePurchaseOrder(PurchaseHeader,SalesHeader."Sell-to Customer No.");
+
+      // [WHEN] Getting Drop Shipment Lines from Sales Lines.
+      GetDropShipmentLine(PurchaseLine,PurchaseHeader);
+
+      // [THEN] "Description" in purchase line is "D1", "Description 2" in purchase line is "D2".
+      VerifyPurchaseLineDescription(PurchaseLine,SalesLine.Description,SalesLine."Description 2");
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListHandler)]
+    PROCEDURE DropShipmentDescriptionfromItemTranslation@194();
+    VAR
+      Customer@1006 : Record 18;
+      Item@1005 : Record 27;
+      ItemVariant@1004 : Record 5401;
+      ItemTranslation@1008 : Record 30;
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      SalesHeader@1001 : Record 36;
+      SalesLine@1000 : Record 37;
+      Vendor@1007 : Record 23;
+    BEGIN
+      // [FEATURE] [Purchase] [Drop Shipment]
+      // [SCENARIO 378247] Descriptions should be getting from Item Translation when getting Drop Shipment Lines if Item Translation exists and Item Cross Reference doesn't exist.
+      Initialize;
+
+      // [GIVEN] Create Item and Item Variant.
+      // [GIVEN] Sales Order with Drop Shipment Line, "Variant Code" and descriptions.
+      CreateItemWithVariant(Item,ItemVariant);
+      CreateSalesOrderWithItemVariantPurchDesc(
+        SalesHeader,SalesLine,Customer,Item."No.",ItemVariant.Code,LibraryUtility.GenerateGUID,LibraryUtility.GenerateGUID);
+
+      // [GIVEN] Create Purchase Order associated with Sales Order.
+      CreatePurchOrder(PurchaseHeader,Vendor,SalesHeader."Sell-to Customer No.");
+
+      // [GIVEN] Create Item Translation with "Description" = "D1","Description 2" = "D2".
+      CreateItemTranslation(ItemTranslation,Item."No.",Vendor."Language Code",ItemVariant.Code);
+
+      // [WHEN] Getting Drop Shipment Line from Sales Lines.
+      GetDropShipmentLine(PurchaseLine,PurchaseHeader);
+
+      // [THEN] "Description" in purchase line is "D1", "Description 2" in purchase line is "D2".
+      VerifyPurchaseLineDescription(PurchaseLine,ItemTranslation.Description,ItemTranslation."Description 2")
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListHandler)]
+    PROCEDURE DropShipmentDescriptionfromItemCrossReference@161();
+    VAR
+      Customer@1008 : Record 18;
+      Item@1007 : Record 27;
+      ItemCrossReference@1009 : Record 5717;
+      ItemVariant@1006 : Record 5401;
+      ItemVendor@1010 : Record 99;
+      ItemTranslation@1005 : Record 30;
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1001 : Record 37;
+      Vendor@1000 : Record 23;
+    BEGIN
+      // [FEATURE] [Purchase] [Drop Shipment]
+      // [SCENARIO 378247] Descriptions should be getting from Item Cross Reference when getting Drop Shipment Lines if Item Cross Reference exist.
+      Initialize;
+
+      // [GIVEN] Create Item and Item Variant.
+      // [GIVEN] Sales Order with Drop Shipment Line, "Variant Code" and descriptions.
+      CreateItemWithVariant(Item,ItemVariant);
+      CreateSalesOrderWithItemVariantPurchDesc(
+        SalesHeader,SalesLine,Customer,Item."No.",ItemVariant.Code,LibraryUtility.GenerateGUID,LibraryUtility.GenerateGUID);
+
+      // [GIVEN] Create Purchase Order associated with Sales Order.
+      CreatePurchOrder(PurchaseHeader,Vendor,SalesHeader."Sell-to Customer No.");
+
+      // [GIVEN] Create Item Translation.
+      CreateItemTranslation(ItemTranslation,Item."No.",Vendor."Language Code",ItemVariant.Code);
+
+      // [GIVEN] Create Item Vendor and Item Cross Reference with "Description" = "D1".
+      CreateItemVendorWithVariantCode(ItemVendor,Vendor."No.",Item."No.",ItemVariant.Code);
+      CreateItemCrossReference(
+        ItemCrossReference,Item."No.",ItemCrossReference."Cross-Reference Type"::Vendor,Vendor."No.",ItemVariant.Code,
+        SalesLine."Unit of Measure",Item."No.");
+      ItemCrossReference.VALIDATE(Description,LibraryUtility.GenerateGUID);
+      ItemCrossReference.MODIFY(TRUE);
+
+      // [WHEN] Getting Drop Shipment Line from Sales Lines.
+      GetDropShipmentLine(PurchaseLine,PurchaseHeader);
+
+      // [THEN] "Description" in purchase line is "D1", "Description 2" in purchase line is empty.
+      VerifyPurchaseLineDescription(PurchaseLine,ItemCrossReference.Description,'')
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListHandler)]
+    PROCEDURE DropShptAfterPostAsShip@14();
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+      PurchaseHeader@1007 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      Customer@1005 : Record 18;
+    BEGIN
+      // [FEATURE] [Purchase] [Drop Shipment]
+      // [SCENARIO 378140] "Qty. to Receive" in Purchase Line with Drop Shipment should be 0 after receipt and shipment postings full Quantity in Sales Line.
+      Initialize;
+
+      // [GIVEN] "Default Quantity to Ship" = Blank on "Sales Receivables Setup" and "Default Qty. to Receive" = Blank on "Purchases & Payables Setup".
+      SetDefaultQtyToShipToBlank;
+      SetDefaultQtyToReceiveToBlank;
+      // [GIVEN] Sales Order with Drop Shipment Line.
+      CreateCustomer(Customer,TRUE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      CreateSalesLineWithPurchasingCode(SalesLine,SalesHeader);
+      // [GIVEN] Purch.Order is associated with Sales Order.
+      CreatePurchaseOrder(PurchaseHeader,SalesHeader."Sell-to Customer No.");
+      LibraryPurchase.GetDropShipment(PurchaseHeader);
+      // [GIVEN] "Qty. to Ship" is equal Quantity from Sales Line.
+      WITH SalesLine DO BEGIN
+        FIND;
+        VALIDATE("Qty. to Ship",Quantity);
+        MODIFY(TRUE);
+      END;
+      // [GIVEN] "Qty. to Receive" is equal Quantity from Sales Line.
+      WITH PurchaseLine DO BEGIN
+        SETRANGE("Document Type",PurchaseHeader."Document Type");
+        SETRANGE("Document No.",PurchaseHeader."No.");
+        FINDFIRST;
+        VALIDATE("Qty. to Receive",SalesLine.Quantity);
+        MODIFY(TRUE);
+      END;
+
+      // [WHEN] Post Sales Order as Receive.
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // [THEN] "Qty To Receive" is equal 0.
+      // [THEN] "Quantity Received" and "Qty. to Invoice" are equal Quantity.
+      VerifyDropShipment(PurchaseLine);
+    END;
+
+    [Test]
+    PROCEDURE CombineReturnReceiptReportWithoutPostingDate@76();
+    BEGIN
+      // Test to verify error message when Combine Return Receipt report is run without Posting Date.
+
+      // Setup: Create and post two Sales Return order for same Customer.
+      Initialize;
+
+      // Exercise: Run Combine Return Receipt without Posting Date.
+      ASSERTERROR RunCombineReturnReceipt(0D,WORKDATE,'');
+
+      // Verify: Verify Error Message.
+      Assert.AreEqual(STRSUBSTNO(PostingDateError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    PROCEDURE CombineReturnReceiptReportWithoutDocumentDate@74();
+    BEGIN
+      // Test to verify error message when Combine Return Receipt report is run without Document Date.
+
+      // Setup: Create and post two Sales Return order for same Customer.
+      Initialize;
+
+      // Exercise: Run Combine Return Receipt without Document date.
+      ASSERTERROR RunCombineReturnReceipt(WORKDATE,0D,'');
+
+      // Verify: Verify Error Message.
+      Assert.AreEqual(STRSUBSTNO(DocumentDateError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,YesConfirmHandler)]
+    PROCEDURE CombineReturnReceiptReport@66();
+    VAR
+      Customer@1004 : Record 18;
+      SalesLine@1003 : Record 37;
+      SalesLine2@1001 : Record 37;
+      DocumentNo@1000 : Code[20];
+      DocumentNo2@1002 : Code[20];
+    BEGIN
+      // Test to check functionality of Combine Return Receipt report .
+
+      // Setup: Create and post two Sales Return order for same Customer.
+      Initialize;
+      CreateCustomer(Customer,TRUE,'');
+      DocumentNo := CreateAndPostSalesReturnOrder(SalesLine,Customer."No.",FALSE);
+      DocumentNo2 := CreateAndPostSalesReturnOrder(SalesLine2,SalesLine."Sell-to Customer No.",FALSE);
+
+      // Exercise: Run Combine Return Receipt.
+      RunCombineReturnReceipt(WORKDATE,WORKDATE,SalesLine."Sell-to Customer No.");
+
+      // Verify: Verify Posted Sales Credit Memo.
+      VerifyPostedSalesCreditMemo(
+        SalesLine."Sell-to Customer No.",SalesLine."Bill-to Customer No.",SalesLine.Type::Item,DocumentNo,SalesLine."No.",
+        SalesLine.Quantity);
+      VerifyPostedSalesCreditMemo(
+        SalesLine2."Sell-to Customer No.",SalesLine2."Bill-to Customer No.",SalesLine2.Type::Item,DocumentNo2,SalesLine2."No.",
+        SalesLine2.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE CombineReturnReceiptReportWithDifferentBillToCustomerNo@77();
+    VAR
+      Customer@1004 : Record 18;
+      SalesLine@1003 : Record 37;
+      SalesLine2@1001 : Record 37;
+      DocumentNo@1000 : Code[20];
+      DocumentNo2@1002 : Code[20];
+    BEGIN
+      // Test to check functionality of Combine Return Receipt report for different Bill To Customer No.
+
+      // Setup: Create and post two Sales Return order for different Bill To Customer.
+      Initialize;
+      CreateCustomer(Customer,TRUE,'');
+      DocumentNo := CreateAndPostSalesReturnOrder(SalesLine,Customer."No.",FALSE);
+      DocumentNo2 := CreateAndPostSalesReturnOrder(SalesLine2,SalesLine."Sell-to Customer No.",TRUE);
+
+      // Exercise: Run Combine Return Receipt.
+      RunCombineReturnReceipt(WORKDATE,WORKDATE,SalesLine."Sell-to Customer No.");
+
+      // Verify: Verify Posted Sales Credit Memo.
+      VerifyPostedSalesCreditMemo(
+        SalesLine."Sell-to Customer No.",SalesLine."Bill-to Customer No.",SalesLine.Type::Item,DocumentNo,SalesLine."No.",
+        SalesLine.Quantity);
+      VerifyPostedSalesCreditMemo(
+        SalesLine2."Sell-to Customer No.",SalesLine2."Bill-to Customer No.",SalesLine2.Type::Item,DocumentNo2,SalesLine2."No.",
+        SalesLine2.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,YesConfirmHandler)]
+    PROCEDURE DeleteInvoiceSalesReturnOrderReport@83();
+    VAR
+      Customer@1001 : Record 18;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1002 : Record 37;
+      SalesLine2@1003 : Record 37;
+    BEGIN
+      // Test to check functionality of Delete Invoice Sales Return Order report after Combine Return Receipt Batch report.
+
+      // Setup: Create and post two Sales Return orders and Run Combine Return Receipt report.
+      Initialize;
+      CreateCustomer(Customer,TRUE,'');
+      CreateAndPostSalesReturnOrder(SalesLine,Customer."No.",FALSE);
+      CreateAndPostSalesReturnOrder(SalesLine2,SalesLine."Sell-to Customer No.",FALSE);
+      RunCombineReturnReceipt(WORKDATE,WORKDATE,SalesLine."Sell-to Customer No.");
+
+      // Exercise: Run Delete Invoice Sales Return Order batch report.
+      RunDeleteInvoiceSalesReturnOrder(SalesLine."Sell-to Customer No.");
+
+      // Verify: Sales Return Orders gets deleted.
+      Assert.IsFalse(SalesHeader.GET(SalesHeader."Document Type"::"Return Order",SalesLine."Document No."),
+        STRSUBSTNO(
+          SalesReturnOrderMustBeDeletedError,SalesHeader."Document Type"::"Return Order",SalesLine.FIELDCAPTION("Document No."),
+          SalesLine."Document No."));
+      Assert.IsFalse(SalesHeader.GET(SalesHeader."Document Type"::"Return Order",SalesLine2."Document No."),
+        STRSUBSTNO(
+          SalesReturnOrderMustBeDeletedError,SalesHeader."Document Type"::"Return Order",SalesLine2.FIELDCAPTION("Document No."),
+          SalesLine2."Document No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentSalesHandler,SalesShipmentLinesHandler,MessageHandler,YesConfirmHandler)]
+    PROCEDURE CombineReturnReceiptReportForItemCharge@84();
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1002 : Record 37;
+      SalesLine2@1003 : Record 37;
+      DocumentNo@1000 : Code[20];
+      DocumentNo2@1001 : Code[20];
+    BEGIN
+      // Test to check functionality of Combine Return Receipt report for Item Charge.
+
+      // Setup: Create and post two Sales Return orders for Item Charge.
+      Initialize;
+      CreateAndPostSalesOrder(SalesHeader,SalesLine);
+      DocumentNo := CreateAndPostSalesReturnOrderForItemCharge(SalesLine,SalesHeader."Sell-to Customer No.");
+      DocumentNo2 := CreateAndPostSalesReturnOrderForItemCharge(SalesLine2,SalesHeader."Sell-to Customer No.");
+
+      // Exercise: Run Combine Return Receipt batch job.
+      RunCombineReturnReceipt(WORKDATE,WORKDATE,SalesLine."Sell-to Customer No.");
+
+      // Verify: Verify Posted Sales Credit Memo.
+      VerifyPostedSalesCreditMemo(
+        SalesLine."Sell-to Customer No.",SalesLine."Bill-to Customer No.",SalesLine.Type::"Charge (Item)",DocumentNo,SalesLine."No.",
+        SalesLine.Quantity);
+      VerifyPostedSalesCreditMemo(
+        SalesLine2."Sell-to Customer No.",SalesLine2."Bill-to Customer No.",SalesLine.Type::"Charge (Item)",DocumentNo2,
+        SalesLine2."No.",SalesLine2.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentSalesHandler,SalesShipmentLinesHandler,MessageHandler,YesConfirmHandler)]
+    PROCEDURE DeleteInvoiceSalesReturnOrderReportForItemCharge@95();
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1002 : Record 37;
+      SalesLine2@1003 : Record 37;
+    BEGIN
+      // Test to check functionality of Delete Invoice Sales Return Order report for Item Charge after Combine Return Receipt Batch report.
+
+      // Setup: Create and post two Sales Return orders for Item Charge and Run Combine Return Receipt report.
+      Initialize;
+      CreateAndPostSalesOrder(SalesHeader,SalesLine);
+      CreateAndPostSalesReturnOrderForItemCharge(SalesLine,SalesHeader."Sell-to Customer No.");
+      CreateAndPostSalesReturnOrderForItemCharge(SalesLine2,SalesHeader."Sell-to Customer No.");
+      RunCombineReturnReceipt(WORKDATE,WORKDATE,SalesLine."Sell-to Customer No.");
+
+      // Exercise: Run Delete Invoice Sales Return Order batch report.
+      RunDeleteInvoiceSalesReturnOrder(SalesLine."Sell-to Customer No.");
+
+      // Verify: Sales Return Orders gets deleted.
+      Assert.IsFalse(SalesHeader.GET(SalesHeader."Document Type"::"Return Order",SalesLine."Document No."),
+        STRSUBSTNO(
+          SalesReturnOrderMustBeDeletedError,SalesHeader."Document Type"::"Return Order",SalesLine.FIELDCAPTION("Document No."),
+          SalesLine."Document No."));
+      Assert.IsFalse(SalesHeader.GET(SalesHeader."Document Type"::"Return Order",SalesLine2."Document No."),
+        STRSUBSTNO(
+          SalesReturnOrderMustBeDeletedError,SalesHeader."Document Type"::"Return Order",SalesLine2.FIELDCAPTION("Document No."),
+          SalesLine2."Document No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentPurchaseHandler,OptionDialogHandler)]
+    PROCEDURE ItemChargeAssignmentInPurchaseReturnOrder@79();
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      ItemNo@1004 : Code[20];
+    BEGIN
+      // Test to check Item Charge Assignment in Purchase Return Order.
+
+      // Setup: Create Purchase Return Order with Item Charge.
+      Initialize;
+      ItemNo := CreatePurchaseReturnOrderWithItemCharge(PurchaseHeader,PurchaseLine,LibraryRandom.RandInt(10));  // Taking Random Quantity.
+
+      // Exercise: Suggest Item Charge Assignment.
+      PurchaseLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Item Charge Assignment.
+      VerifyItemChargeAssignment(
+        PurchaseHeader."Document Type",PurchaseHeader."No.",ItemNo,PurchaseLine.Quantity,PurchaseLine."Line Amount");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentPurchaseHandler,OptionDialogHandler)]
+    PROCEDURE ItemChargeAssignmentInPurchaseCreditMemo@87();
+    VAR
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      ItemNo@1004 : Code[20];
+      DocumentNo@1006 : Code[20];
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Test to check Item Charge Assignment in Purchase Credit Memo.
+
+      // Setup: Create and Post Purchase Return Order with Item Charge Assignment and Create Purchase Credit Memo.
+      Initialize;
+      Quantity := LibraryRandom.RandInt(10);  // Taking Random Quantity.
+      ItemNo := CreatePurchaseReturnOrderWithItemCharge(PurchaseHeader,PurchaseLine,Quantity);
+      PurchaseLine.ShowItemChargeAssgnt;
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+      LibraryPurchase.CreatePurchHeader(
+        PurchaseHeader,PurchaseHeader."Document Type"::"Credit Memo",PurchaseHeader."Buy-from Vendor No.");
+
+      // Exercise: Get Return Shipment Lines.
+      GetReturnShipmentLine(PurchaseHeader,DocumentNo);
+
+      // Verify: Verify that Purchase Lines and Item Charge Assignment gets copied in Purchase Credit Memo.
+      VerifyPurchaseLine(PurchaseHeader."Document Type"::"Credit Memo",PurchaseHeader."No.",ItemNo,Quantity);  // Verify Purchase Line for Item.
+      VerifyPurchaseLine(PurchaseHeader."Document Type"::"Credit Memo",PurchaseHeader."No.",PurchaseLine."No.",PurchaseLine.Quantity);  // Verify Purchase Line for Item Charge.
+      VerifyItemChargeAssignment(
+        PurchaseHeader."Document Type",PurchaseHeader."No.",ItemNo,PurchaseLine.Quantity,PurchaseLine."Line Amount");
+    END;
+
+    [Test]
+    [HandlerFunctions(BatchPostSalesReturnOrderHandler,MessageHandler)]
+    PROCEDURE BatchPostSalesReturnOrderReportWithErrorDialog@96();
+    VAR
+      SalesLine@1004 : Record 37;
+      SalesReceivablesSetup@1003 : Record 311;
+    BEGIN
+      // Test to Validate error message after Calculate Invoice Discount field is set False on Batch Post Sales Return Order report.
+
+      // Setup: Update Sales & Receivables Setup and Create a Sales Return Order.
+      Initialize;
+      UpdateSalesReceivableSetup(FALSE,TRUE);
+      CreateSalesReturnOrder(SalesLine);
+      CalculateInvoiceDiscount := TRUE;  // IsCalculateInvoiceDiscount variable is made Global as it is used in the Handler.
+
+      // Exercise: Run Batch Post Sales Return Order report and set Calculate Invoice Discount field FALSE.
+      ASSERTERROR RunBatchPostSalesReturnOrders(SalesLine."Document No.");
+
+      // Verify: Validate error message.
+      Assert.AreEqual(
+        STRSUBSTNO(
+          CalculateInvoiceDiscountError,SalesReceivablesSetup.FIELDCAPTION("Calc. Inv. Discount"),FALSE,
+          SalesReceivablesSetup.TABLECAPTION,TRUE),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(BatchPostSalesReturnOrderHandler,MessageHandler)]
+    PROCEDURE BatchPostSalesReturnOrderReport@93();
+    VAR
+      SalesLine@1004 : Record 37;
+    BEGIN
+      // Test to check functionality of Batch Post Sales Return Order report.
+
+      // Setup: Update Sales & Receivables Setup and Create a Sales Return Order.
+      Initialize;
+      UpdateSalesReceivableSetup(FALSE,TRUE);
+      CreateSalesReturnOrder(SalesLine);
+
+      // Exercise: Run Batch Post Sales Return Order report.
+      RunBatchPostSalesReturnOrders(SalesLine."Document No.");
+
+      // Verify: Verify Posted Return Receipt.
+      VerifyPostedReturnReceipt(SalesLine);
+    END;
+
+    [Test]
+    PROCEDURE SalesUnitPriceFromItemUnitPrice@102();
+    VAR
+      CustomerPriceGroup@1001 : Record 6;
+      Item@1000 : Record 27;
+      Customer@1002 : Record 18;
+      SalesPrice@1003 : Record 7002;
+      SalesHeader@1005 : Record 36;
+      SalesLine@1006 : Record 37;
+    BEGIN
+      // Test and verify Sales Unit Price update from Item Price.
+
+      // Setup: Create Item and Customer with Customer Price Group.
+      Initialize;
+      CreateItem(Item);
+      LibrarySales.CreateCustomerPriceGroup(CustomerPriceGroup);
+      CreateCustomer(Customer,FALSE,CustomerPriceGroup.Code);
+      CreateSalesPrice(
+        SalesPrice,Item,SalesPrice."Sales Type"::Customer,Customer."No.",Item."Base Unit of Measure",
+        LibraryRandom.RandDec(100,2),WORKDATE);  // Use random Quantity.
+
+      // Exercise: Create and release Sales Order.
+      CreateAndReleaseSalesOrder(SalesHeader,SalesLine,Customer."No.",Item."No.",SalesPrice."Minimum Quantity" / 2);  // Use SalesPrice."Minimum Quantity" / 2 required for test.
+
+      // Verify: Verify Unit Price on Sales Line.
+      VerifyUnitPriceOnSalesLine(SalesLine,Item."Unit Price");
+    END;
+
+    [Test]
+    PROCEDURE SalesUnitPriceFromCustomerSalesPrice@98();
+    VAR
+      CustomerPriceGroup@1001 : Record 6;
+      Item@1000 : Record 27;
+      Customer@1002 : Record 18;
+      SalesPrice@1003 : Record 7002;
+      SalesHeader@1005 : Record 36;
+      SalesLine@1006 : Record 37;
+    BEGIN
+      // Test and verify Sales Unit Price update from Customer Sales Price.
+
+      // Setup: Create Item and Customer with Customer Price Group. Create and release Sales Order.
+      Initialize;
+      CreateItem(Item);
+      LibrarySales.CreateCustomerPriceGroup(CustomerPriceGroup);
+      CreateCustomer(Customer,FALSE,CustomerPriceGroup.Code);
+      CreateSalesPrice(
+        SalesPrice,Item,SalesPrice."Sales Type"::Customer,Customer."No.",Item."Base Unit of Measure",
+        LibraryRandom.RandDec(100,2),WORKDATE);  // Use random Quantity.
+      CreateAndReleaseSalesOrder(SalesHeader,SalesLine,Customer."No.",Item."No.",SalesPrice."Minimum Quantity" / 2);  // Use SalesPrice."Minimum Quantity" / 2 required for test.
+
+      // Exercise: Reopen Sales Order and update Quantity.
+      LibrarySales.ReopenSalesDocument(SalesHeader);
+      SalesLine.VALIDATE(Quantity,SalesPrice."Minimum Quantity");
+      SalesLine.MODIFY(TRUE);
+
+      // Verify: Verify Unit Price on Sales Line.
+      VerifyUnitPriceOnSalesLine(SalesLine,SalesPrice."Unit Price");
+    END;
+
+    [Test]
+    [HandlerFunctions(GetSalesPriceHandler,MessageHandler)]
+    PROCEDURE SalesUnitPriceFromCustomerSalesPriceGroup@92();
+    VAR
+      CustomerPriceGroup@1001 : Record 6;
+      Item@1000 : Record 27;
+      Customer@1002 : Record 18;
+      SalesPrice@1003 : Record 7002;
+      SalesHeader@1005 : Record 36;
+      SalesLine@1006 : Record 37;
+    BEGIN
+      // Test and verify Sales Unit Price update from Customer Price Group.
+
+      // Setup: Create Item and Customer with Customer Price Group. Create and release Sales Order. Reopen Sales Order and update Order Date.
+      Initialize;
+      CreateItem(Item);
+      LibrarySales.CreateCustomerPriceGroup(CustomerPriceGroup);
+      CreateCustomer(Customer,FALSE,CustomerPriceGroup.Code);
+      CreateSalesPrice(
+        SalesPrice,Item,SalesPrice."Sales Type"::"Customer Price Group",Customer."Customer Price Group",Item."Base Unit of Measure",
+        0,CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',WORKDATE));
+
+      // Use random Starting Date.
+      CreateAndReleaseSalesOrder(SalesHeader,SalesLine,Customer."No.",Item."No.",LibraryRandom.RandDec(100,2));  // Use random Quantity.
+      LibrarySales.ReopenSalesDocument(SalesHeader);
+      UpdateOrderDateOnSalesOrder(SalesHeader,SalesPrice."Starting Date");
+
+      // Exercise: Get Sales Price.
+      GetSalesPrice(SalesHeader."No.");
+
+      // Verify: Verify Unit Price on Sales Line.
+      VerifyUnitPriceOnSalesLine(SalesLine,SalesPrice."Unit Price");
+    END;
+
+    [Test]
+    PROCEDURE SalesUnitPriceWithDifferentUnitOfMeasureCode@111();
+    VAR
+      Customer@1001 : Record 18;
+      Item@1000 : Record 27;
+      SalesPrice@1003 : Record 7002;
+      SalesPrice2@1004 : Record 7002;
+      SalesHeader@1005 : Record 36;
+      SalesLine@1006 : Record 37;
+      UnitOfMeasure@1008 : Record 204;
+      ItemUnitOfMeasure@1009 : Record 5404;
+    BEGIN
+      // Test and verify Sales Unit Price update from Customer Sales Price for multiple Unit of Measure.
+
+      // Setup: Create Item with two Item Unit of Measure. Create Sales Price for Item with different Unit of Measure Code. Create and release Sales Order.
+      Initialize;
+      CreateItem(Item);
+      LibraryInventory.CreateUnitOfMeasureCode(UnitOfMeasure);
+      LibraryInventory.CreateItemUnitOfMeasure(ItemUnitOfMeasure,Item."No.",UnitOfMeasure.Code,1);
+      CreateSalesPrice(SalesPrice,Item,SalesPrice."Sales Type"::"All Customers",'',Item."Base Unit of Measure",0,WORKDATE);
+      CreateSalesPrice(SalesPrice2,Item,SalesPrice2."Sales Type"::"All Customers",'',UnitOfMeasure.Code,0,WORKDATE);
+      CreateCustomer(Customer,FALSE,'');
+      CreateAndReleaseSalesOrder(SalesHeader,SalesLine,Customer."No.",Item."No.",LibraryRandom.RandDec(100,2));  // Use random Quantity.
+
+      // Exercise: Reopen Sales Order and update Unit of Measure Code.
+      LibrarySales.ReopenSalesDocument(SalesHeader);
+      SalesLine.VALIDATE("Unit of Measure Code",UnitOfMeasure.Code);
+      SalesLine.MODIFY(TRUE);
+
+      // Verify: Verify Unit Price on Sales Line.
+      VerifyUnitPriceOnSalesLine(SalesLine,SalesPrice2."Unit Price");
+    END;
+
+    [Test]
+    PROCEDURE UpdateSalesShipmentAfterShipment@109();
+    VAR
+      ShippingAgentServices@1000 : Record 5790;
+      DocumentNo@1001 : Code[20];
+    BEGIN
+      // Update Shipping Agent Code, Shipping Agent Service Code, Package Tracking Number on Posted Shipment.
+
+      // Setup: Create Sales Order and Ship it.
+      DocumentNo := CreateSalesOrderAndPost;
+
+      // Exercise: Update Posted Shipment.
+      UpdatePostedShipment(ShippingAgentServices,DocumentNo);
+
+      // Verify: Shipping Agent Code, Shipping Agent Service Code, Package Tracking Number Updated on Posted Shipment .
+      VerifyPostedShipment(ShippingAgentServices,DocumentNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerNo)]
+    PROCEDURE ShippingAdviceError@116();
+    VAR
+      Item@1003 : Record 27;
+      Customer@1002 : Record 18;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      // Create Sales Order and after change Shipping Advice validate error message.
+
+      // Setup: Create Sales Order.
+      Initialize;
+      CreateCustomer(Customer,FALSE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      CreateItem(Item);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2));  // Use Random Quantity.
+
+      // Exercise: Change Shipping Advice to Complete and decline the confirm message.
+      ASSERTERROR UpdateShippingAdviceOnSalesOrder(SalesHeader);
+
+      // Verify: Verify error message.
+      Assert.ExpectedError(InterruptedToRespectError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ShippingAdvice@115();
+    VAR
+      Item@1003 : Record 27;
+      Customer@1002 : Record 18;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      // Create Sales Order and after change Shipping Advice validate Shipping Advice.
+
+      // Setup: Create Sales Order.
+      Initialize;
+      CreateCustomer(Customer,FALSE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      CreateItem(Item);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2));  // Use Random Quantity.
+
+      // Exercise: Change Shipping Advice to Complete.
+      UpdateShippingAdviceOnSalesOrder(SalesHeader);
+
+      // Verify: Verify Shipping Advice must be Complete.
+      SalesHeader.FIND;
+      SalesHeader.TESTFIELD("Shipping Advice",SalesHeader."Shipping Advice"::Complete);
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingHandler)]
+    PROCEDURE CalculateAvailabilityAndCapability@119();
+    VAR
+      Item@1000 : Record 27;
+      Location@1001 : Record 14;
+      SalesLine@1004 : Record 37;
+    BEGIN
+      // Create Order Promising with Capable to Promise. Verify Unavailable Quantity, Planned Delivery Date, Requested Delivery Date.
+
+      // Setup: Create Item and Location. Create Sales Order with Request Delivery Date.
+      Initialize;
+      CreateItem(Item);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      CapableToPromise := TRUE;  // Global Variable used in OrderPromising Handler.
+      CreateSalesOrderWithRequestedDeliveryDate(SalesLine,Item."No.",Location.Code,LibraryRandom.RandDec(10,2));  // Use Random Quantity.
+      UnavailableQuantity := SalesLine.Quantity; // Global Variable used in OrderPromising Handler.
+
+      // Exercise: Open Order Promising Lines Page and Invoke Capable to Promise.
+      OpenOrderPromisingPage(SalesLine."Document No.");
+
+      // Verify: Unavailable Quantity, Planned Delivery Date, Requested Delivery Date. Verification done in OrderPromising Handler.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingHandler)]
+    PROCEDURE CalculateAvailabilityAndCapabilityAfterPostingItemJournalLine@123();
+    VAR
+      Item@1005 : Record 27;
+      Location@1000 : Record 14;
+      SalesLine@1001 : Record 37;
+      ItemJournalLine@1004 : Record 83;
+      Quantity@1002 : Decimal;
+    BEGIN
+      // Create and Post Item Journal Line. Create Order Promising with Capable to Promise. Verify Unavailable Quantity, Planned Delivery Date, Requested Delivery Date.
+
+      // Setup: Create Item and Location. Create and Post Item Journal Line. Create Sales Order with Request Delivery Date.
+      Initialize;
+      CreateItem(Item);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Quantity := LibraryRandom.RandDec(10,2);  // Use Random Quantity.
+      CreateAndPostItemJournalLine(
+        ItemJournalLine."Entry Type"::Purchase,Quantity,Item."No.",LibraryRandom.RandDec(10,2),Location.Code);  // Use Random Unit Price.
+      CreateSalesOrderWithRequestedDeliveryDate(SalesLine,Item."No.",Location.Code,Quantity);
+
+      // Exercise: Open Order Promising Lines Page and Invoke Available to Promise.
+      OpenOrderPromisingPage(SalesLine."Document No.");
+
+      // Verify: Unavailable Quantity, Planned Delivery Date, Requested Delivery Date. Verification done in OrderPromising Handler.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingHandler)]
+    PROCEDURE CalculateAvailabilityAndCapabilityAfterPostingItemJournalLineWithReserveQuantity@132();
+    VAR
+      Item@1008 : Record 27;
+      Location@1007 : Record 14;
+      SalesLine@1004 : Record 37;
+      ItemJournalLine@1001 : Record 83;
+      Quantity@1005 : Decimal;
+    BEGIN
+      // Create and Post Item Journal Line. Create Order Promising with Capable to Promise and Item Reserved as Always. Verify Unavailable Quantity, Planned Delivery Date, Requested Delivery Date.
+
+      // Setup: Create Item and Location. Create and Post Item Journal Line. Update Item Reserved as Always. Create Sales Order with Request Delivery Date.
+      Initialize;
+      CreateItem(Item);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Quantity := LibraryRandom.RandDec(10,2);  // Use Random Quantity.
+      CreateAndPostItemJournalLine(
+        ItemJournalLine."Entry Type"::Purchase,Quantity,Item."No.",LibraryRandom.RandDec(10,2),Location.Code);  // Use Random Unit Price.
+      Item.FIND;
+      Item.VALIDATE(Reserve,Item.Reserve::Always);
+      Item.MODIFY(TRUE);
+      CreateSalesOrderWithRequestedDeliveryDate(SalesLine,Item."No.",Location.Code,Quantity);
+
+      // Exercise: Open Order Promising Lines Page and Invoke Available to Promise.
+      OpenOrderPromisingPage(SalesLine."Document No.");
+
+      // Verify: Unavailable Quantity, Planned Delivery Date, Requested Delivery Date. Verification done in OrderPromising Handler.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingHandler)]
+    PROCEDURE OrderPromisingOnSalesOrderWithRequestedDeliveryDate@126();
+    VAR
+      SalesLine@1004 : Record 37;
+      Item@1000 : Record 27;
+    BEGIN
+      // Test to verify Order Promising Line of Sales Order with Requested Delivery Date.
+
+      // Setup: Create Sales Order with Requested Delivery Date.
+      Initialize;
+      RequestedShipmentDate := TRUE;  // Global Variable used in OrderPromising Handler.
+      CapableToPromise := TRUE;  // Global Variable used in OrderPromising Handler.
+      CreateItem(Item);
+      CreateSalesOrderWithRequestedDeliveryDate(SalesLine,Item."No.",'',LibraryRandom.RandDec(10,2));  // Use Random Quantity.
+
+      // Exercise: Open Order Promising Lines Page from Sales Order.
+      OpenOrderPromisingPage(SalesLine."Document No.");
+
+      // Verify: Order Promising Line.
+      VerifyOrderPromisingLine(SalesLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentSalesHandler)]
+    PROCEDURE ItemChargeAssignmentInSalesReturnOrder@133();
+    VAR
+      SalesHeader@1002 : Record 36;
+      SalesLine@1001 : Record 37;
+      ItemNo@1004 : Code[20];
+    BEGIN
+      // Test to check Item Charge Assignment in Sales Return Order.
+
+      // Setup: Create Sales Return Order with Item Charge.
+      Initialize;
+      ItemNo := CreateSalesDocumentWithItemCharge(
+          SalesHeader,SalesLine,SalesHeader."Document Type"::"Return Order",LibraryRandom.RandDec(10,2));  // Taking Random Quantity.
+
+      // Exercise: Suggest Item Charge Assignment.
+      SalesLine.ShowItemChargeAssgnt;
+
+      // Verify: Verify Item Charge Assignment.
+      VerifyItemChargeAssignmentForSales(
+        SalesHeader."Document Type",SalesHeader."No.",ItemNo,SalesLine.Quantity,SalesLine."Line Amount");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentSalesHandler)]
+    PROCEDURE ItemChargeAssignmentInSalesCreditMemo@131();
+    VAR
+      SalesHeader@1003 : Record 36;
+      SalesLine@1001 : Record 37;
+      ItemNo@1004 : Code[20];
+      DocumentNo@1006 : Code[20];
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Test to check Item Charge Assignment in Sales Credit Memo.
+
+      // Setup: Create and Post Sales Return Order with Item Charge Assignment and create Sales Credit Memo.
+      Initialize;
+      Quantity := LibraryRandom.RandDec(10,2);  // Taking Random Quantity.
+      ItemNo := CreateSalesDocumentWithItemCharge(
+          SalesHeader,SalesLine,SalesHeader."Document Type"::"Return Order",Quantity);
+      SalesLine.ShowItemChargeAssgnt;
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);  // Post the Sales Return Order as Shipment.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Credit Memo",SalesHeader."Sell-to Customer No.");
+
+      // Exercise: Get Return Receipt Lines.
+      GetReturnReceiptLLine(SalesHeader,DocumentNo);
+
+      // Verify: Verify that Sales Lines and Item Charge Assignment gets copied in Sales Credit Memo.
+      VerifySalesLineForItemCharge(SalesHeader."Document Type",SalesHeader."No.",ItemNo,Quantity);
+      VerifySalesLineForItemCharge(SalesHeader."Document Type",SalesHeader."No.",SalesLine."No.",SalesLine.Quantity);
+      VerifyItemChargeAssignmentForSales(
+        SalesHeader."Document Type",SalesHeader."No.",ItemNo,SalesLine.Quantity,SalesLine."Line Amount");
+    END;
+
+    [Test]
+    [HandlerFunctions(CreateReturnRelatedDocumentsReportHandler)]
+    PROCEDURE CreateReturnRelatedDocumentReport@129();
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      SalesLine@1000 : Record 37;
+      Vendor@1003 : Record 23;
+    BEGIN
+      // Test to check the functionality of Return Related Documents Report.
+
+      // Setup: Create Sales Return Order and Vendor.
+      Initialize;
+      CreateSalesReturnOrder(SalesLine);
+      CreateVendor(Vendor);
+      VendorNo := Vendor."No.";  // VendorNo is made Global as it is used in the Handler.
+
+      // Exercise: Run Create Return Related Documents Report.
+      RunCreateReturnRelatedDocumentsReport(SalesLine."Document No.");
+
+      // Verify: Verify Sales, Purchase and Purchase Return Orders are created.
+      VerifySalesOrder(SalesLine."Sell-to Customer No.");
+      VerifyPurchaseDocument(PurchaseHeader."Document Type"::Order,VendorNo);
+      VerifyPurchaseDocument(PurchaseHeader."Document Type"::"Return Order",VendorNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesAnalysisbyDimMatrixPageHandler)]
+    PROCEDURE SalesAnalysisByDimMatrixForSalesAmount@140();
+    VAR
+      ItemAnalysisView@1002 : Record 7152;
+      SalesHeader@1001 : Record 36;
+      SalesLine@1000 : Record 37;
+      AnalysisViewListSales@1004 : TestPage 9371;
+    BEGIN
+      // Test to verify the Sales Amount and Quantity on Sales Analysis By Dim Matrix page.
+
+      // Setup: Create Item Analysis View. Create and post a Sales Order as Ship and Invoice. Open Analysis View List Sales page, invoke Update Item Analysis View.
+      LibraryERM.CreateItemAnalysisView(ItemAnalysisView,ItemAnalysisView."Analysis Area"::Sales);
+      CreateAndPostSalesOrder(SalesHeader,SalesLine);
+      Quantity2 := SalesLine.Quantity;  // Quantity is made Global as it is used in handler for verification.
+      Amount := SalesLine."Line Amount";  // Amount is made Global as it is used in handler for verification.
+      InvokeUpdateItemAnalysisViewOnAnalysisViewListSales(AnalysisViewListSales,ItemAnalysisView.Code);
+
+      // Exercise: Open Sales Analysis By Dimensions page and invoke Show Matrix to open Sales Analysis By Dim Matrix page.
+      InvokeShowMatrixOnSalesAnalysisByDimensions(AnalysisViewListSales,SalesLine."No.");
+
+      // Verify: Quantity and Amount on Sales Analysis by Dim Matrix page.
+      // Verification is done in SalesAnalysisbyDimMatrixPageHandler.
+    END;
+
+    [Test]
+    [HandlerFunctions(DeleteEmptyItemRegistersReportHandler,ConfirmHandlerNo)]
+    PROCEDURE DeleteEmptyItemRegistersReportWithNoOption@148();
+    VAR
+      ItemRegister@1004 : Record 46;
+    BEGIN
+      // Test the functionality of Delete Empty Item Registers report with No option for Confirm dialog.
+
+      // Setup: Create and post Sales Order as Invoice after Shipment.
+      Initialize;
+      CreateAndPostSalesOrderAsInvoiceAfterShipment;
+      ItemRegister.FINDLAST;
+
+      // Exercise: Run Delete empty Item Registers report with No option for Confirm dialog.
+      RunDeleteEmptyItemRegistersReport(ItemRegister."No.");
+
+      // Verify: Item Registers does not gets deleted.
+      ItemRegister.GET(ItemRegister."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(DeleteEmptyItemRegistersReportHandler,ConfirmHandler)]
+    PROCEDURE DeleteEmptyItemRegistersReportWithYesOption@147();
+    VAR
+      ItemRegister@1004 : Record 46;
+    BEGIN
+      // Test the functionality of Delete Empty Item Registers report with Yes option for Confirm dialog.
+
+      // Setup: Create and post Sales Order as Invoice after Shipment.
+      Initialize;
+      CreateAndPostSalesOrderAsInvoiceAfterShipment;
+      ItemRegister.FINDLAST;
+
+      // Exercise: Run Delete empty Item Registers report with Yes option for Confirm dialog.
+      RunDeleteEmptyItemRegistersReport(ItemRegister."No.");
+
+      // Verify: Item Registers gets deleted.
+      Assert.IsFalse(ItemRegister.GET(ItemRegister."No."),STRSUBSTNO(ItemRegisterMustBeDeletedError));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignmentSalesHandler)]
+    PROCEDURE ChangeItemChargeQtyInSalesLineWithAssignedCharge@160();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      ItemNo@1003 : Code[20];
+      ItemChargeQtyDelta@1002 : Decimal;
+      ItemChargeUnitPrice@1004 : Decimal;
+    BEGIN
+      // [FEATURE] [Sales Order] [Item Charge]
+      // [SCENARIO 379725] Quantity on Item Charge line in Sales Order can be altered after the assignment is posted. New quantity of Item Charge can be assigned to and posted correctly with an outstanding quantity on the Item line.
+      Initialize;
+
+      // [GIVEN] Sales Line with Item.
+      // [GIVEN] Sales Line with Item Charge assigned to the Item. Unit Price of Item Charge = "P".
+      ItemChargeUnitPrice := LibraryRandom.RandDec(100,2);
+      CreateSalesDocumentWithItemChargeAndUnitPrice(SalesHeader,SalesLine,ItemNo,ItemChargeUnitPrice);
+
+      // [GIVEN] Set "Qty. Assigned" = "Qty. to Assign" in Item Charge Assignment (mock Item Charge posting).
+      SetItemChargeQtyFullyAssigned(SalesLine);
+
+      // [GIVEN] Quantity in Item Charge line is increased by "dQ".
+      WITH SalesLine DO BEGIN
+        ItemChargeQtyDelta := LibraryRandom.RandInt(10);
+        VALIDATE(Quantity,Quantity + ItemChargeQtyDelta);
+        MODIFY(TRUE);
+        ShowItemChargeAssgnt;
+      END;
+
+      // [WHEN] Post Sales Order.
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [THEN] Item Ledger Entry of posted Item contains Value Entry for Item Charge with Sales Amount (Actual) = "P" * "dQ".
+      VerifyValueEntryForItemCharge(ItemNo,SalesLine."No.",ItemChargeQtyDelta,ItemChargeUnitPrice);
+    END;
+
+    [Test]
+    PROCEDURE VariantCodeAndUnitPriceAreCopiedFromBlanketSalesOrder@166();
+    VAR
+      BlanketSalesLine@1002 : Record 37;
+      SalesLine@1004 : Record 37;
+    BEGIN
+      // [FEATURE] [Blanket Sales Order] [Item Variant]
+      // [SCENARIO 380976] Variant Code and Unit Price are copied from Blanket Sales Order to Sales Order.
+      Initialize;
+
+      // [GIVEN] Blanket Sales Order Line "BSO" with Variant Code "V" and Unit Price "UP".
+      // [GIVEN] Sales Order with same Customer and Item as in "BSO".
+      CreateSalesBlanketOrderAndSalesOrderWithVariant(BlanketSalesLine,SalesLine);
+
+      WITH SalesLine DO BEGIN
+        // [WHEN] Select "Blanket Order Line No." = "BSO" on Sales Order Line.
+        VALIDATE("Blanket Order No.",BlanketSalesLine."Document No.");
+        VALIDATE("Blanket Order Line No.",BlanketSalesLine."Line No.");
+
+        // [THEN] Variant Code on Sales Order Line = "V".
+        // [THEN] Unit Price on Sales Order Line = "UP".
+        TESTFIELD("Variant Code",BlanketSalesLine."Variant Code");
+        TESTFIELD("Unit Price",BlanketSalesLine."Unit Price");
+      END;
+    END;
+
+    [Test]
+    PROCEDURE VariantCodeAndUnitCostAreCopiedFromBlanketPurchaseOrder@169();
+    VAR
+      BlanketPurchaseLine@1002 : Record 39;
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      // [FEATURE] [Blanket Purchase Order] [Item Variant]
+      // [SCENARIO 380976] Variant Code and Unit Cost are copied from Blanket Purchase Order to Purchase Order.
+      Initialize;
+
+      // [GIVEN] Blanket Purchase Order Line "BPO" with Variant Code "V" and Unit Cost "UC".
+      // [GIVEN] Purchase Order Line with same Vendor and Item as in "BPO".
+      CreatePurchBlanketOrderAndPurchOrderWithVariant(BlanketPurchaseLine,PurchaseLine);
+
+      WITH PurchaseLine DO BEGIN
+        // [WHEN] Select "Blanket Order Line No." = "BPO" on Purchase Order Line.
+        VALIDATE("Blanket Order No.",BlanketPurchaseLine."Document No.");
+        VALIDATE("Blanket Order Line No.",BlanketPurchaseLine."Line No.");
+
+        // [THEN] Variant Code on Purchase Order Line = "V".
+        // [THEN] Unit Cost on Purchase Order Line = "UC".
+        TESTFIELD("Variant Code",BlanketPurchaseLine."Variant Code");
+        TESTFIELD("Unit Cost",BlanketPurchaseLine."Unit Cost");
+      END;
+    END;
+
+    [Test]
+    PROCEDURE ItemChargeAmountToAssignCorrespondsQtyToAssignInSalesDoc@171();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLineCharge@1001 : Record 37;
+      SalesLineItem@1004 : Record 37;
+      ItemChargeAssignmentSales@1002 : Record 5809;
+      ItemNo@1003 : Code[20];
+    BEGIN
+      // [FEATURE] [Item Charge] [Sales]
+      // [SCENARIO 211143] Amount to Assign on item charge assignment should be equal to Qty. to Assign multiplied by Unit Price when the sales order is released.
+      Initialize;
+
+      // [GIVEN] Sales order with item line and item charge line.
+      // [GIVEN] Quantity on the item charge line = "Q", Unit Price = "X".
+      ItemNo := CreateSalesDocumentWithItemCharge(
+          SalesHeader,SalesLineCharge,SalesHeader."Document Type"::Order,LibraryRandom.RandInt(100));
+      FindSalesLine(SalesLineItem,SalesHeader."Document Type",SalesHeader."No.",SalesLineItem.Type::Item,ItemNo);
+
+      // [GIVEN] Half of the item charge quantity ("q" = "Q" / 2) is assigned to the item line.
+      LibraryInventory.CreateItemChargeAssignment(
+        ItemChargeAssignmentSales,SalesLineCharge,ItemChargeAssignmentSales."Applies-to Doc. Type"::Order,
+        SalesLineItem."Document No.",SalesLineItem."Line No.",SalesLineItem."No.");
+      ItemChargeAssignmentSales.VALIDATE("Qty. to Assign",ROUND(ItemChargeAssignmentSales."Qty. to Assign" / 2,0.01));
+      ItemChargeAssignmentSales.MODIFY(TRUE);
+
+      // [GIVEN] Qty. to Ship on the item charge line is set to "q".
+      SalesLineCharge.VALIDATE("Qty. to Ship",ItemChargeAssignmentSales."Qty. to Assign");
+      SalesLineCharge.MODIFY(TRUE);
+
+      // [WHEN] Release the sales order.
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+
+      // [THEN] Amount to Assign on item charge assignment is equal to "q" * "X".
+      ItemChargeAssignmentSales.FIND;
+      Assert.AreNearlyEqual(
+        ItemChargeAssignmentSales."Qty. to Assign" * SalesLineCharge."Unit Price",
+        ItemChargeAssignmentSales."Amount to Assign",LibraryERM.GetAmountRoundingPrecision,
+        AmountToAssignItemChargeErr);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1059 : Codeunit 131305;
+    BEGIN
+      CLEAR(ConfirmMessage);
+      CLEAR(GetShipmentLines);
+      CLEAR(CalculateInvoiceDiscount);
+      CLEAR(UnavailableQuantity);
+      CLEAR(RequestedDeliveryDate);
+      CLEAR(CapableToPromise);
+      LibrarySetupStorage.Restore;
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      NoSeriesSetup;
+      LibrarySetupStorage.Save(DATABASE::"Sales & Receivables Setup");
+      LibrarySetupStorage.Save(DATABASE::"Purchases & Payables Setup");
+
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateAndAssignItemChargeLine@46(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36;Quantity@1003 : Decimal;GetShipmentLines2@1004 : Boolean);
+    BEGIN
+      CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::"Charge (Item)",LibraryInventory.CreateItemChargeNo,Quantity);
+      GetShipmentLines := GetShipmentLines2; // Use GetShipmentLines as global for handler.
+      SalesLine.ShowItemChargeAssgnt;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLine@27(EntryType@1004 : Option;Quantity@1001 : Decimal;ItemNo@1002 : Code[20];UnitAmount@1003 : Decimal;LocationCode@1007 : Code[10]);
+    VAR
+      ItemJournalBatch@1006 : Record 233;
+      ItemJournalLine@1000 : Record 83;
+      ItemJournalTemplate@1005 : Record 82;
+    BEGIN
+      SelectItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Item);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,EntryType,ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Unit Amount",UnitAmount);
+      IF LocationCode <> '' THEN
+        ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrder@41(ItemNo@1002 : Code[20];PostAsInvoice@1005 : Boolean) : Decimal;
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      Vendor@1001 : Record 23;
+    BEGIN
+      CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",Vendor."No.");
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,LibraryRandom.RandDec(50,2)); // Taking Random Quantity.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,PostAsInvoice);
+      EXIT(PurchaseLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrderWithDimension@56(VAR DefaultDimension@1000 : Record 352);
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      CreateItem(Item);
+      UpdateItemDimension(DefaultDimension,Item."No.");
+      CreateAndPostPurchaseOrder(Item."No.",TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesDocument@7(VAR Item@1000 : Record 27;DocumentType@1001 : Option;PurchaseQuantity@1004 : Decimal) : Decimal;
+    VAR
+      Customer@1005 : Record 18;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1002 : Record 37;
+    BEGIN
+      CreateCustomer(Customer,FALSE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,Customer."No.");
+
+      // This is the need of the test as Sales Order Quantity should be less than the Purchase Order Quantity. Also being random at the same time.
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",PurchaseQuantity / 2);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      EXIT(SalesLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesOrder@42(VAR SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37);
+    VAR
+      Item@1003 : Record 27;
+      Customer@1002 : Record 18;
+    BEGIN
+      CreateCustomer(Customer,TRUE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      CreateItem(Item);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2)); // Use Random Quantity.
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesOrderAsInvoiceAfterShipment@149();
+    VAR
+      Customer@1003 : Record 18;
+      Item@1002 : Record 27;
+      SalesHeader@1001 : Record 36;
+      SalesLine@1000 : Record 37;
+    BEGIN
+      CreateCustomer(Customer,FALSE,'');
+      CreateItem(Item);
+      CreateSalesOrder(SalesHeader,SalesLine,Customer."No.",Item."No.",LibraryRandom.RandDec(10,2));  // Taking Random Quantity.
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,TRUE);  // Posting it in two times as it is required for the test.
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesReturnOrder@70(VAR SalesLine@1002 : Record 37;CustomerNo@1001 : Code[20];IsBillToCustomerNo@1003 : Boolean) : Code[20];
+    VAR
+      Customer@1004 : Record 18;
+      SalesHeader@1000 : Record 36;
+      Item@1005 : Record 27;
+    BEGIN
+      CreateItem(Item);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",CustomerNo);
+      IF IsBillToCustomerNo THEN BEGIN
+        CreateCustomer(Customer,TRUE,'');
+        SalesHeader.VALIDATE("Bill-to Customer No.",Customer."No.");
+        SalesHeader.MODIFY(TRUE);
+      END;
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(10,2));  // Taking Random Quantity.
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE));
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesReturnOrderForItemCharge@80(VAR SalesLine@1001 : Record 37;SelltoCustomerNo@1002 : Code[20]) : Code[20];
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",SelltoCustomerNo);
+      CreateAndAssignItemChargeLine(SalesLine,SalesHeader,LibraryRandom.RandDec(10,2),TRUE);  // Take random Quantity.
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE));  // Post the Sales Order as Ship.
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrder@105(VAR SalesHeader@1000 : Record 36;VAR SalesLine@1002 : Record 37;CustomerNo@1001 : Code[20];ItemNo@1004 : Code[20];Quantity@1006 : Decimal);
+    BEGIN
+      CreateSalesOrder(SalesHeader,SalesLine,CustomerNo,ItemNo,Quantity);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@15(VAR Customer@1000 : Record 18;CombineShipments@1001 : Boolean;CustomerPriceGroupCode@1002 : Code[10]);
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Combine Shipments",CombineShipments);
+      Customer.VALIDATE("Customer Price Group",CustomerPriceGroupCode);
+      Customer.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithRequestedDeliveryDate@124(VAR SalesLine@1002 : Record 37;ItemNo@1000 : Code[20];LocationCode@1001 : Code[10];Quantity@1004 : Decimal);
+    VAR
+      SalesHeader@1003 : Record 36;
+      Customer@1006 : Record 18;
+    BEGIN
+      RequestedDeliveryDate := CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'M>',WORKDATE);  // Global Variable used in OrderPromising Handler. Calculate Random Date.
+      CreateCustomer(Customer,FALSE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+      UpdateRequestedDeliveryDateOnSalesOrder(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateItemCard@5(Item@1000 : Record 27);
+    VAR
+      ItemCard@1001 : TestPage 30;
+    BEGIN
+      ItemCard.OPENNEW;
+      ItemCard."No.".SETVALUE(Item."No.");
+      ItemCard."Gen. Prod. Posting Group".SETVALUE(Item."Gen. Prod. Posting Group");
+      ItemCard."VAT Prod. Posting Group".SETVALUE(Item."VAT Prod. Posting Group");
+      ItemCard."Inventory Posting Group".SETVALUE(Item."Inventory Posting Group");
+      ItemCard.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE CreateItemCrossReference@157(VAR ItemCrossReference@1003 : Record 5717;ItemNo@1002 : Code[20];CrossReferenceType@1001 : Option;CrossReferenceTypeNo@1000 : Code[30];VariantCode@1004 : Code[10];UnitofMeasure@1005 : Code[10];CrossReferenceNo@1006 : Code[20]);
+    BEGIN
+      LibraryInventory.CreateItemCrossReference(ItemCrossReference,ItemNo,CrossReferenceType,CrossReferenceTypeNo);
+      ItemCrossReference.VALIDATE("Variant Code",VariantCode);
+      ItemCrossReference.VALIDATE("Unit of Measure",UnitofMeasure);
+      ItemCrossReference.VALIDATE("Cross-Reference No.",CrossReferenceNo);
+      ItemCrossReference.VALIDATE(Description,LibraryUtility.GenerateGUID);
+      ItemCrossReference.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItem@25(VAR Item@1000 : Record 27);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2));  // Use random Unit Price.
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithDescription@159(VAR Item@1000 : Record 27);
+    BEGIN
+      CreateItem(Item);
+      Item."Description 2" := LibraryUtility.GenerateGUID;
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemTranslation@155(VAR ItemTranslation@1004 : Record 30;ItemNo@1001 : Code[20];LanguageCode@1002 : Code[10];VariantCode@1003 : Code[10]);
+    BEGIN
+      WITH ItemTranslation DO BEGIN
+        INIT;
+        VALIDATE("Item No.",ItemNo);
+        VALIDATE("Language Code",LanguageCode);
+        VALIDATE("Variant Code",VariantCode);
+        VALIDATE(Description,LibraryUtility.GenerateGUID);
+        VALIDATE("Description 2",LibraryUtility.GenerateGUID);
+        INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateItemVariant@162(VAR ItemVariant@1001 : Record 5401;ItemNo@1000 : Code[20]);
+    BEGIN
+      LibraryInventory.CreateItemVariant(ItemVariant,ItemNo);
+      ItemVariant.VALIDATE("Description 2",LibraryUtility.GenerateGUID);
+      ItemVariant.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemVendorWithVariantCode@152(VAR ItemVendor@1002 : Record 99;VendorNo@1001 : Code[20];ItemNo@1000 : Code[20];VariantCode@1003 : Code[10]);
+    BEGIN
+      ItemVendor.INIT;
+      ItemVendor.VALIDATE("Vendor No.",VendorNo);
+      ItemVendor.VALIDATE("Item No.",ItemNo);
+      ItemVendor.VALIDATE("Variant Code",VariantCode);
+      ItemVendor.VALIDATE("Vendor Item No.",ItemNo);
+      ItemVendor.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithVariant@167(VAR Item@1000 : Record 27;VAR ItemVariant@1001 : Record 5401);
+    BEGIN
+      CreateItemWithDescription(Item);
+      CreateItemVariant(ItemVariant,Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@91(VAR PurchaseHeader@1000 : Record 38;VAR PurchaseLine@1001 : Record 39;PurchaseLineType@1002 : Option;No@1003 : Code[20];Quantity@1004 : Decimal);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLineType,No,Quantity);
+      PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandInt(20));  // Take random Unit Cost.
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@81(VAR PurchaseHeader@1001 : Record 38;SellToCustomerNo@1002 : Code[20]);
+    VAR
+      Vendor@1000 : Record 23;
+    BEGIN
+      CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      PurchaseHeader.VALIDATE("Sell-to Customer No.",SellToCustomerNo);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchOrder@156(VAR PurchaseHeader@1001 : Record 38;VAR Vendor@1004 : Record 23;SellToCustomerNo@1000 : Code[20]);
+    BEGIN
+      CreateVendor(Vendor);
+      Vendor."Language Code" := GetRandomLanguageCode;
+      Vendor.MODIFY(TRUE);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      PurchaseHeader.VALIDATE("Sell-to Customer No.",SellToCustomerNo);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseReturnOrderWithItemCharge@86(VAR PurchaseHeader@1004 : Record 38;VAR PurchaseLine@1000 : Record 39;Quantity@1003 : Decimal) : Code[20];
+    VAR
+      Item@1002 : Record 27;
+      Vendor@1001 : Record 23;
+    BEGIN
+      CreateItem(Item);
+      CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Return Order",Vendor."No.");
+      PurchaseHeader.VALIDATE("Vendor Cr. Memo No.",PurchaseHeader."Buy-from Vendor No.");
+      PurchaseHeader.MODIFY(TRUE);
+      CreatePurchaseLine(PurchaseHeader,PurchaseLine,PurchaseLine.Type::Item,Item."No.",Quantity);
+      CreatePurchaseLine(
+        PurchaseHeader,PurchaseLine,PurchaseLine.Type::"Charge (Item)",
+        LibraryInventory.CreateItemChargeNo,LibraryRandom.RandInt(10));  // Take random Quantity.
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseBlanketOrder@180(VAR PurchaseHeader@1000 : Record 38;VAR PurchaseLine@1001 : Record 39);
+    VAR
+      Item@1003 : Record 27;
+      Vendor@1002 : Record 23;
+    BEGIN
+      CreateVendor(Vendor);
+      CreateItem(Item);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Blanket Order",Vendor."No.");
+      CreatePurchaseLine(PurchaseHeader,PurchaseLine,PurchaseLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2));
+    END;
+
+    LOCAL PROCEDURE CreatePurchBlanketOrderAndPurchOrderWithVariant@170(VAR BlanketPurchaseLine@1002 : Record 39;VAR PurchaseLine@1000 : Record 39);
+    VAR
+      ItemVariant@1004 : Record 5401;
+      BlanketPurchaseHeader@1003 : Record 38;
+      PurchaseHeader@1001 : Record 38;
+    BEGIN
+      CreatePurchaseBlanketOrder(BlanketPurchaseHeader,BlanketPurchaseLine);
+      CreateItemVariant(ItemVariant,BlanketPurchaseLine."No.");
+      BlanketPurchaseLine.VALIDATE("Variant Code",ItemVariant.Code);
+      BlanketPurchaseLine.MODIFY(TRUE);
+
+      LibraryPurchase.CreatePurchHeader(
+        PurchaseHeader,PurchaseHeader."Document Type"::Order,BlanketPurchaseLine."Buy-from Vendor No.");
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,BlanketPurchaseLine."No.",LibraryRandom.RandInt(10));
+    END;
+
+    LOCAL PROCEDURE CreateSalesBlanketOrder@64(VAR SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37);
+    VAR
+      Item@1003 : Record 27;
+      Customer@1002 : Record 18;
+    BEGIN
+      CreateCustomer(Customer,FALSE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Blanket Order",Customer."No.");
+      CreateItem(Item);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2)); // Use Random Quantity.
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@16(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36;Type@1003 : Option;ItemNo@1002 : Code[20];Quantity@1004 : Decimal) : Code[20];
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,Type,ItemNo,Quantity);
+      SalesLine.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2)); // Use random Unit Price.
+      SalesLine.MODIFY(TRUE);
+      EXIT(SalesLine."No.");
+    END;
+
+    LOCAL PROCEDURE CreateSalesLineWithPurchasingCode@75(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36);
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      CreateItem(Item);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2)); // Use Random Quantity.
+      SalesLine.VALIDATE("Purchasing Code",FindPurchasingCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@151(VAR SalesHeader@1004 : Record 36;VAR SalesLine@1003 : Record 37;CustomerNo@1002 : Code[20];ItemNo@1001 : Code[20];Quantity@1000 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CustomerNo);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderAndPost@117() : Code[20];
+    VAR
+      Item@1003 : Record 27;
+      Customer@1001 : Record 18;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1002 : Record 37;
+    BEGIN
+      CreateCustomer(Customer,FALSE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      CreateItem(Item);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2)); // Use Random Quantity.
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE));  // Post Shipment.
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderForDropShipment@69(VAR SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37);
+    BEGIN
+      CreateSalesBlanketOrder(SalesHeader,SalesLine);
+      CODEUNIT.RUN(CODEUNIT::"Blanket Sales Order to Order",SalesHeader);
+      FindSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,SalesHeader."Sell-to Customer No.");
+      CreateSalesLineWithPurchasingCode(SalesLine,SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithItemVariantPurchDesc@103(VAR SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37;VAR Customer@1006 : Record 18;ItemNo@1002 : Code[20];ItemVariantCode@1005 : Code[10];Desc@1003 : Text;Desc2@1004 : Text);
+    BEGIN
+      CreateCustomer(Customer,TRUE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      WITH SalesLine DO BEGIN
+        CreateSalesLine(SalesLine,SalesHeader,Type::Item,ItemNo,LibraryRandom.RandDec(100,2));
+        VALIDATE("Variant Code",ItemVariantCode);
+        VALIDATE("Purchasing Code",FindPurchasingCode);
+        VALIDATE(Description,COPYSTR(Desc,1,MAXSTRLEN(Description)));
+        VALIDATE("Description 2",COPYSTR(Desc2,1,MAXSTRLEN("Description 2")));
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateSalesPrice@107(VAR SalesPrice@1000 : Record 7002;Item@1003 : Record 27;SalesType@1001 : Option;SalesCode@1002 : Code[20];UnitOfMeasureCode@1006 : Code[10];MinimumQuantity@1004 : Decimal;StartingDate@1005 : Date);
+    BEGIN
+      // Create Sales Price with random Unit Price.
+      LibraryCosting.CreateSalesPrice(SalesPrice,SalesType,SalesCode,Item."No.",StartingDate,'','',UnitOfMeasureCode,MinimumQuantity);
+      SalesPrice.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2));
+      SalesPrice.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesReturnOrder@99(VAR SalesLine@1002 : Record 37);
+    VAR
+      Customer@1003 : Record 18;
+      Item@1000 : Record 27;
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      CreateCustomer(Customer,FALSE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",Customer."No.");
+      LibrarySales.CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::Item,LibraryInventory.CreateItem(Item),LibraryRandom.RandDec(10,2));  // Taking Random Quantity.
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocumentWithItemCharge@134(VAR SalesHeader@1004 : Record 36;VAR SalesLine@1000 : Record 37;DocumentType@1005 : Option;Quantity@1003 : Decimal) : Code[20];
+    VAR
+      Customer@1001 : Record 18;
+      Item@1002 : Record 27;
+    BEGIN
+      CreateItem(Item);
+      CreateCustomer(Customer,FALSE,'');
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,Customer."No.");
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",Quantity);
+      CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::"Charge (Item)",
+        LibraryInventory.CreateItemChargeNo,LibraryRandom.RandDecInRange(10,20,2));  // Take random Quantity.
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocumentWithItemChargeAndUnitPrice@164(VAR SalesHeader@1005 : Record 36;VAR SalesLine@1006 : Record 37;VAR ItemNo@1000 : Code[20];UnitPrice@1007 : Decimal);
+    BEGIN
+      ItemNo := CreateSalesDocumentWithItemCharge(SalesHeader,SalesLine,SalesHeader."Document Type"::Order,LibraryRandom.RandInt(10));
+      SalesLine.VALIDATE("Unit Price",UnitPrice);
+      SalesLine.MODIFY(TRUE);
+      SalesLine.ShowItemChargeAssgnt;
+    END;
+
+    LOCAL PROCEDURE CreateSalesBlanketOrderAndSalesOrderWithVariant@177(VAR BlanketSalesLine@1002 : Record 37;VAR SalesLine@1000 : Record 37);
+    VAR
+      ItemVariant@1004 : Record 5401;
+      BlanketSalesHeader@1003 : Record 36;
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      CreateSalesBlanketOrder(BlanketSalesHeader,BlanketSalesLine);
+      CreateItemVariant(ItemVariant,BlanketSalesLine."No.");
+      BlanketSalesLine.VALIDATE("Variant Code",ItemVariant.Code);
+      BlanketSalesLine.MODIFY(TRUE);
+
+      CreateSalesOrder(
+        SalesHeader,SalesLine,BlanketSalesLine."Sell-to Customer No.",BlanketSalesLine."No.",LibraryRandom.RandInt(10));
+    END;
+
+    LOCAL PROCEDURE CreateTempItem@3(VAR TempItem@1004 : TEMPORARY Record 27);
+    VAR
+      InventoryPostingGroup@1003 : Record 94;
+      GeneralPostingSetup@1006 : Record 252;
+      VATPostingSetup@1007 : Record 325;
+    BEGIN
+      LibraryERM.FindGeneralPostingSetup(GeneralPostingSetup);
+      LibraryERM.FindVATPostingSetup(VATPostingSetup,VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+      InventoryPostingGroup.FINDFIRST;
+      TempItem.INIT;
+      TempItem.INSERT(TRUE);
+      TempItem.VALIDATE("Gen. Prod. Posting Group",GeneralPostingSetup."Gen. Prod. Posting Group");
+      TempItem.VALIDATE("VAT Prod. Posting Group",VATPostingSetup."VAT Prod. Posting Group");
+      TempItem.VALIDATE("Inventory Posting Group",InventoryPostingGroup.Code);
+      TempItem.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateVendor@90(VAR Vendor@1000 : Record 23);
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ExecuteUIHandler@200() : Boolean;
+    VAR
+      Reply@1000 : Boolean;
+    BEGIN
+      // Needed this UI Handler to use it in Combine Return Receipt for ES.
+      Reply := CONFIRM(DummyConfirmQst);
+      EXIT(Reply);
+    END;
+
+    LOCAL PROCEDURE FindAndPostSalesDocument@32(DocumentType@1000 : Option;DocumentNo@1001 : Code[20]);
+    VAR
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      SalesHeader.GET(DocumentType,DocumentNo);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE FindDocumentNo@31(SellToCustomerNo@1001 : Code[20]) : Code[20];
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Order);
+      SalesHeader.SETRANGE("Sell-to Customer No.",SellToCustomerNo);
+      SalesHeader.FINDFIRST;
+      EXIT(SalesHeader."No.");
+    END;
+
+    LOCAL PROCEDURE FindPurchasingCode@68() : Code[10];
+    VAR
+      Purchasing@1000 : Record 5721;
+    BEGIN
+      Purchasing.SETRANGE("Drop Shipment",TRUE);
+      Purchasing.FINDFIRST;
+      EXIT(Purchasing.Code);
+    END;
+
+    LOCAL PROCEDURE FindSalesHeader@67(VAR SalesHeader@1000 : Record 36;DocumentType@1001 : Option;SellToCustomerNo@1002 : Code[20]);
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",DocumentType);
+      SalesHeader.SETRANGE("Sell-to Customer No.",SellToCustomerNo);
+      SalesHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindSalesLine@18(VAR SalesLine@1000 : Record 37;DocumentType@1001 : Option;DocumentNo@1002 : Code[20];Type@1004 : Option;No@1003 : Code[20]);
+    BEGIN
+      SalesLine.SETRANGE("Document Type",DocumentType);
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.SETRANGE(Type,Type);
+      SalesLine.SETRANGE("No.",No);
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindShippingAgentServices@114(VAR ShippingAgentServices@1000 : Record 5790);
+    BEGIN
+      ShippingAgentServices.SETFILTER("Shipping Agent Code",'<>%1','');
+      ShippingAgentServices.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE GetDropShipmentLine@163(VAR PurchaseLine@1001 : Record 39;PurchaseHeader@1000 : Record 38);
+    BEGIN
+      LibraryPurchase.GetDropShipment(PurchaseHeader);
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE GetPostedDocumentLinesToReverseOnSalesReturnOrder@17(No@1001 : Code[20]);
+    VAR
+      SalesReturnOrder@1000 : TestPage 6630;
+    BEGIN
+      SalesReturnOrder.OPENEDIT;
+      SalesReturnOrder.FILTER.SETFILTER("No.",No);
+      SalesReturnOrder.GetPostedDocumentLinesToReverse.INVOKE;
+    END;
+
+    LOCAL PROCEDURE GetRandomLanguageCode@214() : Code[10];
+    VAR
+      Language@1002 : Record 8;
+    BEGIN
+      Language.FINDSET;
+      Language.NEXT(LibraryRandom.RandInt(Language.COUNT - 1));
+      EXIT(Language.Code);
+    END;
+
+    LOCAL PROCEDURE GetReturnReceiptLLine@135(SalesHeader@1001 : Record 36;DocumentNo@1000 : Code[20]);
+    VAR
+      ReturnReceiptLine@1003 : Record 6661;
+      SalesGetReturnReceipts@1004 : Codeunit 6638;
+    BEGIN
+      ReturnReceiptLine.SETRANGE("Document No.",DocumentNo);
+      SalesGetReturnReceipts.SetSalesHeader(SalesHeader);
+      SalesGetReturnReceipts.CreateInvLines(ReturnReceiptLine);
+    END;
+
+    LOCAL PROCEDURE GetReturnShipmentLine@89(PurchaseHeader@1001 : Record 38;DocumentNo@1000 : Code[20]);
+    VAR
+      ReturnShipmentLine@1003 : Record 6651;
+      PurchGetReturnShipments@1004 : Codeunit 6648;
+    BEGIN
+      ReturnShipmentLine.SETRANGE("Document No.",DocumentNo);
+      PurchGetReturnShipments.SetPurchHeader(PurchaseHeader);
+      PurchGetReturnShipments.CreateInvLines(ReturnShipmentLine);
+    END;
+
+    LOCAL PROCEDURE GetSalesPrice@113(No@1001 : Code[20]);
+    VAR
+      SalesOrder@1000 : TestPage 42;
+    BEGIN
+      SalesOrder.OPENEDIT;
+      SalesOrder.FILTER.SETFILTER("No.",No);
+      SalesOrder.SalesLines.GetPrice.INVOKE;
+    END;
+
+    LOCAL PROCEDURE InvokeShowMatrixOnSalesAnalysisByDimensions@143(AnalysisViewListSales@1002 : TestPage 9371;ItemNo@1001 : Code[20]);
+    VAR
+      SalesAnalysisbyDimensions@1000 : TestPage 7158;
+    BEGIN
+      SalesAnalysisbyDimensions.TRAP;
+      AnalysisViewListSales.EditAnalysisView.INVOKE;
+      SalesAnalysisbyDimensions.ItemFilter.SETVALUE(ItemNo);
+      SalesAnalysisbyDimensions.ShowMatrix_Process.INVOKE;
+    END;
+
+    LOCAL PROCEDURE InvokeUpdateItemAnalysisViewOnAnalysisViewListSales@141(VAR AnalysisViewListSales@1001 : TestPage 9371;ItemAnalysisViewCode@1000 : Code[10]);
+    BEGIN
+      AnalysisViewListSales.OPENEDIT;
+      AnalysisViewListSales.FILTER.SETFILTER(Code,ItemAnalysisViewCode);
+      AnalysisViewListSales."Codeunit Update Item Analysis View".INVOKE;
+    END;
+
+    LOCAL PROCEDURE MoveNegativeLines@30(No@1001 : Code[20]);
+    VAR
+      SalesReturnOrder@1000 : TestPage 6630;
+    BEGIN
+      COMMIT; // Commit required before invoke Move Negative Lines.
+      SalesReturnOrder.OPENEDIT;
+      SalesReturnOrder.FILTER.SETFILTER("No.",No);
+      SalesReturnOrder.MoveNegativeLines.INVOKE;
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@47();
+    VAR
+      SalesReceivablesSetup@1001 : Record 311;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Return Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE OpenOrderPromisingPage@145(SalesHeaderNo@1000 : Code[20]);
+    VAR
+      SalesOrder@1001 : TestPage 42;
+    BEGIN
+      SalesOrder.OPENVIEW;
+      SalesOrder.FILTER.SETFILTER("No.",SalesHeaderNo);
+      SalesOrder.SalesLines.OrderPromising.INVOKE;
+    END;
+
+    LOCAL PROCEDURE PostPhysicalInventoryJournal@26(Quantity@1002 : Decimal;ItemNo@1000 : Code[20]) : Code[20];
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      ItemJournalLine.SETRANGE("Item No.",ItemNo);
+      ItemJournalLine.FINDFIRST;
+      ItemJournalLine.VALIDATE("Qty. (Phys. Inventory)",ItemJournalLine."Qty. (Calculated)" + Quantity);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+      LibraryUtility.GenerateGUID;  // Generate New Batch.
+      EXIT(ItemJournalLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE RunBatchPostSalesReturnOrders@100(SalesHeaderNo@1002 : Code[20]);
+    VAR
+      SalesHeader@1001 : Record 36;
+      BatchPostSalesReturnOrders@1000 : Report 6655;
+    BEGIN
+      SalesHeader.SETRANGE("No.",SalesHeaderNo);
+      CLEAR(BatchPostSalesReturnOrders);
+      COMMIT;  // Commit is required to run Batch Post Sales Return Order report.
+      BatchPostSalesReturnOrders.SETTABLEVIEW(SalesHeader);
+      BatchPostSalesReturnOrders.RUN;
+    END;
+
+    LOCAL PROCEDURE RunCalculateInventoryValueReport@51(ItemNo@1000 : Code[20]) : Integer;
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalBatch@1005 : Record 233;
+      ItemJournalLine@1001 : Record 83;
+      ItemJournalTemplate@1007 : Record 82;
+      CalculatePer@1004 : 'Item Ledger Entry,Item';
+      CalcBase@1006 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      SelectItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Revaluation);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,ItemJournalLine."Entry Type",ItemNo,0);
+      Item.SETRANGE("No.",ItemNo);
+      LibraryCosting.CalculateInventoryValue(
+        ItemJournalLine,Item,WORKDATE,ItemJournalLine."Journal Batch Name" + FORMAT(ItemJournalLine."Line No."),
+        CalculatePer::"Item Ledger Entry",FALSE,FALSE,FALSE,CalcBase::" ",FALSE);
+      EXIT(ItemJournalLine."Dimension Set ID");
+    END;
+
+    LOCAL PROCEDURE RunCalculateInventory@23(ItemNo@1001 : Code[20]);
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalTemplate@1004 : Record 82;
+      ItemJournalBatch@1005 : Record 233;
+      ItemJournalLine@1000 : Record 83;
+      CalculateInventory@1002 : Report 790;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::"Phys. Inventory");
+      LibraryInventory.CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Name);
+      ItemJournalLine.INIT;
+      ItemJournalLine.VALIDATE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.VALIDATE("Journal Batch Name",ItemJournalBatch.Name);
+      COMMIT;  // Commit required before running this Report.
+      CLEAR(CalculateInventory);
+      Item.SETRANGE("No.",ItemNo);
+      CalculateInventory.SETTABLEVIEW(Item);
+      CalculateInventory.SetItemJnlLine(ItemJournalLine);
+      CalculateInventory.RUN;
+    END;
+
+    LOCAL PROCEDURE RunCombineReturnReceipt@72(NewPostingDate@1004 : Date;NewDocumentDate@1003 : Date;SelltoCustomerNo@1002 : Code[20]);
+    VAR
+      ReturnReceiptHeader@1000 : Record 6660;
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      SalesHeader.SETRANGE("Sell-to Customer No.",SelltoCustomerNo);
+      ReturnReceiptHeader.SETRANGE("Sell-to Customer No.",SelltoCustomerNo);
+      LibrarySales.CombineReturnReceipts(SalesHeader,ReturnReceiptHeader,NewPostingDate,NewDocumentDate,FALSE,TRUE);
+      ExecuteUIHandler;  // Need to use Execute UI Handler to prevent failure in ES.
+    END;
+
+    LOCAL PROCEDURE RunCreateReturnRelatedDocumentsReport@137(SalesHeaderNo@1000 : Code[20]);
+    VAR
+      SalesHeader@1001 : Record 36;
+      CreateRetRelatedDocuments@1002 : Report 6697;
+    BEGIN
+      SalesHeader.SETRANGE("No.",SalesHeaderNo);
+      SalesHeader.FINDFIRST;
+      COMMIT;  // Commit required before running this Report.
+      CLEAR(CreateRetRelatedDocuments);
+      CreateRetRelatedDocuments.SetSalesHeader(SalesHeader);
+      CreateRetRelatedDocuments.USEREQUESTPAGE(TRUE);
+      CreateRetRelatedDocuments.RUN;
+    END;
+
+    LOCAL PROCEDURE RunDeleteEmptyItemRegistersReport@150(No@1002 : Integer);
+    VAR
+      ItemRegister@1001 : Record 46;
+      DeleteEmptyItemRegisters@1000 : Report 799;
+    BEGIN
+      CLEAR(DeleteEmptyItemRegisters);
+      ItemRegister.SETRANGE("No.",No);
+      DeleteEmptyItemRegisters.SETTABLEVIEW(ItemRegister);
+      DeleteEmptyItemRegisters.USEREQUESTPAGE(TRUE);
+      DeleteEmptyItemRegisters.RUN;
+    END;
+
+    LOCAL PROCEDURE RunDeleteInvoiceSalesReturnOrder@82(SelltoCustomerNo@1001 : Code[20]);
+    VAR
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      SalesHeader.SETRANGE("Sell-to Customer No.",SelltoCustomerNo);
+      LibrarySales.DeleteInvoicedSalesReturnOrders(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE SelectItemJournalBatch@60(VAR ItemJournalBatch@1001 : Record 233;Type@1002 : Option);
+    VAR
+      ItemJournalTemplate@1000 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,Type);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE SetDefaultQtyToShipToBlank@106();
+    VAR
+      SalesReceivablesSetup@1001 : Record 311;
+    BEGIN
+      WITH SalesReceivablesSetup DO BEGIN
+        GET;
+        VALIDATE("Default Quantity to Ship","Default Quantity to Ship"::Blank);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE SetDefaultQtyToReceiveToBlank@154();
+    VAR
+      PurchasesPayablesSetup@1000 : Record 312;
+    BEGIN
+      WITH PurchasesPayablesSetup DO BEGIN
+        GET;
+        VALIDATE("Default Qty. to Receive","Default Qty. to Receive"::Blank);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE SetItemChargeQtyFullyAssigned@168(SalesLine@1000 : Record 37);
+    VAR
+      ItemChargeAssignmentSales@1002 : Record 5809;
+    BEGIN
+      WITH ItemChargeAssignmentSales DO BEGIN
+        SETRANGE("Document Type",SalesLine."Document Type");
+        SETRANGE("Document No.",SalesLine."Document No.");
+        FINDFIRST;
+        "Qty. Assigned" := "Qty. to Assign";
+        "Qty. to Assign" := 0;
+        "Amount to Assign" := 0;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateDefaultDimension@55(VAR DefaultDimension@1000 : Record 352);
+    VAR
+      DimensionValue@1003 : Record 349;
+    BEGIN
+      LibraryDimension.CreateDimensionValue(DimensionValue,DefaultDimension."Dimension Code");
+      DefaultDimension.VALIDATE("Dimension Value Code",DimensionValue.Code);
+      DefaultDimension.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItemDimension@50(VAR DefaultDimension@1005 : Record 352;ItemNo@1002 : Code[20]);
+    VAR
+      Dimension@1000 : Record 348;
+      DimensionValue@1004 : Record 349;
+    BEGIN
+      LibraryDimension.FindDimension(Dimension);
+      LibraryDimension.CreateDimensionValue(DimensionValue,Dimension.Code);
+      LibraryDimension.CreateDefaultDimensionItem(DefaultDimension,ItemNo,Dimension.Code,DimensionValue.Code);
+    END;
+
+    LOCAL PROCEDURE UpdateInventorySetup@11(Value@1000 : Boolean);
+    VAR
+      InventorySetup@1001 : Record 313;
+    BEGIN
+      InventorySetup.GET;
+      InventorySetup.VALIDATE("Expected Cost Posting to G/L",Value);
+      InventorySetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateOrderDateOnSalesOrder@112(SalesHeader@1000 : Record 36;OrderDate@1001 : Date);
+    BEGIN
+      SalesHeader.VALIDATE("Order Date",OrderDate);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdatePostedShipment@120(VAR ShippingAgentServices@1004 : Record 5790;DocumentNo@1001 : Code[20]);
+    VAR
+      SalesShipmentHeader@1003 : Record 110;
+    BEGIN
+      SalesShipmentHeader.GET(DocumentNo);
+      FindShippingAgentServices(ShippingAgentServices);
+      SalesShipmentHeader.VALIDATE("Shipping Agent Code",ShippingAgentServices."Shipping Agent Code");
+      SalesShipmentHeader.VALIDATE("Shipping Agent Service Code",ShippingAgentServices.Code);
+      SalesShipmentHeader.VALIDATE("Package Tracking No.",DocumentNo);
+      SalesShipmentHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateRequestedDeliveryDateOnSalesOrder@128(SalesHeader@1000 : Record 36);
+    BEGIN
+      SalesHeader.VALIDATE("Requested Delivery Date",RequestedDeliveryDate);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesReceivableSetup@48(StockoutWarning@1002 : Boolean;CalcInvDiscount@1001 : Boolean);
+    BEGIN
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(StockoutWarning);
+      LibrarySales.SetCalcInvDiscount(CalcInvDiscount);
+    END;
+
+    LOCAL PROCEDURE UpdateShippingAdviceOnSalesOrder@122(VAR SalesHeader@1000 : Record 36);
+    VAR
+      SalesOrder@1001 : TestPage 42;
+    BEGIN
+      SalesOrder.OPENEDIT;
+      SalesOrder.FILTER.SETFILTER("No.",SalesHeader."No.");
+      SalesOrder."Shipping Advice".SETVALUE(SalesHeader."Shipping Advice"::Complete);
+      SalesOrder.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE VerifyDimensionOnRevaluationJournal@54(DefaultDimension@1000 : Record 352;DimensionSetID@1002 : Integer);
+    VAR
+      DimensionSetEntry@1001 : Record 480;
+    BEGIN
+      DimensionSetEntry.SETRANGE("Dimension Set ID",DimensionSetID);
+      DimensionSetEntry.FINDFIRST;
+      DimensionSetEntry.TESTFIELD("Dimension Code",DefaultDimension."Dimension Code");
+      DimensionSetEntry.TESTFIELD("Dimension Value Code",DefaultDimension."Dimension Value Code");
+    END;
+
+    LOCAL PROCEDURE VerifyItem@8(Item@1000 : Record 27);
+    VAR
+      Item2@1001 : Record 27;
+    BEGIN
+      Item2.GET(Item."No.");
+      Item2.TESTFIELD("Gen. Prod. Posting Group",Item."Gen. Prod. Posting Group");
+      Item2.TESTFIELD("VAT Prod. Posting Group",Item."VAT Prod. Posting Group");
+      Item2.TESTFIELD("Inventory Posting Group",Item."Inventory Posting Group");
+    END;
+
+    LOCAL PROCEDURE VerifyItemChargeAssignment@88(DocumentType@1001 : Option;DocumentNo@1004 : Code[20];ItemNo@1000 : Code[20];Quantity@1003 : Decimal;AmountToAssign@1005 : Decimal);
+    VAR
+      ItemChargeAssignmentPurch@1002 : Record 5805;
+    BEGIN
+      ItemChargeAssignmentPurch.SETRANGE("Document Type",DocumentType);
+      ItemChargeAssignmentPurch.SETRANGE("Document No.",DocumentNo);
+      ItemChargeAssignmentPurch.SETRANGE("Item No.",ItemNo);
+      ItemChargeAssignmentPurch.FINDFIRST;
+      ItemChargeAssignmentPurch.TESTFIELD("Qty. to Assign",Quantity);
+      ItemChargeAssignmentPurch.TESTFIELD("Amount to Assign",AmountToAssign);
+    END;
+
+    LOCAL PROCEDURE VerifyItemChargeAssignmentForSales@127(DocumentType@1001 : Option;DocumentNo@1004 : Code[20];ItemNo@1000 : Code[20];Quantity@1003 : Decimal;AmountToAssign@1005 : Decimal);
+    VAR
+      ItemChargeAssignmentSales@1002 : Record 5809;
+    BEGIN
+      ItemChargeAssignmentSales.SETRANGE("Document Type",DocumentType);
+      ItemChargeAssignmentSales.SETRANGE("Document No.",DocumentNo);
+      ItemChargeAssignmentSales.SETRANGE("Item No.",ItemNo);
+      ItemChargeAssignmentSales.FINDFIRST;
+      ItemChargeAssignmentSales.TESTFIELD("Qty. to Assign",Quantity);
+      ItemChargeAssignmentSales.TESTFIELD("Amount to Assign",AmountToAssign);
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntry@21(DocNo@1000 : Code[20];ItemNo@1001 : Code[20];EntryType@1002 : Option;Quantity@1003 : Decimal);
+    VAR
+      ItemLedgerEntry@1005 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Entry Type",EntryType);
+      ItemLedgerEntry.SETRANGE("Document No.",DocNo);
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.TESTFIELD(Quantity,Quantity);
+      ItemLedgerEntry.TESTFIELD("Invoiced Quantity",Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntryForPurchaseOrder@65(ItemNo@1001 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ItemLedgerEntry@1005 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::Purchase);
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.TESTFIELD(Quantity,Quantity);
+      ItemLedgerEntry.TESTFIELD("Invoiced Quantity",Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyItemValueEntry@20(DocumentNo@1005 : Code[20];ItemNo@1004 : Code[20];EntryType@1003 : Option;Quantity@1002 : Decimal;UnitAmount@1001 : Decimal);
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.SETRANGE("Document No.",DocumentNo);
+      ValueEntry.SETRANGE("Item Ledger Entry Type",EntryType);
+      ValueEntry.FINDFIRST;
+      ValueEntry.TESTFIELD("Item Ledger Entry Quantity",Quantity);
+      Assert.AreNearlyEqual(
+        ValueEntry."Cost per Unit",UnitAmount,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(CostError,ValueEntry.FIELDCAPTION("Cost per Unit"),UnitAmount,ValueEntry.TABLECAPTION));
+      Assert.AreNearlyEqual(
+        ValueEntry."Cost Amount (Actual)",ValueEntry."Cost per Unit" * Quantity,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(
+          CostError,ValueEntry.FIELDCAPTION("Cost Amount (Actual)"),ValueEntry."Cost per Unit" * Quantity,ValueEntry.TABLECAPTION));
+    END;
+
+    LOCAL PROCEDURE VerifyNavigateLines@53(SalesHeader@1001 : Record 36);
+    VAR
+      Customer@1006 : Record 18;
+      Navigate@1000 : TestPage 344;
+      PostedSalesShipment@1002 : Page 130;
+      PostedSalesInvoice@1003 : Page 132;
+      PostedReturnReceipt@1004 : Page 6660;
+      PostedSalesCreditMemo@1005 : Page 134;
+    BEGIN
+      Navigate.OPENEDIT;
+      Navigate.ContactType.SETVALUE(Customer.TABLECAPTION);
+      Navigate.ContactNo.SETVALUE(SalesHeader."Sell-to Customer No.");
+      Navigate.ExtDocNo.SETVALUE(SalesHeader."External Document No.");
+      Navigate.Find.INVOKE;
+      Navigate.FILTER.SETFILTER("Table Name",PostedSalesShipment.CAPTION);
+      Navigate."No. of Records".ASSERTEQUALS(1);
+      Navigate.FILTER.SETFILTER("Table Name",PostedSalesInvoice.CAPTION);
+      Navigate."No. of Records".ASSERTEQUALS(1);
+      Navigate.FILTER.SETFILTER("Table Name",PostedReturnReceipt.CAPTION);
+      Navigate."No. of Records".ASSERTEQUALS(1);
+      Navigate.FILTER.SETFILTER("Table Name",PostedSalesCreditMemo.CAPTION);
+      Navigate."No. of Records".ASSERTEQUALS(1);
+    END;
+
+    LOCAL PROCEDURE VerifyOrderPromisingLine@125(Quantity@1000 : Decimal);
+    BEGIN
+      Assert.AreEqual(Quantity,LibraryVariableStorage.DequeueDecimal,OrderPromisingQtyErr);
+      Assert.AreEqual(Quantity,LibraryVariableStorage.DequeueDecimal,OrderPromisingUnavailQtyErr);
+    END;
+
+    LOCAL PROCEDURE VerifyPhysicalInventoryItemLedger@59(DocumentNo@1003 : Code[20];ItemNo@1002 : Code[20];Quantity@1000 : Decimal);
+    VAR
+      PhysInventoryLedgerEntry@1004 : Record 281;
+      ItemJournalLine@1005 : Record 83;
+    BEGIN
+      PhysInventoryLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      PhysInventoryLedgerEntry.SETRANGE("Entry Type",ItemJournalLine."Entry Type"::"Positive Adjmt.");
+      PhysInventoryLedgerEntry.SETRANGE("Item No.",ItemNo);
+      PhysInventoryLedgerEntry.FINDFIRST;
+      PhysInventoryLedgerEntry.TESTFIELD("Qty. (Calculated)",Quantity);
+      PhysInventoryLedgerEntry.TESTFIELD("Qty. (Phys. Inventory)",Quantity + Quantity); // As Qty. (Phys. Inventory) is double of Qty. (Calculated).
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseInvoiceLine@85(DocumentNo@1001 : Code[20];No@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      PurchInvLine@1000 : Record 123;
+    BEGIN
+      PurchInvLine.SETRANGE("Document No.",DocumentNo);
+      PurchInvLine.SETRANGE("No.",No);
+      PurchInvLine.FINDFIRST;
+      PurchInvLine.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseLine@71(DocumentType@1004 : Option;DocumentNo@1001 : Code[20];No@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",DocumentType);
+      PurchaseLine.SETRANGE("Document No.",DocumentNo);
+      PurchaseLine.SETRANGE("No.",No);
+      PurchaseLine.FINDFIRST;
+      PurchaseLine.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseLineDescription@158(PurchaseLine@1002 : Record 39;Description@1000 : Text[50];Description2@1001 : Text[50]);
+    BEGIN
+      Assert.AreEqual(Description,PurchaseLine.Description,DescriptionErr);
+      Assert.AreEqual(Description2,PurchaseLine."Description 2",DescriptionErr);
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseDocument@139(DocumentType@1001 : Option;BuyFromVendorNo@1003 : Code[20]);
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      PurchaseHeader.SETRANGE("Document Type",DocumentType);
+      PurchaseHeader.SETRANGE("Buy-from Vendor No.",BuyFromVendorNo);
+      PurchaseHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE VerifyPostedSalesCreditMemo@73(CustomerNo@1000 : Code[20];BillToCustomerNo@1003 : Code[20];Type@1006 : Option;DocumentNo@1001 : Code[20];No@1005 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      SalesCrMemoLine@1004 : Record 115;
+    BEGIN
+      SalesCrMemoLine.SETRANGE("Sell-to Customer No.",CustomerNo);
+      SalesCrMemoLine.SETRANGE(Type,Type);
+      SalesCrMemoLine.SETRANGE("Return Receipt No.",DocumentNo);
+      SalesCrMemoLine.FINDFIRST;
+      SalesCrMemoLine.TESTFIELD("No.",No);
+      SalesCrMemoLine.TESTFIELD(Quantity,Quantity);
+      SalesCrMemoLine.TESTFIELD("Bill-to Customer No.",BillToCustomerNo);
+    END;
+
+    LOCAL PROCEDURE VerifyPostedShipment@121(VAR ShippingAgentServices@1001 : Record 5790;DocumentNo@1002 : Code[20]);
+    VAR
+      SalesShipmentHeader@1000 : Record 110;
+    BEGIN
+      SalesShipmentHeader.GET(DocumentNo);
+      SalesShipmentHeader.TESTFIELD("Shipping Agent Code",ShippingAgentServices."Shipping Agent Code");
+      SalesShipmentHeader.TESTFIELD("Shipping Agent Service Code",ShippingAgentServices.Code);
+      SalesShipmentHeader.TESTFIELD("Package Tracking No.",DocumentNo);
+    END;
+
+    LOCAL PROCEDURE VerifyPostedReturnReceipt@101(SalesLine@1000 : Record 37);
+    VAR
+      ReturnReceiptLine@1002 : Record 6661;
+    BEGIN
+      ReturnReceiptLine.SETRANGE("Return Order No.",SalesLine."Document No.");
+      ReturnReceiptLine.FINDFIRST;
+      ReturnReceiptLine.TESTFIELD("No.",SalesLine."No.");
+      ReturnReceiptLine.TESTFIELD(Quantity,SalesLine.Quantity);
+      ReturnReceiptLine.TESTFIELD("Quantity Invoiced",SalesLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifySalesLine@19(DocumentType@1003 : Option;DocumentNo@1002 : Code[20];Type@1001 : Option;No@1000 : Code[20];Quantity@1005 : Decimal;QtyToAssign@1006 : Decimal);
+    VAR
+      SalesLine@1004 : Record 37;
+    BEGIN
+      FindSalesLine(SalesLine,DocumentType,DocumentNo,Type,No);
+      SalesLine.CALCFIELDS("Qty. to Assign");
+      SalesLine.TESTFIELD(Quantity,Quantity);
+      SalesLine.TESTFIELD("Qty. to Assign",QtyToAssign);
+    END;
+
+    LOCAL PROCEDURE VerifySalesLineForItemCharge@136(DocumentType@1004 : Option;DocumentNo@1001 : Code[20];No@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      SalesLine.SETRANGE("Document Type",DocumentType);
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.SETRANGE("No.",No);
+      SalesLine.FINDFIRST;
+      SalesLine.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifySalesOrder@138(CustomerNo@1000 : Code[20]);
+    VAR
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Order);
+      SalesHeader.SETRANGE("Sell-to Customer No.",CustomerNo);
+      SalesHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE VerifyUnitPriceOnSalesLine@108(SalesLine@1000 : Record 37;UnitPrice@1001 : Decimal);
+    BEGIN
+      SalesLine.GET(SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.");
+      SalesLine.TESTFIELD("Unit Price",UnitPrice);
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntryForItemCharge@165(ItemNo@1000 : Code[20];ItemChargeNo@1005 : Code[20];Qty@1001 : Decimal;UnitPrice@1002 : Decimal);
+    VAR
+      ItemLedgerEntry@1004 : Record 32;
+      ValueEntry@1003 : Record 5802;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDFIRST;
+
+      WITH ValueEntry DO BEGIN
+        SETRANGE("Item Ledger Entry No.",ItemLedgerEntry."Entry No.");
+        SETRANGE("Item Charge No.",ItemChargeNo);
+        FINDFIRST;
+        TESTFIELD("Sales Amount (Actual)",Qty * UnitPrice);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyDropShipment@144(VAR PurchaseLine@1005 : Record 39);
+    BEGIN
+      WITH PurchaseLine DO BEGIN
+        FIND;
+        TESTFIELD("Qty. to Receive",0);
+        TESTFIELD("Quantity Received",Quantity);
+        TESTFIELD("Qty. to Invoice","Quantity Received");
+      END;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE BatchPostSalesReturnOrderHandler@104(VAR BatchPostSalesReturnOrders@1000 : TestRequestPage 6655);
+    BEGIN
+      BatchPostSalesReturnOrders.ReceiveReq.SETVALUE(TRUE);
+      BatchPostSalesReturnOrders.InvReq.SETVALUE(TRUE);
+      BatchPostSalesReturnOrders.PostingDateReq.SETVALUE(WORKDATE);
+      BatchPostSalesReturnOrders.ReplacePostingDate.SETVALUE(TRUE);
+      BatchPostSalesReturnOrders.ReplaceDocumentDate.SETVALUE(FALSE);
+
+      IF CalculateInvoiceDiscount THEN
+        BatchPostSalesReturnOrders.CalcInvDisc.SETVALUE(FALSE);
+
+      BatchPostSalesReturnOrders.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CalculateInventoryHandler@22(VAR CalculateInventory@1000 : TestRequestPage 790);
+    BEGIN
+      CalculateInventory.DocumentNo.SETVALUE(LibraryRandom.RandInt(10));  // Value Not important for test.
+      CalculateInventory.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE DeleteEmptyItemRegistersReportHandler@153(VAR DeleteEmptyItemRegisters@1000 : TestRequestPage 799);
+    BEGIN
+      DeleteEmptyItemRegisters.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CreateReturnRelatedDocumentsReportHandler@142(VAR CreateRetRelatedDocuments@1000 : TestRequestPage 6697);
+    BEGIN
+      CreateRetRelatedDocuments.VendorNo.SETVALUE(VendorNo);
+      CreateRetRelatedDocuments.CreatePurchRetOrder.SETVALUE(TRUE);
+      CreateRetRelatedDocuments.CreatePurchaseOrder.SETVALUE(TRUE);
+      CreateRetRelatedDocuments.CreateSalesOrder.SETVALUE(TRUE);
+      CreateRetRelatedDocuments.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE PostedSalesDocumentLinesHandler@40(VAR PostedSalesDocumentLines@1000 : TestPage 5850);
+    BEGIN
+      PostedSalesDocumentLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemChargeAssignmentSalesHandler@13(VAR ItemChargeAssignmentSales@1000 : TestPage 5814);
+    BEGIN
+      IF GetShipmentLines THEN BEGIN
+        ItemChargeAssignmentSales.GetShipmentLines.INVOKE;
+        ItemChargeAssignmentSales.LAST;
+      END;
+      ItemChargeAssignmentSales."Qty. to Assign".SETVALUE(ItemChargeAssignmentSales.AssignableQty.ASDECIMAL);
+      ItemChargeAssignmentSales.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemChargeAssignmentPurchaseHandler@94(VAR ItemChargeAssignmentPurchase@1000 : TestPage 5805);
+    BEGIN
+      ItemChargeAssignmentPurchase.SuggestItemChargeAssignment.INVOKE;
+      ItemChargeAssignmentPurchase.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SalesAnalysisbyDimMatrixPageHandler@146(VAR SalesAnalysisbyDimMatrix@1000 : TestPage 9227);
+    BEGIN
+      SalesAnalysisbyDimMatrix.TotalQuantity.ASSERTEQUALS(-Quantity2);
+      SalesAnalysisbyDimMatrix.TotalInvtValue.ASSERTEQUALS(Amount);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SalesShipmentLinesHandler@39(VAR SalesShipmentLines@1000 : TestPage 5824);
+    BEGIN
+      SalesShipmentLines.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE MoveNegativeSalesLinesHandler@38(VAR MoveNegativeSalesLines@1000 : TestRequestPage 6699);
+    BEGIN
+      MoveNegativeSalesLines.OK.INVOKE;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE OptionDialogHandler@97(Options@1000 : Text[1024];VAR Choice@1001 : Integer;Instruction@1002 : Text[1024]);
+    BEGIN
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE OrderPromisingHandler@130(VAR OrderPromisingLines@1000 : TestPage 99000959);
+    BEGIN
+      IF CapableToPromise THEN
+        OrderPromisingLines.CapableToPromise.INVOKE
+      ELSE
+        OrderPromisingLines.AvailableToPromise.INVOKE;
+
+      IF RequestedShipmentDate THEN BEGIN
+        OrderPromisingLines."Requested Shipment Date".ASSERTEQUALS(RequestedDeliveryDate);
+        OrderPromisingLines."Requested Delivery Date".ASSERTEQUALS(RequestedDeliveryDate);
+      END ELSE BEGIN
+        OrderPromisingLines."Unavailable Quantity".ASSERTEQUALS(UnavailableQuantity);
+        OrderPromisingLines."Requested Delivery Date".ASSERTEQUALS(RequestedDeliveryDate);
+        OrderPromisingLines."Planned Delivery Date".ASSERTEQUALS(RequestedDeliveryDate);
+      END;
+
+      LibraryVariableStorage.Enqueue(OrderPromisingLines.Quantity.ASDECIMAL);
+      LibraryVariableStorage.Enqueue(OrderPromisingLines."Unavailable Quantity".ASDECIMAL);
+
+      OrderPromisingLines.AcceptButton.INVOKE;
+    END;
+
+    [PageHandler]
+    PROCEDURE SalesOrderHandler@37(VAR SalesOrder@1000 : TestPage 42);
+    BEGIN
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SalesListHandler@78(VAR SalesList@1000 : TestPage 45);
+    BEGIN
+      SalesList.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE GetSalesPriceHandler@110(VAR GetSalesPrice@1000 : TestPage 7007);
+    BEGIN
+      GetSalesPrice.OK.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@44(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+      ConfirmMessage := Question;  // The variable ConfirmMessage is made Global as it is used in the handler.
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerNo@118(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := FALSE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@9(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE YesConfirmHandler@199(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      IF STRPOS(Question,DummyConfirmQst) > 0 THEN
+        Reply := TRUE
+      ELSE
+        ERROR(VerificationFailureErr);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [SCM]
+      1. Verify that Item Inventory gets increased on posting Purchase Order for that Item.
+      2. Verify that Item Inventory gets decreased on posting Sales Order after making purchase of that Item.
+      3. Verify that Item Inventory gets increased on posting Sales Return Order after making sale of that Item.
+      4. Verify creation of Item by page.
+      5. Validate Item Ledger Entry after posting Physical Inventory Journal.
+      6. Validate Value Entry after posting Physical Inventory Journal.
+      7. Set the Expected Cost Posting to G/L TRUE in Inventory Setup and verify the dialog message.
+      8. Set the Expected Cost Posting to G/L FALSE in Inventory Setup and verify the dialog message.
+      9. Test Get Posted Document Lines To Reverse functionality on Sales Return Order.
+      10. Test Create Negative lines with Item Charge Assignment on Sales Return Order.
+      11. Test Move Negative Lines functionality on Sales Return Order.
+      12. Test Navigate functionality on Sales Return Order.
+      13. Verify Dimension on Revaluation Journal after Running Calculate Inventory Value Report.
+      14. Update Dimension on Item after Posting Purchase Order and Verify Dimension on Revaluation Journal.
+      15. Verify Item Ledger Entry after posting Purchase Order.
+      16. Verify Physical Inventory Item Journal after posting Physical Inventory Journal.
+      17. Test functionality of Create Sales Order from Sales Blanket Order.
+      18. Test functionality of Drop Shipment before Posting.
+      19. Test functionality of Drop Shipment after Posting.
+      20. Test to verify error message when Combine Return Receipt report is run without Posting Date.
+      21. Test to verify error message when Combine Return Receipt report is run without Document Date.
+      22. Test to check functionality of Combine Return Receipt report.
+      23. Test to check functionality of Combine Return Receipt report for different Bill To Customer No.
+      24. Test to check functionality of Delete Invoice Sales Return Order report after Combine Return Receipt Batch report.
+      25. Test to check functionality of Combine Return reciept report for Item Charge.
+      26. Test to check functionality of Delete Invoice Sales Return Order report for Item Charge after Combine Return Receipt Batch report.
+      27. Test to check Item Charge Assignment in Purchase return Order.
+      28. Test to check Item Charge Assignment in Purchase Credit Memo.
+      29. Test to Validate error message after Calculate Invoice Discount field is set False on Batch Post Sales Return Order report.
+      30. Test to check functionality of Batch Post Sales Return Order report.
+      31. Test and verify Sales Unit Price update from Item Price.
+      32. Test and verify Sales Unit Price update from Customer Sales Price.
+      33. Test and verify Sales Unit Price update from Customer Price Group.
+      34. Test and verify Sales Unit Price update from Customer Sales Price for multiple Unit of Measure.
+      35. Update Shipping Agent Code, Shipping Agent Service Code, Package Tracking Number on Posted Shipment.
+      36. Create Sales Order and after change Shipping Advice validate error message.
+      37. Create Sales Order and after change Shipping Advice validate Shipping Advice.
+      38. Create Order Promising with Capable to Promise, verify Unavailable Quantity, Planned Delivery Date, Requested Delivery Date.
+      39. Create and Post Item Journal Line.Create Order Promising with Capable to Promise, verify Unavailable Quantity, Planned Delivery Date, Requested Delivery Date.
+      40. Create and Post Item Journal Line.Create Order Promising with Capable to Promise and Item Reserved as Always.verify Unavailable Quantity, Planned Delivery Date, Requested Delivery Date.
+      41. Test to verify Order Promising Line of Sales Order with Requested Delivery Date.
+      42. Test to check Item Charge Assignment in Sales Return Order.
+      43. Test to check Item Charge Assignment in Sales Credit Memo.
+      44. Test to check the functionality of Return Related Documents Report.
+      45. Test to verify the Sales Amount and Quantity on Sales Analysis By Dim Matrix page.
+      46. Test the functionality of Delete Empty Item Registers report with No option for Confirm dialog.
+      47. Test the functionality of Delete Empty Item Registers report with Yes option for Confirm dialog.
+
+      Workitem ID: 264567
+      ------------------------------------------------------------------------------------
+      Test Function Name                                                            TFS ID
+      ------------------------------------------------------------------------------------
+      ItemInventoryWithPurchaseOrder                                                131102
+      ItemInventoryWithSalesOrder                                                   131102
+      ItemInventoryWithSalesReturnOrder                                             131102
+
+      Workitem ID: 264606
+      ------------------------------------------------------------------------------------
+      Test Function Name                                                            TFS ID
+      ------------------------------------------------------------------------------------
+      ItemByPage                                                                    131103
+
+      Covers Test Cases for WI -  268012
+      --------------------------------------------------------------------------------------
+      Test Function Name                                                            TFS ID
+      --------------------------------------------------------------------------------------
+      ItemLedgerEntryAfterPostingPhysicalInventoryJournal                           129304
+      ValueEntryAfterPostingPhysicalInventoryJournal                                129305
+
+      Workitem ID: 268602
+      ------------------------------------------------------------------------------------
+      Test Function Name                                                            TFS ID
+      ------------------------------------------------------------------------------------
+      ExpectedCostPostingToGLTrue                                                   127652
+      ExpectedCostPostingToGLFalse                                                  127652
+
+      Workitem ID: 271836
+      ------------------------------------------------------------------------------------
+      Test Function Name                                                            TFS ID
+      ------------------------------------------------------------------------------------
+      SalesReturnOrderForPostedDocument                                             143369
+      NegativeLineOnSalesReturnOrder                                                143369
+      MoveNegativeLinesFromSalesReturnOrder                                         143369
+      NavigateSalesReturnOrder                                                      143369
+
+      Covers Test cases for WI: 272656
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      CalculateInventoryValueDimension,CalculateInventoryValueWithUpdateItemDimension            144677
+
+      WorkItem ID: 272191
+      ----------------------------------------------------------------------------------
+      Test Function Name                                                         TFS ID
+      ----------------------------------------------------------------------------------
+      ItemLedgerEntryAfterPostingPurchaseOrder                                    141279
+      PhysicalInventoryLedgerEntryAfterPostingPhysicalInventoryJournal            141299
+
+      Covers Test cases for WI: 276186
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      SalesOrderFromSalesBlanketOrder,DropShipmentBeforePosting,DropShipmentAfterPosting         143372
+
+      Covers Test cases for WI: 277190
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      CombineReturnReceiptReportWithoutPostingDate                                               129106
+      CombineReturnReceiptReportWithoutDocumentDate                                              129106
+      CombineReturnReceiptReport                                                                 129106
+      CombineReturnReceiptReportWithDifferentBillToCustomerNo                                    129106
+
+      Covers Test cases for WI: 278202
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      DeleteInvoiceSalesReturnOrderReport                                                        129105
+      CombineReturnReceiptReportForItemCharge                                                    129105
+      DeleteInvoiceSalesReturnOrderReportForItemCharge                                           129105
+
+      Covers Test cases for WI: 278118
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      ItemChargeAssignmentInPurchaseReturnOrder                                                 141356
+      ItemChargeAssignmentInPurchaseCreditMemo                                                  141356
+
+      Covers Test cases for WI: 278731
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      BatchPostSalesReturnOrderReportWithErrorDialog                                             129107
+      BatchPostSalesReturnOrderReport                                                            129107
+
+      Covers Test cases for WI: 278725
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      SalesUnitPriceFromItemUnitPrice                                                            143131
+      SalesUnitPriceFromCustomerSalesPrice                                                       143131
+      SalesUnitPriceFromCustomerSalesPriceGroup                                                  143131
+      SalesUnitPriceWithDifferentUnitOfMeasureCode                                               144527
+
+      Covers Test cases for WI: 280944
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      UpdateSalesShipmentAfterShipment                                                           141300
+
+      Covers Test cases for WI: 281507
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      ShippingAdviceError,ShippingAdvice                                                         141338
+
+      Covers Test cases for WI: 281539
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      CalculateAvailabilityAndCapability                                                         141420
+      CalculateAvailabilityAndCapabilityAfterPostingItemJournalLine                              141420
+      CalculateAvailabilityAndCapabilityAfterPostingItemJournalLineWithReserveQuantity           141420
+
+      Covers Test cases for WI: 281537
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      OrderPromisingOnSalesOrderWithRequestedDeliveryDate                                        141419
+
+      Covers Test cases for WI: 281533
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      ItemChargeAssignmentInSalesReturnOrder                                                     141355
+      ItemChargeAssignmentInSalesCreditMemo                                                      141355
+
+      Covers Test cases for WI: 281528
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      CreateReturnRelatedDocumentReport                                                          129110
+
+      Covers Test cases for WI: 268543
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      SalesAnalysisByDimMatrixForSalesAmount                                                     141547
+
+      Covers Test cases for WI: 267700
+      -------------------------------------------------------------------------------------------------
+      Test Function Name                                                                         TFS ID
+      -------------------------------------------------------------------------------------------------
+      DeleteEmptyItemRegistersReportWithNoOption                                                 141540
+      DeleteEmptyItemRegistersReportWithYesOption                                                141540
+    }
+    END.
+  }
+}
+

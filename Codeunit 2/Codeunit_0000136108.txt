@@ -1,0 +1,3286 @@
+OBJECT Codeunit 136108 Service Posting - Invoice
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      InvoicePostError@1002 : TextConst 'ENU=There is nothing to post.';
+      UnknownError@1003 : TextConst 'ENU=Unknown Error';
+      WarningMsg@1013 : TextConst 'ENU=The field Automatic Cost Posting should not be set to Yes if field Use Legacy G/L Entry Locking in General Ledger Setup table is set to No because of possibility of deadlocks.';
+      ExpectedMsg@1006 : TextConst 'ENU=Expected Cost Posting to G/L has been changed';
+      ExpectedConfirm@1007 : TextConst 'ENU=If you change the Expected Cost Posting to G/L';
+      UndoShipmentErrorforService@1008 : TextConst 'ENU="Qty. Shipped Not Invoiced must be equal to ''%1''  in Service Shipment Line: %2=%3, %4=%5. Current value is ''%6''."';
+      UndoShipmentConfirm@1010 : TextConst 'ENU=Do you want to undo the selected shipment line(s)?';
+      Assert@1005 : Codeunit 130000;
+      LibraryERM@1052 : Codeunit 131300;
+      LibraryInventory@1050 : Codeunit 132201;
+      LibraryResource@1051 : Codeunit 130511;
+      LibrarySales@1053 : Codeunit 130509;
+      LibraryService@1004 : Codeunit 131902;
+      LibrarySetupStorage@1016 : Codeunit 131009;
+      LibraryVariableStorage@1017 : Codeunit 131004;
+      LibraryUtility@1001 : Codeunit 131000;
+      LibraryRandom@1009 : Codeunit 130440;
+      isInitialized@1000 : Boolean;
+      OrderNotExist@1011 : TextConst 'ENU=Service Order must not exist.';
+      BaseAmountError@1012 : TextConst 'ENU=Base Amount must be %1';
+      AmountsMustMatchError@1014 : TextConst 'ENU=%1 must be %2 in %3.';
+      PostingDateBlankError@1015 : TextConst 'ENU=Enter the posting date.';
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE QuantityToInvoiceZero@3();
+    VAR
+      ServiceItemLine@1005 : Record 5901;
+      ServiceItem@1003 : Record 5940;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      ServiceHeader2@1002 : Record 5900;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-1 - refer to TFS ID 20887
+      // The test case checks that on posting Service Order the application generates an error when Qty. to Invoice is zero.
+
+      // 1 Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Two Service Orders - Service Item, Service Header, Service Line with Type as Item, Resource and Cost.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+
+      LibraryService.CreateServiceHeader(ServiceHeader2,ServiceHeader2."Document Type"::Order,ServiceHeader."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader2,ServiceItem."No.");
+      CreateServiceLineWithResource(ServiceLine,ServiceHeader2,ServiceItem."No.");
+      CreateServiceLineWithCost(ServiceLine,ServiceHeader2,ServiceItem."No.");
+
+      // 2. Exercise: Post both Service Orders as Ship and modify Qty. to Invoice as zero on Service Line.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      LibraryService.PostServiceOrder(ServiceHeader2,TRUE,FALSE,FALSE);
+      ModifyQtyToInvoiceZero(ServiceHeader."No.");
+      ModifyQtyToInvoiceZero(ServiceHeader2."No.");
+
+      // 3. Verify: Check that on posting Service Order the application generates an error when Qty. to Invoice is zero on
+      // both Service Orders.
+      ASSERTERROR LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      Assert.AreEqual(STRSUBSTNO(InvoicePostError),GETLASTERRORTEXT,UnknownError);
+      ASSERTERROR LibraryService.PostServiceOrder(ServiceHeader2,TRUE,FALSE,FALSE);
+      Assert.AreEqual(STRSUBSTNO(InvoicePostError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE PostLineByLine@18();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceLine2@1000 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      ServiceHeader2@1002 : Record 5900;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-2 - refer to TFS ID 20887.
+      // The test case checks posting of lines one at a time.
+
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      // Create Two Service Order - Service Item, Service Header, Service Line with Type as Item, Resource, Cost and G/L Account.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+
+      LibraryService.CreateServiceHeader(ServiceHeader2,ServiceHeader2."Document Type"::Order,ServiceHeader."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader2,ServiceItem."No.");
+      CreateServiceLineWithResource(ServiceLine2,ServiceHeader2,ServiceItem."No.");
+      CreateServiceLineWithCost(ServiceLine2,ServiceHeader2,ServiceItem."No.");
+      CreateServiceLineWithGLAccount(ServiceLine2,ServiceHeader2,ServiceItem."No.");
+
+      // 2. Exercise: Post both Service Order as Ship and Invoice Line by Line.
+      PostServiceOrderLinebyLine(ServiceHeader);
+      PostServiceOrderLinebyLine(ServiceHeader2);
+
+      // 3. Verify: Check Item Ledger Entry, Values Entries, Service Ledger Entry after posting Line by Line.
+      VerifyOrderItemLedgerEntry(ServiceLine);
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceLedgerEntry(ServiceHeader2."No.",ServiceHeader2."Customer No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE PostServInvoiceWithAllowPostingPeriod@115();
+    VAR
+      ServiceHeader@1003 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+      ServiceItemLine@1001 : Record 5901;
+      ServiceItem@1000 : Record 5940;
+      Type@1004 : ',Item,Resource,Both';
+    BEGIN
+      // 1 Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      LibraryERM.SetAllowPostingFromTo(WORKDATE,WORKDATE);
+
+      // 2. Exercise: Post Service Order with two line, one with blank Type and Posting Date.
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+      CreateEmptyServiceLine(ServiceHeader);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Check Service Order is posted.
+      VerifyPostedServiceOrder(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShippedQuantityZero@7();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-3 - refer to TFS ID 20887.
+      // The test case checks that on posting the Service Order the application generates an error if Quantity Shipped is Zero.
+
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+
+      // 2. Exercise: Create Service Order - Service Item, Service Header, Service Line with Type Item, Resource, Cost and G/L Account.
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Both);
+
+      // 3. Verify: Check that on posting the Service Order the application generates an error if Quantity Shipped is Zero.
+      VerifyQtyShippedOnServiceLine(ServiceHeader."No.");
+      ASSERTERROR LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+      Assert.AreEqual(STRSUBSTNO(InvoicePostError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipPartInvoiceManual@11();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-4 - refer to TFS ID 20887.
+      // The test case checks posting with full shipment and partial invoice with Manual cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipPartInvoice(ServiceHeader,ServiceLine,FALSE,FALSE);
+
+      // Verify: Check G/L Entries, Item Ledger Entry and Service Ledger Entry created after posting.
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyOrderItemLedgerEntry(ServiceLine);
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipPartInvoiceAutoExpected@28();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-4 - refer to TFS ID 20887.
+      // The test case check posting with full shipment and partial invoice with Automatic and Expected Cost Posting as TRUE with Type as
+      // Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipPartInvoice(ServiceHeader,ServiceLine,TRUE,TRUE);
+
+      // Verify: Check Item Ledger Entry, VAT Entries, Value Entries, Detailed Cust. Ledger Entry and Service Ledger Entry.
+      VerifyOrderItemLedgerEntry(ServiceLine);
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipPartInvoiceAuto@35();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-4 - refer to TFS ID 20887.
+      // The test case checks posting with full shipment and partial invoice with Automatic Cost Posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipPartInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check G/L Entries, Item Ledger Entry, Detail Cust. Ledger Entry, Value Entries after posting.
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyOrderItemLedgerEntry(ServiceLine);
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipPartInvoiceExpected@37();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-4 - refer to TFS ID 20887.
+      // The test case checks posting with full shipment and partial invoice with Expected Cost Posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipPartInvoice(ServiceHeader,ServiceLine,FALSE,TRUE);
+
+      // Verify: Check Item Ledger Entry, Detailed Cust. Ledger Entry, Value Entry, Service Ledger Entry after posting.
+      VerifyOrderItemLedgerEntry(ServiceLine);
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+    END;
+
+    LOCAL PROCEDURE ShipPartInvoice@86(VAR ServiceHeader@1009 : Record 5900;VAR ServiceLine@1007 : Record 5902;AutomaticCostPosting@1000 : Boolean;ExpectedCostPosting@1001 : Boolean);
+    VAR
+      ServiceItemLine@1005 : Record 5901;
+      ServiceItem@1003 : Record 5940;
+      Type@1002 : ',Item,Resource,Both';
+    BEGIN
+      // Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup,
+      // Create Service Order - Service Item, Service Header, Service Line with Type as Item and Post with Ship Option.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // Exercise: Modify Qty. to Invoice field on Service Line and Post as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipInvoiceResourceManual@20();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-5 - refer to TFS ID 20887.
+      // The test case checks posting with full shipment and full invoice with Manual cost posting with type as Resource, Cost
+      // and G/L Account.
+
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup,
+      // Create Service Order - Service Item, Service Header, Service Line with Type as Resource, Cost and G/L Account.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Both);
+
+      // 2. Exercise: Post Service Order as Ship and Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Check Quantity on Service Shipment Line. Check Service Ledger Entry, G/L Entry, Detailed Cust. Ledger Entry
+      // and Resource Ledger Entry after posting.
+      VerifyQtyOnServiceShipmentLine(ServiceHeader."No.");
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE InvoiceResourceManual@14();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-6 - refer to TFS ID 20887.
+      // The test checks posting with invoice with Manual Cost Posting with type as Resource, Cost and G/L Account.
+
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup,
+      // Create Service Order - Service Item, Service Header, Service Line with Type as Resource, Cost and G/L Account,
+      // Post Service Order as Ship.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Both);
+
+      PostSrvOrderAsShipForResource(ServiceHeader);
+      PostOrderAsShipForItemGLAccont(ServiceHeader);
+
+      // 2. Exercise: Modify "Qty. to Invoice" on Service Line and Post as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check Service Ledger Entry, Customer Ledger Entry, Resource Ledger Entry, Detailed Cust. Ledger Entry after
+      // posting.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE OrderDeletionFullInvoiceItem@19();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-7 - refer to TFS ID 20887.
+      // The test case checks order deletion after posting with full invoice with no cost posting with Type as Item.
+
+      // 1. Setup: Setup Automatic Cost Posting as FALSE and Expected Cost Posting to G/L as FALSE on Inventory Setup,
+      // Create Service Order - Service Item, Service Header, Service Line with Type as Item and Post as Ship.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Invoice field on Service Line and Post as Invoice.
+      ValidateQtyToInvoiceServicLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check Service Ledger Entry, Item Ledger Entry, Value Entry, Customer Ledger Entry, Detailed Cust. Ledger Entry after
+      // posting and Check that the Service Order does not exist.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyOrderItemLedgerEntry(ServiceLine);
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      Assert.IsFalse(ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No."),OrderNotExist);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE OrderDeletionFullInvoiceManual@32();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-8 - refer to TFS ID 20887.
+      // The test case checks order deletion after posting with full invoice with manual cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      OrderDeletionFullInvoice(ServiceHeader,ServiceLine,FALSE,FALSE);
+
+      // Verify: Check that Service Order not exist after Post Ship and Invoice and Service Ledger Entry, Value Entry for Valued
+      // Quantity.
+      Assert.IsFalse(ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No."),OrderNotExist);
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE OrderDeletionFullInvoiceAutoEx@30();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-8 - refer to TFS ID 20887.
+      // The test case checks order deletion after posting with full invoice with both automatic and expected cost posting with Type as
+      // Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      OrderDeletionFullInvoice(ServiceHeader,ServiceLine,TRUE,TRUE);
+
+      // Verify: Check that Service Order not exist after Post Ship and Invoice and Service Ledger Entry, Value Entry for Valued
+      // Quantity.
+      Assert.IsFalse(ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No."),OrderNotExist);
+      VerifyOrderItemLedgerEntry(ServiceLine);
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE OrderDeletionFullInvoiceAuto@17();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-8 - refer to TFS ID 20887.
+      // The test case checks order deletion after posting with full invoice with automatic cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      OrderDeletionFullInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check that Service Order not exist after Post Ship and Invoice and Service Ledger Entry, Value Entry for Valued
+      // Quantity.
+      Assert.IsFalse(ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No."),OrderNotExist);
+      VerifyOrderItemLedgerEntry(ServiceLine);
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE OrderDeletionFullInvoice@84(VAR ServiceHeader@1003 : Record 5900;VAR ServiceLine@1002 : Record 5902;AutomaticCostPosting@1001 : Boolean;ExpectedCostPosting@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1005 : Record 5940;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Setup: Modify Inventory Setup, Create Service Order, Service Line with Type Item and Modify Qty. to Invoice field
+      // on Service Line.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // Exercise: Post Service Order with Invoice.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE OrderDeletionShipInvoiceManual@29();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-9 - refer to TFS ID 20887.
+      // The test case checks order deletion after posting with full ship and invoice with manual cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      OrderDeletionShipInvoice(ServiceHeader,ServiceLine,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE OrderDeletionShipInvoiceAutoEx@46();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-9 - refer to TFS ID 20887.
+      // The test case checks order deletion after posting with full ship and invoice with automatic and expected cost posting with Type
+      // as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      OrderDeletionShipInvoice(ServiceHeader,ServiceLine,TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE OrderDeletionShipInvoiceAuto@53();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-9 - refer to TFS ID 20887.
+      // The test case checks order deletion after posting with full ship and invoice with automatic cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      OrderDeletionShipInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE OrderDeletionShipInvoice@88(VAR ServiceHeader@1003 : Record 5900;VAR ServiceLine@1002 : Record 5902;AutomaticCostPosting@1001 : Boolean;ExpectedCostPosting@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1005 : Record 5940;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Setup: Modify Inventory Setup, Create Service Order, Service Line with Type Item and Modify Qty. to Invoice field
+      // on Service Line.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+
+      // Exercise: Post Service Order with Ship and Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // Verify: Check that Service Order not exist after Post Ship and Invoice and Service Ledger Entry, Customer Ledger Entry,
+      // Detailed Cust. Ledger Entry, Value Entry for Valued Quantity.
+      Assert.IsFalse(ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No."),OrderNotExist);
+      VerifyOrderItemLedgerEntry(ServiceLine);
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipInvoiceQtyToInvoiceZero@43();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-10 - refer to TFS ID 20887.
+      // The test case checks posting with full Ship with Qty. to Invoice zero and then invoice with type as Resource, Cost and G/L
+      // Account.
+
+      // 1. Setup: Modify Inventory Setup. Create Service Order - Service Line with Type as Item, Resource, Cost and G/L Account.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Both);
+
+      ModifyQtyToInvoiceZero(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order not Exist and Entries for Service Ledger Entry, Customer Ledger Entry, Detailed Cust.
+      // Ledger Entry and Resource Ledger Entry.
+      Assert.IsFalse(ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No."),OrderNotExist);
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipTwiceFullInvoice@34();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-12 - refer to TFS ID 20887.
+      // The test case checks posting with ship partially in two parts and then Invoice with type as Resource, Cost and G/L Account.
+
+      // 1. Setup: Modify Inventory Setup. Create Service Order - Service Line with Type as Item, Resource, Cost and G/L Account.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Resource);
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries after partial ship for Service Ledger Entry, Customer Ledger Entry,
+      // Detailed Cust. Ledger Entry, VAT Entry and Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipTwiceInvoiceManual@47();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-13 - refer to TFS ID 20887.
+      // The test case checks posting with ship partially in two parts and then Invoice with manual cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipTwiceInvoice(ServiceHeader,ServiceLine,FALSE,FALSE);
+
+      // Verify: Check that Service Order Entries after partial ship for Service Ledger Entry, GL Entry,
+      // and Values entry for valued Quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipTwiceInvoiceAutoExpected@48();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-13 - refer to TFS ID 20887.
+      // The test case checks posting with ship partially in two parts and then Invoice with automatic and expected cost posting with Type
+      // as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipTwiceInvoice(ServiceHeader,ServiceLine,TRUE,TRUE);
+
+      // Verify: Check that Service Order Entries after partial ship for Service Ledger Entry, GL Entry,
+      // and Values entry for valued Quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipTwiceInvoiceAuto@36();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-13 - refer to TFS ID 20887.
+      // The test case checks posting with ship partially in two parts and then Invoice with automatic cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipTwiceInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check that Service Order Entries after partial ship for Service Ledger Entry, GL Entry,
+      // and Values entry for valued Quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE ShipTwiceInvoice@83(VAR ServiceHeader@1003 : Record 5900;VAR ServiceLine@1002 : Record 5902;AutomaticCostPosting@1001 : Boolean;ExpectedCostPosting@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1005 : Record 5940;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Setup: Modify Inventory Setup. Create Service Order - Service Line with Type as Item, Modify Qty. to Ship
+      // and Post partially as Ship.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipTwiceInvoiceResource@45();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-14 - refer to TFS ID 20887.
+      // The test case checks posting with ship partially in two parts and then Invoice with manual cost posting with Type as Resource,
+      // Cost and G/L Account.
+
+      // 1. Setup: Modify Inventory Setup. Create Service Order - Service Line with Type as Item, Modify Qty. to Ship
+      // and Post partially as Ship.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Resource);
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries after partial ship for Service Ledger Entry, GL Entry,
+      // Detailed Customer Ledger Entry, Customer Ledger Entry and Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipFollowShipAndInvoiceManual@52();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-15 - refer to TFS ID 20887.
+      // The test case checks posting partially with ship and then again with ship and invoice with manual cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipFollowShipAndInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, GL Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipFollowShipAndInvoiceAutoEx@57();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-15 - refer to TFS ID 20887.
+      // The test case checks posting partially with ship and then again with ship and invoice with automatic and expected cost posting
+      // with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipFollowShipAndInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, GL Entry, Detailed
+      // Cust. Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipFollowShipAndInvoiceAuto@44();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-15 - refer to TFS ID 20887.
+      // The test case checks posting partially with ship and then again with ship and invoice with automatic cost posting with Type
+      // as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipFollowShipAndInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, Item Ledger Entry, GL Entry, Detailed
+      // Cust. Ledger Entry, Customer Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE ShipFollowShipAndInvoice@87(VAR ServiceHeader@1003 : Record 5900;VAR ServiceLine@1002 : Record 5902;AutomaticCostPosting@1001 : Boolean;ExpectedCostPosting@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1005 : Record 5940;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Setup: Modify Inventory Setup. Create Service Order - Service Line with Type as Item, Modify Qty. to Ship
+      // and Post partially as Ship.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // Exercise: Modify Qty. to ship and Qty. to Invoice and Post Service Order as Ship and Invoice.
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipFollowShipInvoiceResource@54();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-16 - refer to TFS ID 20887.
+      // The test case checks posting partially with ship and then again with ship and invoice with manual cost posting with Type as
+      // Resource, Cost and G/L Account.
+
+      // 1. Setup: Modify Inventory Setup. Create Service Order - Service Line with Type as Item, Modify Qty. to Ship
+      // and Post partially as Ship.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Resource);
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Modify Qty. to ship and Qty. to Invoice and Post Service Order as Ship and Invoice.
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, Item Ledger Entry, GL Entry, Detailed
+      // Cust. Ledger Entry, Customer Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipInvoiceTwiceResource@59();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-17 - refer to TFS ID 20887.
+      // The test case checks posting with ship and invoice partially in two parts with manual cost posting with Type as Resource,
+      // Cost and G/L Account.
+
+      // 1. Setup: Modify Inventory Setup. Create Service Order-Service Line with Type as Resource, Cost and G/L Account, Modify Qty.
+      // to Ship and Post as Ship and Invoice.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Resource);
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 2. Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, GL Entry, Detailed Cust. Ledger Entry,
+      // Customer Ledger Entry, Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipInvoiceTwiceItemManual@69();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-18 - refer to TFS ID 20887.
+      // The test case checks posting with ship and invoice partially in two parts with manual cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipInvoiceTwiceItem(ServiceHeader,ServiceLine,FALSE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, Detailed Cust. Ledger Entry,
+      // Item Ledger Entry, Customer Ledger Entry, Resource Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipInvoiceTwiceAutoExpected@51();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-18 - refer to TFS ID 20887.
+      // The test case checks posting with ship and invoice partially in two parts with automatic and expected cost posting with
+      // type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipInvoiceTwiceItem(ServiceHeader,ServiceLine,TRUE,TRUE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, GL Entry, Detailed Cust. Ledger Entry,
+      // Item Ledger Entry, Customer Ledger Entry, Resource Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipInvoiceTwiceAuto@55();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-18 - refer to TFS ID 20887.
+      // The test case checks posting with ship and invoice partially in two parts with automatic cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipInvoiceTwiceItem(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, Detailed Cust. Ledger Entry,
+      // Item Ledger Entry, Customer Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE ShipInvoiceTwiceItem@107(VAR ServiceHeader@1003 : Record 5900;VAR ServiceLine@1002 : Record 5902;AutomaticCostPosting@1001 : Boolean;ExpectedCostPosting@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1005 : Record 5940;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Setup: Modify Inventory Setup. Create Service Order-Service Line with Type as Item and Post as Ship and Modify Qty. to Invoice
+      // Post with Invoice.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipAndInvoiceTwiceResource@62();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-19 - refer to TFS ID 20887.
+      // The test case checks posting with ship and invoice partially in two parts with manual cost posting with Type as
+      // Resource, Cost and G/L Account.
+
+      // 1. Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipAndInvoiceTwice(ServiceHeader,ServiceLine,FALSE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, GL Entry, Detailed Cust. Ledger Entry,
+      // Customer Ledger Entry, Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipAndInvoiceTwiceManual@56();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-20 - refer to TFS ID 20887.
+      // The test case checks posting with partial ship and invoice partially in two parts with manual cost posting with Type as
+      // Resource, Cost and G/L Account.
+
+      // 1. Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipAndInvoiceTwice(ServiceHeader,ServiceLine,TRUE,TRUE);
+
+      // 2. Exercise: Modify Qty. to Ship and Qty. to Invoice and Post Service Order as Ship and Invoice.
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, GL Entry, Detailed Cust. Ledger Entry,
+      // Customer Ledger Entry, Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE ShipAndInvoiceTwice@81(VAR ServiceHeader@1003 : Record 5900;VAR ServiceLine@1002 : Record 5902;AutomaticCostPosting@1001 : Boolean;ExpectedCostPosting@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1005 : Record 5940;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Setup: Modify Inventory Setup. Create Service Order-Service Line with Type as Resource, Cost and G/L Account, Modify Qty. to
+      // Ship and Post partially as Ship and Invoice.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Resource);
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE FullShipAndInvoiceTwiceManual@50();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-21 - refer to TFS ID 20887.
+      // The test case checks posting with partial ship and invoice partially in two parts with manual cost posting with Type as Resource,
+      // Cost and G/L Account.
+
+      // 1. Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ShipAndInvoiceTwice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Ship and Post Service Order as Ship and Invoice.
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, GL Entry, Detailed Cust. Ledger Entry,
+      // Customer Ledger Entry, Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE AutoShipPartialInvoiceItem@64();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-22 - refer to TFS ID 20887.
+      // The test case checks posting with ship and invoice and then again invoice with manual cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      AutoShipPartialInvoice(ServiceHeader,ServiceLine,FALSE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, Detailed Cust. Ledger Entry,
+      // Item Ledger Entry, Customer Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE AutoShipPartialInvoiceAutoEx@61();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-22 - refer to TFS ID 20887.
+      // The test case checks posting with ship and invoice and then again invoice with automatic and expected cost posting
+      // with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      AutoShipPartialInvoice(ServiceHeader,ServiceLine,TRUE,TRUE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, Detailed Cust. Ledger Entry,
+      // Item Ledger Entry, GL Entry, Customer Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE AutoShipPartialInvoiceAuto@63();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-22 - refer to TFS ID 20887.
+      // The test case checks posting with ship and invoice and then again invoice with automatic cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      AutoShipPartialInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, Detailed Cust. Ledger Entry,
+      // Item Ledger Entry, GL Entry, Customer Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE AutoShipPartialInvoice@91(VAR ServiceHeader@1003 : Record 5900;VAR ServiceLine@1002 : Record 5902;AutomaticCostPosting@1001 : Boolean;ExpectedCostPosting@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1005 : Record 5940;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Setup: Modify Inventory Setup. Create Service Order-Service Line with Type as Item and Post as Ship and Modify Qty. to Invoice
+      // Post with Invoice.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE AutoShipPartialInvoiceResource@65();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-23 - refer to TFS ID 20887.
+      // The test case checks posting with ship and invoice and then again invoice with manual cost posting with Type as
+      // Resource, Cost and G/L Account.
+
+      // 1. Setup: Modify Inventory Setup. Create Service Order-Service Line with Type as Resource, Cost and G/L Account, Modify Qty. to
+      // Ship and Post partially as Ship and Invoice.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Resource);
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 2. Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, GL Entry, Detailed Cust. Ledger Entry,
+      // Customer Ledger Entry, Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE PartShipPartInvoiceManual@67();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-24 - refer to TFS ID 20887.
+      // The test case checks posting with partial ship and partial invoice with manual cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      PartShipPartInvoice(ServiceHeader,ServiceLine,FALSE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, Detailed Cust. Ledger Entry,
+      // Item Ledger Entry, Customer Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE PartShipPartInvoiceAutoEx@66();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-24 - refer to TFS ID 20887.
+      // The test case checks posting with partial ship and partial invoice with automatic and expected cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      PartShipPartInvoice(ServiceHeader,ServiceLine,TRUE,TRUE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, Detailed Cust. Ledger Entry,
+      // Item Ledger Entry, GL Entry, Customer Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE PartShipPartInvoiceAuto@60();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-24 - refer to TFS ID 20887.
+      // The test case checks posting with partial ship and partial invoice with automatic cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      PartShipPartInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, VAT Entry, Detailed Cust. Ledger Entry,
+      // Item Ledger Entry, GL Entry, Customer Ledger Entry and Value entry for valued quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyInvoiceQtyItemLedger(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE PartShipPartInvoice@90(VAR ServiceHeader@1003 : Record 5900;VAR ServiceLine@1002 : Record 5902;AutomaticCostPosting@1001 : Boolean;ExpectedCostPosting@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1005 : Record 5940;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Setup: Modify Inventory Setup. Create Service Order-Service Line with Type as Item and Post as Ship and Invoice with
+      // Modification on Qty. to Ship and Qty. to Invoice field.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // Exercise: Modify Qty. to Invoice and Qty. to Ship and Post Service Order as Invoice.
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ConsumeAndInvoiceManual@68();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-25 - refer to TFS ID 20887.
+      // The test case checks posting with consume and invoice with manual cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ConsumeAndInvoice(ServiceHeader,ServiceLine,FALSE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, GL Entry, Detailed Cust.
+      // Ledger Entry, Customer Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ConsumeAndInvoiceAutoEx@74();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-25 - refer to TFS ID 20887.
+      // The test case checks posting with consume and invoice with expected and automatic cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ConsumeAndInvoice(ServiceHeader,ServiceLine,TRUE,TRUE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, GL Entry, Detailed Cust. Ledger Entry,
+      // Customer Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ConsumeAndInvoiceAuto@75();
+    VAR
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      // Covers document number TC-PP-I-25 - refer to TFS ID 20887.
+      // The test case checks posting with consume and invoice with automatic cost posting with Type as Item.
+
+      // Setup: Setup Automatic Cost Posting and Expected Cost Posting to G/L as parameter passed in Inventory Setup.
+      ConsumeAndInvoice(ServiceHeader,ServiceLine,TRUE,FALSE);
+
+      // Verify: Check that Service Order Entries created for Service Ledger Entry, GL Entry, Detailed Cust.
+      // Ledger Entry, Customer Ledger Entry and Value Entry for Values Quantity.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderValueEntry(ServiceHeader."No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE ConsumeAndInvoice@92(VAR ServiceHeader@1003 : Record 5900;VAR ServiceLine@1002 : Record 5902;AutomaticCostPosting@1001 : Boolean;ExpectedCostPosting@1000 : Boolean);
+    VAR
+      ServiceItemLine@1004 : Record 5901;
+      ServiceItem@1005 : Record 5940;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Setup: Modify Inventory Setup. Create Service Order-Service Line with Type as Resource, Cost and G/L Account, Modify Qty. to
+      // Ship and Post partially as Ship and Invoice.
+      Initialize;
+      ModifyCostPostngInventorySetup(AutomaticCostPosting,ExpectedCostPosting);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::Item);
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToConsumeServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ConsumeAndInvoiceResource@79();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1002 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-26 - refer to TFS ID 20887.
+      // The test case checks entries for posting with consume and then invoice with manual cost posting with Type as Resource.
+
+      // 1. Setup: Create Service Order having Service Line with Type as Resource, Modify Qty. to Ship field and Post as Ship, Modify Qty.
+      // to Ship, Qty. to Consume and Post as Ship and Consume.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::" ");
+      CreateServiceLineWithResource(ServiceLine,ServiceHeader,ServiceItem."No.");
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToConsumeServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Invoice and Post Service Order as Invoice.
+      ModifyQtyToInvoiceServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, GL Entry, Detailed Cust.
+      // Ledger Entry, Customer Ledger Entry and Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ConsumeFollowShipAndInvoice@73();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-28 - refer to TFS ID 20887.
+      // The test case checks entries for posting with consume and then ship and invoice with manual cost posting with Type as Resource.
+
+      // 1. Setup: Create Service Order having Service Line with Type as Resource, Modify Qty. to Ship field and Post as Ship, Modify Qty.
+      // to Ship, Qty. to Consume and Post as Ship and Consume.
+      Initialize;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::" ");
+      CreateServiceLineWithResource(ServiceLine,ServiceHeader,ServiceItem."No.");
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToConsumeServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Ship and Post Service Order as Ship and Invoice.
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, GL Entry, Detailed Cust.
+      // Ledger Entry, Customer Ledger Entry and Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE UndoServiceShipment@82();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      ServiceShipmentLine@1000 : Record 5991;
+      UndoServiceShipmentLine@1002 : Codeunit 5818;
+      Type@1007 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-33 - refer to TFS ID 20887.
+      // The test case checks that the application generates an error on posting an order when there is no Qty. Shipped not invoiced
+      // field is zero.
+
+      // 1.Setup: Create Service Order having Service Line with Type as Resource, Modify Sales and Receivables setup for Cal. Inv
+      // Discount field as False and Automatic Cost Posting as False and Expected Cost Posting to G/L as False on Inventory Setup and
+      // Modify Qty. to Ship on Service Line and Post as Ship.
+      Initialize;
+      ModifyInvoiceDiscount;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::" ");
+      CreateServiceLineWithResource(ServiceLine,ServiceHeader,ServiceItem."No.");
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Consume and Post Service Order as Ship and Consume.
+      ModifyQtyToConsumeServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // 3. Verify: Try to Undo Service Shipment Line and Check that Error raised when there is no Qty. Shipped not invoiced field is
+      // Zero.
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceShipmentLine.SETRANGE("Qty. Shipped Not Invoiced",0);
+      ServiceShipmentLine.FINDFIRST;
+      ASSERTERROR UndoServiceShipmentLine.RUN(ServiceShipmentLine);
+      Assert.AreEqual(STRSUBSTNO(UndoShipmentErrorforService,ServiceShipmentLine.Quantity,
+          ServiceShipmentLine.FIELDCAPTION("Document No."),ServiceShipmentLine."Document No.",
+          ServiceShipmentLine.FIELDCAPTION("Line No."),ServiceShipmentLine."Line No.",
+          ServiceShipmentLine."Qty. Shipped Not Invoiced"),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE UndoServiceConsumption@78();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      ServiceShipmentLine@1000 : Record 5991;
+      UndoServiceConsumptionLine@1002 : Codeunit 5819;
+      Type@1007 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-33 - refer to TFS ID 20887.
+      // The test case checks the functionality of undo consumption.
+
+      // 1. Setup: Create Service Order having Service Line with Type as Resource, Modify Sales and Receivables setup for Cal. Inv
+      // Discount field as False and Automatic Cost Posting as False and Expected Cost Posting to G/L as False on Inventory Setup and
+      // Modify Qty. to Ship on Service Line and Post as Ship.
+      Initialize;
+      ModifyInvoiceDiscount;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::" ");
+      CreateServiceLineWithResource(ServiceLine,ServiceHeader,ServiceItem."No.");
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Modify Qty. to Consume and Post Service Order as Ship and Consume.
+      ModifyQtyToConsumeServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // 3. Verify: Undo Consume on Service Shipment Line and Check that no error comes on undo consumption.
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceShipmentLine.SETFILTER("Quantity Consumed",'>0');
+      ServiceShipmentLine.FINDLAST;
+      UndoServiceConsumptionLine.RUN(ServiceShipmentLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipAndUndoShipment@76();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      ServiceShipmentLine@1000 : Record 5991;
+      UndoServiceShipmentLine@1006 : Codeunit 5818;
+      Type@1007 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-33 - refer to TFS ID 20887.
+      // The test case checks that the application generates an error on posting the Service Order as Invoice while there is no Qty. in
+      // Invoice field.
+
+      // 1. Setup: Create Service Order having Service Line with Type as Resource, Modify Sales and Receivables setup for Cal. Inv
+      // Discount field as False and Automatic Cost Posting as False and Expected Cost Posting to G/L as False on Inventory Setup and
+      // Modify Qty. to Ship on Service Line and Post as Ship.
+      Initialize;
+      ModifyInvoiceDiscount;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::" ");
+      CreateServiceLineWithResource(ServiceLine,ServiceHeader,ServiceItem."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Undo Service Shipment Line.
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceShipmentLine.FINDFIRST;
+      UndoServiceShipmentLine.RUN(ServiceShipmentLine);
+
+      // 3. Verify: Try to post the Service Order as Invoice while there is no Qty. in Invoice field.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      ASSERTERROR LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+      Assert.AreEqual(STRSUBSTNO(InvoicePostError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipAndInvoiceLedgerEntries@77();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      Type@1000 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-34 - refer to TFS ID 20887.
+      // The test case checks entries for posting with ship and invoice with manual cost posting with Type as Resource.
+
+      // 1. Setup: Create Service Order having Service Line with Type as Resource, Modify Sales and Receivables setup for Cal. Inv
+      // Discount field as False and Automatic Cost Posting as False and Expected Cost Posting to G/L as False on Inventory Setup and
+      // Modify Qty. to Ship on Service Line and Post as Ship.
+      Initialize;
+      ModifyInvoiceDiscount;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::" ");
+      CreateServiceLineWithResource(ServiceLine,ServiceHeader,ServiceItem."No.");
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // 2. Exercise: Post Service Order as Ship and Invoice.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, GL Entry, Detailed Cust.
+      // Ledger Entry, Customer Ledger Entry and Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,ExpectedCostMsgHandler)]
+    PROCEDURE ShipConsumeUndoConsumption@80();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceLine@1004 : Record 5902;
+      ServiceHeader@1001 : Record 5900;
+      ServiceShipmentLine@1000 : Record 5991;
+      TempServiceLineBeforePosting@1007 : TEMPORARY Record 5902;
+      UndoServiceConsumptionLine@1002 : Codeunit 5819;
+      Type@1006 : ' ,Item,Resource,Both';
+    BEGIN
+      // Covers document number TC-PP-I-35 - refer to TFS ID 20887.
+      // The test case checks entries created for Service Order posted with Ship and consume and for which undo consumption is then done.
+
+      // 1. Setup: Create Service Order having Service Line with Type as Resource and Item, Modify Sales and Receivables setup for
+      // Cal. Inv Discount field as False and Automatic Cost Posting as False and Expected Cost Posting to G/L as False on
+      // Inventory Setup and Modify Qty. to Ship on Service Line and Post as Ship.
+      Initialize;
+      ModifyInvoiceDiscount;
+      ModifyCostPostngInventorySetup(FALSE,FALSE);
+      CreateServiceOrder(ServiceHeader,ServiceItemLine,ServiceLine,ServiceItem,Type::" ");
+      CreateServiceLineWithResource(ServiceLine,ServiceHeader,ServiceItem."No.");
+      CreateServiceLineWithItem(ServiceLine,ServiceHeader,ServiceItem."No.");
+
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // Modify Qty. to Ship and Qty. to Consume and Post as Ship and Consume.
+      ModifyQtyToShipOnServiceLine(ServiceHeader."No.");
+      ModifyQtyToConsumeServiceLine(ServiceHeader."No.");
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      SaveServiceLineInTempTable(TempServiceLineBeforePosting,ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+
+      // Undo Service Consumption.
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceShipmentLine.SETFILTER("Quantity Consumed",'>0');
+      ServiceShipmentLine.FINDLAST;
+      UndoServiceConsumptionLine.RUN(ServiceShipmentLine);
+      VerifyItemLedgerAndValueEntriesAfterUndoConsumption(TempServiceLineBeforePosting);
+
+      // 2. Exercise: Post Service Order as Invoice.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that Service Order Entries created for Service Ledger Entry, GL Entry, Detailed Cust. Ledger Entry, Customer
+      // Ledger Entry and Resource Ledger Entry.
+      VerifyServiceLedgerEntry(ServiceHeader."No.",ServiceHeader."Customer No.");
+      VerifyServiceOrderGLEntry(ServiceHeader."No.");
+      VerifyDetailedCustLedgerEntry(ServiceHeader."No.",CalculateTotlAmountShippedLine(ServiceHeader."No."));
+      VerifyCustomerLedgerEntry(ServiceHeader."No.");
+      VerifyResourceLedgerEntry(ServiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplaceDatesAsFalse@97();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceInvoiceHeader@1005 : Record 5992;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Posting and Document Dates are not replaced on running report Batch Post Service Invoice
+      // without the option Replace Posting Date, Replace Document Date.
+
+      // 1. Setup: Create Service Invoice - Service Header, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,LibrarySales.CreateCustomerNo);
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Invoices with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceInvoices(ServiceHeader,PostingDate,FALSE,FALSE,FALSE);
+
+      // 3. Verify: Check that the posted Service Invoice different date from that inputted in report.
+      FindServiceInvoiceHeader(ServiceInvoiceHeader,ServiceHeader."No.");
+      ServiceInvoiceHeader.TESTFIELD("Posting Date",WORKDATE);
+      ServiceInvoiceHeader.TESTFIELD("Document Date",WORKDATE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplacePostingDateAsTrue@23();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceInvoiceHeader@1005 : Record 5992;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Posting Date is replaced on running the report Batch Post Service Invoice with the option Replace Posting Date.
+
+      // 1. Setup: Create Service Invoice - Service Header, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,LibrarySales.CreateCustomerNo);
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Invoices with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceInvoices(ServiceHeader,PostingDate,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Check that the posted Service Invoice has the same date as inputted in report.
+      FindServiceInvoiceHeader(ServiceInvoiceHeader,ServiceHeader."No.");
+      ServiceInvoiceHeader.TESTFIELD("Posting Date",PostingDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplaceDocumentDateAsTrue@104();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceInvoiceHeader@1005 : Record 5992;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Document Date is replaced on running the report Batch Post Service Invoice with the option Replace Document Date.
+
+      // 1. Setup: Create Service Invoice - Service Header, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,LibrarySales.CreateCustomerNo);
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Invoices with any random date less than work date.
+      PostingDate := CALCDATE('<-' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceInvoices(ServiceHeader,PostingDate,FALSE,TRUE,FALSE);
+
+      // 3. Verify: Check that the posted Service Invoice has the same date as inputted in report.
+      FindServiceInvoiceHeader(ServiceInvoiceHeader,ServiceHeader."No.");
+      ServiceInvoiceHeader.TESTFIELD("Document Date",PostingDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CalculateInvoiceDiscountFalse@96();
+    VAR
+      Customer@1003 : Record 18;
+      ServiceHeader@1001 : Record 5900;
+      ServiceInvoiceHeader@1005 : Record 5992;
+      CustInvoiceDisc@1008 : Record 19;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Invoice Discount is not calculated on running the report Batch Post Service Invoice with the
+      // option Calculate Invoice Discount as False.
+
+      // 1. Setup: Setup Invoice Discount. Create a new Customer, Customer Invoice Discount. Input non-zero percent in line.
+      // Create Service Invoice - Service Header, Service Line with Type as Item.
+      Initialize;
+      ModifyInvoiceDiscount;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateInvDiscForCustomer(CustInvoiceDisc,Customer."No.",'',0);  // Minimum amount is 0.
+      UpdateCustomerInvoiceDiscount(CustInvoiceDisc);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,Customer."No.");
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Invoices with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceInvoices(ServiceHeader,PostingDate,FALSE,FALSE,FALSE);
+
+      // 3. Verify: Check that the posted Service Invoice has zero Invoice Discount Amount on Service Lines.
+      FindServiceInvoiceHeader(ServiceInvoiceHeader,ServiceHeader."No.");
+      VerifyZeroDiscountInLines(ServiceInvoiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CalculateInvoiceDiscountAsTrue@127();
+    VAR
+      Customer@1003 : Record 18;
+      ServiceHeader@1001 : Record 5900;
+      ServiceInvoiceHeader@1005 : Record 5992;
+      CustInvoiceDisc@1008 : Record 19;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Invoice Discount is calculated correctly on running the report Batch Post Service Invoice with the
+      // option Calculate Invoice Discount as True.
+
+      // 1. Setup: Setup Invoice Discount. Create a new Customer, Customer Invoice Discount. Input non-zero percent in line.
+      // Create Service Invoice - Service Header, Service Line with Type as Item.
+      Initialize;
+      ModifyInvoiceDiscount;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateInvDiscForCustomer(CustInvoiceDisc,Customer."No.",'',0);  // Minimum amount is 0.
+      UpdateCustomerInvoiceDiscount(CustInvoiceDisc);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,Customer."No.");
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Invoices with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceInvoices(ServiceHeader,PostingDate,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that the posted Service Invoice has non-zero Invoice Discount Amount on Service Lines.
+      FindServiceInvoiceHeader(ServiceInvoiceHeader,ServiceHeader."No.");
+      VerifyNonZeroDiscountInLines(ServiceInvoiceHeader."No.",CustInvoiceDisc."Discount %");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplaceDatesAsFalseCreditMemo@102();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceCrMemoHeader@1005 : Record 5994;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Posting and Document Dates are not replaced on running report Batch Post Service Cr. Memos
+      // without the option Replace Posting Date, Replace Document Date.
+
+      // 1. Setup: Create Service Credit Memo - Service Header, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Cr. Memos with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceCreditMemos(ServiceHeader,PostingDate,FALSE,FALSE,FALSE);
+
+      // 3. Verify: Check that the posted Service Credit Memo Header has different date from that inputted in report.
+      FindServiceCreditMemoHeader(ServiceCrMemoHeader,ServiceHeader."No.");
+      ServiceCrMemoHeader.TESTFIELD("Posting Date",WORKDATE);
+      ServiceCrMemoHeader.TESTFIELD("Document Date",WORKDATE);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplacePostingDateAsTrueCredit@116();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceCrMemoHeader@1000 : Record 5994;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Posting Date is replaced on running the report Batch Post Service Cr. Memos with the option Replace Posting Date.
+
+      // 1. Setup: Create Service Credit Memo - Service Header, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Cr. Memos with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceCreditMemos(ServiceHeader,PostingDate,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Check that the posted Service Credit Memo has the same date as inputted in report.
+      FindServiceCreditMemoHeader(ServiceCrMemoHeader,ServiceHeader."No.");
+      ServiceCrMemoHeader.TESTFIELD("Posting Date",PostingDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplaceDocumentDateTrueCredit@118();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceCrMemoHeader@1000 : Record 5994;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Document Date is replaced on running the report Batch Post Service Cr. Memos with the option Replace Document Date.
+
+      // 1. Setup: Create Service Credit Memo - Service Header, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Cr. Memos with any random date less than work date.
+      PostingDate := CALCDATE('<-' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceCreditMemos(ServiceHeader,PostingDate,FALSE,TRUE,FALSE);
+
+      // 3. Verify: Check that the posted Service Credit Memo has the same date as inputted in report.
+      FindServiceCreditMemoHeader(ServiceCrMemoHeader,ServiceHeader."No.");
+      ServiceCrMemoHeader.TESTFIELD("Document Date",PostingDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CalculateDiscountFalseCredit@120();
+    VAR
+      Customer@1003 : Record 18;
+      ServiceHeader@1001 : Record 5900;
+      ServiceCrMemoHeader@1000 : Record 5994;
+      CustInvoiceDisc@1008 : Record 19;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Invoice Discount is not calculated on running the report Batch Post Service Cr. Memos with the
+      // option Calculate Invoice Discount as False.
+
+      // 1. Setup: Setup Invoice Discount. Create a new Customer, Customer Invoice Discount. Input non-zero percent in line.
+      // Create Service Credit Memo - Service Header, Service Line with Type as Item.
+      Initialize;
+      ModifyInvoiceDiscount;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateInvDiscForCustomer(CustInvoiceDisc,Customer."No.",'',0);  // Minimum amount is 0.
+      UpdateCustomerInvoiceDiscount(CustInvoiceDisc);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",Customer."No.");
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Cr. Memos with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceCreditMemos(ServiceHeader,PostingDate,FALSE,FALSE,FALSE);
+
+      // 3. Verify: Check that the posted Service Credit Memo has zero Invoice Discount Amount on Service Lines.
+      FindServiceCreditMemoHeader(ServiceCrMemoHeader,ServiceHeader."No.");
+      VerifyZeroDiscountCreditLines(ServiceCrMemoHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CalculateDiscountTrueCredit@129();
+    VAR
+      Customer@1003 : Record 18;
+      ServiceHeader@1001 : Record 5900;
+      ServiceCrMemoHeader@1000 : Record 5994;
+      CustInvoiceDisc@1008 : Record 19;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Invoice Discount is calculated correctly on running the report Batch Post Service Cr. Memos with the
+      // option Calculate Invoice Discount as True.
+
+      // 1. Setup: Setup Invoice Discount. Create a new Customer, Customer Invoice Discount. Input non-zero percent in line.
+      // Create Service Credit Memo - Service Header, Service Line with Type as Item.
+      Initialize;
+      ModifyInvoiceDiscount;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateInvDiscForCustomer(CustInvoiceDisc,Customer."No.",'',0);  // Minimum amount is 0.
+      UpdateCustomerInvoiceDiscount(CustInvoiceDisc);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",Customer."No.");
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Cr. Memos with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceCreditMemos(ServiceHeader,PostingDate,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that the posted Credit Memo has non-zero Invoice Discount Amount on Service Lines.
+      FindServiceCreditMemoHeader(ServiceCrMemoHeader,ServiceHeader."No.");
+      VerifyNonZeroDiscountInCredit(ServiceCrMemoHeader."No.",CustInvoiceDisc."Discount %");
+    END;
+
+    [Test]
+    PROCEDURE ReplacePostingDateErrorCredit@94();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the application generates an error as 'Please enter the posting date' on running the report Batch Post
+      // Service Cr. Memos with the option Replace Posting Date and blank posting date.
+
+      // 1. Setup: Create Service Credit Memo - Service Header, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::"Credit Memo",LibrarySales.CreateCustomerNo);
+      CreateMultipleServiceLines(ServiceHeader,'');
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Cr. Memos with blank date.
+      PostingDate := PostingDate;  // Used to initialize the variable.
+      ASSERTERROR BatchPostServiceCreditMemos(ServiceHeader,PostingDate,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Check that the application generates an error as 'Please enter the posting date'.
+      Assert.AreEqual(STRSUBSTNO(PostingDateBlankError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplaceDatesAsFalseOrder@111();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceItem@1002 : Record 5940;
+      ServiceItemLine@1006 : Record 5901;
+      ServiceInvoiceHeader@1005 : Record 5992;
+      ServiceShipmentHeader@1000 : Record 5990;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Posting and Document Dates are not replaced on running report Batch Post Service Orders
+      // without the option Replace Posting Date, Replace Document Date.
+
+      // 1. Setup: Create Service Order - Service Item, Service Header, Service Item Line, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceItem(ServiceItem,LibrarySales.CreateCustomerNo);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      CreateMultipleServiceLines(ServiceHeader,ServiceItem."No.");
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Orders with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceOrder(ServiceHeader,PostingDate,FALSE,FALSE,FALSE);
+
+      // 3. Verify: Check that the posted Service Invoice/Shipment Headers have different date from that inputted in report.
+      FindServiceInvoiceFromOrder(ServiceInvoiceHeader,ServiceHeader."No.");
+      ServiceInvoiceHeader.TESTFIELD("Posting Date",ServiceHeader."Posting Date");
+      ServiceInvoiceHeader.TESTFIELD("Document Date",ServiceHeader."Document Date");
+
+      FindServiceShipmentHeader(ServiceShipmentHeader,ServiceHeader."No.");
+      ServiceShipmentHeader.TESTFIELD("Posting Date",ServiceHeader."Posting Date");
+      ServiceShipmentHeader.TESTFIELD("Document Date",ServiceHeader."Document Date");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplacePostingDateAsTrueOrder@119();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceHeader@1001 : Record 5900;
+      ServiceItemLine@1006 : Record 5901;
+      ServiceInvoiceHeader@1002 : Record 5992;
+      ServiceShipmentHeader@1000 : Record 5990;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Posting Date is replaced on running the report Batch Post Service Orders with the option Replace Posting Date.
+
+      // 1. Setup: Create Service Order - Service Item, Service Header, Service Item Line, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceItem(ServiceItem,LibrarySales.CreateCustomerNo);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      CreateMultipleServiceLines(ServiceHeader,ServiceItem."No.");
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Orders with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceOrder(ServiceHeader,PostingDate,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Check that the posted Service Invoice/Shipment have the same date as inputted in report.
+      FindServiceInvoiceFromOrder(ServiceInvoiceHeader,ServiceHeader."No.");
+      ServiceInvoiceHeader.TESTFIELD("Posting Date",PostingDate);
+
+      FindServiceShipmentHeader(ServiceShipmentHeader,ServiceHeader."No.");
+      ServiceShipmentHeader.TESTFIELD("Posting Date",PostingDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE ReplaceDocumentDateTrueOrder@124();
+    VAR
+      ServiceItem@1006 : Record 5940;
+      ServiceHeader@1005 : Record 5900;
+      ServiceItemLine@1002 : Record 5901;
+      ServiceInvoiceHeader@1001 : Record 5992;
+      ServiceShipmentHeader@1000 : Record 5990;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Document Date is replaced on running the report Batch Post Service Orders with the option Replace Document Date.
+
+      // 1. Setup: Create Service Order - Service Item, Service Header, Service Item Line, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceItem(ServiceItem,LibrarySales.CreateCustomerNo);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      CreateMultipleServiceLines(ServiceHeader,ServiceItem."No.");
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Orders with any random date less than work date.
+      PostingDate := CALCDATE('<-' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceOrder(ServiceHeader,PostingDate,FALSE,TRUE,FALSE);
+
+      // 3. Verify: Check that the posted Service Invoice/Shipment has the same date as inputted in report.
+      FindServiceInvoiceFromOrder(ServiceInvoiceHeader,ServiceHeader."No.");
+      ServiceInvoiceHeader.TESTFIELD("Document Date",PostingDate);
+
+      FindServiceShipmentHeader(ServiceShipmentHeader,ServiceHeader."No.");
+      ServiceShipmentHeader.TESTFIELD("Document Date",PostingDate);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CalculateDiscountFalseOrder@131();
+    VAR
+      Customer@1003 : Record 18;
+      ServiceItem@1009 : Record 5940;
+      ServiceHeader@1005 : Record 5900;
+      ServiceItemLine@1002 : Record 5901;
+      ServiceInvoiceHeader@1001 : Record 5992;
+      CustInvoiceDisc@1008 : Record 19;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Invoice Discount is not calculated on running the report Batch Post Service Orders with the
+      // option Calculate Invoice Discount as False.
+
+      // 1. Setup: Setup Invoice Discount. Create a new Customer, Customer Invoice Discount. Input non-zero percent in line.
+      // Create Service Order - Service Item, Service Header, Service Item Line, multiple Service Lines with Type as Item.
+      Initialize;
+      ModifyInvoiceDiscount;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateInvDiscForCustomer(CustInvoiceDisc,Customer."No.",'',0);  // Minimum amount is 0.
+      UpdateCustomerInvoiceDiscount(CustInvoiceDisc);
+
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      CreateMultipleServiceLines(ServiceHeader,ServiceItem."No.");
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Orders with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceOrder(ServiceHeader,PostingDate,FALSE,FALSE,FALSE);
+
+      // 3. Verify: Check that the posted Service Invoice has zero Invoice Discount Amount on Service Lines.
+      FindServiceInvoiceFromOrder(ServiceInvoiceHeader,ServiceHeader."No.");
+      VerifyZeroDiscountInLines(ServiceInvoiceHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CalculateDiscountTrueOrder@138();
+    VAR
+      Customer@1003 : Record 18;
+      ServiceItem@1005 : Record 5940;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1001 : Record 5901;
+      ServiceInvoiceHeader@1000 : Record 5992;
+      CustInvoiceDisc@1008 : Record 19;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the Invoice Discount is calculated correctly on running the report Batch Post Service Orders with the
+      // option Calculate Invoice Discount as True.
+
+      // 1. Setup: Setup Invoice Discount. Create a new Customer, Customer Invoice Discount. Input non-zero percent in line.
+      // Create Service Order - Service Item, Service Header, Service Item Line, multiple Service Lines with Type as Item.
+      Initialize;
+      ModifyInvoiceDiscount;
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateInvDiscForCustomer(CustInvoiceDisc,Customer."No.",'',0);  // Minimum amount is 0.
+      UpdateCustomerInvoiceDiscount(CustInvoiceDisc);
+
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      CreateMultipleServiceLines(ServiceHeader,ServiceItem."No.");
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Service Orders with any random date greater than work date.
+      PostingDate := CALCDATE('<' + FORMAT(RANDOM(5)) + 'D>',WORKDATE);
+      BatchPostServiceOrder(ServiceHeader,PostingDate,FALSE,FALSE,TRUE);
+
+      // 3. Verify: Check that the posted Invoice has non-zero Invoice Discount Amount on Service Lines.
+      FindServiceInvoiceFromOrder(ServiceInvoiceHeader,ServiceHeader."No.");
+      VerifyNonZeroDiscountInLines(ServiceInvoiceHeader."No.",CustInvoiceDisc."Discount %");
+    END;
+
+    [Test]
+    [HandlerFunctions(ExpectedCostConfirmHandler,MessageHandler)]
+    PROCEDURE ReplacePostingDateErrorOrder@140();
+    VAR
+      ServiceItem@1005 : Record 5940;
+      ServiceHeader@1002 : Record 5900;
+      ServiceItemLine@1001 : Record 5901;
+      PostingDate@1004 : Date;
+    BEGIN
+      // Test that the application generates an error as 'Please enter the posting date' on running the report Batch Post
+      // Service Orders with the option Replace Posting Date and blank posting date.
+
+      // 1. Setup: Create Service Order - Service Item, Service Header, Service Item Line, multiple Service Lines with Type as Item.
+      Initialize;
+      LibraryService.CreateServiceItem(ServiceItem,LibrarySales.CreateCustomerNo);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      CreateMultipleServiceLines(ServiceHeader,ServiceItem."No.");
+      COMMIT;  // Commit is required to run the batch job.
+
+      // 2. Exercise: Run the Batch Post Orders with blank date.
+      PostingDate := 0D;  // Used to initialize the variable.
+      ExecuteUIHandlers;
+      ASSERTERROR BatchPostServiceOrder(ServiceHeader,PostingDate,TRUE,FALSE,FALSE);
+
+      // 3. Verify: Check that the application generates an error as 'Please enter the posting date'.
+      Assert.AreEqual(STRSUBSTNO(PostingDateBlankError),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE CheckSourceNoOnValueEntry@113();
+    VAR
+      Customer@1000 : Record 18;
+      BillToCustomer@1001 : Record 18;
+      ServiceHeader@1002 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      Item@1004 : Record 27;
+    BEGIN
+      // Verify that source no is correct in value entry when bill-to customer no is defined.
+
+      // Setup: Create Service Invoce with Bill-to Customer No.
+      Initialize;
+      LibrarySales.CreateCustomer(Customer);
+      LibrarySales.CreateCustomer(BillToCustomer);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,Customer."No.");
+      ServiceHeader.VALIDATE("Bill-to Customer No.",BillToCustomer."No.");
+      ServiceHeader.MODIFY(TRUE);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItem(Item));
+      ServiceLine.VALIDATE(Quantity,LibraryRandom.RandDec(100,2));
+      ServiceLine.MODIFY(TRUE);
+
+      // Exercise: Post Service Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // Verify: Verify Souce No on Value Entry.
+      VerifySourceNoOnValueEntry(ServiceLine."No.",BillToCustomer."No.");
+    END;
+
+    [Test]
+    PROCEDURE PaymentMehodCodeAfterServiceInvoicePosting@125();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      PaymentMethod@1002 : Record 289;
+      CustLedgerEntry@1003 : Record 21;
+    BEGIN
+      // [FEATURE] [Invoice] [Payment Method]
+      // [SCENARIO 363865] Payment Method is populated from posted Service Invoice to Customer Ledger Entry
+      Initialize;
+      LibraryERM.CreatePaymentMethod(PaymentMethod);
+
+      // [GIVEN] Service Invoice with "Payment Method Code" = "PM"
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,'');
+      ServiceHeader.VALIDATE("Payment Method Code",PaymentMethod.Code);
+      ServiceHeader.MODIFY;
+      CreateServiceLine(ServiceHeader);
+
+      // [WHEN] Post Service Invoice
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // [THEN] "Customer Ledger Entry"."Payment Method Code" = "PM"
+      CustLedgerEntry.SETRANGE("Customer No.",ServiceHeader."Customer No.");
+      CustLedgerEntry.FINDFIRST;
+      Assert.AreEqual(
+        PaymentMethod.Code,CustLedgerEntry."Payment Method Code",CustLedgerEntry.FIELDCAPTION("Payment Method Code"));
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleStrMenu)]
+    PROCEDURE PostServiceLinesWithEmptyTypeAndAllowedDates@133();
+    VAR
+      ServiceHeader@1003 : Record 5900;
+      ServiceItemLine@1002 : Record 5901;
+      ServiceLine@1001 : Record 5902;
+      TempServiceLine@1004 : TEMPORARY Record 5902;
+      ServiceInvoiceHeader@1006 : Record 5992;
+      ServiceInvoiceLine@1005 : Record 5993;
+      ServPostYesNo@1000 : Codeunit 5981;
+    BEGIN
+      // [SCENARIO 376766] Service Order with Text Service Line that have empty Posting Date should be posted when Allowed Posting Dates are defined
+      Initialize;
+
+      // [GIVEN] Set Allowed Posting Dates in GLSetup
+      LibraryERM.SetAllowPostingFromTo(CALCDATE('<-CY>',WORKDATE),CALCDATE('<CY>',WORKDATE));
+
+      // [GIVEN] New Service Order with Service Item Line
+      CreateServiceDocument(ServiceHeader,ServiceItemLine,LibrarySales.CreateCustomerNo);
+      CreateServiceLineWithItem(ServiceLine,ServiceHeader,ServiceItemLine."Item No.");
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+      ServiceLine.MODIFY(TRUE);
+      TempServiceLine := ServiceLine;
+      TempServiceLine.INSERT;
+
+      // [GIVEN] Second Service Line with empty Type and Description = "D"
+      ServiceLine.INIT;
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::" ",'');
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+      ServiceLine.VALIDATE("Service Item No.",ServiceItemLine."Service Item No.");
+      ServiceLine.Description := ServiceItemLine."Service Item No.";
+      ServiceLine.MODIFY(TRUE);
+      TempServiceLine := ServiceLine;
+      TempServiceLine.INSERT;
+
+      // [WHEN] Post Service Order
+      // Select Ship and Invoice in HandleStrMenu
+      LibraryVariableStorage.Enqueue(3);
+      ServPostYesNo.PostDocumentWithLines(ServiceHeader,TempServiceLine);
+
+      // [THEN] Posted Service Shipment Line with empty type has Description = "D"
+      ServiceInvoiceHeader.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceInvoiceLine.SETRANGE(Type,ServiceInvoiceLine.Type::" ");
+      FindServiceInvoiceLines(ServiceInvoiceLine,ServiceInvoiceHeader."No.");
+      ServiceInvoiceLine.TESTFIELD(Description,ServiceItemLine."Service Item No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(PostedServiceInvoicePH)]
+    PROCEDURE ShowPostedDocumentForPostedServiceInvoice@89();
+    VAR
+      ServiceInvoiceHeader@1004 : Record 5992;
+      CustLedgerEntry@1002 : Record 21;
+      ServiceHeaderNo@1000 : Code[20];
+    BEGIN
+      // [FEATURE] [Invoice] [Customer]
+      // [SCENARIO 377063] Posted Service Invoice is shown after "Show Posted Document" action from customer ledger entry
+
+      // [GIVEN] Posted Service Invoice
+      ServiceHeaderNo := CreatePostServiceInvoice;
+      FindServiceInvoiceHeader(ServiceInvoiceHeader,ServiceHeaderNo);
+
+      // [GIVEN] Customer ledger entry linked to the posted Service Invoice
+      FindCustLedgEntry(CustLedgerEntry,ServiceInvoiceHeader."No.",ServiceInvoiceHeader."Customer No.");
+
+      // [WHEN] Perform "Show Posted Document" action
+      // [THEN] Page "Posted Service Invoice" is opened for the posted Service Invoice
+      // [THEN] CustLedgerEntry.ShowDoc() return TRUE
+      LibraryVariableStorage.Enqueue(ServiceInvoiceHeader."No."); // used in PostedServiceInvoicePH
+      LibraryVariableStorage.Enqueue(ServiceInvoiceHeader."Customer No."); // used in PostedServiceInvoicePH
+      Assert.IsTrue(CustLedgerEntry.ShowDoc,ServiceInvoiceHeader.TABLECAPTION);
+      // Verify values in PostedServiceInvoicePH
+    END;
+
+    LOCAL PROCEDURE Initialize@9000();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      LibrarySetupStorage.Restore;
+      IF isInitialized THEN
+        EXIT;
+
+      // Setup demonstration data.
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateAccountInServiceCosts;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryService.SetupServiceMgtNoSeries;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      isInitialized := TRUE;
+      COMMIT;
+      LibrarySetupStorage.Save(DATABASE::"General Ledger Setup");
+      LibrarySetupStorage.Save(DATABASE::"Inventory Setup");
+      LibrarySetupStorage.Save(DATABASE::"Sales & Receivables Setup");
+    END;
+
+    LOCAL PROCEDURE BatchPostServiceCreditMemos@100(ServiceHeader@1001 : Record 5900;PostingDate@1002 : Date;ReplacePostingDate@1003 : Boolean;ReplaceDocumentDate@1004 : Boolean;CalculateInvoiceDiscount@1005 : Boolean);
+    VAR
+      BatchPostServiceCrMemos@1000 : Report 6005;
+    BEGIN
+      ServiceHeader.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceHeader.SETRANGE("No.",ServiceHeader."No.");
+      CLEAR(BatchPostServiceCrMemos);
+      BatchPostServiceCrMemos.SETTABLEVIEW(ServiceHeader);
+      BatchPostServiceCrMemos.InitializeRequest(PostingDate,ReplacePostingDate,ReplaceDocumentDate,CalculateInvoiceDiscount);
+      BatchPostServiceCrMemos.USEREQUESTPAGE(FALSE);
+      BatchPostServiceCrMemos.RUN;
+    END;
+
+    LOCAL PROCEDURE BatchPostServiceInvoices@99(ServiceHeader@1001 : Record 5900;PostingDate@1002 : Date;ReplacePostingDate@1003 : Boolean;ReplaceDocumentDate@1004 : Boolean;CalculateInvoiceDiscount@1005 : Boolean);
+    VAR
+      BatchPostServiceInvoices@1000 : Report 6004;
+    BEGIN
+      ServiceHeader.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceHeader.SETRANGE("No.",ServiceHeader."No.");
+      CLEAR(BatchPostServiceInvoices);
+      BatchPostServiceInvoices.SETTABLEVIEW(ServiceHeader);
+      BatchPostServiceInvoices.InitializeRequest(PostingDate,ReplacePostingDate,ReplaceDocumentDate,CalculateInvoiceDiscount);
+      BatchPostServiceInvoices.USEREQUESTPAGE(FALSE);
+      BatchPostServiceInvoices.RUN;
+    END;
+
+    LOCAL PROCEDURE BatchPostServiceOrder@106(ServiceHeader@1001 : Record 5900;PostingDate@1002 : Date;ReplacePostingDate@1003 : Boolean;ReplaceDocumentDate@1004 : Boolean;CalculateInvoiceDiscount@1005 : Boolean);
+    VAR
+      BatchPostServiceOrders@1000 : Report 6001;
+    BEGIN
+      ServiceHeader.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceHeader.SETRANGE("No.",ServiceHeader."No.");
+      CLEAR(BatchPostServiceOrders);
+      BatchPostServiceOrders.SETTABLEVIEW(ServiceHeader);
+      BatchPostServiceOrders.InitializeRequest(TRUE,TRUE,PostingDate,ReplacePostingDate,ReplaceDocumentDate,CalculateInvoiceDiscount);
+      BatchPostServiceOrders.USEREQUESTPAGE(FALSE);
+      BatchPostServiceOrders.RUN;
+    END;
+
+    LOCAL PROCEDURE CalculateTotlAmountShippedLine@40(OrderNo@1001 : Code[20]) TotalAmount : Decimal;
+    VAR
+      ServiceInvoiceLine@1003 : Record 5993;
+      ServiceInvoiceHeader@1002 : Record 5992;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceInvoiceLine.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      ServiceInvoiceLine.FINDSET;
+      REPEAT
+        TotalAmount += ServiceInvoiceLine."Amount Including VAT";
+      UNTIL ServiceInvoiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateMultipleServiceLines@70(ServiceHeader@1000 : Record 5900;ServiceItemNo@1001 : Code[20]);
+    VAR
+      ServiceLine@1004 : Record 5902;
+      Counter@1002 : Integer;
+    BEGIN
+      // Create 2 to random number of lines.
+      FOR Counter := 1 TO 1 + RANDOM(10) DO BEGIN
+        CreateServiceLineWithItem(ServiceLine,ServiceHeader,ServiceItemNo);
+        ServiceLine.VALIDATE("Unit Price",10 * RANDOM(100) + LibraryUtility.GenerateRandomFraction);  // Input random decimal quantity.
+        ServiceLine.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLine@168(ServiceHeader@1001 : Record 5900);
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,LibraryInventory.CreateItemNo);
+      ServiceLine.VALIDATE(Quantity,LibraryRandom.RandDec(100,2));
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineWithCost@13(VAR ServiceLine@1003 : Record 5902;ServiceHeader@1002 : Record 5900;ServiceItemNo@1001 : Code[20]);
+    VAR
+      ServiceCost@1000 : Record 5905;
+    BEGIN
+      LibraryService.FindServiceCost(ServiceCost);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Cost,ServiceCost.Code);
+      ServiceLine.VALIDATE("Service Item No.",ServiceItemNo);
+      ServiceLine.VALIDATE(Quantity,RANDOM(100));  // Required field - value is not important to test case.
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineWithGLAccount@6(VAR ServiceLine@1003 : Record 5902;ServiceHeader@1002 : Record 5900;ServiceItemNo@1001 : Code[20]);
+    BEGIN
+      LibraryService.CreateServiceLine(
+        ServiceLine,ServiceHeader,ServiceLine.Type::"G/L Account",LibraryERM.CreateGLAccountWithSalesSetup);
+      ServiceLine.VALIDATE("Service Item No.",ServiceItemNo);
+      ServiceLine.VALIDATE(Quantity,RANDOM(100));  // Required field - value is not important to test case.
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineWithItem@22(VAR ServiceLine@1001 : Record 5902;ServiceHeader@1003 : Record 5900;ServiceItemNo@1002 : Code[20]);
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,CreateItem);
+      ServiceLine.VALIDATE("Service Item No.",ServiceItemNo);
+      ServiceLine.VALIDATE(Quantity,RANDOM(100));  // Required field - value is not important to test case.
+      ServiceLine.VALIDATE("Unit Price",RANDOM(1000) + LibraryUtility.GenerateRandomFraction);  // Use random value more than 1000 for unit price.
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceLineWithResource@8(VAR ServiceLine@1003 : Record 5902;ServiceHeader@1002 : Record 5900;ServiceItemNo@1001 : Code[20]);
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,CreateResource);
+      ServiceLine.VALIDATE("Service Item No.",ServiceItemNo);
+      ServiceLine.VALIDATE(Quantity,RANDOM(100));  // Required field - value is not important to test case.
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateEmptyServiceLine@122(ServiceHeader@1000 : Record 5900);
+    VAR
+      ServiceLine@1003 : Record 5902;
+    BEGIN
+      ServiceLine.INIT;
+      ServiceLine.VALIDATE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.VALIDATE("Document No.",ServiceHeader."No.");
+      ServiceLine.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrder@71(VAR ServiceHeader@1001 : Record 5900;VAR ServiceItemLine@1002 : Record 5901;VAR ServiceLine@1003 : Record 5902;VAR ServiceItem@1004 : Record 5940;Type@1005 : ',Item,Resource,Both');
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      // Create Service Order - Service Item, Service Header, Service Line with Type as Item.
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      IF Type IN [Type::Item,Type::Both] THEN
+        CreateServiceLineWithItem(ServiceLine,ServiceHeader,ServiceItem."No.");
+      IF Type IN [Type::Resource,Type::Both] THEN BEGIN
+        CreateServiceLineWithResource(ServiceLine,ServiceHeader,ServiceItem."No.");
+        CreateServiceLineWithCost(ServiceLine,ServiceHeader,ServiceItem."No.");
+        CreateServiceLineWithGLAccount(ServiceLine,ServiceHeader,ServiceItem."No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePostServiceInvoice@156() : Code[20];
+    VAR
+      ServiceHeader@1000 : Record 5900;
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Invoice,LibrarySales.CreateCustomerNo);
+      CreateServiceLine(ServiceHeader);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+      EXIT(ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItem@153() : Code[20];
+    VAR
+      VATPostingSetup@1000 : Record 325;
+      Item@1001 : Record 27;
+    BEGIN
+      FindVATPostingSetup(VATPostingSetup);
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("VAT Prod. Posting Group",VATPostingSetup."VAT Prod. Posting Group");
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateResource@154() : Code[20];
+    VAR
+      VATPostingSetup@1000 : Record 325;
+      Resource@1001 : Record 156;
+    BEGIN
+      FindVATPostingSetup(VATPostingSetup);
+      LibraryResource.CreateResource(Resource,VATPostingSetup."VAT Bus. Posting Group");
+      Resource.VALIDATE("VAT Prod. Posting Group",VATPostingSetup."VAT Prod. Posting Group");
+      Resource.MODIFY(TRUE);
+      EXIT(Resource."No.");
+    END;
+
+    LOCAL PROCEDURE CreateServiceDocument@135(VAR ServiceHeader@1001 : Record 5900;VAR ServiceItemLine@1002 : Record 5901;CustomerNo@1000 : Code[20]);
+    VAR
+      ServiceItem@1003 : Record 5940;
+    BEGIN
+      LibraryService.CreateServiceItem(ServiceItem,CustomerNo);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CustomerNo);
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+    END;
+
+    LOCAL PROCEDURE FindServiceCreditMemoHeader@108(VAR ServiceCrMemoHeader@1000 : Record 5994;PreAssignedNo@1001 : Code[20]);
+    BEGIN
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceCrMemoHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindServiceCreditMemoLines@123(VAR ServiceCrMemoLine@1000 : Record 5995;DocumentNo@1001 : Code[20]);
+    BEGIN
+      ServiceCrMemoLine.SETRANGE("Document No.",DocumentNo);
+      ServiceCrMemoLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindServiceInvoiceFromOrder@117(VAR ServiceInvoiceHeader@1000 : Record 5992;OrderNo@1001 : Code[20]);
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvoiceHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindServiceInvoiceHeader@103(VAR ServiceInvoiceHeader@1000 : Record 5992;PreAssignedNo@1001 : Code[20]);
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceInvoiceHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindServiceInvoiceLines@114(VAR ServiceInvoiceLine@1000 : Record 5993;DocumentNo@1001 : Code[20]);
+    BEGIN
+      ServiceInvoiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceInvoiceLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindServiceShipmentHeader@112(VAR ServiceShipmentHeader@1000 : Record 5990;OrderNo@1001 : Code[20]);
+    BEGIN
+      ServiceShipmentHeader.SETRANGE("Order No.",OrderNo);
+      ServiceShipmentHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindVATPostingSetup@151(VAR VATPostingSetup@1000 : Record 325);
+    BEGIN
+      VATPostingSetup.SETRANGE("Unrealized VAT Type",VATPostingSetup."Unrealized VAT Type"::" ");
+      LibraryERM.FindVATPostingSetup(VATPostingSetup,VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+    END;
+
+    LOCAL PROCEDURE FindCustLedgEntry@143(VAR CustLedgerEntry@1000 : Record 21;DocumentNo@1002 : Code[20];CustomerNo@1001 : Code[20]);
+    BEGIN
+      WITH CustLedgerEntry DO BEGIN
+        SETRANGE("Document No.",DocumentNo);
+        SETRANGE("Customer No.",CustomerNo);
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE ModifyCostPostngInventorySetup@1(AutomaticCostPosting@1001 : Boolean;ExpectedCostPostingtoGL@1002 : Boolean);
+    VAR
+      InventorySetup@1000 : Record 313;
+    BEGIN
+      // Sometimes this function triggers a message and a confirm dialog
+      // This is to make sure the corresponding handlers are always executed
+      // (otherwise tests would fail)
+      ExecuteUIHandlers;
+
+      InventorySetup.GET;
+      InventorySetup.VALIDATE("Automatic Cost Posting",AutomaticCostPosting);
+      InventorySetup.VALIDATE("Expected Cost Posting to G/L",ExpectedCostPostingtoGL);
+      InventorySetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ModifyInvoiceDiscount@95();
+    VAR
+      SalesReceivablesSetup@1000 : Record 311;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Calc. Inv. Discount",FALSE);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ModifyQtyToInvoiceServiceLine@10(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDSET;
+      REPEAT
+        // Division by 2 ensures Qty. to Invoice is less than Quantity Shipped.
+        ServiceLine.VALIDATE("Qty. to Invoice",ServiceLine."Quantity Shipped" / 2);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ModifyQtyToShipOnServiceLine@49(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE("Qty. to Ship",ServiceLine."Qty. to Ship" * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ModifyQtyToConsumeServiceLine@72(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE("Qty. to Consume",ServiceLine."Qty. to Ship" * LibraryUtility.GenerateRandomFraction);
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ModifyQtyToInvoiceZero@21(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE("Qty. to Invoice",0);  // Validate Qty. to Invoice as 0 - value 0 is important to test case.
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE PostServiceOrderLinebyLine@15(ServiceHeader@1000 : Record 5900);
+    VAR
+      TempServiceLine@1005 : TEMPORARY Record 5902;
+      ServiceLine@1001 : Record 5902;
+      ServicePost@1006 : Codeunit 5980;
+      Ship@1002 : Boolean;
+      Consume@1007 : Boolean;
+      Invoice@1008 : Boolean;
+    BEGIN
+      Ship := TRUE;
+      Invoice := TRUE;
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.SETRANGE("Quantity Shipped",0);
+      ServiceLine.FINDSET;
+      REPEAT
+        TempServiceLine := ServiceLine;
+        TempServiceLine.INSERT;
+        ServiceHeader.GET(TempServiceLine."Document Type",TempServiceLine."Document No.");
+        ServicePost.PostWithLines(ServiceHeader,TempServiceLine,Ship,Consume,Invoice);
+        TempServiceLine.DELETE;
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE PostSrvOrderAsShipForResource@41(ServiceHeader@1008 : Record 5900);
+    VAR
+      TempServiceLine@1007 : TEMPORARY Record 5902;
+      ServiceLine@1006 : Record 5902;
+      ServicePost@1005 : Codeunit 5980;
+      Ship@1004 : Boolean;
+      Consume@1003 : Boolean;
+      Invoice@1002 : Boolean;
+    BEGIN
+      Ship := TRUE;
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.SETRANGE(Type,ServiceLine.Type::Resource);
+      ServiceLine.FINDFIRST;
+      TempServiceLine := ServiceLine;
+      TempServiceLine.INSERT;
+      ServicePost.PostWithLines(ServiceHeader,TempServiceLine,Ship,Consume,Invoice);
+    END;
+
+    LOCAL PROCEDURE PostOrderAsShipForItemGLAccont@42(ServiceHeader@1008 : Record 5900);
+    VAR
+      TempServiceLine@1007 : TEMPORARY Record 5902;
+      ServiceLine@1006 : Record 5902;
+      ServicePost@1005 : Codeunit 5980;
+      Ship@1004 : Boolean;
+      Consume@1003 : Boolean;
+      Invoice@1002 : Boolean;
+    BEGIN
+      Ship := TRUE;
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.SETFILTER(Type,'<>%1',ServiceLine.Type::Resource);
+      ServiceLine.SETRANGE("Quantity Shipped",0);
+      ServiceLine.FINDSET;
+      REPEAT
+        TempServiceLine := ServiceLine;
+        TempServiceLine.INSERT;
+        ServiceHeader.GET(TempServiceLine."Document Type",TempServiceLine."Document No.");
+        ServicePost.PostWithLines(ServiceHeader,TempServiceLine,Ship,Consume,Invoice);
+        TempServiceLine.DELETE;
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SaveServiceLineInTempTable@132(VAR TempServiceLine@1001 : TEMPORARY Record 5902;ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        TempServiceLine := ServiceLine;
+        TempServiceLine.INSERT;
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateCustomerInvoiceDiscount@105(VAR CustInvoiceDisc@1000 : Record 19);
+    BEGIN
+      // Input any random Discount percentage.
+      CustInvoiceDisc.VALIDATE("Discount %",RANDOM(10) + LibraryUtility.GenerateRandomFraction);
+      CustInvoiceDisc.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ValidateQtyToInvoiceServicLine@26(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.VALIDATE("Qty. to Invoice",ServiceLine."Quantity Shipped");
+        ServiceLine.MODIFY(TRUE);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCustomerLedgerEntry@27(OrderNo@1002 : Code[20]);
+    VAR
+      ServiceInvoiceHeader@1001 : Record 5992;
+      CustLedgerEntry@1000 : Record 21;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvoiceHeader.FINDFIRST;
+      CustLedgerEntry.SETRANGE("Document Type",CustLedgerEntry."Document Type"::Invoice);
+      CustLedgerEntry.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      CustLedgerEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE VerifyDetailedCustLedgerEntry@16(OrderNo@1001 : Code[20];TotalAmount@1005 : Decimal);
+    VAR
+      ServiceInvoiceHeader@1004 : Record 5992;
+      DetailedCustLedgEntry@1002 : Record 379;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvoiceHeader.FINDFIRST;
+      DetailedCustLedgEntry.SETRANGE("Document Type",DetailedCustLedgEntry."Document Type"::Invoice);
+      DetailedCustLedgEntry.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      DetailedCustLedgEntry.FINDSET;
+      REPEAT
+        DetailedCustLedgEntry.TESTFIELD(Amount,TotalAmount);
+      UNTIL DetailedCustLedgEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyNonZeroDiscountInCredit@126(DocumentNo@1000 : Code[20];InvoiceDiscountPct@1002 : Decimal);
+    VAR
+      ServiceCrMemoLine@1001 : Record 5995;
+      GeneralLedgerSetup@1003 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      FindServiceCreditMemoLines(ServiceCrMemoLine,DocumentNo);
+      REPEAT
+        Assert.AreNearlyEqual(
+          ROUND(ServiceCrMemoLine."Line Amount" * InvoiceDiscountPct / 100,GeneralLedgerSetup."Amount Rounding Precision"),
+          ServiceCrMemoLine."Inv. Discount Amount",
+          GeneralLedgerSetup."Amount Rounding Precision",
+          STRSUBSTNO(
+            AmountsMustMatchError,
+            ServiceCrMemoLine.FIELDCAPTION("Inv. Discount Amount"),
+            ServiceCrMemoLine."Line Amount" * InvoiceDiscountPct / 100,
+            ServiceCrMemoLine.TABLECAPTION));
+      UNTIL ServiceCrMemoLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyNonZeroDiscountInLines@137(DocumentNo@1000 : Code[20];InvoiceDiscountPct@1002 : Decimal);
+    VAR
+      ServiceInvoiceLine@1001 : Record 5993;
+      GeneralLedgerSetup@1003 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      FindServiceInvoiceLines(ServiceInvoiceLine,DocumentNo);
+      REPEAT
+        Assert.AreNearlyEqual(
+          ROUND(ServiceInvoiceLine."Line Amount" * InvoiceDiscountPct / 100,GeneralLedgerSetup."Amount Rounding Precision"),
+          ServiceInvoiceLine."Inv. Discount Amount",
+          GeneralLedgerSetup."Amount Rounding Precision",
+          STRSUBSTNO(
+            AmountsMustMatchError,
+            ServiceInvoiceLine.FIELDCAPTION("Inv. Discount Amount"),
+            ServiceInvoiceLine."Line Amount" * InvoiceDiscountPct / 100,
+            ServiceInvoiceLine.TABLECAPTION));
+      UNTIL ServiceInvoiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnServiceShipmentLine@4(OrderNo@1002 : Code[20]);
+    VAR
+      ServiceShipmentLine@1000 : Record 5991;
+    BEGIN
+      ServiceShipmentLine.SETRANGE("Order No.",OrderNo);
+      ServiceShipmentLine.FINDSET;
+      REPEAT
+        ServiceShipmentLine.TESTFIELD(Quantity,ServiceShipmentLine."Quantity Invoiced");
+      UNTIL ServiceShipmentLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyShippedOnServiceLine@31(DocumentNo@1001 : Code[20]);
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type"::Order);
+      ServiceLine.SETRANGE("Document No.",DocumentNo);
+      ServiceLine.FINDSET;
+      REPEAT
+        ServiceLine.TESTFIELD("Quantity Shipped",0);
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyResourceLedgerEntry@39(OrderNo@1003 : Code[20]);
+    VAR
+      ServiceInvoiceLine@1001 : Record 5993;
+      ServiceInvoiceHeader@1000 : Record 5992;
+      ResLedgerEntry@1002 : Record 203;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceInvoiceLine.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      ServiceInvoiceLine.SETRANGE(Type,ServiceInvoiceLine.Type::Resource);
+      ServiceInvoiceLine.FINDFIRST;
+      ResLedgerEntry.SETRANGE("Document No.",ServiceInvoiceLine."Document No.");
+      ResLedgerEntry.FINDFIRST;
+      ResLedgerEntry.TESTFIELD(Quantity,-ServiceInvoiceLine.Quantity);
+      ResLedgerEntry.TESTFIELD("Order Type",ResLedgerEntry."Order Type"::Service);
+      ResLedgerEntry.TESTFIELD("Order No.",ServiceInvoiceHeader."Order No.");
+      ResLedgerEntry.TESTFIELD("Order Line No.",ServiceInvoiceLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE VerifyServiceOrderGLEntry@25(OrderNo@1001 : Code[20]);
+    VAR
+      ServiceInvoiceHeader@1000 : Record 5992;
+      GLEntry@1002 : Record 17;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvoiceHeader.FINDFIRST;
+      GLEntry.SETRANGE("Document Type",GLEntry."Document Type"::Invoice);
+      GLEntry.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      GLEntry.SETRANGE("Source Type",GLEntry."Source Type"::Customer);
+      GLEntry.FINDSET;
+      REPEAT
+        GLEntry.TESTFIELD("Source No.",ServiceInvoiceHeader."Bill-to Customer No.");
+        GLEntry.TESTFIELD("Posting Date",ServiceInvoiceHeader."Posting Date");
+      UNTIL GLEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyServiceOrderVATEntry@38(OrderNo@1002 : Code[20]);
+    VAR
+      ServiceInvoiceLine@1001 : Record 5993;
+      ServiceInvoiceHeader@1000 : Record 5992;
+      VATEntry@1003 : Record 254;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceInvoiceLine.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      ServiceInvoiceLine.FINDFIRST;
+      VATEntry.SETRANGE("Document Type",VATEntry."Document Type"::Invoice);
+      VATEntry.SETRANGE("Document No.",ServiceInvoiceLine."Document No.");
+      VATEntry.FINDFIRST;
+      VATEntry.TESTFIELD(Base,-ServiceInvoiceLine."VAT Base Amount");
+    END;
+
+    LOCAL PROCEDURE VerifyServiceLedgerEntry@9(OrderNo@1001 : Code[20];CustomerNo@1002 : Code[20]);
+    VAR
+      ServiceLedgerEntry@1000 : Record 5907;
+    BEGIN
+      ServiceLedgerEntry.SETRANGE("Document Type",ServiceLedgerEntry."Document Type"::Invoice);
+      ServiceLedgerEntry.SETRANGE("Service Order No.",OrderNo);
+      ServiceLedgerEntry.FINDSET;
+      REPEAT
+        ServiceLedgerEntry.TESTFIELD("Customer No.",CustomerNo);
+      UNTIL ServiceLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifySourceNoOnValueEntry@148(ItemNo@1000 : Code[20];SourceCode@1002 : Code[20]);
+    VAR
+      ValueEntry@1001 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.FINDFIRST;
+      ValueEntry.TESTFIELD("Source No.",SourceCode);
+    END;
+
+    LOCAL PROCEDURE VerifyOrderItemLedgerEntry@5(ServiceLine@1001 : Record 5902);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Shipment");
+      ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Service);
+      ItemLedgerEntry.SETRANGE("Order No.",ServiceLine."Document No.");
+      ItemLedgerEntry.FINDSET;
+      REPEAT
+        ItemLedgerEntry.TESTFIELD("Item No.",ServiceLine."No.");
+        ItemLedgerEntry.TESTFIELD(Quantity,-ServiceLine.Quantity);
+      UNTIL ItemLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyInvoiceQtyItemLedger@58(OrderNo@1001 : Code[20]);
+    VAR
+      ServiceShipmentLine@1002 : Record 5991;
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ServiceShipmentLine.SETRANGE("Order No.",OrderNo);
+      ServiceShipmentLine.FINDFIRST;
+      ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Shipment");
+      ItemLedgerEntry.SETRANGE("Document No.",ServiceShipmentLine."Document No.");
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.TESTFIELD("Item No.",ServiceShipmentLine."No.");
+      ItemLedgerEntry.TESTFIELD("Invoiced Quantity",-ServiceShipmentLine."Quantity Invoiced");
+    END;
+
+    LOCAL PROCEDURE VerifyServiceOrderValueEntry@12(OrderNo@1001 : Code[20]);
+    VAR
+      ServiceShipmentLine@1000 : Record 5991;
+      ValueEntry@1002 : Record 5802;
+      ItemLedgerEntry@1003 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Shipment");
+      ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Service);
+      ItemLedgerEntry.SETRANGE("Order No.",OrderNo);
+      ItemLedgerEntry.FINDFIRST;
+      ServiceShipmentLine.SETRANGE("Order No.",ItemLedgerEntry."Order No.");
+      ServiceShipmentLine.FINDFIRST;
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ItemLedgerEntry."Entry Type");
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntry."Entry No.");
+      ValueEntry.FINDFIRST;
+      ValueEntry.TESTFIELD("Valued Quantity",-ServiceShipmentLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyVATEntry@85(OrderNo@1002 : Code[20]);
+    VAR
+      ServiceInvoiceLine@1001 : Record 5993;
+      ServiceInvoiceHeader@1000 : Record 5992;
+      VATEntry@1003 : Record 254;
+      VatBaseAmount@1004 : Decimal;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceInvoiceLine.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      ServiceInvoiceLine.FINDFIRST;
+      VATEntry.SETRANGE("Document Type",VATEntry."Document Type"::Invoice);
+      VATEntry.SETRANGE("Document No.",ServiceInvoiceLine."Document No.");
+      VATEntry.FINDSET;
+      REPEAT
+        VatBaseAmount += VATEntry.Base;
+      UNTIL VATEntry.NEXT = 0;
+      Assert.AreEqual(
+        ServiceInvoiceLine."VAT Base Amount",-VatBaseAmount,STRSUBSTNO(BaseAmountError,-ServiceInvoiceLine."VAT Base Amount"));
+    END;
+
+    LOCAL PROCEDURE VerifyZeroDiscountCreditLines@121(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceCrMemoLine@1001 : Record 5995;
+    BEGIN
+      FindServiceCreditMemoLines(ServiceCrMemoLine,DocumentNo);
+      REPEAT
+        ServiceCrMemoLine.TESTFIELD("Inv. Discount Amount",0);
+      UNTIL ServiceCrMemoLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyZeroDiscountInLines@110(DocumentNo@1000 : Code[20]);
+    VAR
+      ServiceInvoiceLine@1001 : Record 5993;
+    BEGIN
+      FindServiceInvoiceLines(ServiceInvoiceLine,DocumentNo);
+      REPEAT
+        ServiceInvoiceLine.TESTFIELD("Inv. Discount Amount",0);
+      UNTIL ServiceInvoiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerAndValueEntriesAfterUndoConsumption@109(VAR TempServiceLineBeforePosting@1000 : TEMPORARY Record 5902);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+      RelatedItemLedgerEntry@1003 : Record 32;
+      Tolerance@1004 : Decimal;
+    BEGIN
+      // Verify that the value of the field Quantity of the Item Ledger Entry is equal to the value of the field Qty. to Ship of the
+      // relevant Service Line.
+      Tolerance := 0.000005;
+      TempServiceLineBeforePosting.SETRANGE(Type,TempServiceLineBeforePosting.Type::Item);
+      TempServiceLineBeforePosting.FINDSET;
+      ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Shipment");
+      ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::"Negative Adjmt.");
+      ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Service);
+      ItemLedgerEntry.SETRANGE("Order No.",TempServiceLineBeforePosting."Document No.");
+      ItemLedgerEntry.SETRANGE(Correction,FALSE);
+      REPEAT
+        ItemLedgerEntry.SETRANGE("Order Line No.",TempServiceLineBeforePosting."Line No.");
+        ItemLedgerEntry.FINDLAST;  // Find the Item Ledger Entry for the second action.
+        Assert.AreNearlyEqual(
+          ItemLedgerEntry.Quantity,-TempServiceLineBeforePosting."Qty. to Consume",Tolerance,
+          'Quantity and Quantity Consumed are nearly equal');
+        Assert.AreNearlyEqual(
+          ItemLedgerEntry."Invoiced Quantity",-TempServiceLineBeforePosting."Qty. to Consume",Tolerance,
+          'Quantity Consumed and Invoiced Quantity are nearly equal');
+        RelatedItemLedgerEntry.SETRANGE("Applies-to Entry",ItemLedgerEntry."Applies-to Entry");
+        RelatedItemLedgerEntry.FINDFIRST;
+        ItemLedgerEntry.TESTFIELD("Cost Amount (Actual)",-RelatedItemLedgerEntry."Cost Amount (Actual)");
+        ItemLedgerEntry.TESTFIELD("Sales Amount (Actual)",0);
+        VerifyValueEntryAfterUndoConsumption(ItemLedgerEntry);
+      UNTIL TempServiceLineBeforePosting.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntryAfterUndoConsumption@101(VAR ItemLedgerEntry@1003 : Record 32);
+    VAR
+      ValueEntry@1001 : Record 5802;
+    BEGIN
+      // Verify that the value ofthe field Valued Quantity of the Value Entry is equal to the value of the field Qty. to Ship of
+      // the relevant Service Line.
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntry."Entry No.");
+      ValueEntry.FINDLAST;
+      ValueEntry.TESTFIELD("Valued Quantity",ItemLedgerEntry.Quantity);
+      ValueEntry.TESTFIELD("Item Ledger Entry Type",ItemLedgerEntry."Entry Type");
+      ItemLedgerEntry.TESTFIELD("Cost Amount (Actual)",ItemLedgerEntry."Cost Amount (Actual)");
+    END;
+
+    LOCAL PROCEDURE VerifyPostedServiceOrder@130(OrderNo@1000 : Code[20]);
+    VAR
+      ServiceInvoiceHeader@1002 : Record 5992;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",OrderNo);
+      ServiceInvoiceHeader.FINDFIRST;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ExpectedCostConfirmHandler@24(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    VAR
+      ConfirmValue@1002 : Integer;
+    BEGIN
+      ConfirmValue := 0;
+      Assert.IsTrue(
+        ConfirmValue IN [STRPOS(Question,ExpectedConfirm),STRPOS(Question,UndoShipmentConfirm)],
+        'Unexpected confirm dialog: ' + Question);
+      Reply := TRUE
+    END;
+
+    [MessageHandler]
+    PROCEDURE ExpectedCostMsgHandler@33(Msg@1000 : Text[1024]);
+    BEGIN
+      IF STRPOS(Msg,WarningMsg) = 1 THEN
+        EXIT;
+      Assert.IsTrue(STRPOS(Msg,ExpectedMsg) = 1,'Unexpected message dialog: ' + Msg)
+    END;
+
+    LOCAL PROCEDURE ExecuteUIHandlers@2();
+    BEGIN
+      MESSAGE(STRSUBSTNO(ExpectedMsg));
+      IF CONFIRM(STRSUBSTNO(ExpectedConfirm)) THEN ;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@93(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@139(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE HandleStrMenu@155(Options@1000 : Text[1024];VAR Choice@1001 : Integer;Instructions@1002 : Text[1024]);
+    BEGIN
+      // Select posting option
+      Choice := LibraryVariableStorage.DequeueInteger;
+    END;
+
+    [PageHandler]
+    PROCEDURE PostedServiceInvoicePH@146(VAR PostedServiceInvoice@1000 : TestPage 5978);
+    BEGIN
+      PostedServiceInvoice."No.".ASSERTEQUALS(LibraryVariableStorage.DequeueText);
+      PostedServiceInvoice."Customer No.".ASSERTEQUALS(LibraryVariableStorage.DequeueText);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Service]
+      PostLineByLineUnsupported version tags:
+      NA: Unable to Compile
+
+      Test for CRM Service Posting - Invoice.
+        1. Test posting of a Service Order when the value in the Qty. to Invoice field is Zero.
+           a. TC-PP-I-1 - Posting a Service Order with the Invoice Option when the value in the Qty. to Invoice Field equals zero and
+                          the Shipment has already been posted.
+           b. TC-PP-I-2 - Posting a Service Order with the Ship and Invoice Option when the value in the Qty. to Invoice Field is equal
+                          to zero and the value in the Qty. to Ship field is not a zero.
+           c. TC-PP-I-3 - Posting a Service Order with the Invoice Option when the value in the Qty. to Invoice field is equal to zero and
+                          nothing has been shipped.
+        2. Test posting of a Service Order as Invoice when some Quantity has been shipped before.
+           a. TC-PP-I-4 - Posting a Service Order with the Invoice Option when the value in the Qty. to Invoice field is less than
+                          the value in the Quantity Shipped field
+           b. TC-PP-I-5 - Posting a Service Order with the Ship and Invoice Option when the value in the Qty. to Invoice field is
+                          Less than the value in the Qty. to Ship field
+        3. Test posting of a Service Order as Invoice with Total Quantity shipped when Close condition is not met.
+           a. TC-PP-I-6 - Posting a Service Order with the Invoice Option when the value in the Qty. to Invoice Field equals the value
+                          in the Quantity Shipped field and Close condition is not met.
+           b. TC-PP-I-7 - Posting a Service Order with the Ship and Invoice Option when the value in the Qty. to Invoice Field equals
+                          the value in the Quantity Shipped field and the Close condition is not met.
+        4. Test posting of a Service Order as Invoice with Total Quantity shipped when Close condition is met.
+           a. TC-PP-I-8 - Posting a Service Order with the Invoice Option when the Value in the Qty. to Invoice Field Equals
+                          the Value in the Quantity Shipped Field and the Close Condition is Met.
+           b. TC-PP-I-9 - Posting a Service Order with the Ship and Invoice Option when the Value in the Qty. to Invoice Field Equals
+                          the Value in the Quantity Shipped Field and Close Condition is Met.
+           c. TC-PP-I-10- Posting a Service Order with the Invoice Option when the Value in the Quantity Invoiced Field is Not Equal
+                          to Zero and the Close Condition Is Met.
+        5. Test posting of a Service Order as Invoice or Ship and after shipment values has been effected in Several Steps.
+           a. TC-PP-I-12 - Posting a Service Order with the Invoice Option after the Order Was Posted Several Times with the Ship Option,
+                           and the Value in the Qty. to Invoice Field Equals the Value in the Quantity Shipped Field.
+           b. TC-PP-I-13 - Posting a Service Order with the Invoice Option after the Order Was Posted Several Times with the Ship Option,
+                           and the Value in the Qty. to Invoice Field is Less than the Value in the Quantity Shipped Field.
+           c. TC-PP-I-14 - Posting a Service Order with the Invoice Option after the Order Was Posted Several Times with the Ship Option,
+                           and the Value in the Qty. to Invoice Field is Greater than the Value in the Quantity Shipped Field.
+           d. TC-PP-I-15 - Posting a Service Order with the Ship and Invoice Option after the Order Was Posted with the Ship Option,
+                           and the Value in the Qty. to Invoice Field equals the Value in the Quantity Shipped Field plus the
+           e. TC-PP-I-16 - Posting a Service Order with the Ship and Invoice Option after It Was Posted with the Ship Option, and
+                           the Value in the Qty. to Invoice Field is Less than the Value in the Quantity Shipped Field plus the Value in
+                           the Qty. to Ship Field.
+        6. Test posting of a Service Order as Invoice or Ship and after shipment values has been effected in Several Steps.
+           a. TC-PP-I-17 - Posting a Service Order with the Invoice Option After It Was Shipped with the Ship Option and Invoiced with
+                           the Invoice Option; the Value in the Quantity Shipped Field is Greater than the Value in the Quantity Invoiced
+                           Field Plus the Value in the Qty. to Invoice Field.
+           b. TC-PP-I-18 - Posting a Service Order with the Invoice Option After It Was Shipped with the Ship Option and Invoiced
+                           with the Invoice Option.
+           c. TC-PP-I-19 - Posting a Service Order with the Invoice Option After It Was Shipped with the Ship Option and Invoiced
+                           with the Invoice Option; the Value in the Quantity Shipped Field is Less than the Value in the Quantity
+                           Invoiced Field Plus the Value in the Qty. to Invoice Field.
+           d. TC-PP-I-20 - Posting a Service Order with the Ship and Invoice Option After It Was Shipped with the Ship Option And
+                           Invoiced with the Invoice Option.
+           e. TC-PP-I-21 - Posting a Service Order with the Ship and Invoice Option After It Was Shipped With the Ship Option
+                           and Invoiced with the Invoice Option; (Quantity Shipped + Quantity to Ship)
+                           = (Quantity Invoiced + Quantity to Invoice).
+           f. TC-PP-I-22 - Posting a Service Order with the Invoice Option After It Was Posted with the Ship and Invoice Option;
+                           Quantity to Invoice < Quantity Shipped - Quantity Invoiced.
+           g. TC-PP-I-23 - Posting a Service Order with the Invoice Option After the Order Was Posted with the Ship and Invoice Option;
+                           Quantity to Invoice > Quantity Shipped - Quantity Invoiced.
+           h. TC-PP-I-24 - Posting a Service Order with the Ship and Invoice Option After the Order Was Posted With the Ship
+                           and Invoice Option;
+        7. Test Case Group: Posting a Service Order with the Invoice or Ship and Invoice Option after the Order Was Shipped and then
+                            Consumed.
+           a. TC-PP-I-25 - Posting a Service Order with the Invoice Option After It Was Posted With the Ship Option and Consumed With the
+                           Ship and Consume Option; Quantity to Invoice < Quantity Shipped - Quantity Consumed.
+           b. TC-PP-I-26 - Posting a Service Order with the Invoice Option After the Order Was Posted With the Ship Option and Consumed
+                           With Ship the Ship and Consume Option; Quantity to Invoice = Quantity Shipped - Quantity Consumed.
+           c. TC-PP-I-28 - Posting a Service Order with the Ship and Invoice Option After the Order Was Posted with the Ship Option And
+                           Consumed with the Ship and Consume Option; Quantity to Ship + Quantity Shipped > Quantity Consumed + Quantity
+                           to Invoice.
+        8. Test Case Group: Posting a Service Order with the Invoice or Ship and Invoice Option after the Undo Shipment Function Was Run.
+           a. TC-PP-I-33 - Posting a Service Order with the Invoice Option After It Was Posted with the Ship Option, Consumed With the
+                           Ship & Consume Option and then Consumption and Shipment were Undone.
+           b. TC-PP-I-34 - Posting a Service Order with the Ship and Invoice Option After It Was Posted with the Ship Option and the
+                           Shipment Was Undone.
+        9. Test Case Group: Posting a Service Order with the Invoice or Ship and Invoice Option after the Undo Consumption Function Was
+                            Run.
+           a. TC-PP-I-35 - Posting a Service Order with the Invoice Option After It Was Posted with the Ship Option, Consumed With
+                           the Ship and Consume Option and the Consumption was Undone.
+        10. Check the report Batch Post Service Invoices with different options.
+        11. Check the report Batch Post Service Cr. Memos with different options.
+        12. Check the report Batch Post Service Orders with different options.
+        13. Verify that source no is correct in value entry when bill-to customer no is defined.
+
+      TFS_TS_ID = 20887
+      Cover Test cases:
+        TCG-PP-I-1  TFS_TC_ID=31910 and 12118
+        TCG-PP-I-2  TFS_TC_ID=31911 and 12119
+        TCG-PP-I-3  TFS_TC_ID=31912 and 12120
+        TCG-PP-I-4  TFS_TC_ID=31913 and 12121
+        TCG-PP-I-5  TFS_TC_ID=31914 and 12122
+        TCG-PP-I-6  TFS_TC_ID=31915 and 12123
+        TCG-PP-I-7  TFS_TC_ID=31916 and 12124
+        TCG-PP-I-8  TFS_TC_ID=31917 and 12125
+        TCG-PP-I-9  TFS_TC_ID=31918 and 12126
+
+      TFS_TS_ID = 244874
+      Covers Test cases:
+      ------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                              TFS ID
+      ------------------------------------------------------------------------------------------------------
+      ReplaceDatesAsFalse, ReplacePostingDateAsTrue, ReplaceDocumentDateAsTrue                        129096
+      CalculateInvoiceDiscountFalse, CalculateInvoiceDiscountAsTrue                                   129096
+
+      TFS_TS_ID = 244884
+      Covers Test cases:
+      ------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                              TFS ID
+      ------------------------------------------------------------------------------------------------------
+      ReplaceDatesAsFalseCreditMemo, ReplacePostingDateAsTrueCredit, ReplaceDocumentDateTrueCredit    129097
+      CalculateDiscountFalseCredit, CalculateDiscountTrueCredit, ReplacePostingDateErrorCredit        129097
+
+      TFS_TS_ID = 245054
+      Covers Test cases:
+      ------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                              TFS ID
+      ------------------------------------------------------------------------------------------------------
+      ReplaceDatesAsFalseOrder, ReplacePostingDateAsTrueOrder, ReplaceDocumentDateTrueOrder           129094
+      CalculateDiscountFalseOrder, CalculateDiscountTrueOrder, ReplacePostingDateErrorOrder           129094
+
+      Bug ID 329206
+      ------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                              TFS ID
+      ------------------------------------------------------------------------------------------------------
+      CheckSourceNoOnValueEntry
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,2669 @@
+OBJECT Codeunit 137068 SCM Inventory Orders-II
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ItemJournalTemplate@1024 : Record 82;
+      ItemJournalBatch@1023 : Record 233;
+      RevaluationItemJournalTemplate@1021 : Record 82;
+      RevaluationItemJournalBatch@1019 : Record 233;
+      LocationSilver@1005 : Record 14;
+      LocationSilver2@1030 : Record 14;
+      LocationBlue@1007 : Record 14;
+      LocationRed@1022 : Record 14;
+      LocationInTransit@1009 : Record 14;
+      Assert@1015 : Codeunit 130000;
+      LibraryRandom@1000 : Codeunit 130440;
+      LibraryInventory@1002 : Codeunit 132201;
+      LibraryItemTracking@1028 : Codeunit 130502;
+      LibrarySales@1011 : Codeunit 130509;
+      LibraryUtility@1003 : Codeunit 131000;
+      LibraryWarehouse@1008 : Codeunit 132204;
+      LibraryPurchase@1006 : Codeunit 130512;
+      LibraryERM@1016 : Codeunit 131300;
+      LibraryCosting@1018 : Codeunit 132200;
+      LibraryVariableStorage@1020 : Codeunit 131004;
+      LibrarySetupStorage@1029 : Codeunit 131009;
+      LibraryPlanning@1026 : Codeunit 132203;
+      IsInitialized@1001 : Boolean;
+      TrackingQuantity@1010 : Decimal;
+      AssignLotNo@1013 : Boolean;
+      DifferentExpirationDate@1014 : Boolean;
+      NewExpirationDate@1004 : Date;
+      GlobalDocumentType@1012 : 'Quote,Blanket Order,Order,Invoice,Return Order,Credit Memo,Posted Shipment,Posted Invoice';
+      ValidationErr@1017 : TextConst '@@@={Locked};ENU=%1 must be %2.';
+      AmountErr@1025 : TextConst 'ENU=Amount is incorrect.';
+      CannotChangeSellToCustErr@1027 : TextConst 'ENU=You cannot change Sell-to Customer No. because the order is associated with one or more sales orders.';
+      TrackingMethod@1031 : 'Serial No.,Lot';
+      MultipleValueEntriesWithChargeMsg@1032 : TextConst 'ENU=More than one Item Charge is posted for each Item Ledger Entry.';
+      PostedChargeCostAmountMsg@1033 : TextConst 'ENU=Wrong Cost Amount of posted Item Charge.';
+      WrongNoOfOrdersPrintedErr@1034 : TextConst 'ENU=Two orders must be printed';
+      WrongValueOfPurchCodeErr@1035 : TextConst 'ENU=Wrong value of purchasing code';
+      QuantitiesOfCreatedAndPrintedPurchaseOrdersMismatchErr@1036 : TextConst '@@@="%1: Quantity of created orders; %2: quantity of printed orders.";ENU=Quantities of created (%1) and printed (%2) purchase orders mismatch.';
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler,ItemTrackingSummaryPageHandler,PostedItemTrackingLinesPageHandler)]
+    PROCEDURE TransferOrderWithSameExpirationDateAndLotNo@282();
+    BEGIN
+      // Setup.
+      Initialize;
+      TransferOrderWithExpirationDateAndLotNo;  // Expiration Date values same on Item Tracking Lines.
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler,ItemTrackingSummaryPageHandler,PostedItemTrackingLinesPageHandler)]
+    PROCEDURE TransferOrderWithDifferentExpirationDateAndLotNo@283();
+    BEGIN
+      // Setup.
+      Initialize;
+      DifferentExpirationDate := TRUE;  // Expiration Date values different on Item Tracking Lines. Global variable required in PostedItemTrackingLinesPageHandler.
+      TransferOrderWithExpirationDateAndLotNo;
+    END;
+
+    LOCAL PROCEDURE TransferOrderWithExpirationDateAndLotNo@9();
+    VAR
+      Item@1003 : Record 27;
+      Bin@1006 : Record 7354;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      TransferHeader@1001 : Record 5740;
+      TransferLine@1002 : Record 5741;
+      ReservationEntry@1007 : Record 337;
+      Direction@1005 : 'Outbound,Inbound';
+    BEGIN
+      // Create a Lot Tracked Item, Create and release Purchase Order.
+      LibraryWarehouse.FindBin(Bin,LocationSilver.Code,'',1);  // Find Bin of Index 1.
+      CreateLotTrackedItem(Item);
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",PurchaseLine.Type::Item,LocationBlue.Code,LibraryRandom.RandDec(100,2),0);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+
+      // Assign values to Global variables, assign Lot No. on Purchase Order and Post Purchase Order.
+      AssignLotNo := TRUE;
+      TrackingQuantity := PurchaseLine.Quantity;
+      AssignTrackingOnPurchaseLine(PurchaseLine,ReservationEntry);
+      NewExpirationDate := ReservationEntry."Expiration Date";
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);  // Post as Receive and Invoice.
+
+      // Create and release Transfer Order, update Bin Code and assign Tracking on it.
+      CreateAndReleaseTransferOrder(TransferHeader,TransferLine,LocationBlue.Code,LocationSilver.Code,Item."No.",TrackingQuantity);
+      UpdateBinCodeOnTransferLine(TransferLine,Bin.Code);
+      AssignLotNo := FALSE;  // Assign Lot - False, for Select Entries on Item Tracking summary page.
+      TransferLine.OpenItemTrackingLines(Direction::Outbound);  // Assign Ship Tracking on Page Handler ItemTrackingPageHandler for Lot No.
+
+      // Exercise: Post Transfer Order as Ship and Receive.
+      LibraryWarehouse.PostTransferOrder(TransferHeader,TRUE,TRUE);
+
+      // Verify: Verify the entries on Transfer Receipt Line. Verify the Item Tracking applied in PostedItemTrackingLinesPageHandler.
+      VerifyTransferReceiptLine(
+        TransferLine."Document No.",Item."No.",TrackingQuantity,LocationSilver.Code,LocationBlue.Code,Bin.Code);
+    END;
+
+    [Test]
+    PROCEDURE CopySalesOrderToQuoteWithBlankLastShippingNo@51();
+    VAR
+      SalesHeader@1005 : Record 36;
+      SalesHeader2@1006 : Record 36;
+      Quantity@1009 : Decimal;
+      StockoutWarning@1001 : Boolean;
+      ItemNo@1002 : Code[20];
+    BEGIN
+      // Setup: Create Item and create and post a Sales Order.
+      Initialize;
+      ItemNo := CreateItem;
+      StockoutWarning := UpdateStockoutWarning(FALSE);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndReleaseSalesOrder(SalesHeader,ItemNo,Quantity);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);  // Post as Ship Only.
+
+      // Exercise: Copy the Sales Order to blank Sales Quote.
+      CopySalesDocument(SalesHeader2,SalesHeader2."Document Type"::Quote,GlobalDocumentType::Order,SalesHeader."No.");
+
+      // Verify: Verify the Last Shipping No as blank on Sales Quote. Verify the values on Sales Quote.
+      SalesHeader2.TESTFIELD("Last Shipping No.",'');
+      VerifySalesLine(SalesHeader2,ItemNo,Quantity);
+
+      // Tear Down: Set Stockout Warning to original state.
+      UpdateStockoutWarning(StockoutWarning);
+    END;
+
+    [Test]
+    PROCEDURE CopySalesOrderToQuoteWithMakeOrderAndBlankLastShippingNo@52();
+    VAR
+      SalesHeader@1005 : Record 36;
+      SalesHeader2@1006 : Record 36;
+      StockoutWarning@1001 : Boolean;
+      Quantity@1002 : Decimal;
+      ItemNo@1003 : Code[20];
+    BEGIN
+      // Setup: Create Item and create and post a Sales Order. Copy Sales Order to a Sales blank Quote
+      Initialize;
+      ItemNo := CreateItem;
+      StockoutWarning := UpdateStockoutWarning(FALSE);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndReleaseSalesOrder(SalesHeader,ItemNo,Quantity);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);  // Post as Ship only.
+      CopySalesDocument(SalesHeader2,SalesHeader2."Document Type"::Quote,GlobalDocumentType::Order,SalesHeader."No.");
+
+      // Exercise: Make Sales Order from Sales Quote.
+      LibrarySales.QuoteMakeOrder(SalesHeader2);
+
+      // Verify: Verify the Last Shipping No as blank on Sales Order created from Sales Quote. Verify the values on Sales Order made from the Sales Quote.
+      SelectSalesHeader(SalesHeader2,SalesHeader2."Sell-to Customer No.");
+      SalesHeader2.TESTFIELD("Last Shipping No.",'');
+      VerifySalesLine(SalesHeader2,ItemNo,Quantity);
+
+      // Tear Down: Set Stockout Warning to original state.
+      UpdateStockoutWarning(StockoutWarning);
+    END;
+
+    [Test]
+    PROCEDURE CopyPurchaseOrderToQuoteWithBlankLastReceivingNo@53();
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      PurchaseHeader2@1005 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      ItemNo@1010 : Code[20];
+      Quantity@1009 : Decimal;
+    BEGIN
+      // Setup: Create Item, create release and post a Purchase Order.
+      Initialize;
+      ItemNo := CreateItem;
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndReleasePurchaseOrder(PurchaseHeader,ItemNo,PurchaseLine.Type::Item,'',Quantity,0);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);  // Post as Receive only.
+
+      // Exercise: Copy the Purchase Order to blank Purchase Quote.
+      CopyPurchaseDocument(PurchaseHeader2,PurchaseHeader2."Document Type"::Quote,GlobalDocumentType::Order,PurchaseHeader."No.");
+
+      // Verify: Verify the Last Receiving No as blank on Purchase Quote. Verify the values on Purchase Quote.
+      PurchaseHeader2.TESTFIELD("Last Receiving No.",'');
+      VerifyPurchaseLine(PurchaseHeader2,ItemNo,Quantity);
+    END;
+
+    [Test]
+    PROCEDURE CopyPurchaseOrderToQuoteWithMakeOrderAndBlankLastReceivingNo@54();
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      PurchaseHeader2@1005 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      ItemNo@1010 : Code[20];
+      Quantity@1009 : Decimal;
+    BEGIN
+      // Setup: Create Item, create and release Purchase Order and post it. Copy Purchase Order to a Purchase Quote.
+      Initialize;
+      ItemNo := CreateItem;
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndReleasePurchaseOrder(PurchaseHeader,ItemNo,PurchaseLine.Type::Item,'',Quantity,0);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);  // Post as Receive only.
+      CopyPurchaseDocument(PurchaseHeader2,PurchaseHeader2."Document Type"::Quote,GlobalDocumentType::Order,PurchaseHeader."No.");
+
+      // Exercise: Make Purchase Order from Purchase Quote.
+      MakeOrderFromPurchaseQuote(PurchaseHeader2);
+
+      // Verify: Verify the Last Receiving No as blank on Purchase Order created from Purchase Quote and verify the values on Purchase Order.
+      SelectPurchaseHeader(PurchaseHeader2,PurchaseHeader2."Buy-from Vendor No.");
+      PurchaseHeader2.TESTFIELD("Last Receiving No.",'');
+      VerifyPurchaseLine(PurchaseHeader2,ItemNo,Quantity);
+    END;
+
+    [Test]
+    PROCEDURE ItemLedgerEntryForTransferReceiptWithBin@27();
+    VAR
+      Item@1003 : Record 27;
+      Bin@1006 : Record 7354;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      TransferHeader@1001 : Record 5740;
+      TransferLine@1002 : Record 5741;
+      Quantity@1008 : Decimal;
+    BEGIN
+      // Setup: Create Item, create and post Purchase Order. Create Transfer Order and update Bin on Transfer Line.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      LibraryWarehouse.FindBin(Bin,LocationSilver.Code,'',1);  // Find Bin of Index 1.
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndReleasePurchaseOrder(PurchaseHeader,Item."No.",PurchaseLine.Type::Item,LocationBlue.Code,Quantity,0);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);  // Post as Receive and Invoice.
+      CreateAndReleaseTransferOrder(TransferHeader,TransferLine,LocationBlue.Code,LocationSilver.Code,Item."No.",Quantity);
+      UpdateBinCodeOnTransferLine(TransferLine,Bin.Code);
+
+      // Exercise: Post Transfer Order as Ship and Receive.
+      LibraryWarehouse.PostTransferOrder(TransferHeader,TRUE,TRUE);
+
+      // Verify: Verify the Item Ledger Entry for Posted Transfer Receipt.
+      VerifyItemLedgerEntry(Item."No.",-Quantity);
+    END;
+
+    [Test]
+    PROCEDURE ItemLedgerEntryWithAdjustCostItemEntry@16();
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+      InventorySetup@1013 : Record 313;
+      DocumentNo@1005 : Code[20];
+      Quantity@1002 : Decimal;
+      UnitCost@1000 : Decimal;
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Purchase]
+      // [SCENARIO] Check Quantity and Amount is not changed after Adjust Cost, if Item is purchased only.
+
+      // [GIVEN] Prevent Automatic Cost Posting. Create and post Item Journal Line (purchase).
+      Initialize;
+      UpdateAutomaticCostSetup(InventorySetup);
+      UnitCost := LibraryRandom.RandDec(100,2);
+      Quantity := LibraryRandom.RandDec(100,2);
+      LibraryInventory.CreateItem(Item);
+      DocumentNo := CreateAndPostItemJournalLine(ItemJournalLine,ItemJournalLine."Entry Type"::Purchase,Item."No.",Quantity,UnitCost);
+
+      // [WHEN] Adjust Cost Item Entries.
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // [THEN] Item Ledger Entry is correct after running Adjust Cost Item Entries.
+      VerifyItemLedgerEntryForAdjustCost(DocumentNo,ItemJournalLine."Entry Type"::Purchase,Item."No.",Quantity,Quantity * UnitCost);
+
+      // Tear down: Restore the values of Inventory Setup.
+      RestoreInventorySetup(InventorySetup);
+    END;
+
+    [Test]
+    PROCEDURE ValueEntryForPurchaseOrderItemChargeAssignment@142();
+    VAR
+      Item@1003 : Record 27;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      Quantity@1008 : Decimal;
+    BEGIN
+      // Setup: Create Item, create and release Purchase Order. Create Purchase Line for Item Charge and assign it to the Purchase Order.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndReleasePurchaseOrder(PurchaseHeader,Item."No.",PurchaseLine.Type::Item,LocationBlue.Code,Quantity,0);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      AssignAndUpdateItemChargeOnPurchaseLine(PurchaseHeader);
+
+      // Exercise: Post Purchase Order as Receive and Invoice.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify the Invoice quantity for Item Charge Assignment in Value Entry.
+      VerifyValueEntry(Item."No.",Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListPageHandler)]
+    PROCEDURE PurchaseShippingDetailsWithDropShipmentForSalesOrder@36();
+    VAR
+      SalesHeader@1004 : Record 36;
+      ItemNo@1000 : Code[20];
+    BEGIN
+      // Setup: Create Item.
+      Initialize;
+      ItemNo := CreateItem;
+
+      // Create a Drop shipment Sales Order.
+      CreateSalesOrderWithPurchasingCodeDropShipment(SalesHeader,ItemNo);
+
+      // Exercise: Create Purchase Order and Get Sales Order from Drop Shipment.
+      CreatePurchaseOrderAndGetDropShipment(SalesHeader);
+
+      // Verify: Verify Purchase Order have same Ship to Address, Ship to Code as Sales Order.
+      VerifyPurchaseShippingDetails(ItemNo,SalesHeader."Ship-to Code",SalesHeader."Ship-to Address");
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListPageHandler)]
+    PROCEDURE PurchaseShippingDetailsWithSpecialOrderForSalesOrder@37();
+    VAR
+      PurchHeader@1000 : Record 38;
+      SalesHeader@1004 : Record 36;
+    BEGIN
+      // Setup: Create Item.
+      Initialize;
+
+      // Create a Special Order Sales Order.
+      CreateSalesOrderWithPurchasingCodeSpecialOrder(SalesHeader,CreateItem);
+
+      // Exercise: Create Purchase Order and Get Sales Order from Special Order.
+      CreatePurchaseOrderAndGetSpecialOrder(PurchHeader,SalesHeader,'');
+
+      // Verify: Verify Purchase Order have same Ship to Address, Ship to Code as Sales Order.
+      PurchHeader.TESTFIELD("Ship-to Address",LocationBlue.Address);
+      PurchHeader.TESTFIELD("Ship-to Code",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListPageHandler)]
+    PROCEDURE PurchaseShipmentMethodForSpecialSalesOrder@22();
+    VAR
+      SalesHeader@1004 : Record 36;
+      PurchHeader@1002 : Record 38;
+      Vendor@1000 : Record 23;
+    BEGIN
+      // Setup: Create Item.
+      Initialize;
+
+      // Create a Special Order Sales Order with Shipment Method Code.
+      CreateSalesOrderWithPurchasingCodeSpecialOrder(SalesHeader,CreateItem);
+
+      // Exercise: Create Purchase Order and Get Sales Order from Special Order.
+      CreatePurchaseOrderAndGetSpecialOrder(PurchHeader,SalesHeader,'');
+
+      // Verify: Verify Shipment Method Code of Purchase Order is copied from vendor (not from Sales Order).
+      Vendor.GET(PurchHeader."Buy-from Vendor No.");
+      PurchHeader.FIND; // Refresh Purchase Order.
+      PurchHeader.TESTFIELD("Shipment Method Code",Vendor."Shipment Method Code");
+    END;
+
+    [Test]
+    PROCEDURE RevaluationJournalAfterPostForDiffLocationsFRQItem@96();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      // Setup: Create FRQ Item.
+      Initialize;
+      CreateFRQItem(Item);
+
+      // Create and Post Purchase Order for Item at different locations.
+      CreateAndPostPurchaseWithLocation(Item."No.",LocationBlue.Code);
+      CreateAndPostPurchaseWithLocation(Item."No.",LocationRed.Code);
+
+      // Create Revaluation Journal for Item at different locations. Update Unit Cost Revalued for Item at Location Blue.
+      CreateRevaluationJournalForItem(Item."No.");
+      CreateRevaluationJournalForItem(Item."No.");
+      UpdateItemJournallineUnitCostRevalued(Item."No.",LocationBlue.Code);
+
+      // Exercise: Post Revaluation Journal Line For Item at Location Blue only.
+      PostItemJournalLine(Item."No.",LocationBlue.Code);
+
+      // Verify: Verify after posting of Item on first Location, Item at other Location is still present on same Revaluation Journal Worksheet.
+      VerifyItemJournalLineBatchAndTemplateForItem(
+        Item."No.",LocationRed.Code,RevaluationItemJournalBatch."Journal Template Name",RevaluationItemJournalBatch.Name);
+    END;
+
+    [Test]
+    PROCEDURE ItemJournalAfterPostForDiffLocationsFRQItem@76();
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      // Setup: Create FRQ Item.
+      Initialize;
+      CreateFRQItem(Item);
+
+      // Create Item Journal Lines for Item at different locations.
+      CreateItemJournalLineWithLocation(LocationBlue.Code,Item."No.");
+      CreateItemJournalLineWithLocation(LocationRed.Code,Item."No.");
+
+      // Exercise: Post Item Journal Line For Item at Location Blue only.
+      PostItemJournalLine(Item."No.",LocationBlue.Code);
+
+      // Verify: Verify after posting of Item on first Location, Item at other Location is still present on same Item Journal Worksheet.
+      VerifyItemJournalLineBatchAndTemplateForItem(
+        Item."No.",LocationRed.Code,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignementPurchPageHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE PurchaseOrderWithItemChargeAssignment@60();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      PurchInvHeader@1005 : Record 122;
+      GLEntry@1003 : Record 17;
+    BEGIN
+      // Verify the GL Entry after post Purchase Order with Assign Item Charge Equally on multiple Purchase Lines.
+
+      // Setup: Update Setups, create Purchase Order with multiple lines and Assign Charge Item Equally on Purchase Lines.
+      Initialize;
+      LibraryERM.SetInvRoundingPrecisionLCY(1);  // Required Invoice Rounding as 1.
+      LibraryPurchase.SetInvoiceRounding(FALSE);
+      CreatePurchaseOrderWithMultiLine(PurchaseHeader);
+      AssignChargeItemPurchEqually(PurchaseLine,PurchaseHeader);
+
+      // Exercise: Post Purchase Order as Receive and Invoice.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Verify: Verify the GL Entry after post Purchase Order with Assign Item Charge Equally.
+      PurchInvHeader.GET(PurchaseHeader."Last Posting No.");
+      PurchInvHeader.CALCFIELDS(Amount);
+      VerifyGLEntry(
+        GLEntry."Document Type"::Invoice,PurchaseHeader."Last Posting No.",PurchInvHeader.Amount,
+        GLEntry."Gen. Posting Type"::Purchase);
+      VerifyGLEntry(
+        GLEntry."Document Type"::Invoice,PurchaseHeader."Last Posting No.",-PurchInvHeader.Amount,GLEntry."Gen. Posting Type"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemChargeAssignementSalePageHandler,ItemChargeAssignMenuHandler)]
+    PROCEDURE SalesOrderWithItemChargeAssignment@136();
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1004 : Record 37;
+      SalesInvoiceHeader@1006 : Record 112;
+      GLEntry@1003 : Record 17;
+    BEGIN
+      // Verify the GL Entry after post Sales Order with Assign Item Charge Equally on multiple Sales Lines.
+
+      // Setup: Update Setups, create Sales Order with multiple lines and Assign Charge Item Equally on Sales Lines.
+      Initialize;
+      LibraryERM.SetInvRoundingPrecisionLCY(1);  // Required Invoice Rounding as 1.
+      LibrarySales.SetInvoiceRounding(FALSE);
+      CreateSalesOrder(
+        SalesHeader,LibraryInventory.CreateItem(Item),LibraryRandom.RandDec(100,2),LibraryRandom.RandDec(10,2));  // Using Random value for Quantity and Unit Price.
+      FindSalesLine(SalesLine,SalesHeader);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",SalesLine.Quantity,SalesLine."Unit Price");
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",SalesLine.Quantity,SalesLine."Unit Price");
+      AssignChargeItemSaleEqually(SalesLine,SalesHeader);
+
+      // Exercise: Post Sales Order as Receive and Invoice.
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // Verify: Verify the GL Entry after post Sales Order with Assign Item Charge Equally.
+      SalesInvoiceHeader.GET(SalesHeader."Last Posting No.");
+      SalesInvoiceHeader.CALCFIELDS(Amount);
+      VerifyGLEntry(
+        GLEntry."Document Type"::Invoice,SalesHeader."Last Posting No.",-SalesInvoiceHeader.Amount,GLEntry."Gen. Posting Type"::Sale);
+      VerifyGLEntry(
+        GLEntry."Document Type"::Invoice,SalesHeader."Last Posting No.",SalesInvoiceHeader.Amount,GLEntry."Gen. Posting Type"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(GetSalesOrdersReportHandler)]
+    PROCEDURE ShipmentMethodCodeAsOnVendorThroughRequisitionWorkSheet@61();
+    VAR
+      SalesHeader@1000 : Record 36;
+      Vendor@1001 : Record 23;
+      RequisitionLine@1002 : Record 246;
+      GetSalesOrders@1003 : Report 698;
+      LibraryPlanning@1004 : Codeunit 132203;
+    BEGIN
+      // Verify Shipment Method Code on Purchase Order with Shipment method code on Vendor when created through Requisition WorkSheet.
+
+      // Setup: Create Item and create vendor with Shipment Method Code and Create Sales Order with Purchasing Code.
+      Initialize;
+      CreateSalesOrderWithPurchasingCodeSpecialOrder(SalesHeader,CreateItem);
+      CreateVendorWithShipmentMethodCode(Vendor,SalesHeader."Shipment Method Code");
+      CreateRequisitionLine(RequisitionLine);
+      LibraryVariableStorage.Enqueue(SalesHeader."No.");
+      GetSalesOrders.SetReqWkshLine(RequisitionLine,1); // Special Order.
+      COMMIT;
+      GetSalesOrders.RUNMODAL;
+      UpdateVendorOnRequisitionLine(RequisitionLine,SalesHeader."No.",Vendor."No.");
+
+      // Exercise: For Carry Out Action Message.
+      LibraryPlanning.CarryOutReqWksh(
+        RequisitionLine,RequisitionLine."Expiration Date",RequisitionLine."Order Date",SalesHeader."Posting Date",
+        SalesHeader."Posting Date",'Anvvalue');
+
+      // Verify: Verify Shipment Method Code of vendor is updated on Purchase Order.
+      VerifyShipmentMethodCode(Vendor."No.",Vendor."Shipment Method Code");
+    END;
+
+    [Test]
+    [HandlerFunctions(GetSalesOrdersReportHandler,ItemVendorCatalogModalHandler)]
+    PROCEDURE VSTF324906@67();
+    VAR
+      ItemVendor@1009 : Record 99;
+      Vendor@1008 : Record 23;
+      ReqWkshName@1007 : Record 245;
+      ReqLine@1000 : Record 246;
+      ItemVariant@1001 : Record 5401;
+      SalesLine@1002 : Record 37;
+      SalesHeader@1004 : Record 36;
+      GetSalesOrders@1005 : Report 698;
+      RetrieveDimFrom@1003 : 'Item,Sales Line';
+      ItemNo@1006 : Code[20];
+    BEGIN
+      // Setup: Create Item with variant.
+      Initialize;
+      ItemNo := CreateItem;
+      LibraryInventory.CreateItemVariant(ItemVariant,ItemNo);
+
+      // Create a Special Order Sales Order.
+      CreateSalesOrderWithPurchasingCodeSpecialOrder(SalesHeader,ItemNo);
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.FINDFIRST;
+      SalesLine.VALIDATE("Variant Code",ItemVariant.Code);
+      SalesLine.MODIFY(TRUE);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+
+      // Get Sales Orders for Special Orders in Req. Worksheet.
+      LibraryVariableStorage.Enqueue(SalesHeader."No.");
+      ReqWkshName.SETRANGE("Template Type",ReqWkshName."Template Type"::"Req.");
+      ReqWkshName.FINDFIRST;
+      LibraryPlanning.CreateRequisitionLine(ReqLine,ReqWkshName."Worksheet Template Name",ReqWkshName.Name);
+
+      COMMIT;
+      CLEAR(GetSalesOrders);
+      GetSalesOrders.InitializeRequest(RetrieveDimFrom::Item);
+      GetSalesOrders.SetReqWkshLine(ReqLine,1);
+      GetSalesOrders.RUNMODAL;
+
+      // Execute: Access Item Vendor Catalog for a Req. Line holding a Variant Code and create a new entry.
+      Vendor.INIT;
+      ReqLine.SETRANGE(Type,ReqLine.Type::Item);
+      ReqLine.SETRANGE("No.",ItemNo);
+      ReqLine.FINDFIRST;
+      ReqLine.LookupVendor(Vendor);
+
+      // Verify: The Item Vendor record has the expected Variant Code.
+      ItemVendor.SETRANGE("Item No.",ItemNo);
+      ItemVendor.SETRANGE("Variant Code",ItemVariant.Code);
+      Assert.AreEqual(
+        1,ItemVendor.COUNT,'Item Vendor entry was not created correctly for item ' + ItemNo + ', variant ' + ItemVariant.Code);
+    END;
+
+    [Test]
+    PROCEDURE NotChangedLocationWhenEditVendorInReqLineForSalesLineWithDropShipm@105();
+    VAR
+      NewVendor@1001 : Record 23;
+      ReqLine@1000 : Record 246;
+    BEGIN
+      // [FEATURE] [Requisition Worksheet] [Sales Order] [Drop Shipment]
+      // [SCENARIO 378516] Location and Bin shouldn't be changed when modifying Vendor in Requisition Line for Sales Line with Drop Shipment.
+      Initialize;
+
+      // [GIVEN] Requisition Line with Drop Shipment, "Location Code" = "L1", "Bin Code" = Blank.
+      CreateReqLineWithDropShipmentAndLocation(ReqLine,LocationSilver.Code);
+      // [GIVEN] Vendor as "V".
+      LibraryPurchase.CreateVendor(NewVendor);
+
+      // [WHEN] Set Vendor On Requisition Line to "V".
+      UpdateVendorOnRequisitionLine(ReqLine,ReqLine."Sales Order No.",NewVendor."No.");
+
+      // [THEN] Requisition Line keeps "Location Code" = "L1", "Bin Code" = Blank.
+      ReqLine.TESTFIELD("Location Code",LocationSilver.Code);
+      ReqLine.TESTFIELD("Bin Code",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListPageHandler)]
+    PROCEDURE CannotChangeSellToCustInSpecPurchOrderWithLines@38();
+    VAR
+      SalesHeader@1001 : Record 36;
+      Customer@1003 : Record 18;
+      PurchHeader@1005 : Record 38;
+    BEGIN
+      // [FEATURE] [Special Order]
+      // [SCENARIO 361615] "Sell-to Customer No." in purchase order cannot be changed if the order has lines linked to a special sales order with a different "Customer No."
+      // [GIVEN] Sales order with "Special Order" purchasing code
+      CreateSalesOrderWithPurchasingCodeSpecialOrder(SalesHeader,CreateItem);
+
+      // [GIVEN] Purchase order with one line copied from the sales order
+      CreatePurchaseOrderAndGetSpecialOrder(PurchHeader,SalesHeader,'');
+      LibrarySales.CreateCustomer(Customer);
+
+      // [WHEN] Change the "Sell-to Customer No." in the purchase order
+      ASSERTERROR PurchHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+
+      // [THEN] Error message prevents user from changing the customer
+      Assert.ExpectedError(CannotChangeSellToCustErr);
+    END;
+
+    [Test]
+    PROCEDURE CanChangeSellToCustInPurchOrderWithoutLines@77();
+    VAR
+      Customer@1003 : Record 18;
+      PurchHeader@1005 : Record 38;
+    BEGIN
+      // [FEATURE] [Special Order]
+      // [SCENARIO 361615] "Sell-to Customer No." in purchase order can be changed if the order has no lines
+
+      // [GIVEN] Purchase header without lines, but with "Sell-to Customer No." filled
+      CreatePurchaseHeaderWithSellToCustomer(PurchHeader);
+
+      // [WHEN] Change the "Sell-to Customer No." in the purchase order
+      LibrarySales.CreateCustomer(Customer);
+      PurchHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+
+      // [THEN] New value is accepted
+      Assert.AreEqual(
+        Customer."No.",PurchHeader."Sell-to Customer No.",
+        STRSUBSTNO(ValidationErr,PurchHeader.FIELDCAPTION("Sell-to Customer No."),Customer."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler)]
+    PROCEDURE CopyDocumentDoesNotCopyItemTrackingFromPostedSalesInvoiceToQuote@68();
+    VAR
+      SalesHeader@1005 : Record 36;
+      PostedInvoiceNo@1001 : Code[20];
+    BEGIN
+      // [FEATURE] [Sales] [Quote] [Invoice] [Copy Document] [Item Tracking]
+      // [SCENARIO 376111] "Copy Document" does not copy item tracking lines from a posted sales invoice into a quote
+
+      // [GIVEN] Post sales invoice with lot tracking
+      Initialize;
+      PostedInvoiceNo := CreateAndPostSalesOrderWithLotTracking;
+
+      // [GIVEN] Create new sales quote
+      // [WHEN] Run "Copy Document" to copy posted invoice into the new quote
+      CopySalesDocument(
+        SalesHeader,SalesHeader."Document Type"::Quote,GlobalDocumentType::"Posted Invoice",PostedInvoiceNo);
+
+      // [THEN] Sales quote does not have item tracking lines assigned
+      VerifyReservationEntryIsEmpty(DATABASE::"Sales Line",SalesHeader."Document Type",SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler)]
+    PROCEDURE CopyDocumentDoesNotCopyItemTrackingFromPostedPurchaseInvoiceToQuote@70();
+    VAR
+      PurchHeader@1005 : Record 38;
+      PostedInvoiceNo@1001 : Code[20];
+    BEGIN
+      // [FEATURE] [Purchase] [Quote] [Invoice] [Copy Document] [Item Tracking]
+      // [SCENARIO 376111] "Copy Document" does not copy item tracking lines from a posted purchase invoice into a quote
+
+      // [GIVEN] Post purchase invoice with lot tracking
+      Initialize;
+      PostedInvoiceNo := CreateAndPostPurchaseOrderWithLotTracking;
+
+      // [GIVEN] Create new purchase quote
+      // [WHEN] Run "Copy Document" to copy posted invoice into the new quote
+      CopyPurchaseDocument(
+        PurchHeader,PurchHeader."Document Type"::Quote,GlobalDocumentType::"Posted Invoice",PostedInvoiceNo);
+
+      // [THEN] Purchase quote does not have item tracking lines assigned
+      VerifyReservationEntryIsEmpty(DATABASE::"Purchase Line",PurchHeader."Document Type",PurchHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler)]
+    PROCEDURE CopyDocumentDoesNotCopyItemTrackingFromPostedSalesInvoiceToBlanketOrder@69();
+    VAR
+      SalesHeader@1005 : Record 36;
+      PostedInvoiceNo@1001 : Code[20];
+    BEGIN
+      // [FEATURE] [Sales] [Blanket Order] [Invoice] [Copy Document] [Item Tracking]
+      // [SCENARIO 376111] "Copy Document" does not copy item tracking lines from a posted sales invoice into a blanket order
+
+      // [GIVEN] Post sales invoice with lot tracking
+      Initialize;
+      PostedInvoiceNo := CreateAndPostSalesOrderWithLotTracking;
+
+      // [GIVEN] Create new blanket sales order
+      // [WHEN] Run "Copy Document" to copy posted invoice into the new blanket order
+      CopySalesDocument(
+        SalesHeader,SalesHeader."Document Type"::"Blanket Order",GlobalDocumentType::"Posted Invoice",PostedInvoiceNo);
+
+      // [THEN] Blanket sales order does not have item tracking lines assigned
+      VerifyReservationEntryIsEmpty(DATABASE::"Sales Line",SalesHeader."Document Type",SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler)]
+    PROCEDURE CopyDocumentDoesNotCopyItemTrackingFromPostedPurchaseInvoiceToBlanketOrder@56();
+    VAR
+      PurchHeader@1005 : Record 38;
+      PostedInvoiceNo@1001 : Code[20];
+    BEGIN
+      // [FEATURE] [Purchase] [Blanket Order] [Invoice] [Copy Document] [Item Tracking]
+      // [SCENARIO 376111] "Copy Document" does not copy item tracking lines from a posted purchase invoice into a blanket order
+
+      // [GIVEN] Post purchase invoice with lot tracking
+      Initialize;
+      PostedInvoiceNo := CreateAndPostPurchaseOrderWithLotTracking;
+
+      // [GIVEN] Create new blanket purchase order
+      // [WHEN] Run "Copy Document" to copy posted invoice into the new blanket order
+      CopyPurchaseDocument(
+        PurchHeader,PurchHeader."Document Type"::"Blanket Order",GlobalDocumentType::"Posted Invoice",PostedInvoiceNo);
+
+      // [THEN] Blanket purchase order does not have item tracking lines assigned
+      VerifyReservationEntryIsEmpty(DATABASE::"Purchase Line",PurchHeader."Document Type",PurchHeader."No.");
+    END;
+
+    [Test]
+    PROCEDURE ValueEntryPurchOrderWithNegItemChargeAssignt@85();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      ItemNo@1005 : Code[20];
+      ItemChargeNo@1003 : Code[20];
+      AmountSum@1001 : Decimal;
+      ChargeQty@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Item Charge] [Costing]
+      // [SCENARIO 376009] Value entry Amounts for Posted Purchase Invoice equal to line Amounts when they are changed after shipping.
+
+      // [GIVEN] Purchase Order with 2 lines: 1 - Item and 2 - negative Item Charge, assigned to Item, shipped.
+      Initialize;
+      LibraryPurchase.CreatePurchHeader(
+        PurchaseHeader,PurchaseHeader."Document Type"::Order,LibraryPurchase.CreateVendorNo);
+      ItemNo := LibraryInventory.CreateItemNo;
+      CreatePurchaseLine(
+        PurchaseHeader,ItemNo,PurchaseLine.Type::Item,'',
+        LibraryRandom.RandDecInRange(5,10,2),LibraryRandom.RandDecInRange(100,200,2));
+      ItemChargeNo := LibraryInventory.CreateItemChargeNo;
+      ChargeQty := -1; // Specific value needed for test
+      CreatePurchaseLine(
+        PurchaseHeader,ItemChargeNo,PurchaseLine.Type::"Charge (Item)",'',ChargeQty,
+        LibraryRandom.RandDecInRange(10,20,2));
+      AssignItemCharge(PurchaseHeader);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // [GIVEN] Reopen Purchase Order, Change Line Amounts for both lines.
+      LibraryPurchase.ReopenPurchaseDocument(PurchaseHeader);
+      AmountSum := UpdateLineAmounts(PurchaseHeader,LibraryRandom.RandDecInRange(10,20,2));
+
+      // [WHEN] Invoice Purchase Order.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+
+      // [THEN] Value Entry Amounts contain last changed Amounts.
+      VerifyCostAmountActualSum(ItemNo,AmountSum);
+    END;
+
+    [Test]
+    PROCEDURE ValueEntrySalesOrderWithNegItemChargeAssignt@82();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1004 : Record 37;
+      ItemNo@1005 : Code[20];
+      ItemChargeNo@1003 : Code[20];
+      AmountSum@1001 : Decimal;
+      ChargeQty@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Item Charge] [Costing]
+      // [SCENARIO 376009] Value entry Amounts for Posted Sales Invoice equal to line Amounts when they are changed after shipping.
+
+      // [GIVEN] Sales Order with 2 lines: 1 - Item and 2 - negative Item Charge, assigned to Item, shipped.
+      Initialize;
+      LibrarySales.CreateSalesHeader(
+        SalesHeader,SalesHeader."Document Type"::Order,LibrarySales.CreateCustomerNo);
+      ItemNo := LibraryInventory.CreateItemNo;
+      CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,
+        LibraryRandom.RandDecInRange(5,10,2),LibraryRandom.RandDecInRange(100,200,2));
+      ItemChargeNo := LibraryInventory.CreateItemChargeNo;
+      ChargeQty := -1; // Specific value needed for test
+      CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::"Charge (Item)",ItemChargeNo,ChargeQty,
+        LibraryRandom.RandDecInRange(100,200,2));
+      AssignItemChargeSales(SalesHeader);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // [GIVEN] Reopen Sales Order, Change Line Amounts for both lines.
+      LibrarySales.ReopenSalesDocument(SalesHeader);
+      AmountSum := UpdateLineAmountsSales(SalesHeader,LibraryRandom.RandDecInRange(10,20,2));
+
+      // [WHEN] Invoice Sales Order.
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,TRUE);
+
+      // [THEN] Value Entry Amounts contain last changed Amounts.
+      VerifySalesAmountActualSum(ItemNo,AmountSum);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseItemChargeNotPostedWhenQtyToInvoiceIsZero@93();
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      PurchRcptLine@1004 : Record 121;
+      ItemChargeAmount@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Item Charge] [Purchase]
+      // [SCENARIO] Item charge is not posted when invoicing a purchase order if "Qty. to Invoice" = 0 on purchase line
+
+      // [GIVEN] Create purchase order "PO1" and receive it without invoicing
+      CreatePurchaseOrderPostReceipt(PurchRcptLine);
+
+      // [GIVEN] Create purchase order "PO2"
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      // [GIVEN] First purchase order line: type = item charge, unit cost = "X"
+      AssignItemChargeToPostedReceiptLine(PurchaseHeader,1,LibraryRandom.RandDec(100,2),PurchRcptLine);
+
+      // [GIVEN] Second purchase order line: type = item charge, unit cost = "Y"
+      // [GIVEN] Assign both item charges to the posted purchase receipt
+      ItemChargeAmount := LibraryRandom.RandDecInRange(101,200,2);
+      AssignItemChargeToPostedReceiptLine(PurchaseHeader,1,ItemChargeAmount,PurchRcptLine);
+
+      // [GIVEN] Post purchase order "PO2" - receive only
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // [GIVEN] Reopen "PO2" and set "Quantity to Invoice" = 0 in the first line
+      LibraryPurchase.ReopenPurchaseDocument(PurchaseHeader);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      PurchaseLine.VALIDATE("Qty. to Invoice",0);
+      PurchaseLine.MODIFY(TRUE);
+
+      // [WHEN] Invoice purchase order "PO2"
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",PurchaseHeader."No.");
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+
+      // [THEN] "Cost Amount (Actual)" = "Y" on the item ledger entry
+      VerifyItemLedgEntryCostAmount(PurchRcptLine."No.",ItemChargeAmount);
+    END;
+
+    [Test]
+    PROCEDURE SalesItemChargeNotPostedWhenQtyToInvoiceIsZero@102();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      SalesShipmentLine@1004 : Record 111;
+      ItemChargeAmount@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Item Charge] [Sales]
+      // [SCENARIO] Item charge is not posted when invoicing a sales order if "Qty. to Invoice" = 0 on sales line
+
+      // [GIVEN] Create sales order "SO1" and ship it without invoicing
+      CreateSalesOrderPostShipment(SalesShipmentLine);
+
+      // [GIVEN] Create sales order "SO2"
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      // [GIVEN] First sales order line: type = item charge, unit price = "X"
+      AssignItemChargeToPostedShipmentLine(SalesHeader,1,LibraryRandom.RandDec(100,2),SalesShipmentLine);
+
+      // [GIVEN] Second sales order line: type = item charge, unit price = "Y"
+      // [GIVEN] Assign both item charges to the posted sales shipment
+      ItemChargeAmount := LibraryRandom.RandDecInRange(101,200,2);
+      AssignItemChargeToPostedShipmentLine(SalesHeader,1,ItemChargeAmount,SalesShipmentLine);
+
+      // [GIVEN] Post sales order "SO2" - ship only
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // [GIVEN] Reopen "SO2" and set "Quantity to Invoice" = 0 in the first line
+      LibrarySales.ReopenSalesDocument(SalesHeader);
+      FindSalesLine(SalesLine,SalesHeader);
+      SalesLine.VALIDATE("Qty. to Invoice",0);
+      SalesLine.MODIFY(TRUE);
+
+      // [WHEN] Invoice sales order "SO2"
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,TRUE);
+
+      // [THEN] "Sales Amount (Actual)" = "Y" on the item ledger entry
+      VerifyItemLedgEntrySalesAmount(SalesShipmentLine."No.",ItemChargeAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandler2,ItemTrackingSummaryPageHandler,CreateInvtPutawayPickMvmtReportHandler,MessageHandler)]
+    PROCEDURE TransferOrderWithDifferentUOM@97();
+    VAR
+      Item@1003 : Record 27;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1004 : Record 39;
+      TransferHeader@1001 : Record 5740;
+      TransferLine@1002 : Record 5741;
+      WarehouseActivityLine@1009 : Record 5767;
+      ItemUnitOfMeasure@1008 : Record 5404;
+      Direction@1005 : 'Outbound,Inbound';
+    BEGIN
+      // [FEATURE] [Item Tracking] [Transfer] [Inventory Put-away]
+      // [SCENARIO 378627] Inventory Put-away line with correct Quantity created for Lot tracked Item Transfer order with different UOM.
+      Initialize;
+
+      // [GIVEN] Lot Tracked Item, create and release Purchase Order, assign Lot and receive.
+      CreateLotTrackedItem(Item);
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",PurchaseLine.Type::Item,LocationBlue.Code,LibraryRandom.RandDec(100,1),0);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      AssignLotNo := TRUE;
+      TrackingQuantity := PurchaseLine.Quantity;
+      PurchaseLine.OpenItemTrackingLines; // ItemTrackingPageHandler.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // [GIVEN] Create Transfer Order to bin location for different UOM (Qty. per UOM < 1), assign Tracking, ship
+      LibraryInventory.CreateItemUnitOfMeasureCode(
+        ItemUnitOfMeasure,Item."No.",LibraryRandom.RandDecInDecimalRange(0.1,0.9,1));
+      CreateAndReleaseTransferOrder(
+        TransferHeader,TransferLine,LocationBlue.Code,LocationSilver2.Code,Item."No.",TrackingQuantity);
+      TransferLine.VALIDATE("Unit of Measure Code",ItemUnitOfMeasure.Code);
+      TransferLine.MODIFY(TRUE);
+      AssignLotNo := FALSE;
+      TransferLine.OpenItemTrackingLines(Direction::Outbound); // ItemTrackingPageHandler.
+      LibraryWarehouse.PostTransferOrder(TransferHeader,TRUE,FALSE);
+
+      // [WHEN] Create Inventory Put-away
+      TransferHeader.CreateInvtPutAwayPick;
+
+      // [THEN] One Put-away line created with Transfer quantity
+      WarehouseActivityLine.SETRANGE("Item No.",Item."No.");
+      Assert.RecordCount(WarehouseActivityLine,1);
+      WarehouseActivityLine.FINDFIRST;
+      WarehouseActivityLine.TESTFIELD(Quantity,TrackingQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingAssignSerialNoOrLotPageHandler,EnterQtyToCreatePageHandler)]
+    PROCEDURE OnePartiallyInvoicedPurchLineWithTrackingAndChargeAssignment@103();
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      PurchaseLineCharge@1005 : Record 39;
+      ItemSNTracked@1008 : Record 27;
+    BEGIN
+      // [FEATURE] [Purchase] [Item Tracking] [Item Charge] [Costing]
+      // [SCENARIO 349405] Item Charge should be distributed equally to all Item Ledger Entries of Purchase Line with Serial No. tracking when the document is partially invoiced.
+      Initialize;
+
+      // [GIVEN] Item with Serial No. tracking.
+      CreateSerialNoTrackedItem(ItemSNTracked);
+
+      // [GIVEN] Tracked Purchase Line for the Item. "Qty. to Invoice" is set less than Quantity.
+      LibraryPurchase.CreatePurchHeaderWithDocNo(
+        PurchaseHeader,PurchaseHeader."Document Type"::Order,LibraryPurchase.CreateVendorNo,LibraryUtility.GenerateGUID);
+      CreateAndTrackPurchaseLine(PurchaseHeader,PurchaseLine,ItemSNTracked."No.",TrackingMethod::"Serial No.");
+
+      // [GIVEN] Purchase Line with Item Charge. The Charge is assigned to the line with Item.
+      CreatePurchaseLineForItemCharge(PurchaseLineCharge,PurchaseHeader);
+      InsertItemChargeAssignmentPurch(PurchaseHeader,PurchaseLine,PurchaseLineCharge,PurchaseLineCharge.Quantity);
+
+      // [WHEN] Post Purchase with "Receive and Invoice" option.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [THEN] Item Charge is equally distributed to all Item Ledger Entries of posted Purchase.
+      VerifyValueEntriesWithItemCharge(PurchaseLineCharge,ItemSNTracked."No.",1); // 1 means 100% of charge is assigned to this line
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingAssignSerialNoOrLotPageHandler,EnterQtyToCreatePageHandler)]
+    PROCEDURE TwoPartiallyInvoicedPurchLinesWithTrackingAndChargeAssignment@104();
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLineSN@1000 : Record 39;
+      PurchaseLineLot@1012 : Record 39;
+      PurchaseLineCharge@1005 : Record 39;
+      ItemSNTracked@1008 : Record 27;
+      ItemLotTracked@1009 : Record 27;
+      ChargeShareForLotTrackedLine@1010 : Decimal;
+      ChargeShareForSNTrackedLine@1011 : Decimal;
+    BEGIN
+      // [FEATURE] [Purchase] [Item Tracking] [Item Charge] [Costing]
+      // [SCENARIO 349405] Item Charge should be distributed proportionally to Item Ledger Entries of two Purchase Lines with different tracking methods when the document is partially invoiced.
+      Initialize;
+
+      // [GIVEN] Items with Serial No. and Lot tracking.
+      CreateSerialNoTrackedItem(ItemSNTracked);
+      CreateLotTrackedItem(ItemLotTracked);
+
+      // [GIVEN] Two tracked Purchase Lines ("L1" and "L2"), one for each Item. "Qty. to Invoice" is set less than Quantity for each line.
+      // [GIVEN] (I.e. "L1" with 2 serial nos. "L1".Quantity = 2, "L1"."Qty. to Invoice" = 1;
+      // [GIVEN] "L2" with a lot. "L2".Quantity = 5, L2."Qty. to Invoice" = 3.)
+      LibraryPurchase.CreatePurchHeaderWithDocNo(
+        PurchaseHeader,PurchaseHeader."Document Type"::Order,LibraryPurchase.CreateVendorNo,LibraryUtility.GenerateGUID);
+      CreateAndTrackPurchaseLine(PurchaseHeader,PurchaseLineSN,ItemSNTracked."No.",TrackingMethod::"Serial No.");
+      CreateAndTrackPurchaseLine(PurchaseHeader,PurchaseLineLot,ItemLotTracked."No.",TrackingMethod::Lot);
+
+      // [GIVEN] Purchase Line with Item Charge (i.e. Amount = 100).
+      CreatePurchaseLineForItemCharge(PurchaseLineCharge,PurchaseHeader);
+
+      // [GIVEN] Assigned Item Charge to both Item lines in proportions (i.e. 40 to "L1" and 60 to "L2").
+      ChargeShareForSNTrackedLine := LibraryRandom.RandInt(99) / 100; // maximum one line's share is 99%
+      ChargeShareForLotTrackedLine := 1 - ChargeShareForSNTrackedLine;
+      InsertItemChargeAssignmentPurch(PurchaseHeader,PurchaseLineSN,PurchaseLineCharge,ChargeShareForSNTrackedLine);
+      InsertItemChargeAssignmentPurch(PurchaseHeader,PurchaseLineLot,PurchaseLineCharge,ChargeShareForLotTrackedLine);
+
+      // [WHEN] Post Purchase with "Receive and Invoice" option.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // [THEN] Item Charge is distributed to Item Ledger Entries of both Purchase lines.
+      // [THEN] Each Item Ledger Entry has a Value Entry with Item Charge.
+      // [THEN] (I.e. "L1" has two Value Entries with Item Charge, each for 20;
+      // [THEN] "L2" has one Value Entry with Item Charge for 60.)
+      VerifyValueEntriesWithItemCharge(PurchaseLineCharge,ItemSNTracked."No.",ChargeShareForSNTrackedLine);
+      VerifyValueEntriesWithItemCharge(PurchaseLineCharge,ItemLotTracked."No.",ChargeShareForLotTrackedLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(GetSalesOrdersReportHandler,StandardPurchaseOrderReportHandler,CarryOutActionMsgReqHandler)]
+    PROCEDURE SpecialOrdersFromReqWkshPrintedSeparately@120();
+    VAR
+      Purchasing@1000 : Record 5721;
+      SalesHeader@1001 : ARRAY [2] OF Record 36;
+      Item@1002 : Record 27;
+      Vendor@1004 : Record 23;
+      RequisitionLine@1005 : Record 246;
+      Location@1007 : Record 14;
+      GetSalesOrders@1006 : Report 698;
+    BEGIN
+      // [FEATURE] [Special Order] [Requisition Worksheet]
+      // [SCENARIO] When several purchase order are created for special sales orders via requisition worksheet, each order should be printer separately
+
+      Initialize;
+
+      // [GIVEN] Two sales orders for the same customer, but on different locations
+      CreatePurchasingCodeWithSpecialOrder(Purchasing);
+      LibraryInventory.CreateItem(Item);
+      CreateSalesOrderWithPurchasingCodeOnLocation(
+        SalesHeader[1],SelectCustomer,Item."No.",LibraryWarehouse.CreateLocation(Location),Purchasing.Code);
+
+      CreateSalesOrderWithPurchasingCodeOnLocation(
+        SalesHeader[2],SalesHeader[1]."Sell-to Customer No.",Item."No.",LibraryWarehouse.CreateLocation(Location),Purchasing.Code);
+
+      // [GIVEN] Open requisition worksheet and run "Get Special Orders"
+      CreateRequisitionLine(RequisitionLine);
+      LibraryVariableStorage.Enqueue(SalesHeader[1]."No." + '|' + SalesHeader[2]."No.");
+      GetSalesOrders.SetReqWkshLine(RequisitionLine,1); // Special Order.
+      COMMIT;
+      GetSalesOrders.RUNMODAL;
+
+      CreateVendorWithShipmentMethodCode(Vendor,SalesHeader[1]."Shipment Method Code");
+      UpdateVendorOnRequisitionLine(RequisitionLine,SalesHeader[1]."No.",Vendor."No.");
+      UpdateVendorOnRequisitionLine(RequisitionLine,SalesHeader[2]."No.",Vendor."No.");
+
+      // [WHEN] Carry out action messages
+      UpdateReportSelection(REPORT::Order);
+      RequisitionLine.SETFILTER("Sales Order No.",SalesHeader[1]."No." + '|' + SalesHeader[2]."No.");
+      CarryOutReqWkshWithRequestPage(
+        RequisitionLine,RequisitionLine."Expiration Date",RequisitionLine."Order Date",
+        SalesHeader[1]."Posting Date",SalesHeader[1]."Posting Date");
+
+      // [THEN] Two orders are printed
+      Assert.AreEqual(2,LibraryVariableStorage.Length,WrongNoOfOrdersPrintedErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(GetSalesOrdersReportHandler,StandardPurchaseOrderReportHandler,CarryOutActionMsgReqHandler)]
+    PROCEDURE SpecialOrdersFromReqWkshDiffPurchCodePrintedSeparately@132();
+    VAR
+      Purchasing@1000 : ARRAY [2] OF Record 5721;
+      SalesHeader@1001 : ARRAY [2] OF Record 36;
+      PurchaseLine@1009 : ARRAY [2] OF Record 39;
+      Item@1002 : Record 27;
+      Vendor@1004 : Record 23;
+      RequisitionLine@1005 : Record 246;
+      Location@1007 : Record 14;
+      GetSalesOrders@1006 : Report 698;
+      LocationCode@1003 : Code[10];
+    BEGIN
+      // [FEATURE] [Special Order] [Requisition Worksheet]
+      // [SCENARIO] When several purchase orders are created for special sales orders with different purchasing codes via requisition worksheet, each order should be printed separately
+
+      Initialize;
+
+      // [GIVEN] Two sales orders for the same customer, on the same locations, but with different Purchasing Codes
+      LocationCode := LibraryWarehouse.CreateLocation(Location);
+      CreatePurchasingCodeWithSpecialOrder(Purchasing[1]);
+      CreatePurchasingCodeWithSpecialOrder(Purchasing[2]);
+      LibraryInventory.CreateItem(Item);
+      CreateSalesOrderWithPurchasingCodeOnLocation(
+        SalesHeader[1],SelectCustomer,Item."No.",LocationCode,Purchasing[1].Code);
+
+      CreateSalesOrderWithPurchasingCodeOnLocation(
+        SalesHeader[2],SalesHeader[1]."Sell-to Customer No.",Item."No.",LocationCode,Purchasing[2].Code);
+
+      // [GIVEN] Open requisition worksheet and run "Get Special Orders"
+      CreateRequisitionLine(RequisitionLine);
+      LibraryVariableStorage.Enqueue(SalesHeader[1]."No." + '|' + SalesHeader[2]."No.");
+      GetSalesOrders.SetReqWkshLine(RequisitionLine,1); // Special Order.
+      COMMIT;
+      GetSalesOrders.RUNMODAL;
+
+      CreateVendorWithShipmentMethodCode(Vendor,SalesHeader[1]."Shipment Method Code");
+      UpdateVendorOnRequisitionLine(RequisitionLine,SalesHeader[1]."No.",Vendor."No.");
+      UpdateVendorOnRequisitionLine(RequisitionLine,SalesHeader[2]."No.",Vendor."No.");
+
+      // [WHEN] Carry out action messages
+      UpdateReportSelection(REPORT::Order);
+      RequisitionLine.SETFILTER("Sales Order No.",SalesHeader[1]."No." + '|' + SalesHeader[2]."No.");
+      CarryOutReqWkshWithRequestPage(
+        RequisitionLine,RequisitionLine."Expiration Date",RequisitionLine."Order Date",
+        SalesHeader[1]."Posting Date",SalesHeader[1]."Posting Date");
+
+      // [THEN] Two orders are printed
+      Assert.AreEqual(2,LibraryVariableStorage.Length,WrongNoOfOrdersPrintedErr);
+
+      // [THEN] Two purchase line exist, each related with own sales line
+      FindPurchaseLineBySalesSpecialOrder(PurchaseLine[1],SalesHeader[1]);
+      FindPurchaseLineBySalesSpecialOrder(PurchaseLine[2],SalesHeader[2]);
+
+      // [THEN] Fields "Purchasing Code" of created purchasing lines are corresponding to "Purchasing Code" of sales lines.
+      Assert.AreEqual(Purchasing[1].Code,PurchaseLine[1]."Purchasing Code",WrongValueOfPurchCodeErr);
+      Assert.AreEqual(Purchasing[2].Code,PurchaseLine[2]."Purchasing Code",WrongValueOfPurchCodeErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(GetSalesOrdersReportHandler,StandardPurchaseOrderReportHandler,CarryOutActionMsgReqHandler)]
+    PROCEDURE SpecialOrdersFromReqWkshCreatedPrintedMatchDiffLocationsInLines@133();
+    VAR
+      Purchasing@1000 : Record 5721;
+      SalesHeader@1001 : ARRAY [2] OF Record 36;
+      Item@1002 : Record 27;
+      Vendor@1004 : Record 23;
+      RequisitionLine@1005 : Record 246;
+      Location@1007 : Record 14;
+      GetSalesOrders@1006 : Report 698;
+      HeaderLocationCode@1003 : Code[10];
+      Printed@1008 : Integer;
+      Created@1009 : Integer;
+    BEGIN
+      // [FEATURE] [Special Order] [Requisition Worksheet]
+      // [SCENARIO] When several purchase orders are created for special sales orders via requisition worksheet, the quantity of created and printed orders is the same.
+
+      Initialize;
+
+      // [GIVEN] Two sales orders for the same customer, each with one line, with a same location in headers but with different locations in lines.
+      CreatePurchasingCodeWithSpecialOrder(Purchasing);
+      LibraryInventory.CreateItem(Item);
+      HeaderLocationCode := LibraryWarehouse.CreateLocation(Location);
+      CreateSalesOrderWithPurchasingCodeWithDiffLocationsInHeaderAndInLine(
+        SalesHeader[1],SelectCustomer,Item."No.",HeaderLocationCode,LibraryWarehouse.CreateLocation(Location),Purchasing.Code);
+
+      CreateSalesOrderWithPurchasingCodeWithDiffLocationsInHeaderAndInLine(
+        SalesHeader[2],SalesHeader[1]."Sell-to Customer No.",Item."No.",
+        HeaderLocationCode,LibraryWarehouse.CreateLocation(Location),Purchasing.Code);
+
+      // [GIVEN] Open requisition worksheet and run "Get Special Orders".
+      CreateRequisitionLine(RequisitionLine);
+      LibraryVariableStorage.Enqueue(SalesHeader[1]."No." + '|' + SalesHeader[2]."No.");
+      GetSalesOrders.SetReqWkshLine(RequisitionLine,1); // Special Order.
+      COMMIT;
+      GetSalesOrders.RUNMODAL;
+
+      CreateVendorWithShipmentMethodCode(Vendor,SalesHeader[1]."Shipment Method Code");
+      UpdateVendorOnRequisitionLine(RequisitionLine,SalesHeader[1]."No.",Vendor."No.");
+      UpdateVendorOnRequisitionLine(RequisitionLine,SalesHeader[2]."No.",Vendor."No.");
+
+      // [WHEN] Carry out action messages.
+      UpdateReportSelection(REPORT::Order);
+      RequisitionLine.SETFILTER("Sales Order No.",SalesHeader[1]."No." + '|' + SalesHeader[2]."No.");
+      CarryOutReqWkshWithRequestPage(
+        RequisitionLine,RequisitionLine."Expiration Date",RequisitionLine."Order Date",
+        SalesHeader[1]."Posting Date",SalesHeader[1]."Posting Date");
+
+      // [THEN] The quantity of created and printed orders is the same.
+      Created := CountPurchaseOrdersQuanityForItem(Item."No.");
+      Printed := LibraryVariableStorage.Length;
+      Assert.AreEqual(Created,Printed,STRSUBSTNO(QuantitiesOfCreatedAndPrintedPurchaseOrdersMismatchErr,Created,Printed));
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesListPageHandler)]
+    PROCEDURE ItemTranslationInPurchLineCreatedFromSalesWithSpecialOrder@134();
+    VAR
+      Item@1000 : Record 27;
+      ItemTranslation@1001 : Record 30;
+      Vendor@1004 : Record 23;
+      SalesHeader@1002 : Record 36;
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1005 : Record 39;
+    BEGIN
+      // [FEATURE] [Special Order] [Item Translation]
+      // [SCENARIO 218068] Purchase line descriptions should be taken from item translation when the purchase order is created with Special Order - Get Sales Order function.
+      Initialize;
+
+      // [GIVEN] Item with item translation into language "L".
+      // [GIVEN] Description and "Description 2" in "L" are "DL1" and "DL2" respectively.
+      LibraryInventory.CreateItem(Item);
+      CreateItemTranslation(ItemTranslation,Item."No.");
+
+      // [GIVEN] Vendor "V" with language code "L".
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("Language Code",ItemTranslation."Language Code");
+      Vendor.MODIFY(TRUE);
+
+      // [GIVEN] Sales order "SO" set up for Special Order.
+      CreateSalesOrderWithPurchasingCodeSpecialOrder(SalesHeader,Item."No.");
+
+      // [WHEN] Create purchase order with vendor "V" from sales order "SO" using Special Order - Get Sales Order function.
+      CreatePurchaseOrderAndGetSpecialOrder(PurchaseHeader,SalesHeader,Vendor."No.");
+
+      // [THEN] Description and "Description 2" on the purchase line are equal to "DL1" and "DL2" respectively.
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      PurchaseLine.TESTFIELD(Description,ItemTranslation.Description);
+      PurchaseLine.TESTFIELD("Description 2",ItemTranslation."Description 2");
+    END;
+
+    LOCAL PROCEDURE Initialize@1();
+    VAR
+      LibraryERMCountryData@1059 : Codeunit 131305;
+    BEGIN
+      LibrarySetupStorage.Restore;
+      CLEAR(TrackingQuantity);
+      CLEAR(AssignLotNo);
+      CLEAR(DifferentExpirationDate);
+      CLEAR(NewExpirationDate);
+      CLEAR(GlobalDocumentType);  // Used to match sequence for Document Type field used in Reports -Copy Sales / Purchase Document.
+      LibraryVariableStorage.Clear;
+
+      // Lazy Setup.
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      CreateLocationSetup;
+      NoSeriesSetup;
+      RevaluationJournalSetup;
+      ItemJournalSetup;
+      IsInitialized := TRUE;
+      COMMIT;
+
+      LibrarySetupStorage.Save(DATABASE::"General Ledger Setup");
+      LibrarySetupStorage.Save(DATABASE::"Purchases & Payables Setup");
+      LibrarySetupStorage.Save(DATABASE::"Sales & Receivables Setup");
+    END;
+
+    LOCAL PROCEDURE AssignChargeItemPurchEqually@166(VAR PurchaseLine@1000 : Record 39;PurchaseHeader@1001 : Record 38);
+    VAR
+      PurchaseOrder@1002 : TestPage 50;
+      ItemChargeNo@1003 : Code[20];
+    BEGIN
+      ItemChargeNo := LibraryInventory.CreateItemChargeNo;
+      CreatePurchaseLine(
+        PurchaseHeader,ItemChargeNo,PurchaseLine.Type::"Charge (Item)",'',1,LibraryRandom.RandDec(100,2));  // 1 Required for Charg Item Quantity and Using Random for Direct Unit Cost.
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      PurchaseOrder.OPENEDIT;
+      PurchaseOrder.GOTORECORD(PurchaseHeader);
+      PurchaseOrder.PurchLines.FILTER.SETFILTER("No.",ItemChargeNo);
+      PurchaseOrder.PurchLines.ItemChargeAssignment.INVOKE;
+    END;
+
+    LOCAL PROCEDURE AssignChargeItemSaleEqually@90(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36);
+    VAR
+      SalesOrder@1002 : TestPage 42;
+      ItemChargeNo@1003 : Code[20];
+    BEGIN
+      ItemChargeNo := LibraryInventory.CreateItemChargeNo;
+      CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::"Charge (Item)",ItemChargeNo,1,LibraryRandom.RandDec(100,2));  // 1 Required for Charg Item Quantity and Using Random for Unit Price.
+      SalesOrder.OPENEDIT;
+      SalesOrder.GOTORECORD(SalesHeader);
+      SalesOrder.SalesLines.FILTER.SETFILTER("No.",ItemChargeNo);
+      LibraryVariableStorage.Enqueue(1);  // Enqueue ItemChargeAssignMenuHandler.
+      SalesOrder.SalesLines.Action1907184504.INVOKE;  // Item Charge & Assignment.
+    END;
+
+    LOCAL PROCEDURE AssignItemCharge@106(PurchaseHeader@1000 : Record 38);
+    VAR
+      PurchLineCharge@1001 : Record 39;
+      PurchLineItem@1002 : Record 39;
+    BEGIN
+      FindPurchLine(PurchLineCharge,PurchaseHeader,PurchLineCharge.Type::"Charge (Item)");
+      FindPurchLine(PurchLineItem,PurchaseHeader,PurchLineItem.Type::Item);
+      InsertItemChargeAssignmentPurch(PurchaseHeader,PurchLineItem,PurchLineCharge,PurchLineCharge.Quantity);
+    END;
+
+    LOCAL PROCEDURE AssignItemChargeSales@84(SalesHeader@1000 : Record 36);
+    VAR
+      SalesLineCharge@1001 : Record 37;
+      SalesLineItem@1002 : Record 37;
+      ItemChargeAssignmentSales@1003 : Record 5809;
+    BEGIN
+      FindSalesLineType(SalesLineCharge,SalesHeader,SalesLineCharge.Type::"Charge (Item)");
+      FindSalesLineType(SalesLineItem,SalesHeader,SalesLineItem.Type::Item);
+
+      WITH ItemChargeAssignmentSales DO BEGIN
+        INIT;
+        VALIDATE("Document Type",SalesHeader."Document Type");
+        VALIDATE("Document No.",SalesHeader."No.");
+        VALIDATE("Document Line No.",SalesLineCharge."Line No.");
+        VALIDATE("Item Charge No.",SalesLineCharge."No.");
+
+        VALIDATE("Applies-to Doc. Type",SalesLineItem."Document Type");
+        VALIDATE("Applies-to Doc. No.",SalesLineItem."Document No.");
+        VALIDATE("Applies-to Doc. Line No.",SalesLineItem."Line No.");
+
+        VALIDATE("Unit Cost",SalesLineCharge."Unit Cost");
+        VALIDATE("Item No.",SalesLineItem."No.");
+        VALIDATE("Qty. to Assign",SalesLineCharge.Quantity);
+        INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE AssignItemChargeToPostedReceiptLine@100(PurchaseHeader@1000 : Record 38;Quantity@1005 : Decimal;UnitCost@1002 : Decimal;PurchRcptLine@1003 : Record 121);
+    VAR
+      PurchaseLine@1001 : Record 39;
+      ItemChargeAssignmentPurch@1006 : Record 5805;
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::"Charge (Item)",'',Quantity);
+      PurchaseLine.VALIDATE("Direct Unit Cost",UnitCost);
+      PurchaseLine.MODIFY(TRUE);
+
+      LibraryInventory.CreateItemChargeAssignPurchase(
+        ItemChargeAssignmentPurch,PurchaseLine,ItemChargeAssignmentPurch."Applies-to Doc. Type"::Receipt,
+        PurchRcptLine."Document No.",PurchRcptLine."Line No.",PurchRcptLine."No.");
+    END;
+
+    LOCAL PROCEDURE AssignItemChargeToPostedShipmentLine@101(SalesHeader@1003 : Record 36;Quantity@1002 : Decimal;UnitPrice@1001 : Decimal;SalesShipmentLine@1000 : Record 111);
+    VAR
+      SalesLine@1004 : Record 37;
+      ItemChargeAssignmentSales@1005 : Record 5809;
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::"Charge (Item)",'',Quantity);
+      SalesLine.VALIDATE("Unit Price",UnitPrice);
+      SalesLine.MODIFY(TRUE);
+
+      LibraryInventory.CreateItemChargeAssignment(
+        ItemChargeAssignmentSales,SalesLine,ItemChargeAssignmentSales."Applies-to Doc. Type"::Shipment,
+        SalesShipmentLine."Document No.",SalesShipmentLine."Line No.",SalesShipmentLine."No.");
+    END;
+
+    LOCAL PROCEDURE InsertItemChargeAssignmentPurch@114(VAR PurchaseHeader@1001 : Record 38;VAR PurchaseLine@1002 : Record 39;VAR PurchaseLineCharge@1003 : Record 39;QtyToAssign@1004 : Decimal);
+    VAR
+      ItemChargeAssignmentPurch@1000 : Record 5805;
+    BEGIN
+      WITH ItemChargeAssignmentPurch DO BEGIN
+        INIT;
+        VALIDATE("Document Type",PurchaseHeader."Document Type");
+        VALIDATE("Document No.",PurchaseHeader."No.");
+        VALIDATE("Document Line No.",PurchaseLineCharge."Line No.");
+        VALIDATE("Line No.",LibraryUtility.GetNewRecNo(ItemChargeAssignmentPurch,FIELDNO("Line No.")));
+        VALIDATE("Item Charge No.",PurchaseLineCharge."No.");
+
+        VALIDATE("Applies-to Doc. Type",PurchaseLine."Document Type");
+        VALIDATE("Applies-to Doc. No.",PurchaseLine."Document No.");
+        VALIDATE("Applies-to Doc. Line No.",PurchaseLine."Line No.");
+
+        VALIDATE("Unit Cost",PurchaseLineCharge."Unit Cost");
+        VALIDATE("Item No.",PurchaseLine."No.");
+        VALIDATE("Qty. to Assign",QtyToAssign);
+        INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE FindSalesLineType@89(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36;LineType@1002 : Option);
+    BEGIN
+      WITH SalesLine DO BEGIN
+        SETRANGE("Document Type",SalesHeader."Document Type");
+        SETRANGE("Document No.",SalesHeader."No.");
+        SETRANGE(Type,LineType);
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateLineAmountsSales@92(SalesHeader@1000 : Record 36;AddAmount@1001 : Decimal) Result : Decimal;
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      WITH SalesLine DO BEGIN
+        SETRANGE("Document Type",SalesHeader."Document Type");
+        SETRANGE("Document No.",SalesHeader."No.");
+        FINDSET;
+        REPEAT
+          VALIDATE("Unit Price","Unit Price" + AddAmount);
+          MODIFY(TRUE);
+          Result += Amount;
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE FindPurchLine@112(VAR PurchaseLine@1000 : Record 39;PurchaseHeader@1001 : Record 38;LineType@1002 : Option);
+    BEGIN
+      WITH PurchaseLine DO BEGIN
+        SETRANGE("Document Type",PurchaseHeader."Document Type");
+        SETRANGE("Document No.",PurchaseHeader."No.");
+        SETRANGE(Type,LineType);
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateLineAmounts@124(PurchaseHeader@1000 : Record 38;AddAmount@1001 : Decimal) Result : Decimal;
+    VAR
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      WITH PurchaseLine DO BEGIN
+        SETRANGE("Document Type",PurchaseHeader."Document Type");
+        SETRANGE("Document No.",PurchaseHeader."No.");
+        FINDSET;
+        REPEAT
+          VALIDATE("Direct Unit Cost","Direct Unit Cost" + AddAmount);
+          MODIFY(TRUE);
+          Result += Amount;
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE CarryOutReqWkshWithRequestPage@137(VAR RequisitionLine@1005 : Record 246;ExpirationDate@1004 : Date;OrderDate@1003 : Date;PostingDate@1002 : Date;ExpectedReceiptDate@1001 : Date);
+    VAR
+      CarryOutActionMsgReq@1000 : Report 493;
+    BEGIN
+      CarryOutActionMsgReq.SetReqWkshLine(RequisitionLine);
+      CarryOutActionMsgReq.InitializeRequest(ExpirationDate,OrderDate,PostingDate,ExpectedReceiptDate,'');
+      CarryOutActionMsgReq.USEREQUESTPAGE(TRUE);
+      COMMIT;
+      CarryOutActionMsgReq.RUN;
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateLocation@4(VAR Location@1004 : Record 14;BinMandatory@1000 : Boolean;RequirePutAway@1001 : Boolean;RequirePick@1002 : Boolean;RequireReceive@1003 : Boolean;RequireShipment@1005 : Boolean);
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Location.VALIDATE("Require Put-away",RequirePutAway);
+      Location.VALIDATE("Require Receive",RequireReceive);
+      Location.VALIDATE("Require Pick",RequirePick);
+      Location.VALIDATE("Require Shipment",RequireShipment);
+      Location."Bin Mandatory" := BinMandatory;
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateLocationSetup@8();
+    VAR
+      WarehouseEmployee@1000 : Record 7301;
+    BEGIN
+      CreateAndUpdateLocation(LocationBlue,FALSE,FALSE,FALSE,FALSE,FALSE);
+      CreateAndUpdateLocation(LocationSilver,TRUE,FALSE,FALSE,FALSE,FALSE);
+      CreateAndUpdateLocation(LocationSilver2,TRUE,TRUE,TRUE,FALSE,FALSE);
+      CreateAndUpdateLocation(LocationRed,FALSE,TRUE,TRUE,FALSE,FALSE);
+      LibraryWarehouse.CreateInTransitLocation(LocationInTransit);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,LocationSilver.Code,FALSE);
+      LibraryWarehouse.CreateNumberOfBins(LocationSilver.Code,'','',LibraryRandom.RandInt(3),FALSE);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,LocationSilver2.Code,FALSE);
+      LibraryWarehouse.CreateNumberOfBins(LocationSilver.Code,'','',1,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderPostReceipt@128(VAR PurchRcptLine@1002 : Record 121);
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      ReceiptNo@1003 : Code[20];
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,'',LibraryRandom.RandInt(10));
+
+      ReceiptNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+      PurchRcptLine.SETRANGE("Document No.",ReceiptNo);
+      PurchRcptLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderPostShipment@129(VAR SalesShipmentLine@1000 : Record 111);
+    VAR
+      SalesHeader@1001 : Record 36;
+      SalesLine@1002 : Record 37;
+      ShipmentNo@1003 : Code[20];
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,'',LibraryRandom.RandInt(10));
+      ShipmentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      SalesShipmentLine.SETRANGE("Document No.",ShipmentNo);
+      SalesShipmentLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@7();
+    VAR
+      InventorySetup@1000 : Record 313;
+      PurchasesPayablesSetup@1003 : Record 312;
+      SalesReceivablesSetup@1001 : Record 311;
+      WarehouseSetup@1002 : Record 5769;
+    BEGIN
+      LibraryInventory.NoSeriesSetup(InventorySetup);
+
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Quote Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesReceivablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesReceivablesSetup.VALIDATE("Posted Shipment Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesReceivablesSetup.MODIFY(TRUE);
+
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.VALIDATE("Posted Receipt Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.VALIDATE("Posted Invoice Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.MODIFY(TRUE);
+
+      LibraryWarehouse.NoSeriesSetup(WarehouseSetup);
+    END;
+
+    LOCAL PROCEDURE ItemJournalSetup@80();
+    BEGIN
+      ItemJournalTemplate.INIT;
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalTemplate.MODIFY(TRUE);
+
+      ItemJournalBatch.INIT;
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE RevaluationJournalSetup@138();
+    BEGIN
+      RevaluationItemJournalTemplate.INIT;
+      LibraryInventory.SelectItemJournalTemplateName(RevaluationItemJournalTemplate,RevaluationItemJournalTemplate.Type::Revaluation);
+
+      RevaluationItemJournalBatch.INIT;
+      LibraryInventory.CreateItemJournalBatch(RevaluationItemJournalBatch,RevaluationItemJournalTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE AssignTrackingOnPurchaseLine@15(VAR PurchaseLine@1000 : Record 39;VAR ReservationEntry@1001 : Record 337);
+    BEGIN
+      PurchaseLine.OpenItemTrackingLines;  // Opens ItemTrackingPageHandler.
+      UpdateReservationEntry(ReservationEntry,PurchaseLine."No.",WORKDATE);
+    END;
+
+    LOCAL PROCEDURE AssignAndUpdateItemChargeOnPurchaseLine@30(VAR PurchaseHeader@1013 : Record 38);
+    VAR
+      PurchaseLine@1012 : Record 39;
+      ChargePurchaseLine@1000 : Record 39;
+      ItemChargeAssignmentPurch@1001 : Record 5805;
+    BEGIN
+      LibraryPurchase.ReopenPurchaseDocument(PurchaseHeader);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      CreatePurchaseLine(
+        PurchaseHeader,LibraryInventory.CreateItemChargeNo,PurchaseLine.Type::"Charge (Item)",
+        '',LibraryRandom.RandDec(100,2),LibraryRandom.RandDec(100,2));
+      FindPurchaseLine(ChargePurchaseLine,PurchaseHeader);
+      ChargePurchaseLine.SETRANGE(Type,PurchaseLine.Type::"Charge (Item)");
+      ChargePurchaseLine.FINDFIRST;
+      LibraryInventory.CreateItemChargeAssignPurchase(
+        ItemChargeAssignmentPurch,ChargePurchaseLine,PurchaseLine."Document Type",PurchaseLine."Document No.",
+        PurchaseLine."Line No.",PurchaseLine."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndReleasePurchaseOrder@12(VAR PurchaseHeader@1000 : Record 38;ItemNo@1001 : Code[20];Type@1007 : Option;LocationCode@1002 : Code[10];Quantity@1003 : Decimal;DirectUnitCost@1005 : Decimal);
+    VAR
+      Vendor@1006 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      CreatePurchaseLine(PurchaseHeader,ItemNo,Type,LocationCode,Quantity,DirectUnitCost);
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE CreateRequisitionLine@64(VAR RequisitionLine@1000 : Record 246);
+    VAR
+      ReqWkshTemplate@1002 : Record 244;
+      RequisitionWkshName@1001 : Record 245;
+      LibraryPlanning@1003 : Codeunit 132203;
+    BEGIN
+      ReqWkshTemplate.SETRANGE(Type,ReqWkshTemplate.Type::"Req.");
+      ReqWkshTemplate.FINDFIRST;
+      LibraryPlanning.CreateRequisitionWkshName(RequisitionWkshName,ReqWkshTemplate.Name);
+      LibraryPlanning.CreateRequisitionLine(RequisitionLine,RequisitionWkshName."Worksheet Template Name",RequisitionWkshName.Name);
+    END;
+
+    LOCAL PROCEDURE CreateLotTrackedItem@13(VAR Item@1001 : Record 27);
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+    BEGIN
+      CreateItemTrackingCode(ItemTrackingCode);  // Item Tracking with Lot TRUE.
+      CreateItemWithItemTrackingCode(Item,ItemTrackingCode.Code);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrderWithLotTracking@73() : Code[20];
+    VAR
+      Item@1002 : Record 27;
+      PurchaseHeader@1000 : Record 38;
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      CreateLotTrackedItem(Item);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Invoice,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2));
+      AssignLotNo := TRUE;
+      PurchaseLine.OpenItemTrackingLines;
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      EXIT(PurchaseHeader."Last Posting No.");
+    END;
+
+    PROCEDURE CreateAndPostSalesOrderWithLotTracking@74() : Code[20];
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+      Item@1001 : Record 27;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,FALSE,FALSE);
+      ItemTrackingCode.VALIDATE("Lot Sales Outbound Tracking",TRUE);
+      ItemTrackingCode.MODIFY(TRUE);
+      LibraryInventory.CreateTrackedItem(Item,LibraryUtility.GetGlobalNoSeriesCode,'',ItemTrackingCode.Code);
+
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandDec(100,2));
+      AssignLotNo := TRUE;
+      SalesLine.OpenItemTrackingLines;
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      EXIT(SalesHeader."Last Posting No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrderWithDropShipmAndLocation@111(VAR SalesLine@1006 : Record 37;ItemNo@1000 : Code[20];LocationCode@1003 : Code[10]);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      CreateSalesOrderWithPurchasingCodeDropShipment(SalesHeader,ItemNo);
+      FindSalesLine(SalesLine,SalesHeader);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseTransferOrder@19(VAR TransferHeader@1000 : Record 5740;VAR TransferLine@1001 : Record 5741;FromLocation@1003 : Code[10];ToLocation@1002 : Code[10];ItemNo@1004 : Code[20];Quantity@1005 : Decimal);
+    BEGIN
+      LibraryWarehouse.CreateTransferHeader(TransferHeader,FromLocation,ToLocation,LocationInTransit.Code);
+      LibraryWarehouse.CreateTransferLine(TransferHeader,TransferLine,ItemNo,Quantity);
+      LibraryWarehouse.ReleaseTransferOrder(TransferHeader);
+    END;
+
+    LOCAL PROCEDURE CreateDefaultBinContent@108(Item@1000 : Record 27;LocationCode@1004 : Code[10]);
+    VAR
+      Bin@1001 : Record 7354;
+      BinContent@1003 : Record 7302;
+    BEGIN
+      LibraryWarehouse.FindBin(Bin,LocationCode,'',1);
+      LibraryWarehouse.CreateBinContent(
+        BinContent,LocationCode,'',Bin.Code,Item."No.",'',Item."Base Unit of Measure");
+      BinContent.VALIDATE(Default,TRUE);
+      BinContent.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingCode@2(VAR ItemTrackingCode@1000 : Record 6502);
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,FALSE,TRUE);
+      ItemTrackingCode.VALIDATE("Lot Warehouse Tracking",TRUE);
+      ItemTrackingCode.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItem@6() : Code[20];
+    BEGIN
+      EXIT(LibraryInventory.CreateItemNo);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithItemTrackingCode@3(VAR Item@1000 : Record 27;ItemTrackingCode@1001 : Code[10]);
+    BEGIN
+      Item.GET(CreateItem);
+      Item.VALIDATE("Item Tracking Code",ItemTrackingCode);
+      Item.VALIDATE("Lot Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSerialNoTrackedItem@109(VAR Item@1001 : Record 27);
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,TRUE,FALSE);
+      LibraryInventory.CreateTrackedItem(Item,'',LibraryUtility.GetGlobalNoSeriesCode,ItemTrackingCode.Code);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithVendor@107(VAR Item@1000 : Record 27);
+    VAR
+      Vendor@1002 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Vendor No.",Vendor."No.");
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemTranslation@140(VAR ItemTranslation@1001 : Record 30;ItemNo@1002 : Code[20]);
+    VAR
+      Language@1000 : Record 8;
+    BEGIN
+      Language.INIT;
+      Language.VALIDATE(Code,LibraryUtility.GenerateRandomCode(Language.FIELDNO(Code),DATABASE::Language));
+      Language.INSERT(TRUE);
+
+      ItemTranslation.INIT;
+      ItemTranslation.VALIDATE("Item No.",ItemNo);
+      ItemTranslation.VALIDATE("Language Code",Language.Code);
+      ItemTranslation.VALIDATE(Description,LibraryUtility.GenerateRandomText(MAXSTRLEN(ItemTranslation.Description)));
+      ItemTranslation.VALIDATE("Description 2",LibraryUtility.GenerateRandomText(MAXSTRLEN(ItemTranslation.Description)));
+      ItemTranslation.INSERT(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeaderWithSellToCustomer@79(VAR PurchHeader@1000 : Record 38);
+    VAR
+      Customer@1001 : Record 18;
+      Vendor@1002 : Record 23;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchHeader,PurchHeader."Document Type",Vendor."No.");
+      PurchHeader.VALIDATE("Sell-to Customer No.",Customer."No.");
+      PurchHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@14(VAR PurchaseHeader@1000 : Record 38;ItemNo@1003 : Code[20];Type@1006 : Integer;LocationCode@1002 : Code[10];Quantity@1001 : Decimal;DirectUnitCost@1005 : Decimal);
+    VAR
+      PurchaseLine@1004 : Record 39;
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,Type,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.VALIDATE("Direct Unit Cost",DirectUnitCost);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndTrackPurchaseLine@116(VAR PurchaseHeader@1001 : Record 38;VAR PurchaseLine@1000 : Record 39;ItemNo@1006 : Code[20];TrackingOption@1002 : Integer);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,LibraryRandom.RandIntInRange(11,20));
+      PurchaseLine.VALIDATE("Qty. to Invoice",LibraryRandom.RandInt(10)); // less than Quantity
+      PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(100,2));
+      PurchaseLine.MODIFY(TRUE);
+
+      LibraryVariableStorage.Enqueue(TrackingOption);
+      LibraryVariableStorage.Enqueue(PurchaseLine."Quantity (Base)");
+      LibraryVariableStorage.Enqueue(PurchaseLine."Quantity (Base)" - PurchaseLine."Qty. to Invoice (Base)");
+      PurchaseLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLineForItemCharge@122(VAR PurchaseLineCharge@1001 : Record 39;VAR PurchaseHeader@1002 : Record 38);
+    VAR
+      ItemCharge@1000 : Record 5800;
+    BEGIN
+      LibraryInventory.CreateItemCharge(ItemCharge);
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLineCharge,PurchaseHeader,PurchaseLineCharge.Type::"Charge (Item)",ItemCharge."No.",1);
+      PurchaseLineCharge.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(100,2));
+      PurchaseLineCharge.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderWithMultiLine@83(VAR PurchaseHeader@1004 : Record 38);
+    VAR
+      Vendor@1000 : Record 23;
+      Item@1001 : Record 27;
+      PurchaseLine@1003 : Record 39;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      CreatePurchaseLine(
+        PurchaseHeader,LibraryInventory.CreateItem(Item),PurchaseLine.Type::Item,'',LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandDec(10,2));
+      CreatePurchaseLine(PurchaseHeader,Item."No.",PurchaseLine.Type::Item,'',PurchaseLine.Quantity,PurchaseLine."Direct Unit Cost");
+      CreatePurchaseLine(PurchaseHeader,Item."No.",PurchaseLine.Type::Item,'',PurchaseLine.Quantity,PurchaseLine."Direct Unit Cost");
+    END;
+
+    LOCAL PROCEDURE CreateReqLineForSalesOrderWithDropShipm@110(SalesLine@1009 : Record 37;VAR RequisitionLine@1008 : Record 246);
+    VAR
+      RetrieveDimensionsFrom@1007 : 'Item,Sales Line';
+    BEGIN
+      CreateRequisitionLine(RequisitionLine);
+      LibraryPlanning.GetSalesOrders(SalesLine,RequisitionLine,RetrieveDimensionsFrom::"Sales Line");
+      WITH RequisitionLine DO BEGIN
+        SETRANGE(Type,Type::Item);
+        SETRANGE("No.",SalesLine."No.");
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateReqLineWithDropShipmentAndLocation@113(VAR ReqLine@1008 : Record 246;LocationCode@1001 : Code[10]);
+    VAR
+      Item@1000 : Record 27;
+      SalesLine@1002 : Record 37;
+    BEGIN
+      CreateItemWithVendor(Item);
+      CreateDefaultBinContent(Item,LocationCode);
+      CreateAndReleaseSalesOrderWithDropShipmAndLocation(SalesLine,Item."No.",LocationCode);
+      CreateReqLineForSalesOrderWithDropShipm(SalesLine,ReqLine);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrder@44(VAR SalesHeader@1004 : Record 36;ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      SalesLine@1003 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesDocumentWithItem(
+        SalesHeader,SalesLine,SalesHeader."Document Type"::Order,'',ItemNo,Quantity,'',0D);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CopySalesDocument@11(VAR SalesHeader@1000 : Record 36;DocumentType@1003 : Option;FromDocType@1002 : Option;DocumentNo@1004 : Code[20]);
+    BEGIN
+      SalesHeader.INIT;
+      SalesHeader.VALIDATE("Document Type",DocumentType);
+      SalesHeader.INSERT(TRUE);  // Creating empty Document for Copy function.
+      LibrarySales.CopySalesDocument(SalesHeader,FromDocType,DocumentNo,TRUE,FALSE);
+      SalesHeader.GET(SalesHeader."Document Type",SalesHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@153(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36;Type@1002 : Option;ItemNo@1003 : Code[20];Quantity@1005 : Decimal;UnitPrice@1004 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,Type,ItemNo,Quantity);
+      SalesLine.VALIDATE("Unit Price",UnitPrice);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CopyPurchaseDocument@47(VAR PurchaseHeader@1000 : Record 38;DocumentType@1003 : Option;FromDocType@1002 : Option;DocumentNo@1004 : Code[20]);
+    BEGIN
+      PurchaseHeader.INIT;
+      PurchaseHeader.VALIDATE("Document Type",DocumentType);
+      PurchaseHeader.INSERT(TRUE);  // Creating empty Document for Copy function.
+      LibraryPurchase.CopyPurchaseDocument(PurchaseHeader,FromDocType,DocumentNo,TRUE,FALSE);
+      PurchaseHeader.GET(PurchaseHeader."Document Type",PurchaseHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateVendorWithShipmentMethodCode@62(VAR Vendor@1002 : Record 23;ShipmentMethodCode@1001 : Code[10]);
+    VAR
+      ShipmentMethod@1000 : Record 10;
+    BEGIN
+      ShipmentMethod.SETFILTER(Code,'<>%1',ShipmentMethodCode);
+      ShipmentMethod.FINDFIRST;
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("Shipment Method Code",ShipmentMethod.Code);
+      Vendor.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLine@25(ItemJournalLine@1000 : Record 83;EntryType@1005 : Option;ItemNo@1004 : Code[20];Quantity@1003 : Decimal;UnitAmount@1006 : Decimal) : Code[20];
+    VAR
+      ItemJournalBatch@1002 : Record 233;
+    BEGIN
+      SelectItemJournalBatch(ItemJournalBatch);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,EntryType,ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Unit Amount",UnitAmount);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      EXIT(ItemJournalLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE FindSalesLine@31(VAR SalesLine@1001 : Record 37;SalesHeader@1000 : Record 36);
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindPurchaseLine@46(VAR PurchaseLine@1001 : Record 39;PurchaseHeader@1000 : Record 38);
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseHeader."Document Type");
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindPurchaseLineBySpecialOrderSalesLine@149(VAR PurchaseLine@1001 : Record 39;SalesLine@1000 : Record 37);
+    BEGIN
+      PurchaseLine.SETRANGE(Type,PurchaseLine.Type::Item);
+      PurchaseLine.SETRANGE("No.",SalesLine."No.");
+      PurchaseLine.SETRANGE("Special Order Sales No.",SalesLine."Document No.");
+      PurchaseLine.SETRANGE("Special Order Sales Line No.",SalesLine."Line No.");
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindPurchaseLineBySalesSpecialOrder@157(VAR PurchaseLine@1001 : Record 39;SalesHeader@1000 : Record 36);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      FindSalesLine(SalesLine,SalesHeader);
+      FindPurchaseLineBySpecialOrderSalesLine(PurchaseLine,SalesLine);
+    END;
+
+    LOCAL PROCEDURE MakeOrderFromPurchaseQuote@86(VAR PurchaseHeader@1000 : Record 38);
+    VAR
+      PurchQuoteToOrder@1001 : Codeunit 96;
+    BEGIN
+      CLEAR(PurchQuoteToOrder);
+      PurchQuoteToOrder.RUN(PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE RestoreInventorySetup@24(InventorySetup@1000 : Record 313);
+    VAR
+      InventorySetup2@1001 : Record 313;
+    BEGIN
+      InventorySetup2.GET;
+      InventorySetup2.VALIDATE("Automatic Cost Posting",InventorySetup."Automatic Cost Posting");
+      InventorySetup2.VALIDATE("Automatic Cost Adjustment",InventorySetup."Automatic Cost Adjustment");
+      InventorySetup2.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectPurchaseHeader@48(VAR PurchaseHeader@1000 : Record 38;VendorNo@1001 : Code[20]);
+    BEGIN
+      PurchaseHeader.SETRANGE("Document Type",PurchaseHeader."Document Type"::Order);
+      PurchaseHeader.SETRANGE("Buy-from Vendor No.",VendorNo);
+      PurchaseHeader.SETRANGE(Status,PurchaseHeader.Status::Open);
+      PurchaseHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SelectSalesHeader@49(VAR SalesHeader@1000 : Record 36;CustomerNo@1001 : Code[20]);
+    BEGIN
+      SalesHeader.SETRANGE("Document Type",SalesHeader."Document Type"::Order);
+      SalesHeader.SETRANGE("Sell-to Customer No.",CustomerNo);
+      SalesHeader.SETRANGE(Status,SalesHeader.Status::Open);
+      SalesHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SelectItemJournalBatch@75(VAR ItemJournalBatch@1002 : Record 233);
+    VAR
+      ItemJournalTemplate@1000 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE CountPurchaseOrdersQuanityForItem@151(ItemNo@1000 : Code[20]) Result : Integer;
+    VAR
+      PurchaseLine@1001 : Record 39;
+      DocNo@1002 : Code[20];
+    BEGIN
+      WITH PurchaseLine DO BEGIN
+        SETRANGE("Document Type","Document Type"::Order);
+        SETRANGE(Type,Type::Item);
+        SETRANGE("No.",ItemNo);
+        IF FINDSET THEN
+          REPEAT
+            IF "Document No." <> DocNo THEN BEGIN
+              DocNo := "Document No.";
+              Result += 1;
+            END;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateAutomaticCostSetup@20(VAR InventorySetup@1001 : Record 313);
+    VAR
+      InventorySetup2@1000 : Record 313;
+    BEGIN
+      InventorySetup.GET;
+      InventorySetup2.GET;
+      InventorySetup2.VALIDATE("Automatic Cost Posting",FALSE);
+      InventorySetup2.VALIDATE("Automatic Cost Adjustment",InventorySetup2."Automatic Cost Adjustment"::Never);
+      InventorySetup2.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateReservationEntry@5(VAR ReservationEntry@1004 : Record 337;ItemNo@1001 : Code[20];ExpirationDate@1002 : Date);
+    VAR
+      NoOfDays@1003 : Integer;
+    BEGIN
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.FINDSET;
+      NoOfDays := 0;
+      REPEAT
+        ReservationEntry.VALIDATE("Expiration Date",CALCDATE('<+' + FORMAT(NoOfDays) + 'D>',ExpirationDate));
+        ReservationEntry.MODIFY(TRUE);
+        IF DifferentExpirationDate THEN
+          NoOfDays += 1;
+      UNTIL ReservationEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateBinCodeOnTransferLine@26(VAR TransferLine@1001 : Record 5741;BinCode@1000 : Code[20]);
+    BEGIN
+      TransferLine.VALIDATE("Transfer-To Bin Code",BinCode);
+      TransferLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateStockoutWarning@43(NewStockoutWarning@1001 : Boolean) StockoutWarning : Boolean;
+    VAR
+      SalesReceivablesSetup@1000 : Record 311;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      StockoutWarning := SalesReceivablesSetup."Stockout Warning";
+      SalesReceivablesSetup.VALIDATE("Stockout Warning",NewStockoutWarning);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithPurchasingCodeDropShipment@35(VAR SalesHeader@1000 : Record 36;ItemNo@1002 : Code[20]);
+    VAR
+      Purchasing@1005 : Record 5721;
+    BEGIN
+      CreatePurchasingCodeWithDropShipment(Purchasing);
+      CreateSalesOrderWithPurchasingCode(SalesHeader,ItemNo,Purchasing.Code);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithPurchasingCodeSpecialOrder@91(VAR SalesHeader@1000 : Record 36;ItemNo@1002 : Code[20]);
+    VAR
+      Purchasing@1005 : Record 5721;
+    BEGIN
+      CreatePurchasingCodeWithSpecialOrder(Purchasing);
+      CreateSalesOrderWithPurchasingCode(SalesHeader,ItemNo,Purchasing.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchasingCodeWithDropShipment@201(VAR Purchasing@1000 : Record 5721);
+    BEGIN
+      LibraryPurchase.CreatePurchasingCode(Purchasing);
+      Purchasing.VALIDATE("Drop Shipment",TRUE);
+      Purchasing.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchasingCodeWithSpecialOrder@34(VAR Purchasing@1000 : Record 5721);
+    BEGIN
+      LibraryPurchase.CreatePurchasingCode(Purchasing);
+      Purchasing.VALIDATE("Special Order",TRUE);
+      Purchasing.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@42(VAR SalesHeader@1000 : Record 36;ItemNo@1003 : Code[20];Quantity@1005 : Decimal;UnitPrice@1002 : Decimal);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,SelectCustomer);
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity,UnitPrice);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderOnLocation@115(VAR SalesHeader@1003 : Record 36;CustomerNo@1006 : Code[20];ItemNo@1002 : Code[20];Quantity@1001 : Decimal;UnitPrice@1000 : Decimal;LocationCode@1004 : Code[10]);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CustomerNo);
+      SalesHeader.VALIDATE("Location Code",LocationCode);
+      SalesHeader.MODIFY(TRUE);
+
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity,UnitPrice);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithDiffLocationsInHeaderAndInLine@135(VAR SalesHeader@1003 : Record 36;CustomerNo@1006 : Code[20];ItemNo@1002 : Code[20];Quantity@1001 : Decimal;UnitPrice@1000 : Decimal;HeaderLocationCode@1004 : Code[10];LineLocationCode@1007 : Code[10]);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CustomerNo);
+      SalesHeader.VALIDATE("Location Code",HeaderLocationCode);
+      SalesHeader.MODIFY(TRUE);
+
+      CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity,UnitPrice);
+      SalesLine.VALIDATE("Location Code",LineLocationCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateSellToCustomerOnPurchaseHeader@40(VAR PurchaseHeader@1000 : Record 38;SellToCustomerNo@1001 : Code[20]);
+    BEGIN
+      PurchaseHeader.VALIDATE("Sell-to Customer No.",SellToCustomerNo);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderAndGetDropShipment@81(SalesHeader@1002 : Record 36);
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      // Create Purchase Order. Update Sell to Customer on Purchase Header and Get Sales Order for Drop Shipment For Sales Order.
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      UpdateSellToCustomerOnPurchaseHeader(PurchaseHeader,SalesHeader."Sell-to Customer No.");
+      LibraryVariableStorage.Enqueue(SalesHeader."No.");  // Enqueue variable used in SalesListPageHandler.
+      LibraryPurchase.GetDropShipment(PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderAndGetSpecialOrder@39(VAR PurchHeader@1000 : Record 38;SalesHeader@1002 : Record 36;VendorNo@1001 : Code[20]);
+    VAR
+      DistIntegration@1005 : Codeunit 5702;
+    BEGIN
+      // Create Purchase Order. Update Sell to Customer on Purchase Header and Get Sales Order for Special Order For Sales Order.
+      LibraryPurchase.CreatePurchHeader(PurchHeader,PurchHeader."Document Type"::Order,VendorNo);
+      UpdateSellToCustomerOnPurchaseHeader(PurchHeader,SalesHeader."Sell-to Customer No.");
+      LibraryVariableStorage.Enqueue(SalesHeader."No.");  // Enqueue variable used in SalesListPageHandler.
+      DistIntegration.GetSpecialOrders(PurchHeader);
+    END;
+
+    LOCAL PROCEDURE SelectPurchaseOrderLine@50(VAR PurchaseLine@1000 : Record 39;No@1003 : Code[20]);
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE(Type,PurchaseLine.Type::Item);
+      PurchaseLine.SETRANGE("No.",No);
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithPurchasingCode@65(VAR SalesHeader@1000 : Record 36;ItemNo@1002 : Code[20];PurchasingCode@1003 : Code[10]);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      CreateSalesOrder(SalesHeader,ItemNo,LibraryRandom.RandDec(10,2),0);
+      FindSalesLine(SalesLine,SalesHeader);
+      SalesLine.VALIDATE("Purchasing Code",PurchasingCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithPurchasingCodeOnLocation@147(VAR SalesHeader@1000 : Record 36;CustomerNo@1001 : Code[20];ItemNo@1002 : Code[20];LocationCode@1003 : Code[10];PurchasingCode@1004 : Code[10]);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      CreateSalesOrderOnLocation(SalesHeader,CustomerNo,ItemNo,LibraryRandom.RandDec(10,2),0,LocationCode);
+      FindSalesLine(SalesLine,SalesHeader);
+      SalesLine.VALIDATE("Purchasing Code",PurchasingCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithPurchasingCodeWithDiffLocationsInHeaderAndInLine@144(VAR SalesHeader@1000 : Record 36;CustomerNo@1001 : Code[20];ItemNo@1002 : Code[20];HeaderLocationCode@1003 : Code[10];LineLocationCode@1006 : Code[10];PurchasingCode@1004 : Code[10]);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      CreateSalesOrderWithDiffLocationsInHeaderAndInLine(
+        SalesHeader,CustomerNo,ItemNo,LibraryRandom.RandDec(10,2),0,HeaderLocationCode,LineLocationCode);
+      FindSalesLine(SalesLine,SalesHeader);
+      SalesLine.VALIDATE("Purchasing Code",PurchasingCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectCustomer@32() : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+      ShipmentMethod@1001 : Record 10;
+    BEGIN
+      ShipmentMethod.FINDFIRST;
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Location Code",LocationBlue.Code);
+      Customer.VALIDATE("Shipment Method Code",ShipmentMethod.Code);
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateFRQItem@45(VAR Item@1001 : Record 27);
+    BEGIN
+      // Create Fixed Reorder Quantity Item.
+      Item.GET(CreateItem);
+      Item.VALIDATE("Reordering Policy",Item."Reordering Policy"::"Fixed Reorder Qty.");
+      Item.VALIDATE("Safety Stock Quantity",LibraryRandom.RandDec(10,2));
+      Item.VALIDATE("Reorder Quantity",LibraryRandom.RandDec(10,2));
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateRevaluationJournalForItem@33(ItemNo@1000 : Code[20]);
+    VAR
+      ItemJournalLine@1001 : Record 83;
+      Item@1003 : Record 27;
+      CalculatePer@1005 : 'Item Ledger Entry,Item';
+      CalcBase@1004 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      Item.SETRANGE("No.",ItemNo);
+      ItemJournalLine.VALIDATE("Journal Template Name",RevaluationItemJournalBatch."Journal Template Name");
+      ItemJournalLine.VALIDATE("Journal Batch Name",RevaluationItemJournalBatch.Name);
+      ItemJournalLine.VALIDATE("Value Entry Type",ItemJournalLine."Value Entry Type"::Revaluation);
+      LibraryCosting.CalculateInventoryValue(
+        ItemJournalLine,Item,WORKDATE,LibraryUtility.GetGlobalNoSeriesCode,CalculatePer::Item,TRUE,FALSE,FALSE,CalcBase::" ",FALSE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderWithLocation@145(VAR PurchaseHeader@1003 : Record 38;ItemNo@1002 : Code[20];LocationCode@1001 : Code[10];Quantity@1005 : Decimal);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      LibraryPurchase.CreatePurchaseDocumentWithItem(
+        PurchaseHeader,PurchaseLine,PurchaseHeader."Document Type"::Order,'',ItemNo,Quantity,LocationCode,0D);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseWithLocation@55(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10]);
+    VAR
+      PurchaseHeader@1002 : Record 38;
+    BEGIN
+      CreatePurchaseOrderWithLocation(PurchaseHeader,ItemNo,LocationCode,LibraryRandom.RandDec(10,2));
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",PurchaseHeader."No.");
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectItemJournalLineForLocation@57(VAR ItemJournalLine@1000 : Record 83;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10]);
+    BEGIN
+      ItemJournalLine.SETRANGE("Item No.",ItemNo);
+      ItemJournalLine.SETRANGE("Location Code",LocationCode);
+      ItemJournalLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdateItemJournallineUnitCostRevalued@58(ItemNo@1001 : Code[20];LocationCode@1002 : Code[10]);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      SelectItemJournalLineForLocation(ItemJournalLine,ItemNo,LocationCode);
+      ItemJournalLine.VALIDATE("Unit Cost (Revalued)",LibraryRandom.RandDec(10,2));
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateReportSelection@127(ReportID@1001 : Integer);
+    VAR
+      ReportSelections@1000 : Record 77;
+    BEGIN
+      WITH ReportSelections DO BEGIN
+        SETRANGE(Usage,6);  // Purchase Order. Number is used instead of an option value to avoid codeunit localization
+        DELETEALL;
+
+        VALIDATE(Usage,6);
+        VALIDATE(Sequence,LibraryUtility.GenerateGUID);
+        VALIDATE("Report ID",ReportID);
+        INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalLineWithLocation@78(LocationCode@1001 : Code[10];ItemNo@1000 : Code[20]);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,ItemJournalLine."Entry Type"::Purchase,ItemNo,
+        LibraryRandom.RandDec(10,2));
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE PostItemJournalLine@59(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10]);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      SelectItemJournalLineForLocation(ItemJournalLine,ItemNo,LocationCode);
+      CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post Batch",ItemJournalLine);
+    END;
+
+    LOCAL PROCEDURE UpdateVendorOnRequisitionLine@66(VAR RequisitionLine@1002 : Record 246;SalesOrderNo@1000 : Code[20];VendorNo@1001 : Code[20]);
+    BEGIN
+      WITH RequisitionLine DO BEGIN
+        SETRANGE("Sales Order No.",SalesOrderNo);
+        FINDFIRST;
+        VALIDATE("Vendor No.",VendorNo);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyGLEntry@207(DocumentType@1004 : Option;DocumentNo@1001 : Code[20];Amount@1002 : Decimal;GenPostingType@1003 : Option);
+    VAR
+      GLEntry@1000 : Record 17;
+      ActualAmount@1032 : Decimal;
+    BEGIN
+      GLEntry.SETRANGE("Document Type",DocumentType);
+      GLEntry.SETRANGE("Document No.",DocumentNo);
+      GLEntry.SETRANGE("Gen. Posting Type",GenPostingType);
+      GLEntry.FINDSET;
+      REPEAT
+        ActualAmount += GLEntry.Amount;
+      UNTIL GLEntry.NEXT = 0;
+      Assert.AreNearlyEqual(Amount,ActualAmount,LibraryERM.GetAmountRoundingPrecision,AmountErr);
+    END;
+
+    LOCAL PROCEDURE VerifySalesLine@41(SalesHeader@1002 : Record 36;ItemNo@1000 : Code[20];Quantity@1001 : Decimal);
+    VAR
+      SalesLine@1014 : Record 37;
+    BEGIN
+      FindSalesLine(SalesLine,SalesHeader);
+      SalesLine.TESTFIELD(Type,SalesLine.Type::Item);
+      SalesLine.TESTFIELD("No.",ItemNo);
+      SalesLine.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseLine@17(PurchaseHeader@1002 : Record 38;ItemNo@1000 : Code[20];Quantity@1001 : Decimal);
+    VAR
+      PurchaseLine@1006 : Record 39;
+    BEGIN
+      FindPurchaseLine(PurchaseLine,PurchaseHeader);
+      PurchaseLine.TESTFIELD(Type,PurchaseLine.Type::Item);
+      PurchaseLine.TESTFIELD("No.",ItemNo);
+      PurchaseLine.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgEntryCostAmount@125(ItemNo@1001 : Code[20];ExpectedAmount@1002 : Decimal);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      WITH ItemLedgerEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        FINDFIRST;
+        CALCFIELDS("Cost Amount (Actual)");
+        TESTFIELD("Cost Amount (Actual)",ExpectedAmount);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgEntrySalesAmount@126(ItemNo@1001 : Code[20];ExpectedAmount@1000 : Decimal);
+    VAR
+      ItemLedgerEntry@1002 : Record 32;
+    BEGIN
+      WITH ItemLedgerEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        FINDFIRST;
+        CALCFIELDS("Sales Amount (Actual)");
+        TESTFIELD("Sales Amount (Actual)",ExpectedAmount);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntry@63(ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Transfer Receipt");
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.TESTFIELD(Quantity,Quantity);
+      ItemLedgerEntry.TESTFIELD("Invoiced Quantity",Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntry@285(ItemNo@1004 : Code[20];InvoicedQuantity@1003 : Decimal);
+    VAR
+      ValueEntry@1007 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.SETRANGE("Document Type",ValueEntry."Document Type"::"Purchase Invoice");
+      ValueEntry.FINDFIRST;
+      ValueEntry.TESTFIELD("Invoiced Quantity",InvoicedQuantity);
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntriesWithItemCharge@119(PurchaseLineCharge@1004 : Record 39;ItemNo@1002 : Code[20];ItemChargeShare@1003 : Decimal);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+      ValueEntry@1001 : Record 5802;
+      GeneralLedgerSetup@1006 : Record 98;
+      PostedQty@1005 : Decimal;
+    BEGIN
+      GeneralLedgerSetup.GET;
+
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.CALCSUMS(Quantity);
+      PostedQty := ItemLedgerEntry.Quantity;
+
+      IF ItemLedgerEntry.FINDSET THEN BEGIN
+        ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntry."Entry No.");
+        ValueEntry.SETRANGE("Item Charge No.",PurchaseLineCharge."No.");
+        ValueEntry.FINDFIRST;
+        Assert.AreEqual(2,ValueEntry.COUNT,MultipleValueEntriesWithChargeMsg);
+        Assert.AreNearlyEqual(
+          PurchaseLineCharge."Direct Unit Cost" * ItemChargeShare * ItemLedgerEntry.Quantity / PostedQty,
+          ValueEntry."Cost Amount (Actual)",GeneralLedgerSetup."Amount Rounding Precision" * ItemLedgerEntry.COUNT,
+          PostedChargeCostAmountMsg);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyCostAmountActualSum@139(ItemNo@1004 : Code[20];ExpectedAmount@1003 : Decimal);
+    VAR
+      ValueEntry@1007 : Record 5802;
+    BEGIN
+      WITH ValueEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Document Type","Document Type"::"Purchase Invoice");
+        CALCSUMS("Cost Amount (Actual)");
+        TESTFIELD("Cost Amount (Actual)",ExpectedAmount);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifySalesAmountActualSum@87(ItemNo@1004 : Code[20];ExpectedAmount@1003 : Decimal);
+    VAR
+      ValueEntry@1007 : Record 5802;
+    BEGIN
+      WITH ValueEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Document Type","Document Type"::"Sales Invoice");
+        CALCSUMS("Sales Amount (Actual)");
+        TESTFIELD("Sales Amount (Actual)",ExpectedAmount);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyTransferReceiptLine@10(TransferOrderNo@1001 : Code[20];ItemNo@1002 : Code[20];Quantity@1005 : Decimal;TransferToCode@1004 : Code[10];TransferFromCode@1003 : Code[10];TransferToBinCode@1006 : Code[20]);
+    VAR
+      TransferReceiptLine@1000 : Record 5747;
+    BEGIN
+      TransferReceiptLine.SETRANGE("Transfer Order No.",TransferOrderNo);
+      TransferReceiptLine.FINDFIRST;
+      TransferReceiptLine.TESTFIELD("Item No.",ItemNo);
+      TransferReceiptLine.TESTFIELD(Quantity,Quantity);
+      TransferReceiptLine.TESTFIELD("Transfer-to Code",TransferToCode);
+      TransferReceiptLine.TESTFIELD("Transfer-from Code",TransferFromCode);
+      TransferReceiptLine.TESTFIELD("Transfer-To Bin Code",TransferToBinCode);
+      TransferReceiptLine.ShowItemTrackingLines;  // Verify the Posted Item Tracking Lines in PostedItemTrackingLinesHandler.
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntryForAdjustCost@29(DocumentNo@1000 : Code[20];EntryType@1002 : Option;ItemNo@1001 : Code[20];InvoicedQuantity@1004 : Decimal;CostAmountActual@1005 : Decimal);
+    VAR
+      ItemLedgerEntry@1003 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      ItemLedgerEntry.SETRANGE("Entry Type",EntryType);
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)");
+      ItemLedgerEntry.TESTFIELD("Invoiced Quantity",InvoicedQuantity);
+      Assert.AreNearlyEqual(
+        CostAmountActual,ItemLedgerEntry."Cost Amount (Actual)",LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(ValidationErr,ItemLedgerEntry.FIELDCAPTION("Cost Amount (Actual)"),CostAmountActual));
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseShippingDetails@18(ItemNo@1003 : Code[20];ShipToCode@1004 : Code[10];ShipToAddress@1002 : Text[50]);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      SelectPurchaseOrderLine(PurchaseLine,ItemNo);
+      PurchaseHeader.GET(PurchaseLine."Document Type"::Order,PurchaseLine."Document No.");
+      PurchaseHeader.TESTFIELD("Ship-to Address",ShipToAddress);
+      PurchaseHeader.TESTFIELD("Ship-to Code",ShipToCode);
+    END;
+
+    LOCAL PROCEDURE VerifyReservationEntryIsEmpty@99(SourceType@1001 : Integer;SourceSubtype@1002 : Option;SourceID@1003 : Code[20]);
+    VAR
+      DummyReservationEntry@1000 : Record 337;
+    BEGIN
+      DummyReservationEntry.SETRANGE("Source Type",SourceType);
+      DummyReservationEntry.SETRANGE("Source Subtype",SourceSubtype);
+      DummyReservationEntry.SETRANGE("Source ID",SourceID);
+      Assert.RecordIsEmpty(DummyReservationEntry);
+    END;
+
+    LOCAL PROCEDURE VerifyShipmentMethodCode@121(VendorNo@1001 : Code[20];ShipmentMethodCode@1000 : Code[10]);
+    VAR
+      PurchaseHeader@1002 : Record 38;
+    BEGIN
+      PurchaseHeader.SETRANGE("Buy-from Vendor No.",VendorNo);
+      PurchaseHeader.FINDFIRST;
+      PurchaseHeader.TESTFIELD("Shipment Method Code",ShipmentMethodCode);
+    END;
+
+    LOCAL PROCEDURE VerifyItemJournalLineBatchAndTemplateForItem@72(ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];JournalTemplateName@1003 : Code[10];JournalBatchName@1004 : Code[10]);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      // Verify Item is still present on same worksheet.
+      ItemJournalLine.SETRANGE("Item No.",ItemNo);
+      ItemJournalLine.SETRANGE("Location Code",LocationCode);
+      ItemJournalLine.FINDFIRST;
+      ItemJournalLine.TESTFIELD("Journal Template Name",JournalTemplateName);
+      ItemJournalLine.TESTFIELD("Journal Batch Name",JournalBatchName);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingPageHandler@21(VAR ItemTrackingLines@1000 : TestPage 6510);
+    BEGIN
+      IF AssignLotNo THEN BEGIN
+        ItemTrackingLines."Assign Lot No.".INVOKE;  // Assign Lot No.
+        ItemTrackingLines."Quantity (Base)".SETVALUE(ItemTrackingLines."Quantity (Base)".ASDECIMAL / 2);  // Partial Quantity.
+        ItemTrackingLines."Assign Lot No.".INVOKE;  // Assign Lot No for the new Line.
+      END ELSE
+        ItemTrackingLines."Select Entries".INVOKE;  // Open Item Tracking Summary Page for Selected Line.
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingPageHandler2@131(VAR ItemTrackingLines@1000 : TestPage 6510);
+    BEGIN
+      IF AssignLotNo THEN
+        ItemTrackingLines."Assign Lot No.".INVOKE
+      ELSE
+        ItemTrackingLines."Select Entries".INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingAssignSerialNoOrLotPageHandler@123(VAR ItemTrackingLines@1000 : TestPage 6510);
+    VAR
+      QtyToBeHandled@1001 : Integer;
+      QtyNotToBeInvoiced@1003 : Integer;
+    BEGIN
+      TrackingMethod := LibraryVariableStorage.DequeueInteger;
+      CASE TrackingMethod OF
+        TrackingMethod::"Serial No.":
+          BEGIN
+            ItemTrackingLines."Assign Serial No.".INVOKE;
+            QtyNotToBeInvoiced := LibraryVariableStorage.DequeueInteger;
+            ItemTrackingLines.FIRST;
+            WHILE QtyNotToBeInvoiced > 0 DO BEGIN
+              ItemTrackingLines."Qty. to Invoice (Base)".SETVALUE(0);
+              ItemTrackingLines.NEXT;
+              QtyNotToBeInvoiced -= 1;
+            END;
+          END;
+        TrackingMethod::Lot:
+          BEGIN
+            ItemTrackingLines."Assign Lot No.".INVOKE;
+            QtyToBeHandled := LibraryVariableStorage.DequeueInteger;
+            QtyNotToBeInvoiced := LibraryVariableStorage.DequeueInteger;
+            ItemTrackingLines.FIRST;
+            ItemTrackingLines."Qty. to Invoice (Base)".SETVALUE(QtyToBeHandled - QtyNotToBeInvoiced);
+          END;
+      END;
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE EnterQtyToCreatePageHandler@130(VAR EnterQuantitytoCreate@1000 : TestPage 6513);
+    BEGIN
+      EnterQuantitytoCreate.QtyToCreate.SETVALUE(LibraryVariableStorage.DequeueInteger);
+      EnterQuantitytoCreate.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingSummaryPageHandler@23(VAR ItemTrackingSummary@1000 : TestPage 6500);
+    BEGIN
+      ItemTrackingSummary.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE PostedItemTrackingLinesPageHandler@28(VAR PostedItemTrackingLines@1000 : TestPage 6511);
+    BEGIN
+      PostedItemTrackingLines.FIRST;
+      REPEAT
+        PostedItemTrackingLines.Quantity.ASSERTEQUALS(TrackingQuantity / 2);  // Verify partial Quantity.
+        PostedItemTrackingLines."Expiration Date".ASSERTEQUALS(WORKDATE);
+        IF DifferentExpirationDate THEN BEGIN
+          PostedItemTrackingLines.NEXT;
+          PostedItemTrackingLines."Expiration Date".ASSERTEQUALS(NewExpirationDate);  // Different Expiration Date on second Item Tracking Line.
+        END;
+      UNTIL PostedItemTrackingLines.LAST;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SalesListPageHandler@88(VAR SalesList@1000 : TestPage 45);
+    VAR
+      DocumentNo@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(DocumentNo);
+      SalesList.FILTER.SETFILTER("No.",DocumentNo);  // Apply Filter of Document No on Sales List Page.
+      SalesList.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemChargeAssignementPurchPageHandler@95(VAR ItemChargeAssignmentPurch@1000 : TestPage 5805);
+    BEGIN
+      ItemChargeAssignmentPurch.SuggestItemChargeAssignment.INVOKE;
+      ItemChargeAssignmentPurch.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemChargeAssignementSalePageHandler@177(VAR ItemChargeAssignmentSales@1000 : TestPage 5814);
+    BEGIN
+      ItemChargeAssignmentSales.SuggestItemChargeAssignment.INVOKE;
+      ItemChargeAssignmentSales.OK.INVOKE;
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE ItemChargeAssignMenuHandler@98(Options@1000 : Text[1024];VAR Choice@1001 : Integer;Instruction@1002 : Text[1024]);
+    BEGIN
+      Choice := 1;  // Using 1 for Assign Equally Option.
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE GetSalesOrdersReportHandler@71(VAR GetSalesOrders@1000 : TestRequestPage 698);
+    VAR
+      DocumentNo@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(DocumentNo);
+      GetSalesOrders."Sales Line".SETFILTER("Document No.",DocumentNo);
+      GetSalesOrders.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemVendorCatalogModalHandler@94(VAR ItemVendorCatalog@1000 : TestPage 114);
+    BEGIN
+      ItemVendorCatalog.NEW;
+      ItemVendorCatalog."Vendor No.".SETVALUE(LibraryPurchase.CreateVendorNo);
+      ItemVendorCatalog.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CreateInvtPutawayPickMvmtReportHandler@117(VAR CreateInvtPutawayPickMvmt@1000 : TestRequestPage 7323);
+    BEGIN
+      CreateInvtPutawayPickMvmt.CreateInventorytPutAway.SETVALUE(TRUE);
+      CreateInvtPutawayPickMvmt.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@141(Message@1000 : Text);
+    BEGIN
+    END;
+
+    [ReportHandler]
+    PROCEDURE StandardPurchaseOrderReportHandler@118(VAR StandardPurchaseOrder@1000 : Report 405);
+    BEGIN
+      LibraryVariableStorage.Enqueue(TRUE);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CarryOutActionMsgReqHandler@146(VAR CarryOutActionMsgReq@1000 : TestRequestPage 493);
+    BEGIN
+      CarryOutActionMsgReq.PrintOrders.SETVALUE(TRUE);
+      CarryOutActionMsgReq.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [SCM]
+      Tests for various Orders:
+       1. Verify Transfer Order can be posted successfully with the Lot Tracked Item with the same Expiration Date.
+       2. Verify Transfer Order can be posted successfully with the Lot Tracked Item with the different Expiration Date.
+       3. Verify Sales Quote copied from a Sales Order do not carry the Last Shipping No.
+       4. Verify new Sales order changing from a Sales Quote do not carry the Last Shipping No.
+       5. Verify Purchase Quote copied from a Purchase Order do not carry the Last Receiving No.
+       6. Verify new Purchase Order changing from a Purchase Quote do not carry the Last Receiving No.
+       7. Verify the Item Ledger Entry for the Posted Transfer Receipt with Transfer To Location with Bin.
+       8. Verify The Item Ledger Entry after Adjust Cost Item Entries for Purchase.
+       9. Verify the  Value Entry for the Item Charge Assignment on Purchase Order.
+       10.Verify Purchase Order have same Shipping details as associated Sales Order created for Drop Shipment.
+       11.Verify Purchase Order have same Shipping details as associated Sales Order created for Special Order.
+       12.Verify Purchase Order have same Shipment Method Code as associated Sales Order created for Special Order.
+       13.Verify that after posting of first Item , second Item is still present on same Revaluation Journal Worksheet.
+       14.Verify that after posting of first Item , second Item is still present on same Item Journal Worksheet.
+       15.Verify the GL Entry after post Purchase Order with Assign Item Charge Equally on multiple Purchase Lines.
+       16.Verify the GL Entry after post Sales Order with Assign Item Charge Equally on multiple Sales Lines.
+       17.Verify Shipment Method Code on Purchase Order with Shipment method code on Vendor when created through Requisition WorkSheet.
+
+          Covers Test Cases for WI - 285506
+        ------------------------------------------------------------------
+        Test Function Name                                         TFS ID
+        ------------------------------------------------------------------
+        TransferOrderWithSameExpirationDateAndLotNo                202763
+        TransferOrderWithDifferentExpirationDateAndLotNo           202765
+
+        Covers Test Cases for WI - 285507
+        -----------------------------------------------------------------------
+        Test Function Name                                              TFS ID
+        -----------------------------------------------------------------------
+        CopySalesOrderToQuoteWithBlankLastShippingNo                    202820
+        CopySalesOrderToQuoteWithMakeOrderAndBlankLastShippingNo        202820
+        CopyPurchaseOrderToQuoteWithBlankLastReceivingNo                202821
+        CopyPurchaseOrderToQuoteWithMakeOrderAndBlankLastReceivingNo    202821
+
+        Covers Test Cases for WI - 290383
+        -----------------------------------------------------------------------
+        Test Function Name                                              TFS ID
+        -----------------------------------------------------------------------
+        ItemLedgerEntryForTransferReceiptWithBin                        120978
+        ItemLedgerEntryWithAdjustCostItemEntry                          120978
+        ValueEntryForPurchaseOrderItemChargeAssignment                  120977
+
+        Covers Test Cases
+        -----------------------------------------------------------------------
+        Test Function Name                                              TFS ID
+        -----------------------------------------------------------------------
+        PurchaseShippingDetailsWithDropShipmentForSalesOrder            251841
+        PurchaseShippingDetailsWithSpecialOrderForSalesOrder            251841
+
+        Covers Test Cases
+        -----------------------------------------------------------------------
+        Test Function Name                                              TFS ID
+        -----------------------------------------------------------------------
+        PurchaseShipmentMethodForSpecialSalesOrder                      255853
+
+        Covers Test cases:
+        ------------------------------------------------------------------------------------------------
+        Test Function                                                                             TFS ID
+        ------------------------------------------------------------------------------------------------
+        RevaluationJournalAfterPostForDiffLocationsFRQItem                                        270573
+        ItemJournalAfterPostForDiffLocationsFRQItem                                               270573
+
+        Covers Test Cases for WI - 318379
+        ------------------------------------------------------------------------------------------------
+        Test Function Name                                                                        TFS ID
+        ------------------------------------------------------------------------------------------------
+        PurchaseOrderWithItemChargeAssignment, SalesOrderWithItemChargeAssignment                 262247
+
+        BUG ID 317753
+        ------------------------------------------------------------------------------------------------
+        Test Function                                                                             TFS ID
+        ------------------------------------------------------------------------------------------------
+        ShipmentMethodCodeAsOnVendorThroughRequisitionWorkSheet                                   255986
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,1104 @@
+OBJECT Codeunit 137620 SCM Costing Bugs I
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1006 : Codeunit 130000;
+      LibraryCosting@1015 : Codeunit 132200;
+      LibraryERM@1013 : Codeunit 131300;
+      LibraryInventory@1017 : Codeunit 132201;
+      LibraryItemTracking@1002 : Codeunit 130502;
+      LibraryManufacturing@1018 : Codeunit 132202;
+      LibraryPurchase@1019 : Codeunit 130512;
+      LibrarySales@1016 : Codeunit 130509;
+      LibraryPatterns@1000 : Codeunit 132212;
+      LibraryRandom@1005 : Codeunit 130440;
+      MSG_RUN_ADJ_COST@1008 : TextConst 'ENU=Some unadjusted value entries will not be covered with the new setting. You must run the Adjust Cost - Item Entries batch job once to adjust these.';
+      ERR_REM_QTY_TOO_LOW@1009 : TextConst 'ENU=You cannot ship more than the';
+      CNF_CHANGE_ADJUST_COST_PERIOD@1010 : TextConst 'ENU=Do you really want to change the Average Cost Period?';
+      CNF_ADJUST_ALL_ENTRIES@1011 : TextConst 'ENU=If you change the Average Cost Period, the program must adjust all item entries.';
+      MSG_AVERAGE_COST_PERIOD_CHANGED@1012 : TextConst 'ENU="Average Cost Period has been changed to "';
+      LibrarySetupStorage@1021 : Codeunit 131009;
+      LibraryUtility@1001 : Codeunit 131000;
+      LibraryWarehouse@1014 : Codeunit 132204;
+      isInitialized@1007 : Boolean;
+      OriginalQtyMsg@1004 : TextConst 'ENU=For one or more return document lines, you chose to return the original quantity';
+      TXT_WrongTextInHandler@1003 : TextConst 'ENU=Expected message did not appear.';
+
+    [Test]
+    PROCEDURE VSTF202207@2();
+    VAR
+      ItemTrackingCode@1001 : Record 6502;
+      Item@1000 : Record 27;
+      ItemJournalBatch@1003 : Record 233;
+      ItemJournalLine1@1002 : Record 83;
+      ItemJournalLine2@1014 : Record 83;
+      ReservEntry1@1004 : Record 337;
+      ReservEntry@1008 : Record 337;
+      SalesHeader@1006 : Record 36;
+      SalesLine@1007 : Record 37;
+      ItemLedgerEntry@1011 : Record 32;
+      i@1005 : Integer;
+      SalesUnitCost@1009 : Decimal;
+      SalesILENo@1010 : Integer;
+      SalesReturnAmount@1012 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Make item
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,FALSE,TRUE);
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::Average,LibraryRandom.RandInt(100),0,0,ItemTrackingCode.Code);
+
+      // 1st line
+      LibraryInventory.CreateItemJournalBatchByType(ItemJournalBatch,ItemJournalBatch."Template Type"::Item);
+      LibraryPatterns.MAKEItemJournalLine(
+        ItemJournalLine1,ItemJournalBatch,Item,'','',WORKDATE,ItemJournalLine1."Entry Type"::"Positive Adjmt.",1,
+        LibraryRandom.RandInt(100));
+      LibraryItemTracking.CreateItemJournalLineItemTracking(
+        ReservEntry1,ItemJournalLine1,'',
+        LibraryUtility.GenerateRandomCode(ReservEntry.FIELDNO("Lot No."),DATABASE::"Reservation Entry"),ItemJournalLine1.Quantity);
+      // 2nd line - qty 1 for each lot
+      LibraryPatterns.MAKEItemJournalLine(
+        ItemJournalLine2,ItemJournalBatch,Item,'','',WORKDATE,ItemJournalLine2."Entry Type"::"Positive Adjmt.",
+        LibraryRandom.RandInt(10),LibraryRandom.RandInt(100));
+      WHILE i < ItemJournalLine2.Quantity DO BEGIN
+        i += 1;
+        LibraryItemTracking.CreateItemJournalLineItemTracking(
+          ReservEntry,ItemJournalLine2,'',
+          LibraryUtility.GenerateRandomCode(ReservEntry.FIELDNO("Lot No."),DATABASE::"Reservation Entry"),1);
+      END;
+      LibraryInventory.PostItemJournalBatch(ItemJournalBatch);
+
+      // Adjust cost
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // Make sales order
+      SalesUnitCost := LibraryRandom.RandInt(100);
+      LibraryPatterns.MAKESalesOrder(SalesHeader,SalesLine,Item,'','',ItemJournalLine1.Quantity,WORKDATE,SalesUnitCost);
+      LibraryItemTracking.CreateSalesOrderItemTracking(ReservEntry,SalesLine,'',ReservEntry1."Lot No.",ItemJournalLine1.Quantity);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE); // Ship
+      SalesHeader.GET(SalesHeader."Document Type",SalesHeader."No.");
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,TRUE); // Invoice
+      ItemLedgerEntry.SETRANGE("Item No.",Item."No.");
+      ItemLedgerEntry.FINDLAST; // above sales ILE
+      SalesILENo := ItemLedgerEntry."Entry No.";
+
+      // Adjust cost
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // Create sales return order
+      LibraryPatterns.MAKESalesReturnOrder(
+        SalesHeader,SalesLine,Item,'','',ItemJournalLine1.Quantity,WORKDATE,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandDec(100,2));
+      LibraryItemTracking.CreateSalesOrderItemTracking(ReservEntry,SalesLine,'',ReservEntry1."Lot No.",ItemJournalLine1.Quantity);
+      ReservEntry.VALIDATE("Appl.-from Item Entry",SalesILENo);
+      ReservEntry.MODIFY;
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE); // Receive
+      SalesHeader.GET(SalesHeader."Document Type",SalesHeader."No.");
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,TRUE); // Invoice
+
+      // Adjust cost
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // Verify
+      LibraryCosting.CheckAdjustment(Item);
+      ItemLedgerEntry.FINDLAST; // above sales return ILE
+      ItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)");
+      SalesReturnAmount := ItemLedgerEntry."Cost Amount (Actual)";
+      ItemLedgerEntry.GET(SalesILENo);
+      ItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)");
+      SalesUnitCost := ItemLedgerEntry."Cost Amount (Actual)";
+      Assert.AreEqual(-1 * SalesUnitCost * ItemJournalLine1.Quantity,SalesReturnAmount,'');
+    END;
+
+    [Test]
+    PROCEDURE VSTF265183@5();
+    VAR
+      ItemA@1000 : Record 27;
+      ItemB@1001 : Record 27;
+      ItemC@1002 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+      ItemJournalBatch@1005 : Record 233;
+      ItemJournalLine@1007 : Record 83;
+      ProductionOrder1@1008 : Record 5405;
+      ProductionOrder2@1009 : Record 5405;
+      ProductionOrder3@1011 : Record 5405;
+      ProductionOrder4@1012 : Record 5405;
+      ProdOrderLine@1013 : Record 5406;
+      Day1@1006 : Date;
+      Day2@1010 : Date;
+    BEGIN
+      Initialize;
+
+      // Make item
+      LibraryPatterns.MAKEItem(ItemA,ItemA."Costing Method"::Average,LibraryRandom.RandInt(100),0,0,'');
+      LibraryPatterns.MAKEItem(ItemB,ItemB."Costing Method"::Average,LibraryRandom.RandInt(100),0,0,'');
+      LibraryPatterns.MAKEItem(ItemC,ItemC."Costing Method"::Average,LibraryRandom.RandInt(100),0,0,'');
+
+      // Make ProdBOMs
+      LibraryPatterns.MAKEProductionBOM(ProductionBOMHeader,ItemA,ItemB,1,'');
+      ItemB.GET(ItemB."No.");
+      LibraryPatterns.MAKEProductionBOM(ProductionBOMHeader,ItemB,ItemC,1,'');
+
+      Day1 := WORKDATE + 10;
+      Day2 := Day1 + 33;
+
+      // Post item journal
+      LibraryPatterns.POSTItemJournalLine(
+        ItemJournalBatch."Template Type"::Item,ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemB,'','','',200,Day1,0);
+
+      // Create prod. orders
+      LibraryPatterns.MAKEProductionOrder(ProductionOrder1,ProductionOrder1.Status::Released,ItemA,'','',120,Day2 + 1);
+      LibraryPatterns.MAKEProductionOrder(ProductionOrder2,ProductionOrder2.Status::Released,ItemB,'','',120,Day2 + 1);
+
+      // Post item journal
+      LibraryPatterns.POSTItemJournalLine(
+        ItemJournalBatch."Template Type"::Item,ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemC,'','','',200,Day2,0);
+
+      // Production postings
+      GetFirstProdOrderLine(ProdOrderLine,ProductionOrder2);
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ItemC,'','',ProductionOrder2.Quantity,Day2 + 1,ItemC."Unit Cost");
+      LibraryPatterns.POSTOutput(ProdOrderLine,ProductionOrder2.Quantity,Day2 + 1,ItemB."Unit Cost");
+      GetFirstProdOrderLine(ProdOrderLine,ProductionOrder1);
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ItemB,'','',ProductionOrder1.Quantity,Day2 + 1,ItemB."Unit Cost");
+      LibraryPatterns.POSTOutput(ProdOrderLine,ProductionOrder1.Quantity,Day2 + 1,ItemA."Unit Cost");
+
+      // EXERCISE
+      // Create and post prod. orders
+      LibraryPatterns.MAKEProductionOrder(ProductionOrder3,ProductionOrder3.Status::Released,ItemA,'','',15,Day2 + 1);
+      LibraryPatterns.MAKEProductionOrder(ProductionOrder4,ProductionOrder4.Status::Released,ItemB,'','',15,Day2 + 1);
+      GetFirstProdOrderLine(ProdOrderLine,ProductionOrder3);
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ItemB,'','',ProductionOrder3.Quantity,Day2 + 1,ItemB."Unit Cost");
+      LibraryPatterns.POSTOutput(ProdOrderLine,ProductionOrder3.Quantity,Day2 + 1,ItemA."Unit Cost");
+      GetFirstProdOrderLine(ProdOrderLine,ProductionOrder4);
+      LibraryPatterns.POSTConsumption(ProdOrderLine,ItemC,'','',ProductionOrder4.Quantity,Day2 + 1,ItemC."Unit Cost");
+      LibraryPatterns.POSTOutput(ProdOrderLine,ProductionOrder4.Quantity,Day2 + 1,ItemB."Unit Cost");
+
+      // finish prod orders
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder1,ProductionOrder1.Status::Finished,Day2 + 1,TRUE);
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder2,ProductionOrder2.Status::Finished,Day2 + 1,TRUE);
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder3,ProductionOrder3.Status::Finished,Day2 + 1,TRUE);
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder4,ProductionOrder4.Status::Finished,Day2 + 1,TRUE);
+
+      // adjust cost
+      LibraryCosting.AdjustCostItemEntries(ItemB."No.",'');
+      LibraryCosting.AdjustCostItemEntries(ItemA."No.",'');
+      LibraryCosting.AdjustCostItemEntries(ItemC."No.",'');
+
+      // Verify
+      LibraryCosting.CheckAdjustment(ItemA);
+      LibraryCosting.CheckAdjustment(ItemB);
+      LibraryCosting.CheckAdjustment(ItemC);
+    END;
+
+    [Test]
+    PROCEDURE VSTF234233Average@11();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      VSTF234233(Item."Costing Method"::Average);
+    END;
+
+    [Test]
+    PROCEDURE VSTF234233FIFO@12();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      VSTF234233(Item."Costing Method"::FIFO);
+    END;
+
+    [Test]
+    PROCEDURE VSTF234233LIFO@13();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      VSTF234233(Item."Costing Method"::LIFO);
+    END;
+
+    [Test]
+    PROCEDURE VSTF234233Standard@14();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      VSTF234233(Item."Costing Method"::Standard);
+    END;
+
+    LOCAL PROCEDURE VSTF234233@3(CostingMethod@1010 : Option);
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      ProductionOrder@1002 : Record 5405;
+      ProdOrderLine@1003 : Record 5406;
+      SalesHeader@1004 : Record 36;
+      ValueEntry@1009 : Record 5802;
+      Day1@1008 : Date;
+      PurchaseQty@1005 : Decimal;
+      OutputQty@1006 : Decimal;
+      SalesQty@1007 : Decimal;
+      VerifyVariance@1011 : Boolean;
+    BEGIN
+      Initialize;
+
+      // Make item
+      LibraryPatterns.MAKEItem(Item,CostingMethod,0,0,0,'');
+
+      Day1 := WORKDATE;
+      // Post purchase order
+      PurchaseQty := LibraryRandom.RandInt(100);
+      LibraryPatterns.POSTPurchaseOrder(PurchaseHeader,Item,'','',PurchaseQty,Day1,0,TRUE,TRUE);
+
+      // Post production
+      OutputQty := LibraryRandom.RandIntInRange(1,PurchaseQty);
+      LibraryPatterns.MAKEProductionOrder(ProductionOrder,ProductionOrder.Status::Released,Item,'','',OutputQty,Day1 - 60);
+      GetFirstProdOrderLine(ProdOrderLine,ProductionOrder);
+      LibraryPatterns.POSTConsumption(ProdOrderLine,Item,'','',OutputQty,Day1 - 30,Item."Unit Cost");
+      LibraryPatterns.POSTOutput(ProdOrderLine,OutputQty,Day1 - 60,Item."Unit Cost");
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,Day1 - 30,TRUE);
+
+      // Post sales
+      SalesQty := LibraryRandom.RandIntInRange(1,PurchaseQty + OutputQty);
+      LibraryPatterns.POSTSalesOrder(SalesHeader,Item,'','',SalesQty,Day1 - 90,Item."Unit Cost",TRUE,TRUE);
+
+      // Adjust cost
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // Verify
+      ValueEntry.SETRANGE("Item No.",Item."No.");
+      ValueEntry.FINDSET;
+      REPEAT
+        ValueEntry.TESTFIELD("Valuation Date",Day1);
+      UNTIL ValueEntry.NEXT = 0;
+      LibraryCosting.CheckAdjustment(Item);
+      VerifyVariance := CostingMethod = Item."Costing Method"::Standard;
+      LibraryCosting.CheckProductionOrderCost(ProductionOrder,VerifyVariance);
+    END;
+
+    [Test]
+    [HandlerFunctions(HNDL_MSG_RUN_ADJ_COST)]
+    PROCEDURE VSTF272991@16();
+    VAR
+      InventorySetup@1001 : Record 313;
+      ProducedItem@1000 : Record 27;
+      ChildItem@1002 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      ProdOrderLine@1004 : Record 5406;
+      ItemJournalBatch@1005 : Record 233;
+      ItemJournalLine@1006 : Record 83;
+      ItemLedgerEntry@1007 : Record 32;
+      ValueEntry@1008 : Record 5802;
+    BEGIN
+      Initialize;
+
+      // Inventory setup
+      LibraryPatterns.SETInventorySetup(
+        InventorySetup."Automatic Cost Adjustment"::Always,InventorySetup."Average Cost Calc. Type"::Item,
+        InventorySetup."Average Cost Period"::Day);
+
+      // Make item and put child into inventory
+      LibraryPatterns.MAKEItem(ChildItem,ChildItem."Costing Method"::Standard,LibraryRandom.RandInt(10),0,0,'');
+      LibraryPatterns.MAKEItem(ProducedItem,ProducedItem."Costing Method"::Standard,LibraryRandom.RandInt(10),0,0,'');
+      LibraryPatterns.POSTItemJournalLine(
+        ItemJournalBatch."Template Type"::Item,ItemJournalLine."Entry Type"::"Positive Adjmt.",ChildItem,'','','',1000,WORKDATE,
+        ChildItem."Standard Cost");
+
+      // Make production order and post output and then consumption
+      LibraryPatterns.MAKEProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProducedItem,'','',LibraryRandom.RandInt(10),WORKDATE);
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+      LibraryPatterns.POSTOutput(ProdOrderLine,ProdOrderLine.Quantity,WORKDATE,ProdOrderLine."Unit Cost");
+      ItemLedgerEntry.FINDLAST; // output line
+      LibraryPatterns.POSTConsumption(
+        ProdOrderLine,ChildItem,'','',LibraryRandom.RandInt(10),WORKDATE,ChildItem."Standard Cost");
+
+      // Finish prod order
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,WORKDATE,TRUE);
+
+      // Verify
+      ValueEntry.SETRANGE("Item Ledger Entry No.",ItemLedgerEntry."Entry No.");
+      ValueEntry.SETRANGE("Entry Type",ValueEntry."Entry Type"::Variance);
+      Assert.IsFalse(ValueEntry.ISEMPTY,''); // should have a variance type of value entry as cost should be auto-adjusted.
+      LibraryCosting.CheckAdjustment(ChildItem);
+      LibraryCosting.CheckAdjustment(ProducedItem);
+      LibraryCosting.CheckProductionOrderCost(ProductionOrder,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(HNDL_MSG_RUN_ADJ_COST)]
+    PROCEDURE VSTF206911@4();
+    VAR
+      InventorySetup@1001 : Record 313;
+      Item@1000 : Record 27;
+      PurchaseHeader@1002 : Record 38;
+      ItemLedgerEntry@1009 : Record 32;
+      SalesHeader@1006 : Record 36;
+      SalesLine@1007 : Record 37;
+      Purch1Cost@1003 : Decimal;
+      Purch2Cost@1004 : Decimal;
+      PurchQty@1005 : Decimal;
+      SalesQty@1008 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Inventory setup
+      LibraryPatterns.SETInventorySetup(
+        InventorySetup."Automatic Cost Adjustment"::Always,InventorySetup."Average Cost Calc. Type"::Item,
+        InventorySetup."Average Cost Period"::Day);
+
+      // Make item
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::Average,LibraryRandom.RandInt(10),0,0,'');
+
+      // Post purchases
+      PurchQty := LibraryRandom.RandInt(10);
+      Purch1Cost := LibraryRandom.RandInt(10);
+      LibraryPatterns.POSTPurchaseOrder(PurchaseHeader,Item,'','',PurchQty,WORKDATE,Purch1Cost,TRUE,TRUE);
+      ItemLedgerEntry.FINDLAST; // store the first purchase ILE
+      Purch2Cost := LibraryRandom.RandIntInRange(Purch1Cost,20); // higher than cost of 1st purchase
+      LibraryPatterns.POSTPurchaseOrder(PurchaseHeader,Item,'','',PurchQty,WORKDATE,Purch2Cost,TRUE,TRUE);
+
+      // Make sales
+      SalesQty := LibraryRandom.RandIntInRange(PurchQty,2 * PurchQty);
+      LibraryPatterns.MAKESalesOrder(SalesHeader,SalesLine,Item,'','',SalesQty,WORKDATE,LibraryRandom.RandInt(10));
+
+      // Verify
+      ASSERTERROR SalesLine.VALIDATE("Appl.-to Item Entry",ItemLedgerEntry."Entry No.");
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ERR_REM_QTY_TOO_LOW) > 0,'');
+      CLEARLASTERROR;
+    END;
+
+    [Test]
+    [HandlerFunctions(PostedPurchaseDocumentLinePageHandler,OriginalQtyMessageHandler)]
+    PROCEDURE VSTF328958_SunshineScenario@7();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1010 : Record 39;
+      SalesHeader@1006 : Record 36;
+      SalesLine@1007 : Record 37;
+      Vendor@1012 : Record 23;
+      VendorNo@1011 : Code[20];
+      Purch1Cost@1003 : Decimal;
+      PurchQty@1005 : Decimal;
+      SalesQty@1008 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Make item
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::Standard,LibraryRandom.RandInt(10),0,0,'');
+
+      // Post purchase
+      PurchQty := LibraryRandom.RandInt(10);
+      Purch1Cost := LibraryRandom.RandInt(10);
+      LibraryPatterns.MAKEPurchaseOrder(PurchaseHeader,PurchaseLine,Item,'','',PurchQty,WORKDATE,Purch1Cost);
+      VendorNo := PurchaseHeader."Buy-from Vendor No.";
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Post sale
+      SalesQty := LibraryRandom.RandIntInRange(PurchQty,PurchQty);
+      LibraryPatterns.MAKESalesOrder(SalesHeader,SalesLine,Item,'','',SalesQty,WORKDATE,LibraryRandom.RandInt(10));
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // Make purchase return
+      Vendor.GET(VendorNo);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Return Order",Vendor."No.");
+      PurchaseHeader.GetPstdDocLinesToRevere;
+
+      // Verify post purchase return
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(PostedPurchaseDocumentLinePageHandler,OriginalQtyMessageHandler)]
+    PROCEDURE VSTF328958_DifferentUOMsScenario@17();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1010 : Record 39;
+      SalesHeader@1006 : Record 36;
+      SalesLine@1007 : Record 37;
+      Vendor@1012 : Record 23;
+      NonBaseItemUOM1@1001 : Record 5404;
+      NonBaseItemUOM2@1004 : Record 5404;
+      VendorNo@1011 : Code[20];
+      Purch1Cost@1003 : Decimal;
+      PurchQty@1005 : Decimal;
+      SalesQty@1008 : Decimal;
+      QtyPerBaseUOM@1009 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Make item with additional UOMs
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::Average,LibraryRandom.RandInt(10),0,0,'');
+      QtyPerBaseUOM := LibraryRandom.RandDec(10,2);
+      LibraryPatterns.MAKEAdditionalItemUOM(NonBaseItemUOM1,Item."No.",QtyPerBaseUOM);
+      LibraryPatterns.MAKEAdditionalItemUOM(NonBaseItemUOM2,Item."No.",QtyPerBaseUOM);
+
+      // Post purchase using alternative UOM 1
+      PurchQty := LibraryRandom.RandInt(10);
+      Purch1Cost := LibraryRandom.RandInt(10);
+      LibraryPatterns.MAKEPurchaseOrder(PurchaseHeader,PurchaseLine,Item,'','',PurchQty,WORKDATE,Purch1Cost);
+      PurchaseLine.VALIDATE("Unit of Measure Code",NonBaseItemUOM1.Code);
+      PurchaseLine.MODIFY(TRUE);
+      VendorNo := PurchaseHeader."Buy-from Vendor No.";
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+
+      // Post sale using alternative UOM 2
+      SalesQty := LibraryRandom.RandIntInRange(PurchQty,PurchQty);
+      LibraryPatterns.MAKESalesOrder(SalesHeader,SalesLine,Item,'','',SalesQty,WORKDATE,LibraryRandom.RandInt(10));
+      SalesLine.VALIDATE("Unit of Measure Code",NonBaseItemUOM2.Code);
+      SalesLine.MODIFY(TRUE);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // Make purchase return
+      Vendor.GET(VendorNo);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::"Return Order",Vendor."No.");
+      PurchaseHeader.GetPstdDocLinesToRevere;
+
+      // Verify post purchase return
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(HNDL_CNF_CHANGE_ADJUST_COST_PERIOD,VSTF239230_HndlMsg)]
+    PROCEDURE VSTF239230@6();
+    VAR
+      InventorySetup@1002 : Record 313;
+      Item@1001 : Record 27;
+      RoutingHeader@1003 : Record 99000763;
+      ProductionOrder@1004 : Record 5405;
+      ProdOrderLine@1005 : Record 5406;
+      ItemJournalBatch@1006 : Record 233;
+      ItemJournalLine@1007 : Record 83;
+      Day1@1000 : Date;
+      Day2@1008 : Date;
+      OldAutoCostAdjustment@1010 : Option;
+      OldAverageCostPeriod@1009 : Option;
+      InventoryQty@1011 : Decimal;
+      QtyPosItemPosting@1015 : Decimal;
+      QtyProdOrder@1012 : Decimal;
+      QtyOutput@1013 : Decimal;
+      QtyNegItemPosting@1014 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Inventory Setup
+      InventorySetup.GET;
+      OldAutoCostAdjustment := InventorySetup."Automatic Cost Adjustment";
+      OldAverageCostPeriod := InventorySetup."Average Cost Period";
+      LibraryPatterns.SETInventorySetup(
+        InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type"::Item,
+        InventorySetup."Average Cost Period"::Month);
+
+      // Make item
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::Average,LibraryRandom.RandInt(10),0,0,'');
+      LibraryPatterns.MAKERouting(RoutingHeader,Item,'',LibraryRandom.RandInt(10));
+
+      Day1 := WORKDATE - 90;
+      // Post item journal
+      InventoryQty := LibraryRandom.RandDecInDecimalRange(2,10,2);
+      QtyPosItemPosting := LibraryRandom.RandDecInDecimalRange(1,InventoryQty - 1,2);
+      LibraryPatterns.POSTPositiveAdjustment(Item,'','','',QtyPosItemPosting,Day1,LibraryRandom.RandInt(10));
+      LibraryPatterns.POSTPositiveAdjustment(Item,'','','',
+        InventoryQty - QtyPosItemPosting,Day1 + 2,LibraryRandom.RandInt(10));
+
+      Day2 := Day1 + 60;
+      // Create prod order
+      LibraryPatterns.MAKEProductionOrder(ProductionOrder,ProductionOrder.Status::Released,Item,'','',InventoryQty,WORKDATE);
+      GetFirstProdOrderLine(ProdOrderLine,ProductionOrder);
+      QtyProdOrder := LibraryRandom.RandDecInDecimalRange(1,InventoryQty - 1,2);
+      LibraryPatterns.POSTConsumption(ProdOrderLine,Item,'','',QtyProdOrder,Day2,Item."Unit Cost"); // consume after 2 months
+      LibraryPatterns.POSTConsumption(ProdOrderLine,Item,'','',InventoryQty - QtyProdOrder,Day2,Item."Unit Cost"); // consume after 2 months
+
+      // Explode routing and post
+      QtyOutput := LibraryRandom.RandDecInDecimalRange(1,InventoryQty - 1,2);
+      OutputJournalExplodeRouting(ItemJournalBatch,ProdOrderLine,Day2);
+      GetFirstItemJournalLineInBatch(ItemJournalLine,ItemJournalBatch);
+      ItemJournalLine.VALIDATE("Run Time",LibraryRandom.RandInt(10));
+      ItemJournalLine.VALIDATE("Output Quantity",QtyOutput);
+      ItemJournalLine.MODIFY;
+      LibraryInventory.PostItemJournalBatch(ItemJournalBatch);
+
+      OutputJournalExplodeRouting(ItemJournalBatch,ProdOrderLine,Day2);
+      GetFirstItemJournalLineInBatch(ItemJournalLine,ItemJournalBatch);
+      ItemJournalLine.VALIDATE("Run Time",LibraryRandom.RandInt(10));
+      ItemJournalLine.VALIDATE("Output Quantity",InventoryQty - QtyOutput);
+      ItemJournalLine.MODIFY;
+      LibraryInventory.PostItemJournalBatch(ItemJournalBatch);
+
+      // Finish prod order
+      LibraryManufacturing.ChangeProdOrderStatus(ProductionOrder,ProductionOrder.Status::Finished,Day2,TRUE);
+
+      // Make negative adjustments
+      QtyNegItemPosting := LibraryRandom.RandDecInDecimalRange(1,InventoryQty - 1,2);
+      LibraryPatterns.POSTNegativeAdjustment(Item,'','','',QtyNegItemPosting,Day2,Item."Unit Cost");
+      LibraryPatterns.POSTNegativeAdjustment(Item,'','','',InventoryQty - QtyNegItemPosting,Day2,Item."Unit Cost");
+
+      // Adjust cost
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // Verify
+      LibraryCosting.CheckAdjustment(Item);
+      LibraryCosting.CheckProductionOrderCost(ProductionOrder,FALSE);
+
+      // Tear down
+      LibraryPatterns.SETInventorySetup(OldAutoCostAdjustment,InventorySetup."Average Cost Calc. Type"::Item,OldAverageCostPeriod);
+    END;
+
+    [Test]
+    PROCEDURE VSTF295274@10();
+    VAR
+      InventorySetup@1013 : Record 313;
+      Item@1000 : Record 27;
+      ItemJournalLine@1002 : Record 83;
+      ItemJournalBatch@1006 : Record 233;
+      ItemLedgerEntry@1001 : Record 32;
+      Day1@1003 : Date;
+      Qty@1007 : Decimal;
+      PurchaseQty1@1011 : Decimal;
+      UnitCost@1008 : Decimal;
+      Loc@1009 : Code[10];
+      Variant@1010 : Code[10];
+      ii@1012 : Integer;
+    BEGIN
+      Initialize;
+
+      InventorySetup.GET;
+      LibraryPatterns.SETInventorySetup(
+        InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type"::Item,
+        InventorySetup."Average Cost Period");
+      // Make item
+      LibraryInventory.CreateItem(Item);
+      Item."Costing Method" := Item."Costing Method"::Average;
+      Item.MODIFY;
+
+      Day1 := WORKDATE;
+      Qty := 2388;
+      UnitCost := 63.3152;
+      PurchaseQty1 := Qty / 4;
+      Loc := '';
+      Variant := '';
+
+      // Post item journals
+      LibraryPatterns.POSTItemJournalLine(
+        ItemJournalBatch."Template Type"::Item,ItemJournalLine."Entry Type"::"Positive Adjmt.",Item,'','','',Qty,Day1,UnitCost);
+
+      ItemLedgerEntry.INIT;
+      ItemLedgerEntry.SETRANGE("Item No.",Item."No.",Item."No.");
+      ItemLedgerEntry.FINDFIRST;
+
+      LibraryInventory.CreateItemJournalBatchByType(ItemJournalBatch,ItemJournalBatch."Template Type"::Item);
+      FOR ii := 1 TO 4 DO BEGIN
+        LibraryPatterns.MAKEItemJournalLine(
+          ItemJournalLine,ItemJournalBatch,Item,Loc,Variant,Day1,ItemJournalLine."Entry Type"::"Negative Adjmt.",PurchaseQty1,
+          UnitCost);
+        ItemJournalLine.VALIDATE("Applies-to Entry",ItemLedgerEntry."Entry No.");
+        ItemJournalLine.MODIFY(TRUE);
+      END;
+      LibraryInventory.PostItemJournalBatch(ItemJournalBatch);
+
+      // Adjust cost
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // Verify
+      LibraryCosting.CheckAdjustment(Item);
+    END;
+
+    [Test]
+    PROCEDURE VSTF330557_WorkCenterToMachineCenter@18();
+    VAR
+      MachineCenter@1002 : Record 99000758;
+      Item@1001 : Record 27;
+      RoutingHeader@1003 : Record 99000763;
+      ItemJournalLine@1007 : Record 83;
+    BEGIN
+      Initialize;
+
+      // Setup the item and its routing.
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::Average,LibraryRandom.RandInt(10),0,0,'');
+      LibraryPatterns.MAKERouting(RoutingHeader,Item,'',LibraryRandom.RandDec(100,2));
+
+      // Explode routing, modify and post
+      MachineCenter.NEXT(RANDOM(MachineCenter.COUNT));
+      MachineCenter.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(100,2));
+      MachineCenter.MODIFY;
+      PostModifiedOutputJournal(ItemJournalLine,Item,ItemJournalLine.Type::"Machine Center",MachineCenter."No.");
+
+      // Verify
+      VerifyOutputValueEntry(ItemJournalLine,MachineCenter."Unit Cost");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VSTF330557_MachineCenterToWorkCenter@19(Specific@1004 : Boolean);
+    VAR
+      CapacityUnitOfMeasure@1000 : Record 99000780;
+      WorkCenterGroup@1010 : Record 99000756;
+      MachineCenter@1002 : Record 99000758;
+      WorkCenter@1008 : Record 99000754;
+      Item@1001 : Record 27;
+      RoutingHeader@1003 : Record 99000763;
+      RoutingLine@1009 : Record 99000764;
+      ItemJournalLine@1007 : Record 83;
+    BEGIN
+      Initialize;
+
+      // Setup the item and its routing.
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::Average,LibraryRandom.RandInt(10),0,0,'');
+
+      WorkCenter.NEXT(RANDOM(WorkCenter.COUNT));
+      LibraryManufacturing.CreateMachineCenter(MachineCenter,WorkCenter."No.",100);
+      MachineCenter.VALIDATE("Unit Cost",LibraryRandom.RandDec(100,2));
+      MachineCenter.MODIFY;
+
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+      LibraryManufacturing.CreateRoutingLine(RoutingHeader,RoutingLine,'','',RoutingLine.Type::"Machine Center",MachineCenter."No.");
+      RoutingHeader.VALIDATE(Status,RoutingHeader.Status::Certified);
+      RoutingHeader.MODIFY;
+
+      Item.VALIDATE("Routing No.",RoutingHeader."No.");
+      Item.MODIFY;
+
+      // Explode routing, modify and post
+      WorkCenterGroup.FINDFIRST;
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      WorkCenter.VALIDATE("Unit Cost",LibraryRandom.RandDec(100,2));
+      WorkCenter.VALIDATE("Specific Unit Cost",Specific);
+      WorkCenter.MODIFY;
+      CapacityUnitOfMeasure.FINDFIRST;
+      WorkCenter.VALIDATE("Unit of Measure Code",CapacityUnitOfMeasure.Code);
+      WorkCenter.MODIFY;
+
+      PostModifiedOutputJournal(ItemJournalLine,Item,ItemJournalLine.Type::"Work Center",WorkCenter."No.");
+
+      // Verify
+      // For Specific cost Work Centers, the unit cost used is still the original Prod. Order Rtng. Line cost.
+      IF Specific THEN
+        VerifyOutputValueEntry(ItemJournalLine,MachineCenter."Unit Cost")
+      ELSE
+        VerifyOutputValueEntry(ItemJournalLine,WorkCenter."Unit Cost")
+    END;
+
+    [Test]
+    PROCEDURE VSTF330557_SpecificWorkCenter@23();
+    BEGIN
+      VSTF330557_MachineCenterToWorkCenter(TRUE);
+    END;
+
+    [Test]
+    PROCEDURE VSTF330557_NonSpecificWorkCenter@26();
+    BEGIN
+      VSTF330557_MachineCenterToWorkCenter(FALSE);
+    END;
+
+    [MessageHandler]
+    PROCEDURE VSTF239230_HndlMsg@25(Message@1000 : Text);
+    BEGIN
+      Assert.IsTrue(
+        (STRPOS(Message,MSG_RUN_ADJ_COST) > 0) OR (STRPOS(Message,MSG_AVERAGE_COST_PERIOD_CHANGED) > 0),TXT_WrongTextInHandler);
+    END;
+
+    [Test]
+    PROCEDURE VSTF81@20();
+    VAR
+      Item@1000 : Record 27;
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      Initialize;
+
+      // Make item. Post adjustments.
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::Average,0,0,0,'');
+
+      LibraryPatterns.POSTPositiveAdjustment(Item,'','','',1,WORKDATE,LibraryRandom.RandDec(100,2));
+      LibraryPatterns.POSTNegativeAdjustment(Item,'','','',1,WORKDATE,0);
+
+      // Exercise: Adjust.
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // Verify.
+      LibraryCosting.CheckAdjustment(Item);
+
+      // Applied entries to adjust flag is not present.
+      ItemLedgerEntry.SETRANGE("Item No.",Item."No.");
+      ItemLedgerEntry.SETRANGE("Applied Entry to Adjust",TRUE);
+      Assert.IsTrue(ItemLedgerEntry.ISEMPTY,'There should be no Applied Entry flag for the item.');
+    END;
+
+    [Test]
+    PROCEDURE CostRoundingAmountForwardedToAppliedProductionEntries@38();
+    VAR
+      ComponentItem@1000 : Record 27;
+      ParentItem@1002 : Record 27;
+      ProdBOMHeader@1006 : Record 99000771;
+      PurchaseHeader@1009 : Record 38;
+      PurchaseLine@1010 : Record 39;
+      ProductionOrder@1011 : Record 5405;
+      ProdOrderLine@1012 : Record 5406;
+      SalesHeader@1015 : Record 36;
+      SalesLine@1016 : Record 37;
+      I@1017 : Integer;
+    BEGIN
+      // [FEATURE] [Manufacturing]
+      // [SCENARIO 377809] Rounding amount posted for a production component is transferred to all applied item ledger entries
+
+      // [GIVEN] Create item "I1" with FIFO costing method
+      LibraryPatterns.MAKEItem(ComponentItem,ComponentItem."Costing Method"::FIFO,0,0,0,'');
+
+      // [GIVEN] Create manufactured item "I2" with Standard costing method and item "I1" as a component
+      LibraryInventory.CreateItem(ParentItem);
+
+      CreateCertifiedProductionBOM(ProdBOMHeader,ParentItem."Base Unit of Measure",ComponentItem."No.",1);
+
+      ParentItem.VALIDATE("Replenishment System",ParentItem."Replenishment System"::"Prod. Order");
+      ParentItem.VALIDATE("Production BOM No.",ProdBOMHeader."No.");
+      ParentItem.MODIFY(TRUE);
+
+      // [GIVEN] Create purchase order for 3 components "I1", direct unit cost = 0.33333. Post as received only.
+      CreatePurchaseOrderWithDirectCost(PurchaseHeader,PurchaseLine,ComponentItem."No.",'',3,1 / 3);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // [GIVEN] Create and refresh production order for item "I2"
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ParentItem."No.",3);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+
+      // [GIVEN] Post 3 output entries and 3 consumption entries
+      GetFirstProdOrderLine(ProdOrderLine,ProductionOrder);
+      FOR I := 1 TO 3 DO BEGIN
+        LibraryPatterns.POSTOutput(ProdOrderLine,1,WORKDATE,ParentItem."Unit Cost");
+        LibraryPatterns.POSTConsumption(ProdOrderLine,ComponentItem,'','',1,WORKDATE,ComponentItem."Unit Cost");
+      END;
+
+      // [GIVEN] Finish production order
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+
+      // [GIVEN] Sell 3 produced items "I2" in 3 separate sales entries
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      FOR I := 1 TO 3 DO
+        LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ParentItem."No.",1);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [GIVEN] Adjust cost
+      LibraryCosting.AdjustCostItemEntries(STRSUBSTNO('%1|%2',ComponentItem."No.",ParentItem."No."),'');
+
+      // [GIVEN] Update cost in purchase order and post invoice. New direct unit cost = 0.66666
+      ReopenPurchaseDocAndPostInvoiceWithNewCost(PurchaseHeader,PurchaseLine,2 / 3);
+
+      // [WHEN] Adjust cost
+      LibraryCosting.AdjustCostItemEntries(STRSUBSTNO('%1|%2',ComponentItem."No.",ParentItem."No."),'');
+
+      // [THEN] Inventory value of item "I2" is 0
+      VerifyItemInventoryValue(ParentItem."No.");
+    END;
+
+    [Test]
+    PROCEDURE AppliedEntryToAdjustRemovedWhenTransferCostAdjusted@56();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      MoveFromLocation@1004 : Record 14;
+      MoveToLocation@1005 : Record 14;
+      Qty@1003 : Decimal;
+    BEGIN
+      // [FEATURE] [Transfer]
+      // [SCENARIO 377809] All transfer entries are marked as adjusted after adjust cost - item entries is run
+
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(MoveFromLocation);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(MoveToLocation);
+
+      // [GIVEN] Create item "I" with FIFO costing method
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),0,0,'');
+
+      // [GIVEN] Post purchase receipt of item "I" on location "L1"
+      Qty := LibraryRandom.RandDec(100,2);
+      CreatePurchaseOrderWithDirectCost(PurchaseHeader,PurchaseLine,Item."No.",MoveFromLocation.Code,Qty,Item."Unit Cost");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // [GIVEN] Post transfer of item "I" from location "L1" to location "L2"
+      PostTransferOrder(Item."No.",Qty,MoveFromLocation.Code,MoveToLocation.Code);
+
+      // [GIVEN] Change unit cost in purchase order and post invoice
+      ReopenPurchaseDocAndPostInvoiceWithNewCost(PurchaseHeader,PurchaseLine,PurchaseLine."Direct Unit Cost" * 2);
+
+      // [WHEN] Adjust cost
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // [THEN] There are no entries marked for adjustment
+      VerifyItemLedgerEntriesToAdjustNotExist(Item."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmYesHandler,DummyMessageHandler)]
+    PROCEDURE GetVisitedEntriesWithinValuationPeriod@31();
+    VAR
+      InventorySetup@1001 : Record 313;
+      Location@1002 : ARRAY [3] OF Record 14;
+      Item@1003 : Record 27;
+      TransferHeader@1004 : Record 5740;
+      ItemLedgerEntry@1005 : Record 32;
+      TempItemLedgerEntry@1006 : TEMPORARY Record 32;
+      ItemApplicationEntry@1007 : Record 339;
+    BEGIN
+      // [FEATURE] [UT]
+      // [SCENARIO 380539] Function GetVisitedEntries in table 339 "Item Application Entry" should collect entries within valuation period
+
+      Initialize;
+
+      // [GIVEN] Update Inventory Setup: set "Average Cost Calc. Type" = "Item & Location & Variant", "Average Cost Period" = Day and disable automatic cost adjustment
+      WITH InventorySetup DO BEGIN
+        GET;
+        LibraryInventory.UpdateInventorySetup(
+          InventorySetup,"Automatic Cost Posting","Expected Cost Posting to G/L","Automatic Cost Adjustment"::Never,
+          "Average Cost Calc. Type"::"Item & Location & Variant","Average Cost Period"::Day);
+      END;
+
+      // [GIVEN] Two locations "L1" and "L2"
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location[1]);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location[2]);
+      LibraryWarehouse.CreateInTransitLocation(Location[3]);
+
+      // [GIVEN] Item "I". Post inventory adjustment on location "L2" on WORKDATE
+      LibraryPatterns.MAKEItem(Item,Item."Costing Method"::Average,0,0,0,'');
+      LibraryPatterns.POSTPositiveAdjustment(Item,Location[2].Code,'','',1,WORKDATE,LibraryRandom.RandDec(100,2));
+      // [GIVEN] Transfer item "I" from location "L2" to "L1" on WORKDATE + 1 day
+      LibraryPatterns.POSTTransferOrder(
+        TransferHeader,Item,Location[2],Location[1],Location[3],'',1,WORKDATE + 1,WORKDATE + 1,TRUE,TRUE);
+
+      ItemLedgerEntry.SETRANGE("Item No.",Item."No.");
+      ItemLedgerEntry.SETRANGE("Location Code",Location[2].Code);
+      ItemLedgerEntry.FINDFIRST;
+
+      // [WHEN] Calculate valuation chain on WORKDATE
+      ItemApplicationEntry.GetVisitedEntries(ItemLedgerEntry,TempItemLedgerEntry,TRUE);
+
+      // [THEN] Valuation chain is empty, transfers are not included
+      Assert.RecordIsEmpty(TempItemLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE Initialize@9();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      // Lazy Setup.
+      LibrarySetupStorage.Restore;
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryPatterns.SETNoSeries;
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateLocalData;
+      isInitialized := TRUE;
+      COMMIT;
+
+      LibrarySetupStorage.Save(DATABASE::"Inventory Setup");
+    END;
+
+    LOCAL PROCEDURE CreateCertifiedProductionBOM@40(VAR ProdBOMHeader@1000 : Record 99000771;UoMCode@1001 : Code[10];ComponentItemNo@1002 : Code[20];QtyPer@1003 : Decimal);
+    VAR
+      ProdBOMLine@1004 : Record 99000772;
+    BEGIN
+      LibraryManufacturing.CreateProductionBOMHeader(ProdBOMHeader,UoMCode);
+      LibraryManufacturing.CreateProductionBOMLine(ProdBOMHeader,ProdBOMLine,'',ProdBOMLine.Type::Item,ComponentItemNo,QtyPer);
+      ProdBOMHeader.VALIDATE(Status,ProdBOMHeader.Status::Certified);
+      ProdBOMHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderWithDirectCost@73(VAR PurchaseHeader@1000 : Record 38;VAR PurchaseLine@1001 : Record 39;ItemNo@1002 : Code[20];LocationCode@1004 : Code[10];Qty@1003 : Decimal;UnitCost@1005 : Decimal);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Qty);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.VALIDATE("Direct Unit Cost",UnitCost);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetFirstProdOrderLine@1(VAR ProdOrderLine@1001 : Record 5406;ProductionOrder@1000 : Record 5405);
+    BEGIN
+      CLEAR(ProdOrderLine);
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE GetFirstItemJournalLineInBatch@8(VAR ItemJournalLine@1000 : Record 83;ItemJournalBatch@1001 : Record 233);
+    BEGIN
+      CLEAR(ItemJournalLine);
+      ItemJournalLine.SETRANGE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.SETRANGE("Journal Batch Name",ItemJournalBatch.Name);
+      ItemJournalLine.FINDFIRST;
+    END;
+
+    PROCEDURE OutputJournalExplodeRouting@22(VAR ItemJournalBatch@1005 : Record 233;ProdOrderLine@1003 : Record 5406;PostingDate@1006 : Date);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+      Item@1004 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItemJournalBatchByType(ItemJournalBatch,ItemJournalBatch."Template Type"::Output);
+
+      Item.GET(ProdOrderLine."Item No.");
+      LibraryInventory.MakeItemJournalLine(
+        ItemJournalLine,ItemJournalBatch,Item,PostingDate,ItemJournalLine."Entry Type"::"Positive Adjmt.",0);
+      ItemJournalLine.VALIDATE("Entry Type",ItemJournalLine."Entry Type"::Output);
+      ItemJournalLine.VALIDATE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.VALIDATE("Order No.",ProdOrderLine."Prod. Order No.");
+      ItemJournalLine.VALIDATE("Order Line No.",ProdOrderLine."Line No.");
+      ItemJournalLine.SetUpNewLine(ItemJournalLine);
+      ItemJournalLine.INSERT;
+      CODEUNIT.RUN(CODEUNIT::"Output Jnl.-Expl. Route",ItemJournalLine);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE PostModifiedOutputJournal@33(VAR ItemJournalLine@1002 : Record 83;Item@1006 : Record 27;NewType@1004 : Option;NewNo@1005 : Code[20]);
+    VAR
+      ProductionOrder@1000 : Record 5405;
+      ProdOrderLine@1001 : Record 5406;
+      ItemJournalBatch@1003 : Record 233;
+    BEGIN
+      // Create prod order
+      LibraryPatterns.MAKEProductionOrder(ProductionOrder,ProductionOrder.Status::Released,Item,'','',
+        LibraryRandom.RandDec(100,2),WORKDATE);
+      GetFirstProdOrderLine(ProdOrderLine,ProductionOrder);
+
+      // Explode routing
+      LibraryManufacturing.OutputJournalExplodeOrderLineRouting(ItemJournalBatch,ProdOrderLine,WORKDATE);
+      GetFirstItemJournalLineInBatch(ItemJournalLine,ItemJournalBatch);
+
+      // Change type and post
+      ItemJournalLine.VALIDATE(Type,NewType);
+      ItemJournalLine.VALIDATE("No.",NewNo);
+      ItemJournalLine.VALIDATE("Run Time",LibraryRandom.RandDec(100,2));
+      ItemJournalLine.VALIDATE("Setup Time",LibraryRandom.RandDec(100,2));
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalBatch(ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE PostTransferOrder@24(ItemNo@1005 : Code[20];Qty@1006 : Decimal;MoveFromLocationCode@1003 : Code[10];MoveToLocationCode@1004 : Code[10]);
+    VAR
+      InTransitLocation@1000 : Record 14;
+      TransferHeader@1002 : Record 5740;
+      TransferLine@1001 : Record 5741;
+    BEGIN
+      LibraryWarehouse.CreateInTransitLocation(InTransitLocation);
+      LibraryInventory.CreateTransferHeader(TransferHeader,MoveFromLocationCode,MoveToLocationCode,InTransitLocation.Code);
+      LibraryInventory.CreateTransferLine(TransferHeader,TransferLine,ItemNo,Qty);
+      LibraryInventory.PostTransferHeader(TransferHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE ReopenPurchaseDocAndPostInvoiceWithNewCost@68(VAR PurchaseHeader@1000 : Record 38;VAR PurchaseLine@1001 : Record 39;NewUnitCost@1002 : Decimal);
+    BEGIN
+      LibraryPurchase.ReopenPurchaseDocument(PurchaseHeader);
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",LibraryUtility.GenerateGUID);
+      PurchaseHeader.MODIFY(TRUE);
+
+      PurchaseLine.FIND;
+      PurchaseLine.VALIDATE("Direct Unit Cost",NewUnitCost);
+      PurchaseLine.MODIFY(TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyItemInventoryValue@46(ItemNo@1001 : Code[20]);
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      WITH ValueEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        CALCSUMS("Cost Amount (Actual)","Cost Amount (Expected)");
+        TESTFIELD("Cost Amount (Actual)",0);
+        TESTFIELD("Cost Amount (Expected)",0);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntriesToAdjustNotExist@27(ItemNo@1001 : Code[20]);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      WITH ItemLedgerEntry DO BEGIN
+        INIT;
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Applied Entry to Adjust",TRUE);
+        Assert.RecordIsEmpty(ItemLedgerEntry);
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyOutputValueEntry@29(ItemJournalLine@1001 : Record 83;UnitCost@1002 : Decimal);
+    VAR
+      ValueEntry@1000 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Order Type",ItemJournalLine."Order Type");
+      ValueEntry.SETRANGE("Order No.",ItemJournalLine."Order No.");
+      ValueEntry.SETRANGE("Item Ledger Entry Type",ValueEntry."Item Ledger Entry Type"::" ");
+      Assert.AreEqual(1,ValueEntry.COUNT,'Too many value entries created for capacity.');
+      ValueEntry.SETRANGE(Type,ItemJournalLine.Type);
+      ValueEntry.SETRANGE("No.",ItemJournalLine."No.");
+      ValueEntry.FINDFIRST;
+      Assert.AreNearlyEqual(ItemJournalLine."Run Time" + ItemJournalLine."Setup Time",ValueEntry."Valued Quantity",
+        LibraryERM.GetAmountRoundingPrecision,'Wrong valued qty.');
+      Assert.AreNearlyEqual(UnitCost * ValueEntry."Valued Quantity",ValueEntry."Cost Amount (Actual)",
+        LibraryERM.GetAmountRoundingPrecision,'Wrong cost amount.');
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE PostedPurchaseDocumentLinePageHandler@209(VAR PostedPurchaseDocumentLines@1000 : TestPage 5855);
+    BEGIN
+      PostedPurchaseDocumentLines.OriginalQuantity.SETVALUE(TRUE);
+      PostedPurchaseDocumentLines.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE OriginalQtyMessageHandler@15(Message@1002 : Text);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,OriginalQtyMsg) > 0,TXT_WrongTextInHandler);
+    END;
+
+    [MessageHandler]
+    PROCEDURE HNDL_MSG_RUN_ADJ_COST@28(Message@1000 : Text);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,MSG_RUN_ADJ_COST) > 0,TXT_WrongTextInHandler);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE HNDL_CNF_CHANGE_ADJUST_COST_PERIOD@21(Question@1000 : Text;VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.IsTrue(STRPOS(Question,CNF_CHANGE_ADJUST_COST_PERIOD) > 0,TXT_WrongTextInHandler);
+      Assert.IsTrue(STRPOS(Question,CNF_ADJUST_ALL_ENTRIES) > 0,TXT_WrongTextInHandler);
+      Reply := TRUE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmYesHandler@30(Question@1001 : Text;VAR Reply@1000 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE DummyMessageHandler@42(Message@1000 : Text);
+    BEGIN
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [SCM] [Adjust Cost Item Entries]
+    }
+    END.
+  }
+}
+

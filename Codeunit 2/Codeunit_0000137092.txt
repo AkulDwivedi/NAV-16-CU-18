@@ -1,0 +1,1626 @@
+OBJECT Codeunit 137092 SCM Kitting - D3 - Part 1
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AssemblySetup@1015 : Record 905;
+      InventorySetup@1023 : Record 313;
+      AssemblyLine@1009 : Record 901;
+      Item@1001 : Record 27;
+      LibraryERM@1000 : Codeunit 131300;
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryInventory@1003 : Codeunit 132201;
+      LibraryCosting@1005 : Codeunit 132200;
+      LibraryAssembly@1013 : Codeunit 132207;
+      LibraryWarehouse@1010 : Codeunit 132204;
+      LibraryDimension@1025 : Codeunit 131001;
+      LibrarySetupStorage@1008 : Codeunit 131009;
+      Assert@1002 : Codeunit 130000;
+      LibraryRandom@1007 : Codeunit 130440;
+      ChangeType@1011 : ' ,Add,Replace,Delete,Edit,Delete all,Edit cards,Usage';
+      BlockType@1024 : 'Dimension,Dimension Value,Dimension Combination,None';
+      PostingDateErr@1027 : TextConst 'ENU="Posting Date is not within your range of allowed posting dates. in Assembly Header Document Type=''Order'',No.=''%1''."';
+      ClearType@1028 : 'Posting Group,Location Posting Setup,Posting Group Setup';
+      ItemPostGrErr@1029 : TextConst 'ENU="Inventory Posting Group must have a value in Item: No.=%1. It cannot be zero or empty."';
+      ResPostGrErr@1030 : TextConst 'ENU="Gen. Prod. Posting Group must have a value in Resource: No.=%1. It cannot be zero or empty."';
+      NoSeriesErr@1031 : TextConst 'ENU=You have insufficient quantity of Item';
+      ZeroQtyErr@1021 : TextConst 'ENU=There is nothing to post.';
+      AsmItemPostingErr@1037 : TextConst 'ENU="Gen. Prod. Posting Group must have a value in Item Journal Line: Journal Template Name=, Journal Batch Name=, Line No.=0. It cannot be zero or empty."';
+      isInitialized@1006 : Boolean;
+      AvailCheckErr@1039 : TextConst 'ENU=You have insufficient quantity of Item %1 on inventory.';
+      GlobalMaterialCost@1012 : Decimal;
+      GlobalResourceCost@1014 : Decimal;
+      GlobalResourceOvhd@1016 : Decimal;
+      GlobalPartialPostFactor@1017 : Decimal;
+      GlobalAsmOvhd@1019 : Decimal;
+      GlobalPostedAsmStatValue@1018 : ARRAY [5,5] OF Decimal;
+      WorkDate2@1020 : Date;
+      MsgUpdateDim@1022 : TextConst 'ENU=Do you want to update the Dimensions on the lines?';
+      ErrorSelectDimValue@1033 : TextConst 'ENU=Select Dimension Value Code';
+      ErrorInvalidDimensions@1034 : TextConst 'ENU="The dimensions that are used in Order "';
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      MfgSetup@1000 : Record 99000765;
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      // Initialize setup.
+      CLEARLASTERROR;
+      LibrarySetupStorage.Restore;
+      LibraryAssembly.UpdateAssemblySetup(AssemblySetup,'',AssemblySetup."Copy Component Dimensions from"::"Item/Resource Card",
+        LibraryUtility.GetGlobalNoSeriesCode);
+      IF isInitialized THEN
+        EXIT;
+
+      // Setup Demonstration data.
+      isInitialized := TRUE;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+
+      MfgSetup.GET;
+      WorkDate2 := CALCDATE(MfgSetup."Default Safety Lead Time",WORKDATE); // to avoid Due Date Before Work Date message.
+      LibraryCosting.AdjustCostItemEntries('','');
+      LibraryCosting.PostInvtCostToGL(FALSE,WorkDate2,'');
+      COMMIT;
+      LibrarySetupStorage.Save(DATABASE::"General Ledger Setup");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE DimensionPosting@58(DimensionsFrom@1003 : Option;OverrideDimensions@1000 : Boolean;HeaderBlockType@1001 : Option;CompBlockType@1004 : Option;DefaultHeaderValuePosting@1011 : Option;DefaultCompValuePosting@1012 : Option);
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+      ExpectedError@1008 : Text[1024];
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.UpdateAssemblySetup(AssemblySetup,'',DimensionsFrom,LibraryUtility.GetGlobalNoSeriesCode);
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Average,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,0);
+
+      // Exercise.
+      LibraryAssembly.CheckOrderDimensions(AssemblyHeader,DimensionsFrom);
+      IF OverrideDimensions THEN
+        LibraryAssembly.EditOrderDimensions(AssemblyHeader);
+      ExpectedError := LibraryAssembly.BlockOrderDimensions(AssemblyHeader,HeaderBlockType,CompBlockType);
+
+      IF ExpectedError = '' THEN
+        ExpectedError := AddAOItemDimension(AssemblyHeader,DefaultHeaderValuePosting,DefaultCompValuePosting);
+
+      SetShortcutDimensions(AssemblyHeader,1);
+      SetShortcutDimensions(AssemblyHeader,2);
+
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,WorkDate2);
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,ExpectedError);
+
+      // Verify.
+      IF ExpectedError = '' THEN BEGIN
+        LibraryAssembly.VerifyPostedAssemblyHeader(TempAssemblyLine,AssemblyHeader,AssemblyHeader.Quantity);
+        LibraryAssembly.VerifyPostedComments(AssemblyHeader);
+        LibraryAssembly.VerifyILEs(TempAssemblyLine,AssemblyHeader,AssemblyHeader."Quantity to Assemble");
+        LibraryAssembly.VerifyValueEntries(TempAssemblyLine,AssemblyHeader,AssemblyHeader."Quantity to Assemble");
+        LibraryAssembly.VerifyResEntries(TempAssemblyLine,AssemblyHeader);
+        LibraryAssembly.VerifyCapEntries(TempAssemblyLine,AssemblyHeader);
+        LibraryAssembly.VerifyItemRegister(AssemblyHeader);
+      END;
+
+      // Tear down.
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE BlockHeaderDim@77();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify an error when posting Assembly Order, if Dimension is blocked for header Item.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Order Header",FALSE,BlockType::Dimension,BlockType::None,
+        DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE BlockCompDim@97();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify an error when posting Assembly Order, if Dimension is blocked for component Items.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Item/Resource Card",FALSE,BlockType::None,BlockType::Dimension,
+        DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE BlockAllDim@114();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO]  Verify an error when posting Assembly Order, if Dimension is blocked for header and component Items.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Order Header",FALSE,BlockType::Dimension,BlockType::Dimension,
+        DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE BlockHeaderDimVal@128();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify an error when posting Assembly Order, if Dimension Value is blocked for header Item.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Order Header",FALSE,BlockType::"Dimension Value",BlockType::None,
+        DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE BlockCompDimComb@116();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify an error when posting Assembly Order, if Dimension Combination is blocked for component Items.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Item/Resource Card",FALSE,BlockType::None,
+        BlockType::"Dimension Combination",DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE BlockHeaderDimComb@20();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify an error when posting Assembly Order, if Dimension Combination is blocked for header Item.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Item/Resource Card",FALSE,BlockType::"Dimension Combination",
+        BlockType::None,DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE BlockAllCombined1@115();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify an error when posting Assembly Order, if Dimension is blocked for header Item and Dimension Value is blocked for component Items.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Order Header",FALSE,BlockType::Dimension,BlockType::"Dimension Value",
+        DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE BlockAllCombined2@130();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify an error when posting Assembly Order, if Dimension Value is blocked for header Item and Dimension Combination is blocked for component Items.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Order Header",FALSE,BlockType::"Dimension Value",
+        BlockType::"Dimension Combination",DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE HeaderDimOverride@14();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify posted entries of Assembly Order, if Dimension Values are overrided in Assembly Order.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Order Header",TRUE,BlockType::None,BlockType::None,
+        DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE HeaderDimIncorrectValue@23();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify an error when posting Assembly Order, if Dimension Value is restricted by Code for header Item and is incorrect in Assembly Order.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Order Header",FALSE,BlockType::None,BlockType::None,
+        DefaultDimension."Value Posting"::"Same Code",DefaultDimension."Value Posting"::" ");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,DimensionsChangeConfirmHandler)]
+    PROCEDURE CompDimIncorrectValue@24();
+    VAR
+      DefaultDimension@1000 : Record 352;
+    BEGIN
+      // [FEATURE] [Dimension]
+      // [SCENARIO] Verify an error when posting Assembly Order, if Dimension Value is restricted by Code for component Items and is incorrect in Assembly Order.
+
+      DimensionPosting(
+        AssemblySetup."Copy Component Dimensions from"::"Order Header",FALSE,BlockType::None,BlockType::None,
+        DefaultDimension."Value Posting"::" ",DefaultDimension."Value Posting"::"Same Code");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE InvalidPostingDate@144(DateDelay@1121 : Integer);
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+      PostingDate@1122 : Date;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryERM.SetAllowPostingFromTo(CALCDATE('<-30D>',WorkDate2),CALCDATE('<+30D>',WorkDate2));
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Average,
+        Item."Replenishment System"::Assembly,'',TRUE);
+
+      // Exercise.
+      PostingDate := WorkDate2 + DateDelay;
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,PostingDate);
+
+      // Verify.
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,STRSUBSTNO(PostingDateErr,AssemblyHeader."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE BeforePostingAllowed@143();
+    BEGIN
+      // [FEATURE] [Posting Date]
+      // [SCENARIO] Verify an error when posting Assembly Order before allowed posting date range.
+
+      InvalidPostingDate(-31);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AfterPostingAllowed@141();
+    BEGIN
+      // [FEATURE] [Posting Date]
+      // [SCENARIO] Verify an error when posting Assembly Order after allowed posting date range.
+
+      InvalidPostingDate(31);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE BoundaryPostingAllowed@139();
+    VAR
+      AssemblyHeader@1004 : Record 900;
+      TempAssemblyLine@1001 : TEMPORARY Record 901;
+    BEGIN
+      // [FEATURE] [Posting Date]
+      // [SCENARIO] Verify cuccessful posting of Assembly Order inside allowed posting date range.
+
+      // Setup.
+      Initialize;
+      LibraryERM.SetAllowPostingFromTo(CALCDATE('<-30D>',WorkDate2),CALCDATE('<+30D>',WorkDate2));
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Average,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,0);
+
+      // Exercise.
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,CALCDATE('<+30D>',WorkDate2));
+
+      // Verify.
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+    END;
+
+    [Normal]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    LOCAL PROCEDURE MissingHeaderPostingGroups@151(HeaderClearType@1000 : Option);
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+      Location@1004 : Record 14;
+      ExpectedError@1002 : Text[1024];
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryAssembly.UpdateAssemblySetup(AssemblySetup,Location.Code,AssemblySetup."Copy Component Dimensions from"::"Order Header",
+        LibraryUtility.GetGlobalNoSeriesCode);
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Average,
+        Item."Replenishment System"::Assembly,Location.Code,TRUE);
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,0);
+      ExpectedError :=
+        LibraryAssembly.ClearOrderPostingSetup(HeaderClearType,AssemblyHeader."Inventory Posting Group",
+          AssemblyHeader."Gen. Prod. Posting Group",AssemblyHeader."Location Code");
+
+      // Exercise.
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,WorkDate2);
+
+      // Verify.
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,ExpectedError);
+
+      // Tear down.
+      LibraryAssembly.UpdateAssemblySetup(AssemblySetup,'',AssemblySetup."Copy Component Dimensions from"::"Order Header",
+        LibraryUtility.GetGlobalNoSeriesCode);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE HeaderLocationPostingSetup@149();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error when posting Assembly Order if appropriate Inventory Posting Setup does not exist within header Location and Inventory Posting Group.
+
+      MissingHeaderPostingGroups(ClearType::"Location Posting Setup");
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE HeaderPostingGrSetup@148();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error when posting Assembly Order if appropriate General Posting Setup does not exist within header Item.
+
+      MissingHeaderPostingGroups(ClearType::"Posting Group Setup");
+    END;
+
+    [Normal]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    LOCAL PROCEDURE MissingCompPostingGrSetup@147(CompClearType@1000 : Option;CompType@1005 : Option);
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+      Location@1004 : Record 14;
+      ExpectedError@1001 : Text[1024];
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryAssembly.UpdateAssemblySetup(AssemblySetup,Location.Code,AssemblySetup."Copy Component Dimensions from"::"Order Header",
+        LibraryUtility.GetGlobalNoSeriesCode);
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Average,
+        Item."Replenishment System"::Assembly,Location.Code,TRUE);
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,0);
+
+      AssemblyLine.SETRANGE("Document Type",AssemblyHeader."Document Type");
+      AssemblyLine.SETRANGE("Document No.",AssemblyHeader."No.");
+      AssemblyLine.SETRANGE(Type,CompType);
+      IF AssemblyLine.FINDFIRST THEN
+        ExpectedError :=
+          LibraryAssembly.ClearOrderPostingSetup(CompClearType,AssemblyLine."Inventory Posting Group",
+            AssemblyLine."Gen. Prod. Posting Group",AssemblyLine."Location Code");
+
+      // Exercise.
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,WorkDate2);
+
+      // Verify.
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,ExpectedError);
+
+      // Tear down.
+      LibraryAssembly.UpdateAssemblySetup(AssemblySetup,'',AssemblySetup."Copy Component Dimensions from"::"Order Header",
+        LibraryUtility.GetGlobalNoSeriesCode);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CompLocationPostingSetup@146();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error when posting Assembly Order if appropriate Inventory Posting Setup does not exist within component Location and Inventory Posting Group.
+
+      MissingCompPostingGrSetup(ClearType::"Location Posting Setup",AssemblyLine.Type::Item);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE CompPostingGroupSetup@156();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error when posting Assembly Order if appropriate General Posting Setup does not exist within component Item.
+
+      MissingCompPostingGrSetup(ClearType::"Posting Group Setup",AssemblyLine.Type::Item);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE MissingHeaderItemPostingGroups@169();
+    VAR
+      Item@1002 : Record 27;
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error when posting Assembly Order if header Item does not have Gen. Prod. Posting Group.
+
+      // Setup.
+      Initialize;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Average,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      Item.GET(AssemblyHeader."Item No.");
+      Item.VALIDATE("Inventory Posting Group",'');
+      Item.VALIDATE("Gen. Prod. Posting Group",'');
+      Item.MODIFY(TRUE);
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,Item."No.",'',1,'');
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,0);
+
+      // Exercise.
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,WorkDate2);
+
+      // Verify.
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,AsmItemPostingErr);
+
+      // Tear down.
+    END;
+
+    [Normal]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    LOCAL PROCEDURE MissingCompPostingGroups@174(Type@1005 : Option);
+    VAR
+      Item@1002 : Record 27;
+      Resource@1000 : Record 156;
+      AssemblyHeader@1006 : Record 900;
+      AssemblyLine@1001 : Record 901;
+      ExpectedError@1008 : Text[1024];
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Average,
+        Item."Replenishment System"::Assembly,'',TRUE);
+
+      CASE Type OF
+        AssemblyLine.Type::Item:
+          BEGIN
+            LibraryInventory.CreateItem(Item);
+            Item.VALIDATE("Inventory Posting Group",'');
+            Item.MODIFY(TRUE);
+            ExpectedError := STRSUBSTNO(ItemPostGrErr,Item."No.");
+            // Exercise.
+            ASSERTERROR
+              LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,Type,Item."No.",
+                LibraryAssembly.GetUnitOfMeasureCode(Type,Item."No.",TRUE),1,0,'');
+            // Verify.
+            Assert.AreEqual(ExpectedError,GETLASTERRORTEXT,'');
+            CLEARLASTERROR;
+          END;
+        AssemblyLine.Type::Resource:
+          BEGIN
+            LibraryAssembly.CreateResource(Resource,TRUE,'');
+            Resource.VALIDATE("Gen. Prod. Posting Group",'');
+            Resource.MODIFY(TRUE);
+            ExpectedError := STRSUBSTNO(ResPostGrErr,Resource."No.");
+            // Exercise.
+            ASSERTERROR
+              LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,Type,Resource."No.",
+                LibraryAssembly.GetUnitOfMeasureCode(Type,Resource."No.",TRUE),1,0,'');
+            // Verify.
+            Assert.AreEqual(ExpectedError,GETLASTERRORTEXT,'');
+            CLEARLASTERROR;
+          END;
+      END;
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE MissingItemPostingGroups@182();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error when posting Assembly Order if component Item does not have Gen. Prod. Posting Group.
+
+      MissingCompPostingGroups(AssemblyLine.Type::Item);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE MissingResourcePostingGroups@183();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error when posting Assembly Order if component Resource does not have Gen. Prod. Posting Group.
+
+      MissingCompPostingGroups(AssemblyLine.Type::Resource);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE MissingPostedDocNoSeries@145();
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error when posting Assembly Order if Assembly Setup does not have "No. Series" for posted Assemblies.
+
+      // Setup.
+      Initialize;
+      LibraryAssembly.UpdateAssemblySetup(
+        AssemblySetup,'',AssemblySetup."Copy Component Dimensions from"::"Order Header",LibraryUtility.GetGlobalNoSeriesCode);
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Average,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      LibraryAssembly.UpdateAssemblySetup(
+        AssemblySetup,'',AssemblySetup."Copy Component Dimensions from"::"Order Header",'');
+      // Exercise.
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,WorkDate2);
+
+      // Verify.
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,STRSUBSTNO(NoSeriesErr));
+
+      // Tear down.
+      LibraryAssembly.UpdateAssemblySetup(AssemblySetup,'',AssemblySetup."Copy Component Dimensions from"::"Order Header",
+        LibraryUtility.GetGlobalNoSeriesCode);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SetShortcutDimensions@1115(AssemblyHeader@1000 : Record 900;Num@1001 : Integer);
+    VAR
+      DimensionValue@1002 : Record 349;
+      DimensionSetEntry@1010 : Record 480;
+      GeneralLedgerSetup@1003 : Record 98;
+      ShortcutDimensionCode@1004 : Code[20];
+      DimensionSetID@1007 : Integer;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      IF Num = 1 THEN
+        ShortcutDimensionCode := GeneralLedgerSetup."Shortcut Dimension 1 Code"
+      ELSE
+        ShortcutDimensionCode := GeneralLedgerSetup."Shortcut Dimension 2 Code";
+
+      DimensionSetID := AssemblyHeader."Dimension Set ID";
+      LibraryDimension.FindDimensionValue(DimensionValue,ShortcutDimensionCode);
+      DimensionSetID := LibraryDimension.CreateDimSet(DimensionSetID,ShortcutDimensionCode,DimensionValue.Code);
+      AssemblyHeader.VALIDATE("Dimension Set ID",DimensionSetID);
+      AssemblyHeader.MODIFY(TRUE);
+
+      LibraryDimension.FindDimensionSetEntry(DimensionSetEntry,AssemblyHeader."Dimension Set ID");
+      DimensionSetEntry.SETRANGE("Dimension Code",ShortcutDimensionCode);
+      DimensionSetEntry.FINDFIRST;
+
+      IF Num = 1 THEN
+        AssemblyHeader.VALIDATE(
+          "Shortcut Dimension 1 Code",
+          LibraryDimension.FindDifferentDimensionValue(DimensionSetEntry."Dimension Code",DimensionSetEntry."Dimension Value Code"))
+      ELSE
+        AssemblyHeader.VALIDATE(
+          "Shortcut Dimension 2 Code",
+          LibraryDimension.FindDifferentDimensionValue(DimensionSetEntry."Dimension Code",DimensionSetEntry."Dimension Value Code"));
+      AssemblyHeader.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AvailabilityCheck@5();
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+      ItemNo@1000 : ARRAY [10] OF Code[20];
+      ResourceNo@1001 : ARRAY [10] OF Code[20];
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error on Assembly Order posting if insufficient Quantity of components on stock.
+
+      // Setup.
+      Initialize;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Average,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      LibraryAssembly.GetCompsToAdjust(ItemNo,ResourceNo,AssemblyHeader);
+
+      // Exercise.
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,WorkDate2);
+
+      // Verify.
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,STRSUBSTNO(AvailCheckErr,ItemNo[1]));
+    END;
+
+    [Normal]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    LOCAL PROCEDURE ModifyAssemblyLines@42(ChangeType@1004 : ' ,Add,Replace,Delete,Edit,Delete all,Edit cards,Usage';CostingMethod@1011 : Option;ComponentType@1009 : Option;NewComponentType@1010 : Option;UseBaseUnitOfMeasure@1007 : Boolean;UpdateUnitCost@1002 : Boolean;HeaderAdjustFactor@1008 : Decimal);
+    VAR
+      Item@1001 : Record 27;
+      Resource@1000 : Record 156;
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1005 : TEMPORARY Record 901;
+      NewComponentNo@1003 : Code[20];
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,CostingMethod,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',UpdateUnitCost);
+      IF NewComponentType = AssemblyLine.Type::Item THEN
+        NewComponentNo := LibraryAssembly.CreateItem(Item,Item."Costing Method"::Standard,Item."Replenishment System"::Purchase,
+            AssemblyHeader."Gen. Prod. Posting Group",AssemblyHeader."Inventory Posting Group")
+      ELSE
+        NewComponentNo := LibraryAssembly.CreateResource(Resource,TRUE,AssemblyHeader."Gen. Prod. Posting Group");
+      LibraryAssembly.EditAssemblyLines(ChangeType,ComponentType,NewComponentType,NewComponentNo,
+        AssemblyHeader."No.",UseBaseUnitOfMeasure);
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,0);
+      IF UpdateUnitCost THEN
+        LibraryAssembly.UpdateOrderCost(AssemblyHeader);
+
+      // Exercise.
+      AssemblyHeader.VALIDATE(Quantity,AssemblyHeader.Quantity * HeaderAdjustFactor);
+      IF CostingMethod <> Item."Costing Method"::Standard THEN
+        AssemblyHeader.VALIDATE("Unit Cost",AssemblyHeader."Unit Cost" * (1 + HeaderAdjustFactor));
+      AssemblyHeader.MODIFY(TRUE);
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,WorkDate2);
+
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+
+      // Verify.
+      LibraryAssembly.VerifyPostedAssemblyHeader(TempAssemblyLine,AssemblyHeader,AssemblyHeader.Quantity);
+      LibraryAssembly.VerifyPostedComments(AssemblyHeader);
+      LibraryAssembly.VerifyILEs(TempAssemblyLine,AssemblyHeader,AssemblyHeader."Quantity to Assemble");
+      LibraryAssembly.VerifyValueEntries(TempAssemblyLine,AssemblyHeader,AssemblyHeader."Quantity to Assemble");
+      LibraryAssembly.VerifyResEntries(TempAssemblyLine,AssemblyHeader);
+      LibraryAssembly.VerifyCapEntries(TempAssemblyLine,AssemblyHeader);
+      LibraryAssembly.VerifyItemRegister(AssemblyHeader);
+
+      // Tear down.
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ItemQtyPer@187();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Qty on Items changed and Unit Cost updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Edit,Item."Costing Method"::Average,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE,TRUE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ResQtyPer@186();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Qty on Resources changed.
+
+      ModifyAssemblyLines(
+        ChangeType::Edit,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE,FALSE,
+        1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE UnitOfMeasure@185();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Qty on Items changed but Unit Cost is not updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Edit,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE,FALSE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ReplaceItemWItem@184();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Items changed and Unit Cost is updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Replace,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE,TRUE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ReplaceItemWRes@181();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Items changed to Resources but Unit Cost is not updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Replace,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Resource,TRUE,FALSE,
+        1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AddItem@179();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Item added and Unit Cost cannot be updated in Assembly Order (Costing Method: Standard).
+
+      ModifyAssemblyLines(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE,TRUE,1);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AddItemDimension@46(ItemNo@1003 : Code[20];DefaultValuePosting@1011 : Option) : Text[1024];
+    VAR
+      DefaultDimension@1002 : Record 352;
+      DimensionValue@1007 : Record 349;
+    BEGIN
+      IF DefaultValuePosting <> DefaultDimension."Value Posting"::" " THEN BEGIN
+        LibraryDimension.FindDefaultDimension(DefaultDimension,27,ItemNo);
+        DefaultDimension.NEXT(DefaultDimension.COUNT);
+
+        LibraryDimension.CreateDimensionValue(DimensionValue,DefaultDimension."Dimension Code");
+        DefaultDimension.VALIDATE("Dimension Value Code",DimensionValue.Code);
+        DefaultDimension.VALIDATE("Value Posting",DefaultValuePosting);
+        DefaultDimension.MODIFY(TRUE);
+
+        EXIT(ErrorInvalidDimensions);
+      END;
+
+      EXIT('');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AddAOItemDimension@49(AssemblyHeader@1003 : Record 900;DefaultHeaderValuePosting@1011 : Option;DefaultCompValuePosting@1000 : Option) ExpectedError : Text[1024];
+    BEGIN
+      ExpectedError := AddItemDimension(AssemblyHeader."Item No.",DefaultHeaderValuePosting);
+
+      IF ExpectedError = '' THEN BEGIN
+        AssemblyLine.SETRANGE("Document Type",AssemblyHeader."Document Type");
+        AssemblyLine.SETRANGE("Document No.",AssemblyHeader."No.");
+        AssemblyLine.SETRANGE(Type,AssemblyLine.Type::Item);
+        AssemblyLine.FINDLAST;
+        ExpectedError := AddItemDimension(AssemblyLine."No.",DefaultCompValuePosting);
+        IF ExpectedError <> '' THEN
+          ExpectedError := ErrorSelectDimValue;
+      END;
+
+      EXIT(ExpectedError);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AddDirectRes@173();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Resource added (), but Unit Cost is not updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Add,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,TRUE,FALSE,
+        1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AddFixedRes@167();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Resource added (), but Unit Cost is not updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Add,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE,FALSE,
+        1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DeleteItem@166();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Item deleted but Unit Cost is not updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Delete,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,FALSE,FALSE,
+        1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DeleteRes@162();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Resource deleted but Unit Cost is not updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Delete,Item."Costing Method"::FIFO,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE,FALSE,
+        1);
+    END;
+
+    [Normal]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    LOCAL PROCEDURE DeleteAllUpdHeader@159(HeaderAdjFactor@1001 : Decimal);
+    VAR
+      AssemblyHeader@1000 : Record 900;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',TRUE);
+
+      // Exercise.
+      LibraryAssembly.EditAssemblyLines(
+        ChangeType::"Delete all",AssemblyLine.Type::Item,AssemblyLine.Type::Item,'',AssemblyHeader."No.",FALSE);
+      AssemblyHeader.VALIDATE(Quantity,AssemblyHeader.Quantity * HeaderAdjFactor);
+      AssemblyHeader.MODIFY(TRUE);
+
+      // Verify.
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,ZeroQtyErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DeleteAll@18();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error on posting Assembly Header, if components are empty and header Quantity is not zero.
+
+      DeleteAllUpdHeader(1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DeleteAllSetQtyToZero@17();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify an error on posting Assembly Header, if components are empty and header Quantity is zero.
+
+      DeleteAllUpdHeader(0);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE Usage@158();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Resource usage is changed (Direct <-> Fixed), but Unit Cost is not updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Usage,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE,FALSE,
+        1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE ReplaceItemWItemUpdCost@190();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Item is replaced and Unit Cost is updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Replace,Item."Costing Method"::FIFO,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE,TRUE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AddItemUpdCost@191();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Item added and Unit Cost cannot be updated in Assembly Order (Costing Method: Standard).
+
+      ModifyAssemblyLines(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Item,AssemblyLine.Type::Item,TRUE,TRUE,1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE AddFixedResUpdCost@192();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Resource added (), and Unit Cost is updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Add,Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE,TRUE,
+        1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE DeleteResUpdCost@193();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if components are edited: Resource added (), and Unit Cost is updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Delete,Item."Costing Method"::FIFO,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE,TRUE,
+        1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE HeaderQty@13();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if header Item Quantity reduced and Unit Cost cannot be updated in Assembly Order (Costing Method: Standard).
+
+      ModifyAssemblyLines(
+        ChangeType::" ",Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE,TRUE,
+        LibraryRandom.RandDec(1,2));
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE HeaderQtyLineUpdate@16();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if header Item Quantity is reduced, Resource added, but Unit Cost is not updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::Add,Item."Costing Method"::Standard,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE,FALSE,
+        LibraryRandom.RandDec(1,2));
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE HeaderUnitCost@28();
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries of posted Assembly Order, if header Item Quantity and Unit Cost is updated in Assembly Order.
+
+      ModifyAssemblyLines(
+        ChangeType::" ",Item."Costing Method"::Average,AssemblyLine.Type::Resource,AssemblyLine.Type::Resource,FALSE,TRUE,
+        LibraryRandom.RandDec(1,2));
+    END;
+
+    [Normal]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    LOCAL PROCEDURE NormalPosting@164(ParentCostingMethod@1000 : Option;CompCostingMethod@1001 : Option;HeaderQtyFactor@1003 : Decimal;PartialPostFactor@1007 : Decimal;ExpectedError@1005 : Text[1024];IndirectCost@1004 : Decimal;PostWithoutAdj@1002 : Boolean) : Code[20];
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+      ItemNo@1011 : ARRAY [10] OF Code[20];
+      ResourceNo@1012 : ARRAY [10] OF Code[20];
+      ItemFilter@1008 : Text[250];
+      AssembledQty@1010 : Decimal;
+    BEGIN
+      // Setup.
+      Initialize;
+      LibraryAssembly.UpdateInventorySetup(InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type"::"Item & Location & Variant",
+        InventorySetup."Average Cost Period"::Day);
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,ParentCostingMethod,CompCostingMethod,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      ItemFilter := LibraryAssembly.GetCompsToAdjust(ItemNo,ResourceNo,AssemblyHeader);
+      LibraryAssembly.ModifyCostParams(AssemblyHeader."No.",FALSE,IndirectCost,0);
+      LibraryAssembly.ModifyItem(AssemblyHeader."Item No.",FALSE,IndirectCost * LibraryRandom.RandDec(10,2),0);
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,0);
+
+      // Exercise.
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,HeaderQtyFactor,PartialPostFactor,TRUE,WorkDate2);
+      LibraryAssembly.CalcOrderCostAmount(GlobalMaterialCost,GlobalResourceCost,GlobalResourceOvhd,GlobalAsmOvhd,AssemblyHeader."No.");
+      AssembledQty := AssemblyHeader."Quantity to Assemble";
+
+      // Check statistics before posting: post factor is 0.
+      GlobalPartialPostFactor := 0;
+      CheckStatisticsPage(AssemblyHeader);
+
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,ExpectedError);
+      IF NOT PostWithoutAdj THEN
+        LibraryCosting.AdjustCostItemEntries(ItemFilter,'');
+
+      // Verify.
+      IF ExpectedError = '' THEN BEGIN
+        IF PartialPostFactor < 100 THEN BEGIN
+          // Check statistics after partial posting.
+          GlobalPartialPostFactor := PartialPostFactor / 100;
+          CheckStatisticsPage(AssemblyHeader);
+        END;
+        LibraryAssembly.VerifyPartialPosting(AssemblyHeader,HeaderQtyFactor);
+        LibraryAssembly.VerifyPostedAssemblyHeader(TempAssemblyLine,AssemblyHeader,AssembledQty);
+        LibraryAssembly.VerifyPostedComments(AssemblyHeader);
+        LibraryAssembly.VerifyILEs(TempAssemblyLine,AssemblyHeader,AssembledQty);
+        LibraryAssembly.VerifyValueEntries(TempAssemblyLine,AssemblyHeader,AssembledQty);
+        LibraryAssembly.VerifyIndirectCostEntries(AssemblyHeader);
+        LibraryAssembly.VerifyResEntries(TempAssemblyLine,AssemblyHeader);
+        LibraryAssembly.VerifyCapEntries(TempAssemblyLine,AssemblyHeader);
+        LibraryAssembly.VerifyItemRegister(AssemblyHeader);
+      END;
+
+      // Tear down.
+      LibraryAssembly.UpdateInventorySetup(InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+
+      EXIT(AssemblyHeader."No.");
+    END;
+
+    [Normal]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    LOCAL PROCEDURE NormalPostGL@57(ParentCostingMethod@1000 : Option;CompCostingMethod@1001 : Option;HeaderQtyFactor@1003 : Decimal;PartialPostFactor@1007 : Decimal;PerPostingGroup@1011 : Boolean;IndirectCost@1002 : Decimal;PostWithoutAdj@1004 : Boolean);
+    VAR
+      PostedAssemblyHeader@1006 : Record 910;
+      AssemblyHeaderNo@1012 : Code[20];
+      DocNo@1005 : Code[20];
+    BEGIN
+      // Setup.
+      Initialize;
+      AssemblyHeaderNo :=
+        NormalPosting(ParentCostingMethod,CompCostingMethod,HeaderQtyFactor,PartialPostFactor,'',IndirectCost,PostWithoutAdj);
+      LibraryAssembly.UpdateInventorySetup(InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type"::"Item & Location & Variant",
+        InventorySetup."Average Cost Period"::Day);
+
+      // Exercise.
+      PostedAssemblyHeader.RESET;
+      PostedAssemblyHeader.SETRANGE("Order No.",AssemblyHeaderNo);
+      PostedAssemblyHeader.FINDFIRST;
+      IF PerPostingGroup THEN
+        DocNo := PostedAssemblyHeader."No."
+      ELSE
+        DocNo := '';
+      LibraryAssembly.PostInvtCostToGL(PerPostingGroup,PostedAssemblyHeader."Item No.",DocNo,
+        TEMPORARYPATH + PostedAssemblyHeader."No." + '.pdf');
+      IF PostWithoutAdj THEN
+        LibraryCosting.AdjustCostItemEntries(PostedAssemblyHeader."Item No.",'');
+
+      // Verify.
+      LibraryAssembly.VerifyGLEntries(PostedAssemblyHeader,PerPostingGroup);
+
+      // Tear down.
+      LibraryAssembly.UpdateInventorySetup(InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE SunshineSTDAVG@35();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Assembly] [Posting]
+      // [SCENARIO] Verify entries on posted Assembly Order (Adjust Cost after posting) when parent Item has Costing Method: Standard and child item has Costing Method: Average.
+
+      NormalPosting(Item."Costing Method"::Standard,Item."Costing Method"::Average,100,100,'',0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE PartialSTDFIFO@43();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Assembly] [Posting]
+      // [SCENARIO] Verify entries on posted Assembly Order (partially Assemble and Consume, Adjust Cost after posting) when parent Item has Costing Method: Standard and child item has Costing Method: FIFO.
+
+      NormalPosting(Item."Costing Method"::Standard,Item."Costing Method"::FIFO,50,25,'',0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE ZeroQtyToAssemble@152();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Assembly] [Posting]
+      // [SCENARIO] Verify an error on posting Assembly Order (Adjust Cost after posting) when Qty to Assemble = 0.
+
+      NormalPosting(Item."Costing Method"::Standard,Item."Costing Method"::Standard,0,100,ZeroQtyErr,0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE ZeroQtyOnLines@150();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Assembly] [Posting]
+      // [SCENARIO] Verify an error on posting Assembly Order (Adjust Cost after posting) when Qty to Consume = 0.
+
+      NormalPosting(Item."Costing Method"::Standard,Item."Costing Method"::Standard,100,0,ZeroQtyErr,0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE IndirectCostSTDSTD@73();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Assembly] [Posting]
+      // [SCENARIO] Verify entries on posted Assembly Order (Adjust Cost after posting) when parent Item has Costing Method: Standard and child item has Costing Method: Standard, components with Indirect Cost.
+
+      NormalPosting(Item."Costing Method"::Standard,Item."Costing Method"::Standard,100,100,'',10,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE SunshineFIFOSTD@244();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Assembly] [Posting]
+      // [SCENARIO] Verify entries on posted Assembly Order (Adjust Cost after posting) when parent Item has Costing Method: FIFO and child item has Costing Method: Standard.
+
+      NormalPosting(Item."Costing Method"::FIFO,Item."Costing Method"::Standard,100,100,'',0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE PartialAVGSTD@243();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Assembly] [Posting]
+      // [SCENARIO] Verify entries on posted Assembly Order (partial assembly and consumption, Adjust Cost after posting) when parent Item has Costing Method: Average and child item has Costing Method: Standard.
+
+      NormalPosting(Item."Costing Method"::Average,Item."Costing Method"::Standard,50,25,'',0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE IndirectCostFIFOAVG@245();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Assembly] [Posting]
+      // [SCENARIO] Verify entries on posted Assembly Order (Adjust Cost after posting) when parent Item has Costing Method: FIFO and child item has Costing Method: Average, components with Indirect Cost.
+
+      NormalPosting(Item."Costing Method"::FIFO,Item."Costing Method"::Average,100,100,'',10,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE SunshineAVGFIFO@246();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Assembly] [Posting]
+      // [SCENARIO] Verify entries on posted Assembly Order (Adjust Cost after posting) when parent Item has Costing Method: Average and child item has Costing Method: FIFO.
+
+      NormalPosting(Item."Costing Method"::Average,Item."Costing Method"::FIFO,100,100,'',0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE SunshineGL@45();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Assembly] [Posting]
+      // [SCENARIO] Verify GL entries on posted Assembly Order when parent Item has Costing Method: Standard and child item has Costing Method: Standard.
+
+      NormalPostGL(Item."Costing Method"::Standard,Item."Costing Method"::Standard,100,100,FALSE,0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE PartialGL@51();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Assembly] [Posting]
+      // [SCENARIO] Verify GL entries on posted Assembly Order (partial assembly and consumption) when parent Item has Costing Method: Standard and child item has Costing Method: Standard.
+
+      NormalPostGL(Item."Costing Method"::Standard,Item."Costing Method"::Standard,50,25,FALSE,0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE IndirectCostGL@134();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Assembly] [Posting]
+      // [SCENARIO] Verify GL entries on posted Assembly Order when parent Item has Costing Method: Standard and child item has Costing Method: Standard, components with Indirect Cost.
+
+      NormalPostGL(Item."Costing Method"::Standard,Item."Costing Method"::Standard,100,100,FALSE,10,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE PostBeforeAdj@82();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Assembly] [Posting]
+      // [SCENARIO] Verify GL entries on posted Assembly Order when parent Item has Costing Method: Standard and child item has Costing Method: Standard, components with Indirect Cost, Adjust Cost AFTER Post to GL.
+
+      NormalPostGL(Item."Costing Method"::Standard,Item."Costing Method"::Standard,100,100,FALSE,10,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,StatisticsPageHandler)]
+    PROCEDURE PostNoAdjPerPostingGr@106();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Assembly] [Posting]
+      // [SCENARIO] Verify GL entries on posted Assembly Order (Post Inventory to GL method: Per Posting Group) when parent Item has Costing Method: Average and child item has Costing Method: Average.
+
+      NormalPostGL(Item."Costing Method"::Average,Item."Costing Method"::Average,100,100,TRUE,0,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ConfirmHandler)]
+    PROCEDURE PostFromPage@1();
+    VAR
+      AssemblyHeader@1006 : Record 900;
+      TempAssemblyLine@1009 : TEMPORARY Record 901;
+    BEGIN
+      // [FEATURE] [Posting]
+      // [SCENARIO] Verify entries on posted Assembly Order when it is posted via page.
+
+      // Setup.
+      Initialize;
+      LibraryAssembly.UpdateInventorySetup(InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type"::"Item & Location & Variant",
+        InventorySetup."Average Cost Period"::Day);
+      LibraryAssembly.SetupAssemblyData(AssemblyHeader,WorkDate2,Item."Costing Method"::Standard,Item."Costing Method"::Standard,
+        Item."Replenishment System"::Assembly,'',TRUE);
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,0);
+
+      // Exercise.
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,WORKDATE);
+      CODEUNIT.RUN(CODEUNIT::"Assembly-Post (Yes/No)",AssemblyHeader);
+
+      // Verify.
+      LibraryAssembly.VerifyPartialPosting(AssemblyHeader,100);
+      LibraryAssembly.VerifyPostedAssemblyHeader(TempAssemblyLine,AssemblyHeader,AssemblyHeader.Quantity);
+      LibraryAssembly.VerifyPostedComments(AssemblyHeader);
+      LibraryAssembly.VerifyILEs(TempAssemblyLine,AssemblyHeader,AssemblyHeader.Quantity);
+      LibraryAssembly.VerifyValueEntries(TempAssemblyLine,AssemblyHeader,AssemblyHeader.Quantity);
+      LibraryAssembly.VerifyIndirectCostEntries(AssemblyHeader);
+      LibraryAssembly.VerifyResEntries(TempAssemblyLine,AssemblyHeader);
+      LibraryAssembly.VerifyCapEntries(TempAssemblyLine,AssemblyHeader);
+      LibraryAssembly.VerifyItemRegister(AssemblyHeader);
+
+      // Tear down.
+      LibraryAssembly.UpdateInventorySetup(InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,PostedStatisticsPageHandler)]
+    PROCEDURE PostedOrderStatistics@12();
+    VAR
+      AssemblyHeader@1010 : Record 900;
+      TempAssemblyLine@1008 : TEMPORARY Record 901;
+    BEGIN
+      // [FEATURE] [Statistics]
+      // [SCENARIO] Check that values are correct in Posted Asm. Order Statistics page.
+
+      // Setup.
+      InitPostedStatScenario(AssemblyHeader);
+
+      // Exercise.
+      LibraryAssembly.PrepareOrderPosting(AssemblyHeader,TempAssemblyLine,100,100,TRUE,WorkDate2);
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+
+      // Verify.
+      InitRefPostAsmStatisticsData;
+      CheckPostedStatisticsPage(AssemblyHeader);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CheckStatisticsPage@2(AssemblyHeader@1000 : Record 900);
+    VAR
+      AssemblyOrder@1001 : TestPage 900;
+    BEGIN
+      AssemblyOrder.OPENEDIT;
+      AssemblyOrder.FILTER.SETFILTER("No.",AssemblyHeader."No.");
+      AssemblyOrder.GOTORECORD(AssemblyHeader);
+
+      // Open statistics page.
+      AssemblyOrder.Action14.INVOKE;
+
+      AssemblyOrder.OK.INVOKE;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CheckPostedStatisticsPage@3(AssemblyHeader@1002 : Record 900);
+    VAR
+      PostedAssemblyHeader@1000 : Record 910;
+      PostedAssemblyOrder@1001 : TestPage 920;
+    BEGIN
+      PostedAssemblyHeader.SETRANGE("Order No.",AssemblyHeader."No.");
+      PostedAssemblyHeader.FINDLAST;
+      PostedAssemblyOrder.OPENEDIT;
+      PostedAssemblyOrder.FILTER.SETFILTER("No.",PostedAssemblyHeader."No.");
+      PostedAssemblyOrder.GOTORECORD(PostedAssemblyHeader);
+
+      // Open statistics page.
+      PostedAssemblyOrder.Statistics.INVOKE;
+
+      PostedAssemblyOrder.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE InitPostedStatScenario@10(VAR AssemblyHeader@1005 : Record 900);
+    VAR
+      Item@1008 : Record 27;
+      Resource@1007 : Record 156;
+      BOMComponent@1006 : Record 90;
+      GenProdPostingGr@1003 : Code[10];
+      AsmInvtPostingGr@1002 : Code[10];
+      CompInvtPostingGr@1001 : Code[10];
+      ItemNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      LibraryAssembly.SetupPostingToGL(GenProdPostingGr,AsmInvtPostingGr,CompInvtPostingGr,'');
+      LibraryAssembly.CreateItem(Item,Item."Costing Method"::Standard,Item."Replenishment System"::Assembly,'','');
+      LibraryAssembly.CreateAssemblyList(Item."Costing Method"::Standard,Item."No.",TRUE,1,1,0,1,GenProdPostingGr,CompInvtPostingGr);
+
+      ItemNo := Item."No.";
+      Item.VALIDATE("Unit Cost",3);
+      Item.VALIDATE("Indirect Cost %",100);
+      Item.VALIDATE("Overhead Rate",5);
+      Item.VALIDATE("Single-Level Capacity Cost",7);
+      Item.VALIDATE("Single-Level Cap. Ovhd Cost",11);
+      Item.MODIFY;
+
+      BOMComponent.SETRANGE("Parent Item No.",Item."No.");
+      IF BOMComponent.FINDSET THEN
+        REPEAT
+          CASE BOMComponent.Type OF
+            BOMComponent.Type::Item:
+              BEGIN
+                Item.GET(BOMComponent."No.");
+                Item.VALIDATE("Standard Cost",13);
+                Item.VALIDATE("Unit Price",17);
+                Item.MODIFY(TRUE);
+              END;
+            BOMComponent.Type::Resource:
+              BEGIN
+                Resource.GET(BOMComponent."No.");
+                Resource.VALIDATE("Unit Price",19);
+                Resource.VALIDATE("Direct Unit Cost",23);
+                Resource.VALIDATE("Indirect Cost %",100);
+                Resource.MODIFY(TRUE);
+              END
+          END;
+        UNTIL BOMComponent.NEXT = 0;
+      BOMComponent.MODIFYALL("Quantity per",1);
+
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,ItemNo,'',1,'');
+      LibraryAssembly.AddCompInventory(AssemblyHeader,WorkDate2,0);
+    END;
+
+    LOCAL PROCEDURE InitRefPostAsmStatisticsData@11();
+    VAR
+      ColIdx@1001 : ',StdCost,ExpCost,ActCost,Dev,Var';
+      RowIdx@1000 : ',MatCost,ResCost,ResOvhd,AsmOvhd,Total';
+    BEGIN
+      GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::MatCost] := 3;
+      GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::ResCost] := 7;
+      GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::ResOvhd] := 11;
+      GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::AsmOvhd] := 26;
+      GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::Total] := 47;
+
+      GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::MatCost] := 13;
+      GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::ResCost] := 23;
+      GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::ResOvhd] := 23;
+      GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::AsmOvhd] := 64;
+      GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::Total] := 123;
+
+      GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::MatCost] := 13;
+      GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::ResCost] := 23;
+      GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::ResOvhd] := 23;
+      GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::AsmOvhd] := 64;
+      GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::Total] := 123;
+
+      GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::MatCost] := 333;
+      GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::ResCost] := 229;
+      GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::ResOvhd] := 109;
+      GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::AsmOvhd] := 146;
+      GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::Total] := 162;
+
+      GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::MatCost] := 10;
+      GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::ResCost] := 16;
+      GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::ResOvhd] := 12;
+      GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::AsmOvhd] := 38;
+      GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::Total] := 76;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyStatisticsField@6(ExpectedValue@1000 : Decimal;ActualValue@1001 : Decimal;ErrorMessage@1002 : Text[1024]);
+    BEGIN
+      Assert.AreNearlyEqual(ExpectedValue,ActualValue,LibraryERM.GetAmountRoundingPrecision,ErrorMessage);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AvailabilityWindowHandler@48(VAR AsmAvailability@1000 : Page 908;VAR Response@1001 : Action);
+    BEGIN
+      Response := ACTION::Yes; // always confirm
+    END;
+
+    [PageHandler]
+    PROCEDURE StatisticsPageHandler@4(VAR AssemblyOrderStatistics@1000 : TestPage 916);
+    BEGIN
+      VerifyStatisticsField(
+        GlobalMaterialCost,
+        AssemblyOrderStatistics.GETFIELD(39).ASDECIMAL,
+        'Wrong Material Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalResourceCost,
+        AssemblyOrderStatistics.GETFIELD(9).ASDECIMAL,
+        'Wrong Resource Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalResourceOvhd,
+        AssemblyOrderStatistics.GETFIELD(32).ASDECIMAL,
+        'Wrong Res. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalMaterialCost + GlobalResourceCost + GlobalResourceOvhd + GlobalAsmOvhd,
+        AssemblyOrderStatistics.GETFIELD(19).ASDECIMAL,
+        'Wrong Cost Amount on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalMaterialCost * GlobalPartialPostFactor,
+        AssemblyOrderStatistics.GETFIELD(40).ASDECIMAL,
+        'Wrong Actual Material Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalResourceCost * GlobalPartialPostFactor,
+        AssemblyOrderStatistics.GETFIELD(12).ASDECIMAL,
+        'Wrong Actual Resource Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalResourceOvhd * GlobalPartialPostFactor,
+        AssemblyOrderStatistics.GETFIELD(34).ASDECIMAL,
+        'Wrong Actual Res. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        (GlobalMaterialCost + GlobalResourceCost + GlobalResourceOvhd + GlobalAsmOvhd) * GlobalPartialPostFactor,
+        AssemblyOrderStatistics.GETFIELD(20).ASDECIMAL,
+        'Wrong Actual cost amount on Statistics page.');
+    END;
+
+    [PageHandler]
+    PROCEDURE PostedStatisticsPageHandler@7(VAR PostedAsmOrderStatistics@1000 : TestPage 923);
+    VAR
+      ColIdx@1002 : ',StdCost,ExpCost,ActCost,Dev,Var';
+      RowIdx@1001 : ',MatCost,ResCost,ResOvhd,AsmOvhd,Total';
+    BEGIN
+      // Standard cost
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::MatCost],
+        PostedAsmOrderStatistics.GETFIELD(38).ASDECIMAL,
+        'Wrong Standard Material Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::ResCost],
+        PostedAsmOrderStatistics.GETFIELD(25).ASDECIMAL,
+        'Wrong Standard Resource Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::ResOvhd],
+        PostedAsmOrderStatistics.GETFIELD(29).ASDECIMAL,
+        'Wrong Standard Res. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::AsmOvhd],
+        PostedAsmOrderStatistics.GETFIELD(45).ASDECIMAL,
+        'Wrong Standard Asm. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::StdCost,RowIdx::Total],
+        PostedAsmOrderStatistics.GETFIELD(23).ASDECIMAL,
+        'Wrong Standard Total Cost Amount on Statistics page');
+
+      // Expected cost
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::MatCost],
+        PostedAsmOrderStatistics.GETFIELD(39).ASDECIMAL,
+        'Wrong Expected Material Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::ResCost],
+        PostedAsmOrderStatistics.GETFIELD(9).ASDECIMAL,
+        'Wrong Expected Resource Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::ResOvhd],
+        PostedAsmOrderStatistics.GETFIELD(32).ASDECIMAL,
+        'Wrong Expected Res. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::AsmOvhd],
+        PostedAsmOrderStatistics.GETFIELD(44).ASDECIMAL,
+        'Wrong Expected Asm. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ExpCost,RowIdx::Total],
+        PostedAsmOrderStatistics.GETFIELD(19).ASDECIMAL,
+        'Wrong Expected Total Cost Amount on Statistics page');
+
+      // Actual cost
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::MatCost],
+        PostedAsmOrderStatistics.GETFIELD(40).ASDECIMAL,
+        'Wrong Actual Material Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::ResCost],
+        PostedAsmOrderStatistics.GETFIELD(12).ASDECIMAL,
+        'Wrong Actual Resource Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::ResOvhd],
+        PostedAsmOrderStatistics.GETFIELD(34).ASDECIMAL,
+        'Wrong Actual Res. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::AsmOvhd],
+        PostedAsmOrderStatistics.GETFIELD(43).ASDECIMAL,
+        'Wrong Actual Asm. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::ActCost,RowIdx::Total],
+        PostedAsmOrderStatistics.GETFIELD(20).ASDECIMAL,
+        'Wrong Actual Total Cost Amount on Statistics page');
+
+      // Dev. %
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::MatCost],
+        PostedAsmOrderStatistics.GETFIELD(41).ASDECIMAL,
+        'Wrong Dev. % Material Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::ResCost],
+        PostedAsmOrderStatistics.GETFIELD(15).ASDECIMAL,
+        'Wrong Dev. % Resource Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::ResOvhd],
+        PostedAsmOrderStatistics.GETFIELD(36).ASDECIMAL,
+        'Wrong Dev. % Res. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::AsmOvhd],
+        PostedAsmOrderStatistics.GETFIELD(42).ASDECIMAL,
+        'Wrong Dev. % Asm. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::Dev,RowIdx::Total],
+        PostedAsmOrderStatistics.GETFIELD(21).ASDECIMAL,
+        'Wrong Dev. % Total Cost Amount on Statistics page');
+
+      // Variance
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::MatCost],
+        PostedAsmOrderStatistics.GETFIELD(24).ASDECIMAL,
+        'Wrong Variance Material Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::ResCost],
+        PostedAsmOrderStatistics.GETFIELD(22).ASDECIMAL,
+        'Wrong Variance Resource Cost on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::ResOvhd],
+        PostedAsmOrderStatistics.GETFIELD(13).ASDECIMAL,
+        'Wrong Variance Res. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::AsmOvhd],
+        PostedAsmOrderStatistics.GETFIELD(7).ASDECIMAL,
+        'Wrong Variance Asm. Overhead on Statistics page');
+
+      VerifyStatisticsField(
+        GlobalPostedAsmStatValue[ColIdx::"Var",RowIdx::Total],
+        PostedAsmOrderStatistics.GETFIELD(47).ASDECIMAL,
+        'Wrong Variance Total Cost Amount on Statistics page');
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@9(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE DimensionsChangeConfirmHandler@15(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.IsTrue(STRPOS(Question,MsgUpdateDim) > 0,STRSUBSTNO('Wrong question: %1',Question));
+
+      Reply := TRUE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Assembly] [SCM]
+      Unsupported version tags:
+      IT: Unable to Execute
+      BE: Unable to Execute
+
+      This CU is covering the chapter 3.1.4 in the Test Design Specification of Kitting, as per the following:
+      SC4-1: Covered by all test functions.
+      SC4-2: DimensionPosting, InvalidInvtPeriod, InvalidPostingDate, MissingHeaderPostingGroups, MissingCompPostingGrSetup,
+        MissingPostedDocNoSeries, AvailabilityCheck
+      SC4-3: NormalPosting
+      SC4-4: ModifyAssemblyLines
+      SC4-5: NormalPosting
+      SC4-6: all test functions.
+      SC4-7: NormalPosting
+      SC4-10: NormalPostGL
+      SC4-11: NormalPostGL
+    }
+    END.
+  }
+}
+

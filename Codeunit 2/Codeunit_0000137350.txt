@@ -1,0 +1,2860 @@
+OBJECT Codeunit 137350 SCM Inventory Reports - III
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      AdjustCostItemEntriesBatchJobMessage@1021 : TextConst 'ENU=Some unadjusted value entries will not be covered with the new setting.';
+      ItemNoFilter@1028 : TextConst 'ENU=%1|%2|%3';
+      PerEntryError@1041 : TextConst 'ENU=Do not enter a Document No. when posting per Entry.';
+      PerPostingGroupError@1040 : TextConst 'ENU=Please enter a Document No. when posting per Posting Group.';
+      PostingDateError@1036 : TextConst 'ENU=Enter the posting date.';
+      Assert@1001 : Codeunit 130000;
+      LibraryAssembly@1014 : Codeunit 132207;
+      LibraryCosting@1017 : Codeunit 132200;
+      LibraryERM@1020 : Codeunit 131300;
+      LibraryInventory@1006 : Codeunit 132201;
+      LibraryItemTracking@1005 : Codeunit 130502;
+      LibraryManufacturing@1026 : Codeunit 132202;
+      LibraryPurchase@1023 : Codeunit 130512;
+      LibrarySales@1016 : Codeunit 130509;
+      LibraryUtility@1015 : Codeunit 131000;
+      LibraryVariableStorage@1025 : Codeunit 131004;
+      LibraryWarehouse@1031 : Codeunit 132204;
+      LibraryReportDataset@1046 : Codeunit 131007;
+      LibraryRandom@1002 : Codeunit 130440;
+      LibrarySetupStorage@1008 : Codeunit 131009;
+      LibraryDimension@1009 : Codeunit 131001;
+      isInitialized@1000 : Boolean;
+      RecordCountError@1030 : TextConst 'ENU=Record count should be greater than 1.';
+      RegisteringDateError@1035 : TextConst 'ENU=Enter the Registering Date.';
+      SalesLinesShownError@1027 : TextConst 'ENU=Sales lines must be shown.';
+      UndoShipmentConfirmMessage@1012 : TextConst 'ENU=Do you really want to undo the selected Shipment lines?';
+      ValueNotMatchedError@1011 : TextConst 'ENU=Value not matched';
+      ValidationError@1007 : TextConst 'ENU=%1 must be %2 in Report.';
+      ValuationDateError@1022 : TextConst 'ENU=Enter the valuation date';
+      WIPInventory@1033 : TextConst 'ENU=WIP Inventory';
+      OptionString@1003 : 'AssignSerialNo,AssignLotNo,SelectEntries';
+      ApplyToItemEntryErr@1004 : TextConst 'ENU=Order No. must be equal to ''%1''  in Item Ledger Entry';
+      DimensionMandatoryErr@1010 : TextConst '@@@=%1: Field(Code) in Table(Dimension), %2: Field(No.) in Table(G/L Account);ENU=Select a Dimension Value Code for the Dimension Code %1 for G/L Account %2.';
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,InventoryValuationRequestPageHandler)]
+    PROCEDURE InventoryValuationAfterPostingItemJournal@5();
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      // Verify Inventory Valuation Report for Cost Posted to G/L after posting Item Journal and Undo the Posted Shipment.
+
+      // Setup: Post Item Journal and Undo Sales Shipment.
+      Initialize;
+      LibraryVariableStorage.Enqueue(UndoShipmentConfirmMessage);
+      PostItemJournalAndUndoShipment(SalesLine);
+
+      // Exercise: Run Inventory Valuation Report.
+      RunInventoryValuationReport(SalesLine."No.",WORKDATE,CALCDATE('<CY>',WORKDATE));
+
+      // Verify: Verify Inventory Valuation Report.
+      VerifyInventoryValuationReport(SalesLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryAvailabilityRequestPageHandler)]
+    PROCEDURE InventoryAvailabilityAfterPostingItemJournal@6();
+    VAR
+      Item@1000 : Record 27;
+      ItemJournalLine@1003 : Record 83;
+      Location@1002 : Record 14;
+      LibraryWarehouse@1005 : Codeunit 132204;
+      CreatePerOption@1001 : 'Location,Variant,Location & Variant';
+      MaxInventory@1006 : Decimal;
+    BEGIN
+      // Verify Inventory Availability Report for updated Stock Keeping Unit with Reorder Point after posting Item Journal.
+
+      // Setup: Create Location, create Item with Reordering Policy Maximum Qty., create Stockkeeping Unit with Reordering Policy Lot-for-Lot and Post Item Journal.
+      Initialize;
+      MaxInventory := LibraryRandom.RandDec(100,2);  // Use Random for Maximum Inventory.
+      CreateAndUpdateItem(
+        Item,Item.Reserve::Never,Item."Reordering Policy"::"Maximum Qty.",MaxInventory,MaxInventory / 2,Item."Costing Method"::FIFO,
+        '','');  // Set Reorder Point less than Max. Inventory.
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      LibraryInventory.CreateStockKeepingUnit(Item,CreatePerOption::Location,FALSE,FALSE);  // Use False for Item InInventory Only and Replace Previous SKUs fields.
+      UpdateStockkeepingUnit(Location.Code,Item."No.");
+      CreateAndPostItemJournalLineWithLocation(ItemJournalLine,Item."No.",Location.Code);
+
+      // Exercise: Run Inventory Availability Report.
+      RunInventoryAvailabilityReport(Item."No.");
+
+      // Verify: Verify Inventory Availability Report for updated Stock Keeping Unit with Reorder Point.
+      VerifyInventoryAvailabilityReport(ItemJournalLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,ItemExpirationRequestPageHandler)]
+    PROCEDURE ItemExpirationAfterPostingPurchaseOrder@31();
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      // Verify Item Expiration Report after posting Purchase Order with Expiration Date.
+
+      // Setup: Create and post Purchase Order with Expiration Date.
+      Initialize;
+      CreatePurchaseOrderWithItemTracking(PurchaseLine,'',FALSE);  // Use blank value for Location Code.
+      UpdateReservationEntryExpirationDate(PurchaseLine."No.");
+      PostPurchaseOrder(PurchaseLine,TRUE,TRUE);
+
+      // Exercise: Run Item Expiration Report.
+      RunItemExpirationReport(PurchaseLine."No.");
+
+      // Verify: Verify Item Expiration Report.
+      VerifyItemExpirationReport(PurchaseLine.Quantity,PurchaseLine."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemRegisterValueRequestPageHandler)]
+    PROCEDURE ItemRegisterAfterPostingItemJournal@30();
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      // Verify Item Register Report after posting Item Journal.
+
+      // Setup: Create and post Item Journal.
+      Initialize;
+      CreateAndPostItemJournalLine(
+        ItemJournalLine,ItemJournalLine."Entry Type"::Purchase,CreateItem,WORKDATE,LibraryRandom.RandInt(10),
+        LibraryRandom.RandDec(10,2));  // Use Random value for Unit Amount and Quantity.
+
+      // Exercise: Run Item Register Report.
+      RunItemRegisterReport(ItemJournalLine);
+
+      // Verify: Verify Item Register Report.
+      VerifyItemRegisterReport(ItemJournalLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemSubstitutionRequestPageHandler)]
+    PROCEDURE ItemSubstitutionAfterCreatingSubstitute@29();
+    VAR
+      ItemSubstitution@1000 : Record 5715;
+    BEGIN
+      // Verify Item Substitutions Report after creating Item Substitute.
+
+      // Setup: Create item and its substitute.
+      Initialize;
+      LibraryAssembly.CreateItemSubstitution(ItemSubstitution,CreateItem);
+
+      // Exercise: Run Item Substitutions Report.
+      RunItemSubstitutionsReport(ItemSubstitution."No.");
+
+      // Verify: Verify Item Substitutions Report.
+      VerifyItemSubstitutionsReport(ItemSubstitution."Substitute No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler,InvtValuationCostSpecRequestPageHandler)]
+    PROCEDURE InvtValuationCostSpecAfterRevaluation@12();
+    VAR
+      Item@1000 : Record 27;
+      InventorySetup@1001 : Record 313;
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      // Verify Inventory Valuation Cost Specification Report when Item is revalued more than once.
+
+      // Setup: Create Item and update Inventory Setup.
+      Initialize;
+      LibraryVariableStorage.Enqueue(AdjustCostItemEntriesBatchJobMessage);
+      CreateAndUpdateItem(Item,Item.Reserve::Never,Item."Reordering Policy"::" ",0,0,Item."Costing Method"::FIFO,'','');  // Pass zero values for Maximum Inventory and Reordering Point.
+      UpdateInventorySetup(InventorySetup."Automatic Cost Adjustment"::Always);
+
+      // Create and post Item Journal for Purchase and Revaluate it.
+      CreateAndPostItemJournalLine(
+        ItemJournalLine,ItemJournalLine."Entry Type"::Purchase,Item."No.",WORKDATE,Item."Unit Cost",LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+      CreateAndPostItemJournalForRevaluation(Item."No.",WORKDATE);
+
+      // Create and post Item Journal for Sales and Revaluate it.
+      CreateAndPostItemJournalLine(
+        ItemJournalLine,ItemJournalLine."Entry Type"::Sale,Item."No.",WORKDATE,Item."Unit Cost",ItemJournalLine.Quantity / 2);  // Divide by 2 to Sale partial Quantity.
+      CreateAndPostItemJournalForRevaluation(Item."No.",WORKDATE);
+
+      // Exercise: Run Inventory Valuation Cost Specification Report.
+      RunInvtValuationCostSpecReport(Item."No.");
+
+      // Verify: Verify Inventory Valuation Cost Specification Report.
+      VerifyInvtValuationCostSpecReport(Item."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(InvtValuationCostSpecValuationDateHandler)]
+    PROCEDURE InvtValuationCostSpecValuationDateMustExists@34();
+    BEGIN
+      // Verify Inventory Valuation Cost Specification Report for blank Valuation Date.
+
+      // Setup.
+      Initialize;
+      COMMIT;
+
+      // Exercise: Run Inventory Valuation Cost Specification Report.
+      ASSERTERROR RunInvtValuationCostSpecReportWithPage;
+
+      // Verify.
+      Assert.ExpectedError(ValuationDateError);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesReservationAvailRequestPageHandler)]
+    PROCEDURE SalesReservationAvailAfterCreatingSalesOrder@38();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Verify Sales Reservation Availability Report after creating Sales Order.
+
+      // Setup: Create Item, create and Receive Purchase Order, create Sales Order.
+      Initialize;
+      CreateAndReceivePurchaseOrder(PurchaseLine);
+      CreateSalesOrderAndModifyQuantity(SalesLine,PurchaseLine."No.",PurchaseLine.Quantity);
+
+      // Exercise: Run Sales Reservation Availability Report.
+      RunSalesReservationAvailReport(SalesLine."Document No.");
+
+      // Verify: Verify Sales Reservation Availability Report.
+      SalesLine.GET(SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.");
+      VerifySalesReservationAvailReport(SalesLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesReservationAvailRequestPageHandler)]
+    PROCEDURE SalesReservationAvailSalesLineMustBeShown@70();
+    VAR
+      SalesReservationAvail@1000 : Report 209;
+    BEGIN
+      // Verify Sales Reservation Availability Report for Show Sales Line as FALSE.
+
+      // Setup.
+      Initialize;
+      LibraryVariableStorage.Enqueue(FALSE);     // Show sales lines
+      LibraryVariableStorage.Enqueue(TRUE);      // Show reservation entries
+      LibraryVariableStorage.Enqueue(FALSE);     // Modify qty...
+      CLEAR(SalesReservationAvail);
+      COMMIT;
+
+      // Exercise.
+      ASSERTERROR SalesReservationAvail.RUN;
+
+      // Verify.
+      Assert.ExpectedError(SalesLinesShownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler,PurchaseReservationAvailRequestPageHandler)]
+    PROCEDURE PurchaseReservationAvailAfterCreatingPurchaseOrder@50();
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      SalesHeader@1004 : Record 36;
+      SalesLine@1005 : Record 37;
+    BEGIN
+      // Verify Purchase Reservation Availability Report after creating Purchase Order.
+
+      // Setup: Create Purchase Order.
+      Initialize;
+      CreatePurchaseOrder(PurchaseLine,CreateItem,LibraryRandom.RandDec(10,2),'');  // Use Random value for Quantity.
+
+      // Create and Ship Sales Order.
+      CreateSalesOrder(SalesLine,PurchaseLine."No.",PurchaseLine.Quantity);
+      SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // Reopen Purchase Order to Reserve.
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.ReopenPurchaseDocument(PurchaseHeader);
+      OpenPurchaseOrderToReserve(PurchaseHeader."No.");
+
+      // Exercise: Run Sales Reservation Availability Report.
+      COMMIT;
+      RunPurchaseReservationAvailReport(PurchaseHeader."No.");
+
+      // Verify: Verify Sales Reservation Availability Report.
+      VerifyPurchaseReservationAvailReport(PurchaseLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(PurchaseReservationAvailPageHandler)]
+    PROCEDURE PurchaseReservationAvailPurchaseLineMustBeShown@49();
+    BEGIN
+      // Verify Purchase Reservation Availability Report for Show Purchase Line as FALSE.
+
+      // Setup.
+      Initialize;
+      LibraryVariableStorage.Enqueue(TRUE);     // Show purchase line
+      LibraryVariableStorage.Enqueue(TRUE);    // Show reservation entries
+      LibraryVariableStorage.Enqueue(TRUE);    // Modify qty to ship in order lines
+      COMMIT;
+
+      // Exercise.
+      REPORT.RUN(REPORT::"Purchase Reservation Avail.",TRUE,FALSE);
+
+      // Verify.
+      ASSERTERROR LibraryReportDataset.LoadDataSetFile;
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryAvailabilityPlanRequestPageHandler)]
+    PROCEDURE InventoryAvailabilityPlanAfterCreatingSalesOrder@48();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Verify Inventory Availability Plan Report after creating Sales Order.
+
+      // Setup: Create Item, create and Receive Purchase Order, create Sales Order.
+      Initialize;
+      CreateAndReceivePurchaseOrder(PurchaseLine);
+      PurchaseLine.GET(PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.");
+      CreateSalesOrder(SalesLine,PurchaseLine."No.",LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+      Item.GET(PurchaseLine."No.");
+      Item.CALCFIELDS(Inventory,"Qty. on Sales Order");
+      LibraryVariableStorage.Enqueue(FALSE);
+
+      // Exercise: Run Inventory Availability Plan Report.
+      RunInventoryAvailabilityPlanReport(PurchaseLine."No.");
+
+      // Verify: Verify Inventory Availability Plan Report.
+      VerifyQuantityOnInventoryAvailabilityPlanReport(Item.Inventory,Item.Inventory - Item."Qty. on Sales Order");
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryAvailabilityPlanRequestPageHandler)]
+    PROCEDURE InventoryAvailabilityPlanWithStockKeeping@92();
+    VAR
+      Item@1000 : Record 27;
+      Location@1001 : Record 14;
+      ItemJournalLine@1002 : Record 83;
+      CreatePerOption@1003 : 'Location,Variant,Location & Variant';
+    BEGIN
+      // Verify Inventory Availability Plan Report with Stockkeeping Unit as True.
+
+      // Setup: Create Item with Stockkeeping Unit, Location, create and Post Item Journal Line.
+      Initialize;
+      Item.GET(CreateItem);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Item.SETRANGE("Location Filter",Location.Code);
+      LibraryInventory.CreateStockKeepingUnit(Item,CreatePerOption::Location,FALSE,FALSE);  // Use False for Item InInventory Only and Replace Previous SKUs fields.
+      CreateAndPostItemJournalLineWithLocation(ItemJournalLine,Item."No.",Location.Code);
+      LibraryVariableStorage.Enqueue(TRUE);
+      Item.CALCFIELDS(Inventory);
+
+      // Exercise: Run Inventory Availability Plan Report.
+      RunInventoryAvailabilityPlanReport(Item."No.");
+
+      // Verify: Verify Inventory Availability Plan Report.
+      VerifyQuantityOnInventoryAvailabilityPlanReport(Item.Inventory,Item.Inventory);
+      LibraryReportDataset.AssertCurrentRowValue('LocCode_SKU',Location.Code);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerInvSetup,MessageHandlerInvtSetup,PostInventoryCostToGLRequestPageHandler)]
+    PROCEDURE PostValueEntryToGLWithPurchaseCost@59();
+    VAR
+      DirectUnitCost@1014 : Decimal;
+      Quantity@1006 : Decimal;
+    BEGIN
+      // Post Value Entry to G/L is correct with Zero Cost - Purchase. Post as Receive, Create Release Production Order and Post Production Journal. Post Purchase Order as Invoice and
+      // Run Adjust Cost Item Entries and Post Inventory Cost to G/L. Verify report Inventory Cost to G/L Report.
+
+      // Setup: Create Purchase Order for Production and Component Item. Post as Receive.
+      Initialize;
+      ExecuteUIHandlers;
+      Quantity := 10 + LibraryRandom.RandInt(100);  // Using Random value for Quantity.
+      DirectUnitCost := LibraryRandom.RandDec(100,2);  // Using Random for Direct Unit Cost.
+      PostValueEntryToGL(DirectUnitCost,Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerInvSetup,MessageHandlerInvtSetup,PostInventoryCostToGLRequestPageHandler)]
+    PROCEDURE PostValueEntryToGLWithCostACYCostAmount@106();
+    VAR
+      DirectUnitCost@1014 : Decimal;
+      Quantity@1006 : Decimal;
+      TotalInventoryValueACY@1017 : Decimal;
+      Component@1015 : Code[20];
+      CurrencyCode@1009 : Code[10];
+    BEGIN
+      // Setup General Ledger Setup for Additional Currency,Post Value Entry to G/L is correct with Zero Cost - Purchase. Post as Receive, Create Release Production Order and Post Production Journal. Post Purchase Order as Invoice and
+      // Run Adjust Cost Item Entries and Post Inventory Cost to G/L.
+
+      // Setup: Create Purchase Order for Production and Component Item. Post as Receive.
+      Initialize;
+      ExecuteUIHandlers;
+      CurrencyCode := CreateCurrency;
+      UpdateAddCurrencySetup(CurrencyCode);
+      Quantity := 10 + LibraryRandom.RandInt(100);  // Using Random value for Quantity.
+      DirectUnitCost := LibraryRandom.RandDec(100,2);  // Using Random for Direct Unit Cost.
+      TotalInventoryValueACY := LibraryERM.ConvertCurrency(Quantity * DirectUnitCost,'',CurrencyCode,WORKDATE);
+      Component := PostValueEntryToGL(DirectUnitCost,Quantity);
+
+      // Verify: Verify record count in Post Value Entry record,Total Inventory Cost on Inventory Cost To GL Report and  Quantity Expected/Actual Cost ACY for Component Item in Item Ledger Entry.
+      VerifyItemLedgerEntry(Component,TRUE,Quantity,TotalInventoryValueACY);
+    END;
+
+    LOCAL PROCEDURE PostValueEntryToGL@110(DirectUnitCost@1018 : Decimal;Quantity@1006 : Decimal) Component : Code[20];
+    VAR
+      InventorySetup@1001 : Record 313;
+      ProductionItem@1003 : Record 27;
+      PostValueEntryToGL@1002 : Record 5811;
+      ProductionBOMHeader@1011 : Record 99000771;
+      ProductionOrder@1007 : Record 5405;
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1005 : Record 39;
+      ProductionQuantity@1010 : Decimal;
+      TotalInventoryValue@1012 : Decimal;
+      ItemNo@1016 : Code[20];
+      Component2@1013 : Code[20];
+    BEGIN
+      // Setup General Ledger Setup for Additional Currency,Post Value Entry to G/L is correct with Zero Cost - Purchase. Post as Receive, Create Release Production Order and Post Production Journal. Post Purchase Order as Invoice and
+      // Run Adjust Cost Item Entries and Post Inventory Cost to G/L.
+
+      // Setup: Create Purchase Order for Production and Component Item. Post as Receive.
+      InventorySetup.GET;
+      ProductionQuantity := LibraryRandom.RandInt(Quantity);  // Using Random value of Quantity for Production Quantity make sure Prod. Quantity less thant Quantity.
+
+      ItemNo :=
+        SetupProductionItem(
+          ProductionItem."Costing Method"::Standard,ProductionItem."Replenishment System"::"Prod. Order",
+          LibraryRandom.RandDec(10,2));
+      Component := SetupProductionItem(ProductionItem."Costing Method"::FIFO,ProductionItem."Replenishment System"::Purchase,0);
+      Component2 := SetupProductionItem(ProductionItem."Costing Method"::FIFO,ProductionItem."Replenishment System"::Purchase,0);
+
+      // Update Production BOM No. on Item.
+      ProductionItem.GET(ItemNo);
+      ProductionItem.VALIDATE(
+        "Production BOM No.",LibraryManufacturing.CreateCertifProdBOMWithTwoComp(ProductionBOMHeader,Component,Component2,1));
+      ProductionItem.MODIFY(TRUE);
+
+      // Set FALSE to Automatic Cost Posting and Expected Cost Posting fields, Create Purchase Order for all Component Item and Post as Receive.
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type"::Item,
+        InventorySetup."Average Cost Period"::Day);
+      CreatePurchaseOrder(PurchaseLine,Component,Quantity,'');
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Component2,Quantity);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);  // Post as Receive.
+
+      // Create Production Order, Refresh, Post Production Jounral and change status from Release to Finish.
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ProductionItem."No.",ProductionQuantity);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,FALSE,TRUE,FALSE);  // Using TRUE for Calculate Lines and Calc Component parameter.
+      PostProductionJournal(ProductionOrder);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+
+      // Run Adjust Cost Item Entries Report, Reopen Purchase Order and Post as Invoice after updating Unit Price on all Lines.
+      LibraryCosting.AdjustCostItemEntries(STRSUBSTNO(ItemNoFilter,ProductionItem."No.",Component,Component2),'');
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.ReopenPurchaseDocument(PurchaseHeader);
+      UpdatePurchaseLineDirectUnitCost(DirectUnitCost,PurchaseHeader."No.");
+      TotalInventoryValue := ProductionQuantity * DirectUnitCost * 2;  // DirectUnitCost multiplying by 2 because for both Purchase lines we used same value.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);   // Post as Invoice.
+      LibraryCosting.AdjustCostItemEntries(STRSUBSTNO(ItemNoFilter,ProductionItem."No.",Component,Component2),'');
+
+      // Exercise: Run Post Inventory Cost To GL Report.
+      RunPostInventoryCostToGL(ProductionItem."No.");
+
+      // Verify: Verify record count in Post Value Entry record,Total Inventory Cost on Inventory Cost To GL Report and  Quantity Expected/Actual Cost ACY for Component Item in Item Ledger Entry.
+      VerifyInventoryCostToGLReport(TotalInventoryValue);
+      FindPostValueEntry(PostValueEntryToGL,Component);
+      Assert.IsTrue(PostValueEntryToGL.COUNT > 1,RecordCountError);
+      REPEAT
+        PostValueEntryToGL.TESTFIELD("Posting Date",WORKDATE);
+      UNTIL PostValueEntryToGL.NEXT = 0;
+    END;
+
+    [Test]
+    PROCEDURE CalculateInventoryReportPostingDateError@76();
+    VAR
+      ItemJournalBatch@1002 : Record 233;
+      ItemJournalTemplate@1001 : Record 82;
+    BEGIN
+      // Verify Posting Date error on Calculate Inventory report.
+
+      // Setup: Create Item Journal Batch.
+      Initialize;
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate,ItemJournalTemplate.Type::"Phys. Inventory");
+
+      // Exercise.
+      ASSERTERROR RunCalculateInventoryReport(ItemJournalBatch,'','',0D);  // Use blank value for Item No., Location Code and 0D for Posting Date.
+
+      // Verify.
+      Assert.ExpectedError(PostingDateError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,PhysInventoryListRequestPageHandler)]
+    PROCEDURE PhysicalInventoryListReportForTrackingAndQuantity@62();
+    VAR
+      PurchaseLine@1003 : Record 39;
+      LotNo@1001 : Code[20];
+    BEGIN
+      // Verify the Item Tracking numbers and Quantity on the Physical Inventory List report if the option "Show Serial/Lot No" and "Show Qty (Calculated)" are checked.
+      LotNo := PhysicalInventoryListReport(PurchaseLine,TRUE,TRUE);  // Booleans value are respective to ShowQuantity and ShowTracking.
+
+      // Verify.
+      VerifyQuantityOnPhysInventoryListReport(PurchaseLine);
+      LibraryReportDataset.AssertCurrentRowValue('ReservEntryBufferLotNo',LotNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,PhysInventoryListRequestPageHandler)]
+    PROCEDURE PhysicalInventoryListReportWithShowTrackingAndShowQuantityAsFalse@73();
+    VAR
+      PurchaseLine@1001 : Record 39;
+      LotNo@1004 : Code[20];
+    BEGIN
+      // Verify the Item Tracking numbers and Quantity are not shown on the Physical Inventory List report if the option "Show Serial/Lot No" and "Show Qty (Calculated)" are not checked.
+      LotNo := PhysicalInventoryListReport(PurchaseLine,FALSE,FALSE);  // Booleans value are respective to ShowQuantity and ShowTracking.
+
+      // Verify.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.GetNextRow;
+      ASSERTERROR LibraryReportDataset.AssertElementWithValueExists('ReservEntryBufferLotNo',LotNo);
+
+      // Rather than testing that the value is not visible (layout), check that it is not configured to be visible but has a correct value
+      LibraryReportDataset.AssertElementWithValueExists('ShowQtyCalculated',FALSE);   // Show qty is false
+      LibraryReportDataset.AssertElementWithValueExists('QtyCalculated_ItemJnlLin',PurchaseLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE PhysicalInventoryListReport@115(VAR PurchaseLine@1006 : Record 39;ShowQuantity@1005 : Boolean;ShowTracking@1003 : Boolean) : Code[20];
+    VAR
+      ItemJournalBatch@1000 : Record 233;
+      ItemJournalTemplate@1002 : Record 82;
+      ReservationEntry@1004 : Record 337;
+    BEGIN
+      // Setup: Create Item with Tracking Code, create and post Purchase Order with Tracking Lines. Run Calculate Inventory on Phys. Inventory Journal.
+      Initialize;
+      CreatePurchaseOrderWithItemTracking(PurchaseLine,'',FALSE);  // Blank value is for Location Code.
+      FindReservationEntry(ReservationEntry,PurchaseLine."No.");
+      PostPurchaseOrder(PurchaseLine,TRUE,FALSE);
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate,ItemJournalTemplate.Type::"Phys. Inventory");
+      RunCalculateInventoryReport(ItemJournalBatch,PurchaseLine."No.",PurchaseLine."Location Code",WORKDATE);
+
+      // Enqueue value for message handler.
+      LibraryVariableStorage.Enqueue(ShowQuantity);
+      LibraryVariableStorage.Enqueue(ShowTracking);
+
+      // Exercise:
+      RunPhysInventoryListReport(ItemJournalBatch);
+      EXIT(ReservationEntry."Lot No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,PhysInventoryListRequestPageHandler)]
+    PROCEDURE PhysicalInventoryListReportWithMultipleBatches@151();
+    VAR
+      PurchaseLine@1003 : Record 39;
+      LotNo@1001 : Code[20];
+    BEGIN
+      // Verify the Item Tracking numbers and Quantity on the Physical Inventory List report on multiple batches and templates
+      LotNo :=
+        PhysicalInventoryListReportMultipleTemplatesAndBatches(
+          PurchaseLine,TRUE,TRUE,
+          LibraryRandom.RandIntInRange(2,5),LibraryRandom.RandIntInRange(2,5));
+
+      // Verify.
+      VerifyQuantityOnPhysInventoryListReport(PurchaseLine);
+      LibraryReportDataset.AssertCurrentRowValue('ReservEntryBufferLotNo',LotNo);
+    END;
+
+    LOCAL PROCEDURE PhysicalInventoryListReportMultipleTemplatesAndBatches@154(VAR PurchaseLine@1006 : Record 39;ShowQuantity@1005 : Boolean;ShowTracking@1003 : Boolean;TemplateCount@1001 : Integer;BatchCount@1009 : Integer) : Code[20];
+    VAR
+      ItemJournalBatch@1000 : Record 233;
+      ItemJournalTemplate@1002 : Record 82;
+      ReservationEntry@1004 : Record 337;
+      TemplateIndex@1007 : Integer;
+      BatchIndex@1008 : Integer;
+    BEGIN
+      // Setup: Create Item with Tracking Code, create and post Purchase Order with Tracking Lines. Run Calculate Inventory on Phys. Inventory Journal.
+      Initialize;
+      CreatePurchaseOrderWithItemTracking(PurchaseLine,'',FALSE);  // Blank value is for Location Code.
+      FindReservationEntry(ReservationEntry,PurchaseLine."No.");
+      PostPurchaseOrder(PurchaseLine,TRUE,FALSE);
+      FOR TemplateIndex := 1 TO TemplateCount DO BEGIN
+        LibraryInventory.CreateItemJournalTemplate(ItemJournalTemplate);
+        ItemJournalTemplate.VALIDATE(Type,ItemJournalTemplate.Type::"Phys. Inventory");
+        ItemJournalTemplate.MODIFY(TRUE);
+        FOR BatchIndex := 1 TO BatchCount DO BEGIN
+          LibraryInventory.CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Name);
+          RunCalculateInventoryReport(ItemJournalBatch,PurchaseLine."No.",PurchaseLine."Location Code",WORKDATE);
+        END;
+      END;
+
+      // Enqueue value for message handler.
+      LibraryVariableStorage.Enqueue(ShowQuantity);
+      LibraryVariableStorage.Enqueue(ShowTracking);
+
+      // Exercise:
+      RunPhysInventoryListReport(ItemJournalBatch);
+      EXIT(ReservationEntry."Lot No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,PhysInventoryListRequestPageHandler)]
+    PROCEDURE PhysicalInventoryListReportWithLocationAndBin@82();
+    VAR
+      Bin@1006 : Record 7354;
+      ItemJournalBatch@1004 : Record 233;
+      ItemJournalTemplate@1003 : Record 82;
+      PurchaseLine@1001 : Record 39;
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      // Verify Physical Inventory List report for non-warehouse location with Bin.
+
+      // Setup: Create Item with Tracking Code, create and post Purchase Order with Tracking Lines. Run Calculate Inventory on Phys. Inventory Journal.
+      Initialize;
+      CreateLocationWithBin(Bin);
+      CreatePurchaseOrder(PurchaseLine,CreateLotTrackedItem(FALSE),LibraryRandom.RandInt(10),Bin."Location Code");  // Use random value for Quantity.
+      PurchaseLine.VALIDATE("Bin Code",Bin.Code);
+      PurchaseLine.MODIFY(TRUE);
+      PurchaseLine.OpenItemTrackingLines;
+      FindReservationEntry(ReservationEntry,PurchaseLine."No.");
+      PostPurchaseOrder(PurchaseLine,TRUE,FALSE);
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate,ItemJournalTemplate.Type::"Phys. Inventory");
+      RunCalculateInventoryReport(ItemJournalBatch,PurchaseLine."No.",PurchaseLine."Location Code",WORKDATE);
+
+      // Enqueue value for message handler.
+      LibraryVariableStorage.Enqueue(TRUE);
+      LibraryVariableStorage.Enqueue(TRUE);
+
+      // Exercise:
+      RunPhysInventoryListReport(ItemJournalBatch);
+
+      // Verify.
+      VerifyQuantityOnPhysInventoryListReport(PurchaseLine);
+      LibraryReportDataset.AssertCurrentRowValue('LocCode_ItemJournalLine',PurchaseLine."Location Code");
+      LibraryReportDataset.AssertCurrentRowValue('BinCode_ItemJournalLine',PurchaseLine."Bin Code");
+      LibraryReportDataset.AssertCurrentRowValue('ReservEntryBufferLotNo',ReservationEntry."Lot No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,PhysInventoryListRequestPageHandler)]
+    PROCEDURE PhysicalInventoryListReportWithWhseLocation@72();
+    VAR
+      ItemJournalBatch@1000 : Record 233;
+      ItemJournalTemplate@1002 : Record 82;
+      PurchaseLine@1001 : Record 39;
+      WarehouseActivityLine@1009 : Record 5767;
+      LotNo@1010 : Code[20];
+    BEGIN
+      // Verify Physical Inventory List report for warehouse location.
+
+      // Setup: Create Item with Tracking Code, create and post Purchase Order with Tracking Lines. Run Calculate Inventory on Phys. Inventory Journal.
+      Initialize;
+      LotNo := CreateAndPostPurchaseOrderWithWMSLocation(PurchaseLine,FALSE);
+      RegisterWarehouseActivity(WarehouseActivityLine,PurchaseLine."Document No.");
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate,ItemJournalTemplate.Type::"Phys. Inventory");
+      RunCalculateInventoryReport(ItemJournalBatch,PurchaseLine."No.",PurchaseLine."Location Code",WORKDATE);
+
+      // Enqueue value for message handler.
+      LibraryVariableStorage.Enqueue(TRUE);
+      LibraryVariableStorage.Enqueue(TRUE);
+
+      // Exercise:
+      RunPhysInventoryListReport(ItemJournalBatch);
+
+      // Verify.
+      VerifyQuantityOnPhysInventoryListReport(PurchaseLine);
+      LibraryReportDataset.AssertCurrentRowValue('LocCode_ItemJournalLine',PurchaseLine."Location Code");
+      LibraryReportDataset.AssertCurrentRowValue('BinCode_ItemJournalLine',PurchaseLine."Bin Code");
+      LibraryReportDataset.AssertCurrentRowValue('ReservEntryBufferLotNo',LotNo);
+    END;
+
+    [Test]
+    PROCEDURE WhseCalculateInventoryReportRegisteringDateError@81();
+    VAR
+      Location@1000 : Record 14;
+      WarehouseJournalBatch@1002 : Record 7310;
+    BEGIN
+      // Verify Registering Date error on Whse. Calculate Inventory report.
+
+      // Setup: Create Warehouse Location. Create Warehouse Journal Batch.
+      Initialize;
+      LibraryWarehouse.CreateFullWMSLocation(Location,1);  // Use 1 for Bins per Zone.
+      CreateWhseJournalBatch(WarehouseJournalBatch,Location.Code);
+
+      // Exercise.
+      ASSERTERROR CalculateWarehouseInventory(WarehouseJournalBatch,'',0D);  // Use blank value for Item No., Location Code and 0D for Posting Date.
+
+      // Verify.
+      Assert.ExpectedError(RegisteringDateError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,WhsePhysInventoryListRequestPageHandler)]
+    PROCEDURE WhsePhysInventoryListReportShowTrackingAsTrue@91();
+    VAR
+      LotNo@1000 : Code[20];
+    BEGIN
+      // Verify Whse. Phys. Inventory List report when "Show Serial/Lot No" option is checked, if warehouse tracking is defined for a specific Item Tracking Code.
+      LotNo := WhsePhysInventoryListReport(TRUE,TRUE,TRUE);  // Booleans value are respective to ShowQuantity, ShowTracking, LotWarehouseTracking.
+      LibraryReportDataset.AssertCurrentRowValue('LotNo_WarehuseJournalLine',LotNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,WhsePhysInventoryListRequestPageHandler)]
+    PROCEDURE WhsePhysInventoryListReportShowTrackingAsFalse@94();
+    VAR
+      LotNo@1000 : Code[20];
+    BEGIN
+      // Verify Whse. Phys. Inventory List report when "Show Serial/Lot No" option is not checked, if warehouse tracking is defined for a specific Item Tracking Code.
+      LotNo := WhsePhysInventoryListReport(TRUE,FALSE,TRUE);  // Booleans value are respective to ShowQuantity, ShowTracking, LotWarehouseTracking.
+      ASSERTERROR LibraryReportDataset.AssertElementWithValueExists('LotNo_WarehuseJournalLine',LotNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingLinesPageHandler,WhsePhysInventoryListRequestPageHandler)]
+    PROCEDURE WhsePhysInventoryListReportWithNonWarehouseTracking@95();
+    VAR
+      LotNo@1000 : Code[20];
+    BEGIN
+      // Verify Whse. Phys. Inventory List report when "Show Serial/Lot No" option is checked, if warehouse tracking is not defined for a specific Item Tracking Code.
+      LotNo := WhsePhysInventoryListReport(TRUE,TRUE,FALSE);  // Booleans value are respective to ShowQuantity, ShowTracking, LotWarehouseTracking.
+      ASSERTERROR LibraryReportDataset.AssertElementWithValueExists('LotNo_WarehuseJournalLine',LotNo);
+    END;
+
+    LOCAL PROCEDURE WhsePhysInventoryListReport@75(ShowQuantity@1006 : Boolean;ShowTracking@1009 : Boolean;LotWarehouseTracking@1010 : Boolean) : Code[20];
+    VAR
+      PurchaseLine@1001 : Record 39;
+      WarehouseActivityLine@1005 : Record 5767;
+      WarehouseJournalBatch@1002 : Record 7310;
+    BEGIN
+      // Setup: Create Item with Tracking Code, create Purchase Order with Tracking Lines. Create and post Warehouse Receipt. Register Put-away. Run Calculate Inventory on Whse. Phys. Inventory Journal.
+      Initialize;
+      CreateAndPostPurchaseOrderWithWMSLocation(PurchaseLine,LotWarehouseTracking);
+      RegisterWarehouseActivity(WarehouseActivityLine,PurchaseLine."Document No.");
+      CreateWhseJournalBatch(WarehouseJournalBatch,PurchaseLine."Location Code");
+      CalculateWarehouseInventory(WarehouseJournalBatch,PurchaseLine."No.",WORKDATE);
+
+      // Enqueue value for message handler.
+      LibraryVariableStorage.Enqueue(ShowQuantity);
+      LibraryVariableStorage.Enqueue(ShowTracking);
+
+      // Exercise:
+      RunWhsePhysInventoryListReport(WarehouseJournalBatch);
+
+      // Verify.
+      VerifyWhsePhysInventoryListReport(WarehouseActivityLine);
+      EXIT(WarehouseActivityLine."Lot No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryCostVarianceRequestPageHandler)]
+    PROCEDURE InventoryCostVarianceReportForStandardItem@105();
+    VAR
+      Item@1001 : Record 27;
+      ValueEntry@1002 : Record 5802;
+    BEGIN
+      // Verify Inventory - Cost Variance Report for Item with Costing Method Standard.
+
+      // Setup: Create Item with Costing method Standard, Create and Post Purchase Order.
+      Initialize;
+      PostPurchaseOrderForVariance(Item,Item."Costing Method"::Standard);
+      ValueEntry.SETRANGE("Item No.",Item."No.");
+      ValueEntry.SETRANGE("Entry Type",ValueEntry."Entry Type"::Variance);
+      ValueEntry.FINDFIRST;
+
+      // Exercise.
+      RunInventoryCostVarianceReport(Item."No.");
+
+      // Verify.
+      VerifyInventoryCostVarianceReport(Item."No.",ValueEntry."Cost Amount (Actual)",ROUND(ValueEntry."Cost per Unit"));
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryCostVarianceRequestPageHandler)]
+    PROCEDURE InventoryCostVarianceReportForNonStandardItem@104();
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      // Verify Inventory - Cost Variance Report for Item with Costing Method other than Standard.
+
+      // Setup: Create Item with Costing method Standard, Create and Post Purchase Order.
+      Initialize;
+      PostPurchaseOrderForVariance(Item,Item."Costing Method"::FIFO);
+
+      // Exercise.
+      RunInventoryCostVarianceReport(Item."No.");
+
+      // Verify.
+      VerifyInventoryCostVarianceReport(Item."No.",0,0);  // Take 0 value since no Value Entry is created.
+    END;
+
+    [Test]
+    [HandlerFunctions(PostInvtCostToGLTestPageHandler)]
+    PROCEDURE DocumentNoPerPostingGroupError@103();
+    VAR
+      PostMethod@1000 : 'per Posting Group,per Entry';
+    BEGIN
+      // Verify Document No. Error on Post Invt. Cost to G/L - Test Report with Posting Method Per Posting Group.
+      RunPostInvtCostToGLTestReport(PostMethod::"per Posting Group",'',PerPostingGroupError);
+    END;
+
+    [Test]
+    [HandlerFunctions(PostInvtCostToGLTestPageHandler)]
+    PROCEDURE DocumentNoPerEntryError@102();
+    VAR
+      PostMethod@1000 : 'per Posting Group,per Entry';
+    BEGIN
+      // Verify Document No. Error on Post Invt. Cost to G/L - Test Report with Posting Method Per Entry.
+      RunPostInvtCostToGLTestReport(PostMethod::"per Entry",LibraryUtility.GenerateGUID,PerEntryError);
+    END;
+
+    LOCAL PROCEDURE RunPostInvtCostToGLTestReport@108(PostMethod@1004 : Option;DocumentNo@1003 : Code[20];Error@1002 : Text[1024]);
+    VAR
+      PostInvtCostToGLTest@1001 : Report 1003;
+    BEGIN
+      // Setup.
+      Initialize;
+      CLEAR(PostInvtCostToGLTest);
+      LibraryVariableStorage.Enqueue(PostMethod);
+      LibraryVariableStorage.Enqueue(DocumentNo);
+      COMMIT;  // Commit is required to run the Report.
+
+      // Exercise.
+      ASSERTERROR PostInvtCostToGLTest.RUN;
+
+      // Verify:
+      Assert.ExpectedError(STRSUBSTNO(Error,PostMethod));
+    END;
+
+    [Test]
+    [HandlerFunctions(PostInvtCostToGLTestPageHandler)]
+    PROCEDURE DimensionOnPostInvtCostToGLTestReport@114();
+    VAR
+      DefaultDimension@1009 : Record 352;
+      Item@1003 : Record 27;
+      PostValueEntryToGL@1005 : Record 5811;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      PostInvtCostToGLTest@1000 : Report 1003;
+      ItemNo@1008 : Code[20];
+      PostMethod@1004 : 'per Posting Group,per Entry';
+    BEGIN
+      // Verify Dimension Entry on Post Invt. Cost to G/L - Test Report.
+
+      // Setup: Create Item, create and Post Purchase Order, Adjust Cost Item entries.
+      Initialize;
+      ItemNo :=
+        SetupProductionItem(Item."Costing Method"::Standard,Item."Replenishment System"::Purchase,LibraryRandom.RandDec(10,2));  // Use Random for Standard Cost.
+      UpdateItemDimension(DefaultDimension,ItemNo);
+      CreatePurchaseOrder(PurchaseLine,ItemNo,LibraryRandom.RandInt(100),'');  // Use Random for Qunatity.
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      CLEAR(PostInvtCostToGLTest);
+      LibraryVariableStorage.Enqueue(PostMethod::"per Entry");
+      LibraryVariableStorage.Enqueue('');  // Blank for Document No.
+      PostValueEntryToGL.SETRANGE("Item No.",ItemNo);
+      PostInvtCostToGLTest.SETTABLEVIEW(PostValueEntryToGL);
+      COMMIT;  // Commit is required to run the Report.
+
+      // Exercise: Run Post Invt. Cost To G/L Test Report.
+      PostInvtCostToGLTest.RUN;
+
+      // Verify: Verify Dimension Entry on Post Invt. Cost to G/L - Test Report.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('ItemValueEntry__Item_No__',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('DimText',
+        DefaultDimension."Dimension Code" + ' - ' + DefaultDimension."Dimension Value Code");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandlerInvtSetup)]
+    PROCEDURE GLAccountDimensionCheckOnNewValueEntryWithZeroAmount@168();
+    VAR
+      InventorySetup@1000 : Record 313;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1001 : Record 37;
+      ItemNo@1008 : Code[20];
+      LocationCode@1009 : Code[10];
+      DimensionCode@1003 : Code[20];
+      GLAccountNo@1004 : Code[20];
+    BEGIN
+      // [FEATURE] [Post Inventory Cost to GL]
+      // [SCENARIO 379969] Dimension check of G/L Account, which will be used on posting to G/L, should be performed on new Value Entry with zero Cost Amount (Actual).
+      Initialize;
+
+      // [GIVEN] Automatic Cost Posting is set to TRUE in Inventory Setup.
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,TRUE,FALSE,InventorySetup."Automatic Cost Adjustment"::Always,
+        InventorySetup."Average Cost Calc. Type",InventorySetup."Average Cost Period");
+
+      // [GIVEN] Item "I" with no unit cost.
+      // [GIVEN] Location "L" with Inventory Posting Setup and mandatory Dimension for "Inventory Account".
+      CreateItemAndLocationWithMandatoryDimForInvtAccount(ItemNo,LocationCode,DimensionCode,GLAccountNo);
+
+      // [GIVEN] Sales Order for Item "I" on Location "L".
+      LibrarySales.CreateSalesDocumentWithItem(
+        SalesHeader,SalesLine,SalesHeader."Document Type"::Order,LibrarySales.CreateCustomerNo,ItemNo,
+        LibraryRandom.RandInt(10),LocationCode,WORKDATE);
+
+      // [WHEN] Post Sales Order with "Ship & Invoice" option.
+      ASSERTERROR LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // [THEN] Error message about lack of mandatory Dimension is raised.
+      Assert.ExpectedError(STRSUBSTNO(DimensionMandatoryErr,DimensionCode,GLAccountNo));
+    END;
+
+    [Test]
+    [HandlerFunctions(PostInventoryCostToGLRequestPageHandler)]
+    PROCEDURE GenBusPostingGroupForSkippedValuesInPostInvtCostToGLReport@11();
+    VAR
+      ValueEntry@1003 : Record 5802;
+      ItemNo@1000 : Code[20];
+      GenBusPostingGroupCode@1001 : Code[10];
+    BEGIN
+      // [FEATURE] [Post Inventory Cost to GL]
+      // [SCENARIO 379963] "Gen. Bus. Posting Group" column in skipped value entries section of "Post Inventory Cost to G/L" report should show "Gen. Bus. Posting Group" of Value Entries.
+      Initialize;
+
+      // [GIVEN] Posted Purchase Order with "Receive & Invoice" option.
+      ItemNo := CreateItem;
+      CreateAndPostPurchaseOrder(ItemNo,LibraryRandom.RandInt(10),LibraryRandom.RandDec(10,2));
+
+      // [GIVEN] Value Entry for posted Purchase is found. ValueEntry."Gen. Bus. Posting Group" = "X".
+      // [GIVEN] Set "Cost Posted to G/L" = "Cost Amount (Actual)" in Value Entry so it will be skipped during posting to G/L.
+      WITH ValueEntry DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        FINDFIRST;
+        GenBusPostingGroupCode := "Gen. Bus. Posting Group";
+        "Cost Posted to G/L" := "Cost Amount (Actual)";
+        "Cost Posted to G/L (ACY)" := "Cost Amount (Actual) (ACY)";
+        MODIFY;
+      END;
+
+      // [WHEN] Run "Post Inventory Cost to G/L" batch job on Item.
+      RunPostInventoryCostToGL(ItemNo);
+
+      // [THEN] "Gen. Bus. Posting Group" in the Skipped Entries section of the resulting report is equal to "X".
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('ItemNo_SkippedValueEntry',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('GenBusPostingGroup_SkippedValueEntry',GenBusPostingGroupCode);
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryValuationRequestPageHandler)]
+    PROCEDURE InventoryValueOnInventoryValuationAfterAdjustCostItemEntries@124();
+    VAR
+      ItemNo@1000 : Code[20];
+      InvtValue@1001 : Decimal;
+    BEGIN
+      // Check Inventory Value exist on Inventory Valuation Report.
+
+      // Setup: Create Item, Post Item Journal and Run Adjust Cost Item Entries.
+      Initialize;
+      ItemNo := CreateItemAndRunAdjustCostItemEntries;
+
+      // Exercise: Run  Inventory Valuation Report.
+      RunInventoryValuationReportWithPage(ItemNo);
+
+      // Verify: Verify Inventory Value exist on Inventory Valuation Report.
+      LibraryReportDataset.LoadDataSetFile;
+      InvtValue := CalculateInventoryValue(ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('EndingInvoicedQty',InvtValue);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemAgeCompositionValueRequestPageHandler)]
+    PROCEDURE InventoryValueOnItemAgeCompositionValueAfterAdjustCostItemEntries@123();
+    VAR
+      ItemNo@1000 : Code[20];
+    BEGIN
+      // Check Inventory Value exist on Item Age Composition Value Report.
+
+      // Setup: Create Item, Post Item Journal and Run Adjust Cost Item Entries.
+      Initialize;
+      ItemNo := CreateItemAndRunAdjustCostItemEntries;
+
+      // Exercise: Run Item Age Composition Value Report.
+      RunItemAgeCompositionValueReport(ItemNo);
+
+      // Verify: Verify Inventory Value exist on Item Age Composition Value Report.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('No_Item',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('TotalInvtValue_Item',CalculateInventoryValue(ItemNo));
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemAgeCompositionValueRequestPageHandler,InventoryValuationRequestPageHandler)]
+    PROCEDURE InventoryValueAfterAdjustCostItemEntriesOnInventoryValuationReport@121();
+    VAR
+      InventoryValue@1001 : Variant;
+      ItemNo@1000 : Code[20];
+    BEGIN
+      // Test Inventory Value on Item Age Composition - Value Report as equal to Inventory Valuation after executing the Adjust Cost Item Entries.
+
+      // Setup: Create Item, Post Item Journal,Run Adjust Cost Item Entries and Get Inventory Value from Item Age Composition - Value Report.
+      Initialize;
+      ItemNo := CreateItemAndRunAdjustCostItemEntries;
+      RunItemAgeCompositionValueReport(ItemNo);
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('No_Item',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.FindCurrentRowValue('TotalInvtValue_Item',InventoryValue);
+
+      // Exercise: Run Inventory Valuation Report.
+      RunInventoryValuationReportWithPage(ItemNo);
+
+      // Verify: Verify Inventory Value exist on "Inventory Valuation" Report is Same as "Item Age Composition - Value" Report Inventory Value.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('ItemNo',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('EndingInvoicedValue',InventoryValue);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandlerInvtSetup,CalculateStdCostMenuHandler,ProductionJournalPageHandler,ConfirmHandlerInvSetup,InventoryValuationWIPRequestPageHandler)]
+    PROCEDURE ValueOfWIPAfterRunningInventoryValuationWIPReport@128();
+    VAR
+      Location@1004 : Record 14;
+      Item@1002 : Record 27;
+      ItemJournalLine@1005 : Record 83;
+      ItemLedgerEntry@1008 : Record 32;
+      InventorySetup@1028 : Record 313;
+      ProductionItem@1031 : Record 27;
+      ProductionOrder@1001 : Record 5405;
+      CalculateStandardCost@1000 : Codeunit 5812;
+      ConsumptionDocumentNo@1010 : Code[20];
+    BEGIN
+      // Run the Inventory Valuation - WIP report for Starting Date greater than Revaluation Journal Posting Date.
+      // Verify values on generated report should be Zero.
+
+      // Setup: Update Automatic Cost Posting on Inventory Setup.
+      Initialize;
+      ExecuteUIHandlers;
+      LibraryInventory.UpdateInventorySetup(InventorySetup,TRUE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,
+        InventorySetup."Average Cost Calc. Type"::Item,InventorySetup."Average Cost Period"::Day);
+
+      // Create Inventory for Child Item and Update Production BOM No. on Parent Item.
+      Item.GET(SetupProductionItem(Item."Costing Method"::FIFO,Item."Replenishment System"::Purchase,0));
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      CreateAndPostItemJournalLineWithLocation(ItemJournalLine,Item."No.",Location.Code);
+      CreateAndUpdateProductionItem(ProductionItem,Item."No.",LibraryRandom.RandDec(10,2));
+      CalculateStandardCost.CalcItem(ProductionItem."No.",FALSE);
+
+      // Create and Post Purchase Order.Create Production Order and Refresh Post Production Jounral.
+      CreatAndPostPurchaseOrder(Item."No.",Location.Code);
+      CreateAndRefreshRelProdOrder(ProductionOrder,ProductionItem."No.",Location.Code,LibraryRandom.RandDec(10,2));
+      PostProductionJournalWithDate(ProductionOrder,WORKDATE);
+
+      // Post Consumption and Output Journal with Negative Quantity and Post Production Journal with greated than Work Date,also change status from Release to Finish..
+      ConsumptionDocumentNo := CreateAndPostItemJournalLineWithConsumption(Item."No.",ProductionOrder."No.",Location.Code);
+      CreateAndPostOutputJournal(ProductionOrder."Source No.",ProductionOrder."No.",-1 * LibraryRandom.RandInt(5),
+        FindItemLedgerEntry(ProductionOrder."Source No.",ConsumptionDocumentNo,ItemLedgerEntry."Entry Type"::Output),FALSE);
+      PostProductionJournalWithDate(ProductionOrder,CALCDATE(STRSUBSTNO('<%1D>',LibraryRandom.RandInt(5)),WORKDATE));
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+
+      // Run Adjust Cost Item Entries and Post Revaluation Journal After one Month.
+      LibraryCosting.AdjustCostItemEntries(ProductionOrder."Source No.",'');
+      CreateAndPostItemJournalForRevaluation(Item."No.",CALCDATE('<1M>',WORKDATE));
+      LibraryCosting.AdjustCostItemEntries(ProductionOrder."Source No.",'');
+
+      // Exercise: Run Inventory Valuation Report greater than Revaluation Posting Date.
+      RunInventoryValuationWIPReport(ProductionOrder."No.");
+
+      // Verify: Verify Values on Generated Report should be Blank for related Production Order.
+      VerifyValuesOnGeneratedReport(ProductionOrder."No.");
+    END;
+
+    [Test]
+    PROCEDURE ItemSubstitutionDescriptionWithInterchangeableChecked@33();
+    VAR
+      ItemSubstitution@1000 : Record 5715;
+      Item@1001 : Record 27;
+      Item2@1002 : Record 27;
+    BEGIN
+      // Verify Descriptions for Item Substitution are correct after checking Interchangeable.
+
+      // Setup: Create Item and Item Substitution.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      LibraryAssembly.CreateItemSubstitution(ItemSubstitution,Item."No.");
+      Item2.GET(ItemSubstitution."Substitute No.");
+
+      // Exercise: Enable Interchangeable in Item Substitution.
+      ItemSubstitution.VALIDATE(Interchangeable,TRUE);
+      ItemSubstitution.MODIFY(TRUE);
+
+      // Verify: Verify Descriptions are correct for two Item Substitution.
+      VerifyDescriptionOnItemSubstitution(Item2."No.",Item2.Description);
+      VerifyDescriptionOnItemSubstitution(Item."No.",Item.Description);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemJournalBatchesPageHandler)]
+    PROCEDURE SetJournalBatchNameFilterOnItemRegisterPage@137();
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+      ItemJournalTemplate@1002 : Record 82;
+      ItemRegisters@1000 : TestPage 117;
+    BEGIN
+      // Test the filter "Journal Batch Name" set on Item Register is correct.
+
+      // Setup: Create a Item Journal Batch.
+      Initialize;
+      ItemJournalBatch.FINDFIRST;
+      ItemJournalBatch.CALCFIELDS("Template Type");
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate,ItemJournalBatch."Template Type");
+      LibraryVariableStorage.Enqueue(ItemJournalBatch.Name); // Enqueue value for ItemJournalBatchesPageHandler.
+
+      // Exercise: Open Item Register Page and set the Journal Batch Name Filter.
+      ItemRegisters.OPENVIEW;
+      ItemRegisters."Journal Batch Name".LOOKUP;
+
+      // Verify: Verify the value of Journal Batch Name is correct.
+      ItemRegisters."Journal Batch Name".ASSERTEQUALS(ItemJournalBatch.Name);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemJournalBatchesPageHandler)]
+    PROCEDURE SetJournalBatchNameFilterOnWarehouseRegisterPage@126();
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+      ItemJournalTemplate@1002 : Record 82;
+      WarehouseRegisters@1000 : TestPage 7325;
+    BEGIN
+      // Test the filter "Journal Batch Name" set on Warehouse Register is correct.
+
+      // Setup: Create a Item Journal Batch.
+      Initialize;
+      ItemJournalBatch.FINDFIRST;
+      ItemJournalBatch.CALCFIELDS("Template Type");
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate,ItemJournalBatch."Template Type");
+      LibraryVariableStorage.Enqueue(ItemJournalBatch.Name); // Enqueue value for ItemJournalBatchesPageHandler.
+
+      // Exercise: Open Warehouse Register Page and set the Journal Batch Name Filter.
+      WarehouseRegisters.OPENVIEW;
+      WarehouseRegisters."Journal Batch Name".LOOKUP;
+
+      // Verify: Verify the value of Journal Batch Name is correct.
+      WarehouseRegisters."Journal Batch Name".ASSERTEQUALS(ItemJournalBatch.Name);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalPageHandler,ItemTrackingLinesHandler,ItemTrackingSummaryPageHandler,ConfirmHandlerInvSetup)]
+    PROCEDURE ReverseLotNoForOutputJournal@155();
+    VAR
+      ItemJournalBatch@1000 : Record 233;
+      ItemLedgerEntry@1008 : Record 32;
+      ProdItemNo@1003 : Code[20];
+      FinishedProdOrderNo@1010 : Code[20];
+      ProdOrderNo@1005 : Code[20];
+      Qty@1002 : Decimal;
+    BEGIN
+      // Setup: Create Inventory for Child Item and Update Production BOM No. on Parent Item.
+      // Create and Refresh two Prod. Orders. Post Production Jounral with Item Tracking. Finish the 1st Prod. Order.
+      Initialize;
+      Qty := LibraryRandom.RandInt(10);
+      ProdItemNo := InitSetupForProdItem(Qty);
+      FinishedProdOrderNo := PostProdJournalForRelProdOrderWithTracking(ProdItemNo,Qty);
+      LibraryManufacturing.ChangeStatusReleasedToFinished(FinishedProdOrderNo);
+      ProdOrderNo := PostProdJournalForRelProdOrderWithTracking(ProdItemNo,Qty);
+
+      // Enqueue values for ItemTrackingLinesHandler.
+      LibraryVariableStorage.Enqueue(OptionString::SelectEntries);
+      LibraryVariableStorage.Enqueue(ProdOrderNo);
+      LibraryVariableStorage.Enqueue(
+        FindItemLedgerEntry(ProdItemNo,FinishedProdOrderNo,ItemLedgerEntry."Entry Type"::Output));
+
+      // Exercise: Create Output Journal for Released Prod. Order, on Item Tracking Lines try to reverse the Lot No. of Finished Prod. Order.
+      // Verify: Verify that it should not be able to Reverse the Lot No. of the Finished Prod. Order through ItemTrackingLinesHandler.
+      CreateOutputJournal(ItemJournalBatch,ProdItemNo,ProdOrderNo,-Qty,0,TRUE); // True means has Tracking.
+    END;
+
+    [Test]
+    [HandlerFunctions(InventoryValuationRequestPageHandler)]
+    PROCEDURE InventoryValuationWithExpectedCost@156();
+    VAR
+      PurchLine@1000 : Record 39;
+      InventorySetup@1002 : Record 313;
+    BEGIN
+      // Setup: Post Purchase Order as Received
+      Initialize;
+      InventorySetup.GET;
+      InventorySetup."Automatic Cost Adjustment" := InventorySetup."Automatic Cost Adjustment"::Always;
+      InventorySetup."Expected Cost Posting to G/L" := TRUE;
+      InventorySetup.MODIFY;
+
+      CreatePurchaseOrder(PurchLine,CreateItem,10,'');
+      PostPurchaseOrder(PurchLine,TRUE,FALSE);
+      PurchLine.FIND;
+
+      // Exercise: Run Inventory Valuation Report.
+      RunInventoryValuationReport(PurchLine."No.",CALCDATE('<1M>',WORKDATE),CALCDATE('<CY>',WORKDATE));
+
+      // Verify: Verify Inventory Valuation Report.
+      VerifyInventoryValuationExpCost(PurchLine);
+    END;
+
+    [Test]
+    PROCEDURE ItemSubstitutionValidateEmptyItemNo_UT@166();
+    VAR
+      ItemSubstitution@1000 : Record 5715;
+      Item@1001 : Record 27;
+    BEGIN
+      // [FEATURE] [UT] [Item Substitution] [Item]
+      // [SCENARIO]  Field "Description" in "Item Substitution" record with "Substitute Type" = "Item" is reset to an empty string when setting empty "Substitute No."
+      WITH ItemSubstitution DO BEGIN
+        // [GIVEN] "Item Subsitution" "IS" with "Substitution Type" = "Item"
+        CreateItemSubstitution(ItemSubstitution,Type::Item,LibraryInventory.CreateItemNo);
+        TESTFIELD(Description,'');
+
+        // [GIVEN] Item "I" with Description = "D"
+        LibraryInventory.CreateItem(Item);
+        // [GIVEN] "IS"."Substitution No." = "I"
+        VALIDATE("Substitute No.",Item."No.");
+        // [GIVEN] "IS".Description = "D"
+        TESTFIELD(Description,Item.Description);
+
+        // [WHEN] When reset "IS"."Substitution No." = ''
+        VALIDATE("Substitute No.",'');
+        // [THEN] "IS".Description = ''
+        TESTFIELD(Description,'');
+      END;
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandlerInvtSetup)]
+    PROCEDURE ItemSubstitutionValidateEmptyNonstockItemNo_UT@172();
+    VAR
+      ItemSubstitution@1000 : Record 5715;
+      NonstockItem@1001 : Record 5718;
+    BEGIN
+      // [FEATURE] [UT] [Item Substitution] [Nonstock Item]
+      // [SCENARIO]  Field "Description" in "Item Substitution" record with "Substitute Type" = "Nonstock Item" is reset to an empty string when setting empty "Substitute No."
+      WITH ItemSubstitution DO BEGIN
+        // [GIVEN] "Item Subsitution" "IS" with "Substitution Type" = "Nonstock Item"
+        LibraryInventory.CreateNonStockItem(NonstockItem);
+        CreateItemSubstitution(ItemSubstitution,Type::"Nonstock Item",NonstockItem."Entry No.");
+        TESTFIELD(Description,'');
+
+        // [GIVEN] "Nonstock Item" "NI" with Description = "D"
+        LibraryInventory.CreateNonStockItem(NonstockItem);
+        VALIDATE("Substitute Type","Substitute Type"::"Nonstock Item");
+        // [GIVEN] "IS"."Substitution No." = "NI"
+        VALIDATE("Substitute No.",NonstockItem."Entry No.");
+        // [GIVEN] "IS".Description = "D"
+        TESTFIELD(Description,NonstockItem.Description);
+
+        // [WHEN] When reset "IS"."Substitution No." = ''
+        VALIDATE("Substitute No.",'');
+        // [THEN] "IS".Description = ''
+        TESTFIELD(Description,'');
+      END;
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1002 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      LibrarySetupStorage.Restore;
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      UpdateInventorySetupCostPosting;
+      LibrarySetupStorage.Save(DATABASE::"Inventory Setup");
+      LibrarySetupStorage.Save(DATABASE::"General Ledger Setup");
+      isInitialized := TRUE;
+    END;
+
+    LOCAL PROCEDURE InitSetupForProdItem@162(Qty@1003 : Decimal) : Code[20];
+    VAR
+      Item@1001 : Record 27;
+      ItemJournalLine@1004 : Record 83;
+      ProductionItem@1000 : Record 27;
+      QtyPer@1002 : Decimal;
+    BEGIN
+      Item.GET(SetupProductionItem(Item."Costing Method"::FIFO,Item."Replenishment System"::Purchase,0));
+      QtyPer := LibraryRandom.RandInt(10);
+      CreateAndPostItemJournalLine(
+        ItemJournalLine,ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",
+        WORKDATE,LibraryRandom.RandDec(10,2),2 * Qty * QtyPer);
+
+      CreateAndUpdateProductionItem(ProductionItem,Item."No.",QtyPer);
+      UpdateItemTrackingCodeForItem(ProductionItem,FALSE); // FALSE means do not set Lot Warehouse Tracking.
+      EXIT(ProductionItem."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemSubstitution@169(VAR ItemSubstitution@1000 : Record 5715;ItemSubstitutionType@1003 : Option;ItemNo@1001 : Code[20]);
+    BEGIN
+      WITH ItemSubstitution DO BEGIN
+        INIT;
+        VALIDATE(Type,ItemSubstitutionType);
+        VALIDATE("No.",ItemNo);
+        VALIDATE("Substitute No.",'');
+        INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CalculateItemLedgerEntryAmount@10(ItemNo@1000 : Code[20]) TotalAmount : Decimal;
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDSET;
+      REPEAT
+        ItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)");
+        TotalAmount += ItemLedgerEntry."Cost Amount (Actual)";
+      UNTIL ItemLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CalculateInventoryValue@120(ItemNo@1000 : Code[20]) : Decimal;
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.GET(ItemNo);
+      Item.CALCFIELDS(Inventory);
+      EXIT(ROUND(Item.Inventory * Item."Unit Cost"));
+    END;
+
+    LOCAL PROCEDURE CalculateWarehouseInventory@83(WarehouseJournalBatch@1001 : Record 7310;ItemNo@1005 : Code[20];RegisteringDate@1002 : Date);
+    VAR
+      BinContent@1000 : Record 7302;
+      WarehouseJournalLine@1003 : Record 7311;
+    BEGIN
+      BinContent.INIT;  // To ignore precal error using INIT.
+      WarehouseJournalLine.INIT;
+      WarehouseJournalLine.VALIDATE("Journal Template Name",WarehouseJournalBatch."Journal Template Name");
+      WarehouseJournalLine.VALIDATE("Journal Batch Name",WarehouseJournalBatch.Name);
+      WarehouseJournalLine.VALIDATE("Location Code",WarehouseJournalBatch."Location Code");
+      BinContent.SETRANGE("Item No.",ItemNo);
+      LibraryWarehouse.WhseCalculateInventory(WarehouseJournalLine,BinContent,RegisteringDate,LibraryUtility.GenerateGUID,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateCurrency@101() : Code[10];
+    VAR
+      Currency@1001 : Record 4;
+    BEGIN
+      LibraryERM.CreateCurrency(Currency);
+      LibraryERM.SetCurrencyGainLossAccounts(Currency);
+      Currency.VALIDATE("Residual Gains Account",Currency."Realized Gains Acc.");
+      Currency.VALIDATE("Residual Losses Account",Currency."Realized Losses Acc.");
+      Currency.MODIFY(TRUE);
+      LibraryERM.CreateRandomExchangeRate(Currency.Code);
+      EXIT(Currency.Code);
+    END;
+
+    LOCAL PROCEDURE CreateOutputJournal@167(VAR ItemJournalBatch@1008 : Record 233;ItemNo@1001 : Code[20];ProductionOrderNo@1002 : Code[20];Quantity@1003 : Decimal;AppliesToEntry@1007 : Integer;Tracking@1004 : Boolean);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+      ItemJournalTemplate@1005 : Record 82;
+    BEGIN
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate,ItemJournalTemplate.Type::Output);
+      LibraryManufacturing.CreateOutputJournal(
+        ItemJournalLine,ItemJournalTemplate,ItemJournalBatch,ItemNo,ProductionOrderNo);
+      ItemJournalLine.VALIDATE("Output Quantity",Quantity);
+      ItemJournalLine.VALIDATE("Applies-to Entry",AppliesToEntry);
+      ItemJournalLine.MODIFY(TRUE);
+
+      IF Tracking THEN
+        ItemJournalLine.OpenItemTrackingLines(FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostOutputJournal@132(ItemNo@1001 : Code[20];ProductionOrderNo@1002 : Code[20];Quantity@1003 : Decimal;AppliesToEntry@1007 : Integer;Tracking@1004 : Boolean);
+    VAR
+      ItemJournalBatch@1006 : Record 233;
+    BEGIN
+      CreateOutputJournal(ItemJournalBatch,ItemNo,ProductionOrderNo,Quantity,AppliesToEntry,Tracking);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLine@7(VAR ItemJournalLine@1003 : Record 83;EntryType@1006 : Option;ItemNo@1002 : Code[20];PostingDate@1000 : Date;UnitAmount@1004 : Decimal;Quantity@1007 : Decimal);
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+    BEGIN
+      SelectAndClearItemJournalBatch(ItemJournalBatch);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,EntryType,ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Posting Date",PostingDate);
+      ItemJournalLine.VALIDATE("Unit Amount",UnitAmount);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLineWithLocation@25(VAR ItemJournalLine@1000 : Record 83;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10]);
+    VAR
+      ItemJournalBatch@1003 : Record 233;
+    BEGIN
+      SelectAndClearItemJournalBatch(ItemJournalBatch);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,ItemJournalLine."Entry Type"::Purchase,ItemNo,
+        LibraryRandom.RandDec(10,1));  // Use Random value for Quantity.
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalForRevaluation@46(ItemNo@1000 : Code[20];PostingDate@1006 : Date);
+    VAR
+      ItemJournalLine@1001 : Record 83;
+      ItemJournalBatch@1002 : Record 233;
+      Item@1003 : Record 27;
+      CalculatePer@1005 : 'Item Ledger Entry,Item';
+      CalcBase@1004 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      Item.SETRANGE("No.",ItemNo);
+      CreateRevaluationJournalBatch(ItemJournalBatch);
+      ItemJournalLine.VALIDATE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.VALIDATE("Journal Batch Name",ItemJournalBatch.Name);
+      LibraryCosting.CalculateInventoryValue(
+        ItemJournalLine,Item,PostingDate,LibraryUtility.GetGlobalNoSeriesCode,CalculatePer::Item,FALSE,FALSE,TRUE,CalcBase::" ",FALSE);
+      RevaluateItemjournalLine(ItemJournalLine);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrder@90(ItemNo@1000 : Code[20];Quantity@1001 : Decimal;UnitCost@1002 : Decimal);
+    VAR
+      PurchaseLine@1003 : Record 39;
+    BEGIN
+      CreatePurchaseOrder(PurchaseLine,ItemNo,Quantity,'');
+      PurchaseLine.VALIDATE("Direct Unit Cost",UnitCost);
+      PurchaseLine.MODIFY(TRUE);
+      PostPurchaseOrder(PurchaseLine,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrderWithWMSLocation@98(VAR PurchaseLine@1000 : Record 39;LotWarehouseTracking@1005 : Boolean) : Code[20];
+    VAR
+      Location@1001 : Record 14;
+      PurchaseHeader@1003 : Record 38;
+      ReservationEntry@1004 : Record 337;
+      WarehouseEmployee@1002 : Record 7301;
+    BEGIN
+      LibraryWarehouse.CreateFullWMSLocation(Location,1);  // Use 1 for Bins per Zone.
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,FALSE);
+      CreatePurchaseOrderWithItemTracking(PurchaseLine,Location.Code,LotWarehouseTracking);
+      FindReservationEntry(ReservationEntry,PurchaseLine."No.");
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      PostWarehouseReceipt(PurchaseLine."Document No.");
+      EXIT(ReservationEntry."Lot No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLineWithConsumption@192(ItemNo@1001 : Code[20];ProductionOrderNo@1006 : Code[20];LocationCode@1002 : Code[10]) : Code[20];
+    VAR
+      ItemJournalBatch@1003 : Record 233;
+      ItemJournalLine@1000 : Record 83;
+      ItemJournalTemplate@1004 : Record 82;
+    BEGIN
+      CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate,ItemJournalTemplate.Type::Consumption);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,ItemJournalLine."Entry Type"::Consumption,
+        ItemNo,-1 * LibraryRandom.RandDec(10,2));
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.VALIDATE("Order No.",ProductionOrderNo);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+      EXIT(ItemJournalLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndReceivePurchaseOrder@41(VAR PurchaseLine@1002 : Record 39);
+    VAR
+      Item@1001 : Record 27;
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      CreateAndUpdateItem(Item,Item.Reserve::Always,Item."Reordering Policy"::" ",0,0,Item."Costing Method"::FIFO,'','');
+      CreatePurchaseOrder(PurchaseLine,Item."No.",LibraryRandom.RandDec(10,1),'');  // Use random value for Quantity.
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshRelProdOrder@129(VAR ProductionOrder@1003 : Record 5405;ItemNo@1000 : Code[20];LocationCode@1002 : Code[10];Qty@1001 : Decimal);
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo,Qty);
+      ProductionOrder.VALIDATE("Location Code",LocationCode);
+      ProductionOrder.MODIFY(TRUE);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateItem@1(VAR Item@1000 : Record 27;Reserve@1008 : Option;ReorderingPolicy@1002 : Option;MaximumInventory@1004 : Decimal;ReorderPoint@1005 : Decimal;CostingMethod@1003 : Option;ItemTrackingCode@1006 : Code[10];LotNos@1001 : Code[10]);
+    BEGIN
+      Item.GET(CreateItem);
+      Item.VALIDATE("Reordering Policy",ReorderingPolicy);
+      Item.VALIDATE("Maximum Inventory",MaximumInventory);
+      Item.VALIDATE("Reorder Point",ReorderPoint);
+      Item.VALIDATE("Costing Method",CostingMethod);
+      Item.VALIDATE("Unit Cost",LibraryRandom.RandDec(10,2));  // Use Random value for Unit Cost.
+      Item.VALIDATE("Item Tracking Code",ItemTrackingCode);
+      Item.VALIDATE("Lot Nos.",LotNos);
+      Item.VALIDATE(Reserve,Reserve);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateProductionItem@143(VAR ProductionItem@1001 : Record 27;ItemNo@1000 : Code[20];QtyPer@1003 : Decimal);
+    VAR
+      ProductionBOMHeader@1002 : Record 99000771;
+    BEGIN
+      ProductionItem.GET(
+        SetupProductionItem(ProductionItem."Costing Method"::Standard,ProductionItem."Replenishment System"::"Prod. Order",
+          LibraryRandom.RandDec(10,2)));
+      ProductionItem.VALIDATE("Production BOM No.",
+        LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ItemNo,QtyPer));
+      ProductionItem.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatAndPostPurchaseOrder@145(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10]);
+    VAR
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      CreatePurchaseOrder(PurchaseLine,ItemNo,LibraryRandom.RandDec(1000,2),LocationCode);
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItem@37() : Code[20];
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      EXIT(LibraryInventory.CreateItem(Item));
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalBatch@69(VAR ItemJournalBatch@1002 : Record 233;VAR ItemJournalTemplate@1001 : Record 82;TemplateType@1000 : Option);
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,TemplateType);
+      LibraryInventory.CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingCodeLotSpecific@28(LotWarehouseTracking@1001 : Boolean) : Code[10];
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,FALSE,TRUE);
+      ItemTrackingCode.VALIDATE("Lot Warehouse Tracking",LotWarehouseTracking);
+      ItemTrackingCode.MODIFY(TRUE);
+      EXIT(ItemTrackingCode.Code);
+    END;
+
+    LOCAL PROCEDURE CreateItemAndRunAdjustCostItemEntries@119() ItemNo : Code[20];
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      ItemNo := CreateItem;
+      CreateAndPostItemJournalLine(
+        ItemJournalLine,ItemJournalLine."Entry Type"::Purchase,ItemNo,WORKDATE,LibraryRandom.RandInt(10),
+        LibraryRandom.RandDec(100,2));
+      LibraryCosting.AdjustCostItemEntries(ItemNo,'');
+      EXIT(ItemNo);
+    END;
+
+    LOCAL PROCEDURE CreateItemAndLocationWithMandatoryDimForInvtAccount@171(VAR ItemNo@1000 : Code[20];VAR LocationCode@1001 : Code[10];VAR DimensionCode@1003 : Code[20];VAR GLAccountNo@1008 : Code[20]);
+    VAR
+      Item@1007 : Record 27;
+      Location@1006 : Record 14;
+      InventoryPostingSetup@1002 : Record 5813;
+    BEGIN
+      ItemNo := LibraryInventory.CreateItem(Item);
+      LocationCode := LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      InventoryPostingSetup.GET(Location.Code,Item."Inventory Posting Group");
+      CreateMandatoryDefaultDimForGLAccount(DimensionCode,InventoryPostingSetup."Inventory Account");
+      GLAccountNo := InventoryPostingSetup."Inventory Account";
+    END;
+
+    LOCAL PROCEDURE CreateLocationWithBin@122(VAR Bin@1000 : Record 7354);
+    VAR
+      Location@1001 : Record 14;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Location.VALIDATE("Bin Mandatory",TRUE);
+      Location.MODIFY(TRUE);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,LibraryUtility.GenerateGUID,'','');
+    END;
+
+    LOCAL PROCEDURE CreateLotTrackedItem@85(LotWarehouseTracking@1001 : Boolean) : Code[20];
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateTrackedItem(
+        Item,LibraryUtility.GetGlobalNoSeriesCode,'',CreateItemTrackingCodeLotSpecific(LotWarehouseTracking));  // Use blank value for Serial No.
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateMandatoryDefaultDimForGLAccount@170(VAR DimensionCode@1003 : Code[20];GLAccountNo@1000 : Code[20]);
+    VAR
+      Dimension@1001 : Record 348;
+      DefaultDimension@1002 : Record 352;
+    BEGIN
+      LibraryDimension.CreateDimension(Dimension);
+      DimensionCode := Dimension.Code;
+      LibraryDimension.CreateDefaultDimensionGLAcc(DefaultDimension,GLAccountNo,DimensionCode,'');
+      DefaultDimension.VALIDATE("Value Posting",DefaultDimension."Value Posting"::"Code Mandatory");
+      DefaultDimension.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@71(VAR PurchaseLine@1001 : Record 39;ItemNo@1003 : Code[20];Quantity@1004 : Decimal;LocationCode@1005 : Code[10]);
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      Vendor@1000 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderWithItemTracking@79(VAR PurchaseLine@1001 : Record 39;LocationCode@1000 : Code[10];LotWarehouseTracking@1002 : Boolean);
+    BEGIN
+      CreatePurchaseOrder(PurchaseLine,CreateLotTrackedItem(LotWarehouseTracking),1 + LibraryRandom.RandInt(10),LocationCode);  // Add random value to take Quantity more than 1.
+      PurchaseLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE CreateRevaluationJournalBatch@32(VAR ItemJournalBatch@1002 : Record 233);
+    VAR
+      ItemJournalTemplate@1001 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Revaluation);
+      LibraryInventory.CreateItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Name);
+      LibraryUtility.GenerateGUID; // To rectify the error 'The Item Journal Batch already exists'.
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@60(VAR SalesLine@1002 : Record 37;ItemNo@1003 : Code[20];Quantity@1004 : Decimal);
+    VAR
+      Customer@1001 : Record 18;
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderAndModifyQuantity@42(VAR SalesLine@1005 : Record 37;ItemNo@1003 : Code[20];Quantity@1001 : Decimal);
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      CreateSalesOrder(SalesLine,ItemNo,LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+      SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+      LibrarySales.ReopenSalesDocument(SalesHeader);
+      OpenSalesOrderToEnterQuantity(SalesHeader."No.",Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateWhseJournalBatch@88(VAR WarehouseJournalBatch@1003 : Record 7310;LocationCode@1002 : Code[10]);
+    VAR
+      WarehouseJournalTemplate@1001 : Record 7309;
+    BEGIN
+      LibraryWarehouse.SelectWhseJournalTemplateName(WarehouseJournalTemplate,WarehouseJournalTemplate.Type::"Physical Inventory");
+      LibraryWarehouse.CreateWhseJournalBatch(WarehouseJournalBatch,WarehouseJournalTemplate.Name,LocationCode);
+    END;
+
+    LOCAL PROCEDURE FindItemLedgerEntry@35(ItemNo@1003 : Code[20];DocumentNo@1001 : Code[20];EntryType@1002 : Option) : Integer;
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      ItemLedgerEntry.SETRANGE("Entry Type",EntryType);
+      ItemLedgerEntry.FINDFIRST;
+      EXIT(ItemLedgerEntry."Entry No.");
+    END;
+
+    LOCAL PROCEDURE FindPostValueEntry@68(VAR PostValueEntryToGL@1001 : Record 5811;ItemNo@1000 : Code[20]);
+    BEGIN
+      PostValueEntryToGL.SETRANGE("Item No.",ItemNo);
+      PostValueEntryToGL.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindReservationEntry@130(VAR ReservationEntry@1000 : Record 337;ItemNo@1001 : Code[20]);
+    BEGIN
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindSalesShipment@24(VAR SalesShipmentLine@1000 : Record 111;DocumentNo@1001 : Code[20];ItemNo@1002 : Code[20]);
+    BEGIN
+      SalesShipmentLine.SETRANGE("Document No.",DocumentNo);
+      SalesShipmentLine.SETRANGE("No.",ItemNo);
+      SalesShipmentLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseActivityLine@97(VAR WarehouseActivityLine@1000 : Record 5767;SourceNo@1002 : Code[20];ActivityType@1003 : Option);
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Source No.",SourceNo);
+      WarehouseActivityLine.SETRANGE("Activity Type",ActivityType);
+      WarehouseActivityLine.SETRANGE("Action Type",WarehouseActivityLine."Action Type"::Place);
+      WarehouseActivityLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseReceiptLine@99(VAR WarehouseReceiptLine@1000 : Record 7317;SourceDocument@1002 : Option;SourceNo@1003 : Code[20]);
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("Source Document",SourceDocument);
+      WarehouseReceiptLine.SETRANGE("Source No.",SourceNo);
+      WarehouseReceiptLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE OpenPurchaseOrderToReserve@55(No@1001 : Code[20]);
+    VAR
+      PurchaseOrder@1000 : TestPage 50;
+    BEGIN
+      PurchaseOrder.OPENEDIT;
+      PurchaseOrder.FILTER.SETFILTER("No.",No);
+      PurchaseOrder.PurchLines.Reserve.INVOKE;
+    END;
+
+    LOCAL PROCEDURE OpenSalesOrderToEnterQuantity@44(No@1001 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      SalesOrder@1000 : TestPage 42;
+    BEGIN
+      SalesOrder.OPENEDIT;
+      SalesOrder.FILTER.SETFILTER("No.",No);
+      SalesOrder.SalesLines.Quantity.SETVALUE(Quantity);
+      SalesOrder.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE PostItemJournalAndUndoShipment@14(VAR SalesLine@1003 : Record 37) DocumentNo : Code[20];
+    VAR
+      Item@1000 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+      SalesHeader@1004 : Record 36;
+      SalesShipmentLine@1002 : Record 111;
+      LibrarySales@1005 : Codeunit 130509;
+    BEGIN
+      // Create Item with Costing Method Average.
+      CreateAndUpdateItem(Item,Item.Reserve::Never,Item."Reordering Policy"::" ",0,0,Item."Costing Method"::Average,'','');  // Pass zero values for Maximum Inventory and Reordering Point.
+
+      // Create and Post Item Journal.
+      CreateAndPostItemJournalLine(
+        ItemJournalLine,ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",WORKDATE,Item."Unit Cost",
+        LibraryRandom.RandDec(10,2));  // Use Random value for Quantity.
+
+      // Create and Ship Sales Order. Use Random value for calculate Shipment Date.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLineWithShipmentDate(
+        SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'M>',WORKDATE),
+        ItemJournalLine.Quantity / 2);
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // Create and Post Item Journal with different Unit Amount. Use Random value for Unit Amount and calculate Posting Date.
+
+      CreateAndPostItemJournalLine(
+        ItemJournalLine,ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",
+        CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',WORKDATE),LibraryRandom.RandDec(10,2) +
+        Item."Unit Cost",LibraryRandom.RandDec(10,2));
+
+      // Exercise: Undo the Posted Shipment.
+      FindSalesShipment(SalesShipmentLine,DocumentNo,Item."No.");
+      LibrarySales.UndoSalesShipmentLine(SalesShipmentLine);
+    END;
+
+    LOCAL PROCEDURE PostPurchaseOrder@86(PurchaseLine@1000 : Record 39;Ship@1001 : Boolean;Receive@1002 : Boolean);
+    VAR
+      PurchaseHeader@1003 : Record 38;
+    BEGIN
+      PurchaseHeader.GET(PurchaseLine."Document Type",PurchaseLine."Document No.");
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,Ship,Receive);
+    END;
+
+    LOCAL PROCEDURE PostPurchaseOrderForVariance@109(VAR Item@1000 : Record 27;CostingMethod@1001 : Option);
+    VAR
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      CreateAndUpdateItem(Item,Item.Reserve::Never,Item."Reordering Policy"::"Maximum Qty.",0,0,CostingMethod,'','');
+      LibraryVariableStorage.Enqueue(Item."No.");
+      CreatePurchaseOrder(PurchaseLine,Item."No.",LibraryRandom.RandDec(10,2),'');  // Use Random value for Quantity.
+      PostPurchaseOrder(PurchaseLine,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE PostProductionJournal@64(VAR ProductionOrder@1001 : Record 5405);
+    VAR
+      ProdOrderLine@1003 : Record 5406;
+      ItemJournalLine@1002 : Record 83;
+      ProductionJournalMgt@1000 : Codeunit 5510;
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+
+      ProductionJournalMgt.InitSetupValues;
+      ProductionJournalMgt.SetTemplateAndBatchName;
+      ProductionJournalMgt.CreateJnlLines(ProductionOrder,ProdOrderLine."Line No.");
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Document No.",ProductionOrder."No.");
+      ItemJournalLine.FINDFIRST;
+      CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post Batch",ItemJournalLine);
+    END;
+
+    LOCAL PROCEDURE PostProdJournalForRelProdOrderWithTracking@160(ItemNo@1001 : Code[20];Qty@1002 : Decimal) : Code[20];
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      LibraryVariableStorage.Enqueue(ItemNo); // Enqueue value for ProdJournalPageHandler.
+      LibraryVariableStorage.Enqueue(OptionString::AssignLotNo); // Enqueue value for ItemTrackingLinesHandler.
+      CreateAndRefreshRelProdOrder(ProductionOrder,ItemNo,'',Qty);
+      PostProductionJournalWithItemTracking(ProductionOrder);
+      EXIT(ProductionOrder."No.");
+    END;
+
+    LOCAL PROCEDURE PostWarehouseReceipt@141(SourceNo@1001 : Code[20]);
+    VAR
+      WarehouseReceiptHeader@1000 : Record 7316;
+      WarehouseReceiptLine@1002 : Record 7317;
+    BEGIN
+      FindWarehouseReceiptLine(WarehouseReceiptLine,WarehouseReceiptLine."Source Document"::"Purchase Order",SourceNo);
+      WarehouseReceiptHeader.GET(WarehouseReceiptLine."No.");
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+    END;
+
+    LOCAL PROCEDURE PostProductionJournalWithDate@138(VAR ProductionOrder@1000 : Record 5405;Postingdate@1004 : Date);
+    VAR
+      ProdOrderLine@1002 : Record 5406;
+      ProductionJournalMgt@1001 : Codeunit 5510;
+    BEGIN
+      LibraryVariableStorage.Enqueue(ProductionOrder."No.");
+      LibraryVariableStorage.Enqueue(Postingdate);
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+      ProductionJournalMgt.Handling(ProductionOrder,ProdOrderLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE PostProductionJournalWithItemTracking@159(ProductionOrder@1003 : Record 5405);
+    VAR
+      ProdOrderLine@1001 : Record 5406;
+      ProductionJournalMgt@1000 : Codeunit 5510;
+    BEGIN
+      WITH ProdOrderLine DO BEGIN
+        SETRANGE(Status,ProductionOrder.Status::Released);
+        SETRANGE("Prod. Order No.",ProductionOrder."No.");
+        FINDFIRST;
+        ProductionJournalMgt.Handling(ProductionOrder,"Line No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE RegisterWarehouseActivity@142(VAR WarehouseActivityLine@1003 : Record 5767;SourceNo@1001 : Code[20]);
+    VAR
+      WarehouseActivityHeader@1002 : Record 5766;
+    BEGIN
+      FindWarehouseActivityLine(WarehouseActivityLine,SourceNo,WarehouseActivityLine."Activity Type"::"Put-away");
+      WarehouseActivityHeader.GET(WarehouseActivityLine."Activity Type",WarehouseActivityLine."No.");
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+    END;
+
+    LOCAL PROCEDURE RevaluateItemjournalLine@39(VAR ItemJournalLine@1000 : Record 83);
+    BEGIN
+      ItemJournalLine.SETRANGE("Journal Template Name",ItemJournalLine."Journal Template Name");
+      ItemJournalLine.SETRANGE("Journal Batch Name",ItemJournalLine."Journal Batch Name");
+      ItemJournalLine.FINDFIRST;
+      ItemJournalLine.VALIDATE("Unit Cost (Revalued)",ItemJournalLine."Unit Cost (Revalued)" - 1);  // Revalue with less than the original Unit Cost.
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE RunCalculateInventoryReport@78(ItemJournalBatch@1001 : Record 233;No@1005 : Code[20];LocationCode@1006 : Code[10];PostingDate@1002 : Date);
+    VAR
+      Item@1004 : Record 27;
+      ItemJournalLine@1003 : Record 83;
+      CalculateInventory@1000 : Report 790;
+    BEGIN
+      ItemJournalLine.VALIDATE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.VALIDATE("Journal Batch Name",ItemJournalBatch.Name);
+      CLEAR(CalculateInventory);
+      Item.SETRANGE("No.",No);
+      Item.SETRANGE("Location Filter",LocationCode);
+      CalculateInventory.SETTABLEVIEW(Item);
+      CalculateInventory.SetItemJnlLine(ItemJournalLine);
+      CalculateInventory.InitializeRequest(PostingDate,LibraryUtility.GenerateGUID,FALSE);
+      CalculateInventory.USEREQUESTPAGE(FALSE);
+      CalculateInventory.RUN;
+    END;
+
+    LOCAL PROCEDURE RunInventoryAvailabilityReport@8(No@1000 : Code[20]);
+    VAR
+      Item@1002 : Record 27;
+      InventoryAvailability@1001 : Report 705;
+    BEGIN
+      CLEAR(InventoryAvailability);
+      Item.SETRANGE("No.",No);
+      InventoryAvailability.SETTABLEVIEW(Item);
+      InventoryAvailability.InitializeRequest(TRUE);     // Use TRUE for 'Use stockkeeping unit' field
+      InventoryAvailability.CalcNeed(Item,'','',0);
+      InventoryAvailability.RUN;
+    END;
+
+    LOCAL PROCEDURE RunInventoryCostVarianceReport@111(No@1000 : Code[20]);
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.SETRANGE("No.",No);
+      REPORT.RUN(REPORT::"Inventory - Cost Variance",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunInventoryValuationReport@2(No@1000 : Code[20];StartDate@1001 : Date;EndDate@1003 : Date);
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      COMMIT;
+      Item.SETRANGE("No.",No);
+      LibraryVariableStorage.Enqueue(StartDate);
+      LibraryVariableStorage.Enqueue(EndDate);
+      REPORT.RUN(REPORT::"Inventory Valuation",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunItemExpirationReport@23(No@1003 : Code[20]);
+    VAR
+      Item@1002 : Record 27;
+      PeriodStartDate@1004 : Date;
+      PeriodLength@1000 : DateFormula;
+    BEGIN
+      Item.SETRANGE("No.",No);
+      EVALUATE(PeriodLength,'<1M>');  // Use 1M for monthly Period.
+      PeriodStartDate := CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'y>',WORKDATE);         // Adding Random Year to calculate Ending Date.
+      LibraryVariableStorage.Enqueue(PeriodStartDate);
+      LibraryVariableStorage.Enqueue(PeriodLength);
+      REPORT.RUN(REPORT::"Item Expiration - Quantity",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunItemRegisterReport@22(ItemJournalLine@1002 : Record 83);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+      ItemRegister@1003 : Record 46;
+    BEGIN
+      ItemRegister.SETRANGE(
+        "From Entry No.",FindItemLedgerEntry(
+          ItemJournalLine."Item No.",ItemJournalLine."Document No.",ItemLedgerEntry."Entry Type"::Purchase));
+      REPORT.RUN(REPORT::"Item Register - Value",TRUE,FALSE,ItemRegister);
+    END;
+
+    LOCAL PROCEDURE RunItemSubstitutionsReport@19(No@1001 : Code[20]);
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      Item.SETRANGE("No.",No);
+      COMMIT;
+      REPORT.RUN(REPORT::"Item Substitutions",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunInvtValuationCostSpecReport@27(No@1003 : Code[20]);
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.SETRANGE("No.",No);
+      LibraryVariableStorage.Enqueue(WORKDATE);
+      REPORT.RUN(REPORT::"Invt. Valuation - Cost Spec.",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunInvtValuationCostSpecReportWithPage@54();
+    VAR
+      InvtValuationCostSpec@1001 : Report 5801;
+    BEGIN
+      CLEAR(InvtValuationCostSpec);
+      InvtValuationCostSpec.USEREQUESTPAGE(TRUE);
+      InvtValuationCostSpec.RUN;
+    END;
+
+    LOCAL PROCEDURE RunInventoryValuationReportWithPage@127(ItemNo@1000 : Code[20]);
+    VAR
+      Item@1001 : Record 27;
+      StartingDate@1002 : Date;
+    BEGIN
+      StartingDate := 0D;
+      LibraryVariableStorage.Enqueue(StartingDate);
+      LibraryVariableStorage.Enqueue(CALCDATE('<CY+1Y>',WORKDATE));
+      COMMIT;  // Due to a limitation in Request Page Testability, COMMIT is needed for this case.
+      Item.SETRANGE("No.",ItemNo);
+      REPORT.RUN(REPORT::"Inventory Valuation",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunPhysInventoryListReport@96(ItemJournalBatch@1000 : Record 233);
+    BEGIN
+      ItemJournalBatch.SETRANGE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalBatch.SETRANGE(Name,ItemJournalBatch.Name);
+      COMMIT;  // Commit required before running this Report.
+      REPORT.RUN(REPORT::"Phys. Inventory List",TRUE,FALSE,ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE RunSalesReservationAvailReport@58(No@1002 : Code[20]);
+    VAR
+      SalesLine@1003 : Record 37;
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SalesLine.SETRANGE("Document No.",No);
+      LibraryVariableStorage.Enqueue(TRUE);    // Show sales line
+      LibraryVariableStorage.Enqueue(FALSE);   // Show reservation entries
+      LibraryVariableStorage.Enqueue(FALSE);   // Notify qty to ship in order lines
+      COMMIT;
+      REPORT.RUN(REPORT::"Sales Reservation Avail.",TRUE,FALSE,SalesLine);
+    END;
+
+    LOCAL PROCEDURE RunPostInventoryCostToGL@65(ItemNo@1002 : Code[20]);
+    VAR
+      PostValueEntryToGL@1001 : Record 5811;
+      PostMethod@1003 : 'per Posting Group,per Entry';
+    BEGIN
+      PostValueEntryToGL.SETRANGE("Item No.",ItemNo);
+      PostValueEntryToGL.SETRANGE("Posting Date",WORKDATE);
+      LibraryVariableStorage.Enqueue(PostMethod::"per Entry");
+      LibraryVariableStorage.Enqueue('');
+      LibraryVariableStorage.Enqueue(TRUE);
+      COMMIT;
+      REPORT.RUN(REPORT::"Post Inventory Cost to G/L",TRUE,FALSE,PostValueEntryToGL);
+    END;
+
+    LOCAL PROCEDURE RunPurchaseReservationAvailReport@47(No@1002 : Code[20]);
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",No);
+      LibraryVariableStorage.Enqueue(TRUE);     // Show purchase line
+      LibraryVariableStorage.Enqueue(FALSE);    // Show reservation entries
+      LibraryVariableStorage.Enqueue(FALSE);    // Modify qty to ship in order lines
+      REPORT.RUN(REPORT::"Purchase Reservation Avail.",TRUE,FALSE,PurchaseLine);
+    END;
+
+    LOCAL PROCEDURE RunInventoryAvailabilityPlanReport@51(No@1000 : Code[20]);
+    VAR
+      Item@1002 : Record 27;
+      PeriodLength@1003 : DateFormula;
+    BEGIN
+      Item.SETRANGE("No.",No);
+      EVALUATE(PeriodLength,'<1M>');  // Use 1M for monthly Period.
+      LibraryVariableStorage.Enqueue(WORKDATE);
+      LibraryVariableStorage.Enqueue(PeriodLength);
+      COMMIT;
+      REPORT.RUN(REPORT::"Inventory - Availability Plan",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunItemAgeCompositionValueReport@125(ItemNo@1000 : Code[20]);
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      COMMIT;  // Due to a limitation in Request Page Testability, COMMIT is needed for this case.
+      Item.SETRANGE("No.",ItemNo);
+      REPORT.RUN(REPORT::"Item Age Composition - Value",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE RunWhsePhysInventoryListReport@87(WarehouseJournalBatch@1000 : Record 7310);
+    VAR
+      WhsePhysInventoryList@1001 : Report 7307;
+    BEGIN
+      WarehouseJournalBatch.SETRANGE("Journal Template Name",WarehouseJournalBatch."Journal Template Name");
+      WarehouseJournalBatch.SETRANGE(Name,WarehouseJournalBatch.Name);
+      COMMIT;  // Commit required before running this Report.
+      CLEAR(WhsePhysInventoryList);
+      WhsePhysInventoryList.SETTABLEVIEW(WarehouseJournalBatch);
+      WhsePhysInventoryList.RUN;
+    END;
+
+    LOCAL PROCEDURE RunInventoryValuationWIPReport@175(ProductionOrderNo@1000 : Code[20]);
+    VAR
+      ProductionOrder@1001 : Record 5405;
+    BEGIN
+      LibraryVariableStorage.Enqueue(CALCDATE(STRSUBSTNO('<%1M>',LibraryRandom.RandInt(5)),WORKDATE));
+      COMMIT;
+      ProductionOrder.SETRANGE(Status,ProductionOrder.Status::Finished);
+      ProductionOrder.SETRANGE("No.",ProductionOrderNo);
+      REPORT.RUN(REPORT::"Inventory Valuation - WIP",TRUE,FALSE,ProductionOrder);
+    END;
+
+    LOCAL PROCEDURE SelectAndClearItemJournalBatch@21(VAR ItemJournalBatch@1001 : Record 233);
+    VAR
+      ItemJournalTemplate@1000 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalBatch."Template Type"::Item,ItemJournalTemplate.Name);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE SetupProductionItem@84(CostingMethod@1003 : Option;ReplenishmentSystem@1008 : Option;StandardCost@1007 : Decimal) : Code[20];
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      CreateAndUpdateItem(Item,Item.Reserve::Never,Item."Reordering Policy"::" ",0,0,CostingMethod,'','');
+      Item.VALIDATE("Replenishment System",ReplenishmentSystem);
+      Item.VALIDATE("Standard Cost",StandardCost);
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE UpdateAddCurrencySetup@77(CurrencyCode@1001 : Code[10]);
+    VAR
+      GeneralLedgerSetup@1000 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup."Additional Reporting Currency" := CurrencyCode;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateStockkeepingUnit@20(LocationCode@1000 : Code[10];ItemNo@1001 : Code[20]);
+    VAR
+      StockkeepingUnit@1002 : Record 5700;
+    BEGIN
+      StockkeepingUnit.SETRANGE("Location Code",LocationCode);
+      StockkeepingUnit.SETRANGE("Item No.",ItemNo);
+      StockkeepingUnit.FINDFIRST;
+      StockkeepingUnit.VALIDATE("Reordering Policy",StockkeepingUnit."Reordering Policy"::"Lot-for-Lot");
+      StockkeepingUnit.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateInventorySetup@18(NewAutomaticCostAdjustment@1003 : Option);
+    VAR
+      InventorySetup@1000 : Record 313;
+    BEGIN
+      InventorySetup.GET;
+      InventorySetup.VALIDATE("Automatic Cost Adjustment",NewAutomaticCostAdjustment);
+      InventorySetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItemDimension@113(VAR DefaultDimension@1006 : Record 352;ItemNo@1002 : Code[20]);
+    VAR
+      Dimension@1000 : Record 348;
+      DimensionValue@1004 : Record 349;
+      LibraryDimension@1001 : Codeunit 131001;
+    BEGIN
+      LibraryDimension.FindDimension(Dimension);
+      LibraryDimension.CreateDimensionValue(DimensionValue,Dimension.Code);
+      LibraryDimension.CreateDefaultDimensionItem(DefaultDimension,ItemNo,Dimension.Code,DimensionValue.Code);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseLineDirectUnitCost@53(DirectUnitCost@1002 : Decimal;DocumentNo@1000 : Code[20]);
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",DocumentNo);
+      PurchaseLine.FINDSET;
+      REPEAT
+        PurchaseLine.VALIDATE("Direct Unit Cost",DirectUnitCost);
+        PurchaseLine.MODIFY(TRUE);
+      UNTIL PurchaseLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateReservationEntryExpirationDate@26(ItemNo@1001 : Code[20]);
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      FindReservationEntry(ReservationEntry,ItemNo);
+      ReservationEntry.VALIDATE("Expiration Date",WORKDATE);
+      ReservationEntry.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItemTrackingCodeForItem@164(VAR Item@1000 : Record 27;LotWarehouseTracking@1001 : Boolean);
+    BEGIN
+      Item.VALIDATE("Item Tracking Code",CreateItemTrackingCodeLotSpecific(LotWarehouseTracking));
+      Item.VALIDATE("Lot Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyInventoryCostToGLReport@74(TotalInventoryValue@1001 : Decimal);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.GetNextRow;
+      Assert.AreEqual(-TotalInventoryValue,LibraryReportDataset.Sum('WIPInvtAmt'),
+        STRSUBSTNO(ValidationError,WIPInventory,-TotalInventoryValue));
+    END;
+
+    LOCAL PROCEDURE VerifyInventoryAvailabilityReport@9(ItemJournalLine@1000 : Record 83);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('LocCode_StockkeepUnit',ItemJournalLine."Location Code");
+
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('ProjAvailBalance',ItemJournalLine.Quantity);
+      LibraryReportDataset.AssertCurrentRowValue('ReordPoint_StockkeepUnit',0);   // Reorder Point must be 0 for Reordering Policy Lot-For-Lot.
+    END;
+
+    LOCAL PROCEDURE VerifyInventoryCostVarianceReport@112(ItemNo@1005 : Code[20];TotalVarianceAmount@1001 : Decimal;CostPerUnit@1002 : Decimal);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.GetNextRow;
+
+      // Variance
+      Assert.AreEqual(TotalVarianceAmount,LibraryReportDataset.Sum('Variance'),ValueNotMatchedError);
+
+      // Cost per unit
+      LibraryReportDataset.SetRange('ItemNo_Item',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('StandardCost_Item',CostPerUnit);
+    END;
+
+    LOCAL PROCEDURE VerifyInventoryValuationReport@3(SalesLine@1000 : Record 37);
+    VAR
+      Item@1001 : Record 27;
+      ILEAmount@1002 : Decimal;
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      Item.GET(SalesLine."No.");
+      Item.CALCFIELDS(Inventory);
+      LibraryReportDataset.SetRange('ItemNo',SalesLine."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('IncreaseInvoicedQty',Item.Inventory);
+      ILEAmount := CalculateItemLedgerEntryAmount(SalesLine."No.");
+      LibraryReportDataset.AssertCurrentRowValue('IncreaseInvoicedValue',ILEAmount);
+    END;
+
+    LOCAL PROCEDURE VerifyInventoryValuationExpCost@165(PurchLine@1000 : Record 39);
+    VAR
+      Item@1001 : Record 27;
+      ILEAmount@1002 : Decimal;
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      Item.GET(PurchLine."No.");
+      LibraryReportDataset.SetRange('ItemNo',PurchLine."No.");
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('StartingInvoicedQty',0);
+      LibraryReportDataset.AssertCurrentRowValue('StartingExpectedQty',PurchLine."Quantity Received");
+      ILEAmount := CalculateItemLedgerEntryAmount(PurchLine."No.");
+      LibraryReportDataset.AssertCurrentRowValue('StartingExpectedValue',ILEAmount);
+    END;
+
+    LOCAL PROCEDURE VerifyItemExpirationReport@17(PurchasedQuantity@1001 : Decimal;ItemNo@1002 : Code[20]);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('No_Item',ItemNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('InvtQty1',PurchasedQuantity); // '... Before' column
+      LibraryReportDataset.AssertCurrentRowValue('TotalInvtQty',PurchasedQuantity);
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntry@107(ItemNo@1002 : Code[20];Positive@1003 : Boolean;Quantity@1004 : Decimal;CostAmountActualACY@1001 : Decimal);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.SETRANGE(Positive,Positive);
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.CALCFIELDS("Cost Amount (Expected) (ACY)","Cost Amount (Actual) (ACY)");
+      ItemLedgerEntry.TESTFIELD(Quantity,Quantity);
+      ItemLedgerEntry.TESTFIELD("Cost Amount (Expected) (ACY)",0);
+      Assert.AreNearlyEqual(
+        CostAmountActualACY,ItemLedgerEntry."Cost Amount (Actual) (ACY)",LibraryERM.GetAmountRoundingPrecision,ValueNotMatchedError);
+    END;
+
+    LOCAL PROCEDURE VerifyItemRegisterReport@16(ItemJournalLine@1000 : Record 83);
+    BEGIN
+      // Verify Invoiced Quantity.
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('InvoicedQuantity_ValueEntry',ItemJournalLine."Quantity (Base)");
+    END;
+
+    LOCAL PROCEDURE VerifyItemSubstitutionsReport@15(SubstituteNo@1000 : Code[20]);
+    VAR
+      Item@1003 : Record 27;
+    BEGIN
+      Item.GET(SubstituteNo);
+
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('Item_Substitution__Substitute_No__',SubstituteNo);
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('UnitCost',Item."Unit Cost");
+    END;
+
+    LOCAL PROCEDURE VerifyInvtValuationCostSpecReport@43(ItemNo@1002 : Code[20]);
+    VAR
+      Item@1004 : Record 27;
+      VarDecimal@1003 : Variant;
+      CostPerUnit@1001 : Decimal;
+      Revaluation@1005 : Decimal;
+    BEGIN
+      Item.GET(ItemNo);
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.GetNextRow;
+
+      // Verify Direct Cost.
+      LibraryReportDataset.FindCurrentRowValue('UnitCost1',VarDecimal);
+      CostPerUnit := VarDecimal;
+      Assert.AreNearlyEqual(Item."Last Direct Cost",CostPerUnit,LibraryERM.GetAmountRoundingPrecision,ValueNotMatchedError);
+
+      // Verify Revaluation.
+      LibraryReportDataset.FindCurrentRowValue('UnitCost2',VarDecimal);
+      Revaluation := VarDecimal;
+      Assert.AreNearlyEqual(ROUND(Item."Standard Cost" - Item."Last Direct Cost"),
+        Revaluation,
+        LibraryERM.GetAmountRoundingPrecision,ValueNotMatchedError);
+
+      // Verify Quantity.
+      Item.CALCFIELDS(Inventory);
+      LibraryReportDataset.AssertCurrentRowValue('RemainingQty',Item.Inventory);
+    END;
+
+    LOCAL PROCEDURE VerifySalesReservationAvailReport@67(SalesLine@1000 : Record 37);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('OutstdngQtyBase_SalesLine',SalesLine."Outstanding Quantity");
+      SalesLine.CALCFIELDS("Reserved Quantity");
+      LibraryReportDataset.AssertCurrentRowValue('ResrvdQtyBase_SalesLine',SalesLine."Reserved Quantity");
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseReservationAvailReport@45(PurchaseLine@1000 : Record 39);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('OutstQtyBase_PurchLine',PurchaseLine."Outstanding Quantity");
+      PurchaseLine.CALCFIELDS("Reserved Quantity");
+      LibraryReportDataset.AssertCurrentRowValue('ReservQtyBase_PurchLine',PurchaseLine."Reserved Quantity");
+    END;
+
+    LOCAL PROCEDURE VerifyQuantityOnInventoryAvailabilityPlanReport@52(Inventory@1000 : Decimal;Quantity@1001 : Decimal);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('Inventory_Item',Inventory);
+      LibraryReportDataset.AssertCurrentRowValue('ProjAvBalance8',Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyQuantityOnPhysInventoryListReport@80(PurchaseLine@1000 : Record 39);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.GetNextRow;
+      LibraryReportDataset.AssertCurrentRowValue('QtyCalculated_ItemJnlLin',PurchaseLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyWhsePhysInventoryListReport@89(WarehouseActivityLine@1000 : Record 5767);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('ItemNo_WarehouseJournlLin',WarehouseActivityLine."Item No.");
+      LibraryReportDataset.GetNextRow;
+
+      LibraryReportDataset.AssertCurrentRowValue('QtyCalculated_WhseJnlLine',WarehouseActivityLine.Quantity);
+      LibraryReportDataset.AssertCurrentRowValue('LocCode_WarehouseJnlLine',WarehouseActivityLine."Location Code");
+      LibraryReportDataset.AssertCurrentRowValue('ZoneCode_WarehouseJnlLine',WarehouseActivityLine."Zone Code");
+      LibraryReportDataset.AssertCurrentRowValue('BinCode_WarehouseJnlLine',WarehouseActivityLine."Bin Code");
+    END;
+
+    LOCAL PROCEDURE VerifyValuesOnGeneratedReport@146(ProductionOrderNo@1004 : Code[20]);
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      LibraryReportDataset.SetRange('No_ProductionOrder',ProductionOrderNo);
+      IF LibraryReportDataset.GetNextRow THEN BEGIN
+        LibraryReportDataset.AssertCurrentRowValue('ValueEntryCostPostedtoGL',0);
+        LibraryReportDataset.AssertCurrentRowValue('ValueOfOutput',0);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyDescriptionOnItemSubstitution@61(ItemNo@1003 : Code[20];Desc@1001 : Text[50]);
+    VAR
+      ItemSubstitution@1000 : Record 5715;
+    BEGIN
+      ItemSubstitution.SETRANGE("Substitute No.",ItemNo);
+      ItemSubstitution.FINDFIRST;
+      ItemSubstitution.TESTFIELD(Description,Desc);
+    END;
+
+    LOCAL PROCEDURE UpdateInventorySetupCostPosting@195();
+    VAR
+      InventorySetup@1001 : Record 313;
+    BEGIN
+      InventorySetup.GET;
+      InventorySetup.VALIDATE("Automatic Cost Posting",FALSE);
+      InventorySetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ExecuteUIHandlers@1033();
+    BEGIN
+      // Generate Dummy message. Required for executing the test case successfully.
+      MESSAGE('');
+      IF CONFIRM('') THEN;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@63(ConfirmMessage@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    VAR
+      Message@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(Message);
+      Assert.IsTrue(STRPOS(ConfirmMessage,STRSUBSTNO(Message)) > 0,ConfirmMessage);
+      Reply := TRUE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerInvSetup@153(ConfirmMessage@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingLinesPageHandler@13(VAR ItemTrackingLines@1000 : TestPage 6510);
+    BEGIN
+      ItemTrackingLines."Assign Lot No.".INVOKE;
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingLinesHandler@161(VAR ItemTrackingLines@1000 : TestPage 6510);
+    VAR
+      OptionValue@1004 : Variant;
+      ApplToItemEntryNo@1007 : Variant;
+      OrderNo@1001 : Variant;
+      TrackingOption@1006 : Option;
+    BEGIN
+      LibraryVariableStorage.Dequeue(OptionValue);
+      TrackingOption := OptionValue;
+      CASE TrackingOption OF
+        OptionString::AssignSerialNo:
+          ItemTrackingLines."Assign Serial No.".INVOKE;
+        OptionString::AssignLotNo:
+          ItemTrackingLines."Assign Lot No.".INVOKE;
+        OptionString::SelectEntries:
+          BEGIN
+            ItemTrackingLines."Select Entries".INVOKE;
+            LibraryVariableStorage.Dequeue(OrderNo);
+            LibraryVariableStorage.Dequeue(ApplToItemEntryNo);
+            ASSERTERROR ItemTrackingLines."Appl.-to Item Entry".SETVALUE(ApplToItemEntryNo);
+            Assert.ExpectedError(STRSUBSTNO(ApplyToItemEntryErr,OrderNo));
+          END;
+      END;
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingSummaryPageHandler@163(VAR ItemTrackingSummary@1000 : TestPage 6500);
+    BEGIN
+      ItemTrackingSummary.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryCostVarianceRequestPageHandler@117(VAR InventoryCostVariance@1000 : TestRequestPage 721);
+    VAR
+      FileName@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(FileName);
+      InventoryCostVariance.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InvtValuationCostSpecValuationDateHandler@36(VAR InvtValuationCostSpec@1000 : TestRequestPage 5801);
+    BEGIN
+      InvtValuationCostSpec.ValuationDate.SETVALUE(0D);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@100(Msg@1000 : Text[1024]);
+    VAR
+      Message@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(Message);
+      Assert.IsTrue(STRPOS(Msg,Message) > 0,Msg);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandlerInvtSetup@148(Msg@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE PhysInventoryListRequestPageHandler@93(VAR PhysInventoryList@1000 : TestRequestPage 722);
+    VAR
+      ShowQtyCalculated@1002 : Variant;
+      ShowSerialLotNumber@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ShowQtyCalculated);
+      LibraryVariableStorage.Dequeue(ShowSerialLotNumber);
+      PhysInventoryList.ShowCalculatedQty.SETVALUE(ShowQtyCalculated);
+      PhysInventoryList.ShowSerialLotNumber.SETVALUE(ShowSerialLotNumber);
+      PhysInventoryList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE PostInvtCostToGLTestPageHandler@116(VAR PostInvtCostToGLTest@1000 : TestRequestPage 1003);
+    VAR
+      PostMethod@1001 : Variant;
+      DocumentNo@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(PostMethod);
+      LibraryVariableStorage.Dequeue(DocumentNo);
+      PostInvtCostToGLTest.PostingMethod.SETVALUE(PostMethod);
+      PostInvtCostToGLTest.DocumentNo.SETVALUE(DocumentNo);
+      PostInvtCostToGLTest.ShowDimensions.SETVALUE(TRUE);
+      PostInvtCostToGLTest.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE PurchaseReservationAvailPageHandler@56(VAR PurchaseReservationAvail@1000 : TestRequestPage 409);
+    VAR
+      ShowReservationEntries@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ShowReservationEntries);
+      PurchaseReservationAvail.ShowReservationEntries.SETVALUE(ShowReservationEntries);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationPageHandler@66(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      Reservation."Reserve from Current Line".INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE SalesReservationAvailRequestPageHandler@150(VAR SalesReservationAvail@1000 : TestRequestPage 209);
+    VAR
+      ShowSalesLines@1002 : Variant;
+      ShowReservationEntries@1001 : Variant;
+      ModifyQtyToShip@1003 : Variant;
+    BEGIN
+      // True for Show Sales Line, False for 'Show reservation entries' and 'Mofify Qty. To Ship in Order Lines'
+      LibraryVariableStorage.Dequeue(ShowSalesLines);
+      LibraryVariableStorage.Dequeue(ShowReservationEntries);
+      LibraryVariableStorage.Dequeue(ModifyQtyToShip);
+      SalesReservationAvail.ShowSalesLines.SETVALUE(ShowSalesLines);
+      SalesReservationAvail.ShowReservationEntries.SETVALUE(ShowReservationEntries);
+      SalesReservationAvail.ModifyQuantityToShip.SETVALUE(ModifyQtyToShip);
+
+      SalesReservationAvail.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhsePhysInventoryListRequestPageHandler@57(VAR WhsePhysInventoryList@1000 : TestRequestPage 7307);
+    VAR
+      ShowQtyCalculated@1002 : Variant;
+      ShowSerialLotNumber@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ShowQtyCalculated);
+      LibraryVariableStorage.Dequeue(ShowSerialLotNumber);
+      WhsePhysInventoryList.ShowCalculatedQty.SETVALUE(ShowQtyCalculated);
+      WhsePhysInventoryList.ShowSerialLotNumber.SETVALUE(ShowSerialLotNumber);
+      WhsePhysInventoryList.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryValuationRequestPageHandler@118(VAR InventoryValuation@1000 : TestRequestPage 1001);
+    VAR
+      StartingDate@1002 : Variant;
+      EndingDate@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(StartingDate);
+      LibraryVariableStorage.Dequeue(EndingDate);
+
+      InventoryValuation.StartingDate.SETVALUE(StartingDate);
+      InventoryValuation.EndingDate.SETVALUE(EndingDate);
+      InventoryValuation.IncludeExpectedCost.SETVALUE(TRUE);
+      InventoryValuation.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ItemAgeCompositionValueRequestPageHandler@40(VAR ItemAgeCompositionValue@1000 : TestRequestPage 5808);
+    BEGIN
+      ItemAgeCompositionValue.EndingDate.SETVALUE(CALCDATE('<CY+1Y>',WORKDATE));
+      ItemAgeCompositionValue.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [StrMenuHandler]
+    PROCEDURE CalculateStdCostMenuHandler@144(Option@1000 : Text[1024];VAR Choice@1001 : Integer;Instruction@1002 : Text[1024]);
+    BEGIN
+      Choice := 2;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ProductionJournalPageHandler@135(VAR ProductionJournal@1000 : Page 5510;VAR Response@1001 : Action);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+      ProductionOrderNo@1006 : Variant;
+      PostingDate@1005 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ProductionOrderNo);
+      LibraryVariableStorage.Dequeue(PostingDate);
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.FINDFIRST;
+      ItemJournalLine.VALIDATE("Posting Date",PostingDate);
+      ItemJournalLine.MODIFY(TRUE);
+      CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post Batch",ItemJournalLine);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ProdJournalPageHandler@158(VAR ProductionJournal@1000 : Page 5510;VAR Response@1001 : Action);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+      ItemNo@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ItemNo);
+      WITH ItemJournalLine DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Entry Type","Entry Type"::Output);
+        FINDFIRST;
+        OpenItemTrackingLines(FALSE);
+        CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post Batch",ItemJournalLine);
+      END;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryValuationWIPRequestPageHandler@134(VAR InventoryValuationWIP@1000 : TestRequestPage 5802);
+    VAR
+      PostingDate@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(PostingDate);
+      InventoryValuationWIP.StartingDate.SETVALUE(CALCDATE('<-CM>',PostingDate));
+      InventoryValuationWIP.EndingDate.SETVALUE(CALCDATE('<CM>',PostingDate));
+      InventoryValuationWIP.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName)
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryAvailabilityRequestPageHandler@131(VAR InventoryAvailability@1001 : TestRequestPage 705);
+    BEGIN
+      InventoryAvailability.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ItemRegisterValueRequestPageHandler@136(VAR ItemRegisterValue@1001 : TestRequestPage 5805);
+    BEGIN
+      ItemRegisterValue.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ItemExpirationRequestPageHandler@149(VAR ItemExpiration@1001 : TestRequestPage 5809);
+    VAR
+      endingDate@1000 : Variant;
+      periodLength@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(endingDate);
+      LibraryVariableStorage.Dequeue(periodLength);
+      ItemExpiration.EndingDate.SETVALUE(endingDate);
+      ItemExpiration.PeriodLength.SETVALUE(periodLength);
+
+      ItemExpiration.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ItemSubstitutionRequestPageHandler@140(VAR ItemSubstitutions@1000 : TestRequestPage 5701);
+    BEGIN
+      ItemSubstitutions.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InvtValuationCostSpecRequestPageHandler@139(VAR InvtValuationCostSpec@1000 : TestRequestPage 5801);
+    VAR
+      ValuationDate@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ValuationDate);
+      InvtValuationCostSpec.ValuationDate.SETVALUE(ValuationDate);
+      InvtValuationCostSpec.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE PostInventoryCostToGLRequestPageHandler@133(VAR PostInventoryCostToGL@1000 : TestRequestPage 1002);
+    VAR
+      PostMethod@1001 : Variant;
+      DocumentNo@1002 : Variant;
+      Post@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(PostMethod);
+      LibraryVariableStorage.Dequeue(DocumentNo);
+      LibraryVariableStorage.Dequeue(Post);
+
+      PostInventoryCostToGL.PostMethod.SETVALUE(PostMethod);
+      PostInventoryCostToGL.DocumentNo.SETVALUE(DocumentNo);
+      PostInventoryCostToGL.Post.SETVALUE(Post);
+
+      PostInventoryCostToGL.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE PurchaseReservationAvailRequestPageHandler@152(VAR PurchaseReservationAvail@1000 : TestRequestPage 409);
+    VAR
+      ShowPurchaseLine@1001 : Variant;
+      ShowReservationEntries@1002 : Variant;
+      ModifyQtyToShip@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ShowPurchaseLine);
+      LibraryVariableStorage.Dequeue(ShowReservationEntries);
+      LibraryVariableStorage.Dequeue(ModifyQtyToShip);
+
+      PurchaseReservationAvail.ShowPurchLine.SETVALUE(ShowPurchaseLine);
+      PurchaseReservationAvail.ShowReservationEntries.SETVALUE(ShowReservationEntries);
+      PurchaseReservationAvail.ModifyQtuantityToShip.SETVALUE(ModifyQtyToShip);
+
+      PurchaseReservationAvail.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE InventoryAvailabilityPlanRequestPageHandler@157(VAR InventoryAvailabilityPlan@1000 : TestRequestPage 707);
+    VAR
+      UseStockkeepingUnit@1001 : Variant;
+      PeriodLength@1002 : Variant;
+      StartingDate@1003 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(UseStockkeepingUnit);
+      LibraryVariableStorage.Dequeue(StartingDate);
+      LibraryVariableStorage.Dequeue(PeriodLength);
+
+      InventoryAvailabilityPlan.StartingDate.SETVALUE(StartingDate);
+      InventoryAvailabilityPlan.PeriodLength.SETVALUE(PeriodLength);
+      InventoryAvailabilityPlan.UseStockkeepUnit.SETVALUE(UseStockkeepingUnit);
+
+      InventoryAvailabilityPlan.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemJournalBatchesPageHandler@147(VAR ItemJournalBatches@1000 : TestPage 262);
+    VAR
+      JournalBatchName@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(JournalBatchName);
+      ItemJournalBatches.FINDFIRSTFIELD(Name,JournalBatchName);
+      ItemJournalBatches.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Reports] [SCM]
+      Unsupported version tags:
+      SE: Unable to Execute
+
+      Test for Inventory Reports:
+        1. Verify Inventory Valuation Report after posting Item Journal and Undo the Posted Shipment.
+        2. Verify Inventory Availability Report for updated Stock Keeping Unit with Reorder Point after posting Item Journal.
+        3. Verify Item Expiration Report after posting Purchase Order with Expiration Date.
+        4. Verify Item Register Report after posting Item Journal.
+        5. Verify Item Substitutions Report after creating Item Substitute.
+        6. Verify Inventory Valuation Cost Specification Report when Item is revalued more than once.
+        7. Verify Inventory Valuation Cost Specification Report for blank Valuation Date.
+        8. Verify Sales Reservation Availability Report after creating Sales Order.
+        9. Verify Sales Reservation Availability Report for Show Sales Line as FALSE.
+       10. Verify Purchase Reservation Availability Report after creating Purchase Order.
+       11. Verify Purchase Reservation Availability Report for Show Purchase Line as FALSE.
+       12. Verify Inventory Availability Plan Report after creating Sales Order.
+       13. Verify Inventory Availability Plan Report with Stockkeeping Unit as True.
+       14. Verify Post Value Entry To GL Report With PurchaseCost.
+       15. Verify Posting Date error on Calculate Inventory report.
+       16. Verify the Item Tracking numbers and Quantity on the Physical Inventory List report if the option "Show Serial/Lot No" and "Show Qty (Calculated)" are checked.
+       17. Verify the Item Tracking numbers and Quantity are not shown on the Physical Inventory List report if the option "Show Serial/Lot No" and "Show Qty (Calculated)" are not checked.
+       18. Verify Physical Inventory List report for non-warehouse location with Bin.
+       19. Verify Physical Inventory List report for warehouse location.
+       20. Verify Registering Date error on Whse. Calculate Inventory report.
+       21. Verify Whse. Phys. Inventory List report when "Show Serial/Lot No" option is checked, if warehouse tracking is defined for a specific Item Tracking Code.
+       22. Verify Whse. Phys. Inventory List report when "Show Serial/Lot No" option is not checked, if warehouse tracking is defined for a specific Item Tracking Code.
+       23. Verify Whse. Phys. Inventory List report when "Show Serial/Lot No" option is checked, if warehouse tracking is not defined for a specific Item Tracking Code.
+       24. Verify Inventory - Cost Variance Report for Item with Costing Method Standard.
+       25. Verify Inventory - Cost Variance Report for Item with Costing Method other than Standard.
+       26. Verify Document No. Error on Post Invt. Cost to G/L - Test Report with Posting Method Per Posting Group.
+       27. Verify Document No. Error on Post Invt. Cost to G/L - Test Report with Posting Method Per Entry.
+       28. Verify Dimension Entry on Post Invt. Cost to G/L - Test Report.
+       29. Post Value Entry to G/L is correct with Zero costs - ACY Cost Amount.
+       30. Verify Inventory Value exist on Inventory Valuation Report.
+       31. Verify Inventory Value on Item Age Composition Value Report.
+       32. Test Inventory Value on Item Age Composition - Value Report as equal to Inventory Valuation after executing the Adjust Cost Item Entries.
+       33. Run the Inventory Valuation - WIP report for Starting Date greater than Revaluation Journal Posting Date.
+       34. Verify two Descriptions on Item Substitution are correct after checking Interchangeable.
+       35. Test the filter "Journal Batch Name" set on Item Register is correct.
+       36. Test the filter "Journal Batch Name" set on Warehouse Register is correct.
+       37. Verify that It should not possible to Reverse Output journal against a different production order.
+
+      Covers Test cases: for WI - 286214
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                 TFS ID
+      --------------------------------------------------------------------------------------------------------
+      InventoryValuationAfterPostingItemJournal                                                          127606
+      InventoryAvailabilityAfterPostingItemJournal                                                       127624
+
+      Covers Test Cases for WI - 286461
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                 TFS ID
+      --------------------------------------------------------------------------------------------------------
+      ItemExpirationAfterPostingPurchaseOrder                                                            139513
+      ItemRegisterAfterPostingItemJournal                                                                139370
+      ItemSubstitutionAfterCreatingSubstitute                                                            139608
+
+      Covers Test cases: for WI - 288421
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                 TFS ID
+      --------------------------------------------------------------------------------------------------------
+      InvtValuationCostSpecAfterRevaluation,InvtValuationCostSpecValuationDateMustExists                 226794
+
+      Covers Test cases: for WI - 290158
+      --------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                 TFS ID
+      --------------------------------------------------------------------------------------------------------
+      SalesReservationAvailAfterCreatingSalesOrder,SalesReservationAvailSalesLineMustBeShown             139476
+      PurchaseReservationAvailAfterCreatingPurchaseOrder,PurchaseReservationAvailPurchaseLineMustBeShown 139480
+      InventoryAvailabilityPlanAfterCreatingSalesOrder,InventoryAvailabilityPlanWithStockKeeping         139403
+
+      Covers Test cases: for WI - 273853
+      ------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                    TFS ID
+      ------------------------------------------------------------------------------------------------------------
+      PostValueEntryToGLWithPurchaseCost                                                                 226913
+      PostValueEntryToGLWithCostACYCostAmount                                                            226915
+
+      Covers Test cases: for WI - 243257
+      ------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                   TFS ID
+      ------------------------------------------------------------------------------------------------------------
+      CalculateInventoryReportPostingDateError, PhysicalInventoryListReportForTrackingAndQuantity,       129229
+      PhysicalInventoryListReportWithoutShowTrackingAndShowQuantity
+      PhysicalInventoryListReportWithLocationAndBin, PhysicalInventoryListReportWithWhseLocation         129232
+      WhseCalculateInventoryReportRegisteringDateError, WhsePhysInventoryListReportWithShowTracking,
+      WhsePhysInventoryListReportWithoutShowTracking, WhsePhysInventoryListReportWithNonWarehouseTracking129231
+
+      Covers Test cases: for WI - 290188
+      ------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                    TFS ID
+      ------------------------------------------------------------------------------------------------------------
+      InventoryCostVarianceReportForStandardItem, InventoryCostVarianceReportForNonStandardItem             139414
+
+      Covers Test cases: for WI - 243263
+      ------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                    TFS ID
+      ------------------------------------------------------------------------------------------------------------
+      DocumentNoPerPostingGroupError, DocumentNoPerEntryError, DimensionOnPostInvtCostToGLTestReport        139484
+
+      Covers Test cases: for Bug ID - 308291
+      ---------------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                             TFS ID
+      ---------------------------------------------------------------------------------------------------------------------------
+      InventoryValueOnInventoryValuationAfterAdjustCostItemEntries,
+      InventoryValueOnItemAgeCompositionValueAfterAdjustCostItemEntries,InventoryValueAfterAdjustCostItemEntries     312308
+
+      Covers Test cases: for Bug ID - 322902
+      ------------------------------------------------------------------------------------
+      Test Function Name                                                  TFS ID
+      ------------------------------------------------------------------------------------
+      ValueOfWIPAfterRunningInventoryValuationWIPReport                   324489
+
+      Covers Test cases: for Bug ID - 52949
+      ------------------------------------------------------------------------------------
+      Test Function Name                                                  TFS ID
+      ------------------------------------------------------------------------------------
+      ItemSubstitutionDescriptionWithInterchangeableChecked                N/A
+
+      Covers Test cases: for Bug ID - 70579
+      ------------------------------------------------------------------------------------
+      Test Function Name                                                  TFS ID
+      ------------------------------------------------------------------------------------
+      SetJournalBatchNameFilterOnItemRegisterPage                         70579
+      SetJournalBatchNameFilterOnWarehouseRegisterPage                    70579
+
+      Covers Test cases: for Bug ID - 72988
+      ------------------------------------------------------------------------------------
+      Test Function Name                                                  TFS ID
+      ------------------------------------------------------------------------------------
+      PhysicalInventoryListReportWithMultipleBatches                      72988
+
+      Covers Test cases: for Bug ID - 91970
+      ------------------------------------------------------------------------------------
+      Test Function Name                                                  TFS ID
+      ------------------------------------------------------------------------------------
+      ReverseLotNoForOutputJournal                                        91970
+    }
+    END.
+  }
+}
+

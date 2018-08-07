@@ -1,0 +1,1752 @@
+OBJECT Codeunit 137007 SCM Inventory Costing
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryCosting@1008 : Codeunit 132200;
+      LibraryERM@1020 : Codeunit 131300;
+      LibraryPurchase@1006 : Codeunit 130512;
+      LibraryPlanning@1015 : Codeunit 132203;
+      LibraryInventory@1002 : Codeunit 132201;
+      LibraryManufacturing@1007 : Codeunit 132202;
+      LibrarySales@1016 : Codeunit 130509;
+      LibraryUtility@1003 : Codeunit 131000;
+      LibraryVariableStorage@1010 : Codeunit 131004;
+      LibrarySetupStorage@1023 : Codeunit 131009;
+      Assert@1001 : Codeunit 130000;
+      LibraryRandom@1009 : Codeunit 130440;
+      LibraryWarehouse@1026 : Codeunit 132204;
+      AverageCostCalcType@1021 : ' ,Item,Item & Location & Variant';
+      AverageCostPeriod@1024 : ' ,Day,Week,Month,Quarter,Year,Accounting Period';
+      isInitialized@1000 : Boolean;
+      ErrMessageGLEntryNoRowExist@1005 : TextConst 'ENU=G/L Entry for WIP Account must not exist.';
+      ErrMessageInvAmountDoNotMatch@1004 : TextConst 'ENU=The Inventory amount totals must be equal.';
+      StandardCostRolledUpMessage@1012 : TextConst 'ENU=The standard costs have been rolled up successfully';
+      AutomaticCostPostingMessage@1011 : TextConst 'ENU=The field Automatic Cost Posting should not be set to Yes';
+      BOMStructureErr@1014 : TextConst 'ENU=The BOM Structure should contain only one line for Item';
+      QtyPerTopItemErr@1013 : TextConst 'ENU=The field Qty. Per Top Item is not correct.';
+      PlanningComponentErr@1017 : TextConst 'ENU="Planning Component is not correct for Sales Order %1 "';
+      ExpCostPostToGLChangedMsg@1018 : TextConst 'ENU=Expected Cost Posting to G/L has been changed';
+      IncorrectCostPostedToGLErr@1019 : TextConst 'ENU=Incorrect Cost Posted to G/L.';
+      UnexpectedCostAmtErr@1022 : TextConst '@@@=%1: Field(Cost Amount (Actual)), %2: Field(Inventory Value (Revalued));ENU=%1 does not match %2 posted by Revaluation Journal.';
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE PostCostYes@20();
+    BEGIN
+      // Covers documents 3477.
+      // Automatic Cost Post True.
+      FIFOAutomaticCostPostToGL(TRUE,TRUE,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE PostCostNo@1();
+    BEGIN
+      // Covers documents 3478.
+      // Automatic Cost Post False.
+      FIFOAutomaticCostPostToGL(FALSE,TRUE,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE PostCostYesCostDiff@8();
+    BEGIN
+      // Covers documents 3479.
+      // Automatic Cost Post True,Fasle if Cost different from expected.
+      FIFOAutomaticCostPostToGL(TRUE,FALSE,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE PostCostNoCostDiff@3();
+    BEGIN
+      // Covers documents 3480.
+      // Automatic Cost Post False, False if Cost different from expected.
+      FIFOAutomaticCostPostToGL(FALSE,FALSE,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE PostCostYesPartialRecvInv@9();
+    BEGIN
+      // Covers documents 3481.
+      // Automatic Cost Post True, partial receive and Invoice of Purchase Order.
+      FIFOAutomaticCostPostToGL(TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE PostCostNoPartialRecvInv@4();
+    BEGIN
+      // Covers documents 3482.
+      // Automatic Cost Post False, partial receive and Invoice of Purchase Order.
+      FIFOAutomaticCostPostToGL(FALSE,TRUE,TRUE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE PostCostYesTwicePartialRecvInv@10();
+    BEGIN
+      // Covers documents 3483.
+      // Automatic Cost Post True, twice partial receive and Invoice of Purchase Order.
+      FIFOAutomaticCostPostToGL(TRUE,TRUE,TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE PostCostNoTwicePartialRecvInv@19();
+    BEGIN
+      // Covers documents 3484.
+      // Automatic Cost Post False, twice partial receive and Invoice of Purchase Order.
+      FIFOAutomaticCostPostToGL(FALSE,TRUE,TRUE,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE ProdOrderLineAfterUpdateUnitCostOnComponent@66();
+    VAR
+      ProductionOrder@1007 : Record 5405;
+      Item@1002 : Record 27;
+      ChildItem@1001 : Record 27;
+      UnitAmount@1000 : Decimal;
+      CalcMethod@1004 : 'One Level,All Levels';
+    BEGIN
+      // Setup: Create Parent and Child Items in a Production BOM and certify it. Create Released Production Order and Refresh it. Create and Post Item Journal line with Unit Amount.
+      Initialize;
+      CreateItemsSetup(Item,ChildItem);
+      CreateAndRefreshReleasedProductionOrder(ProductionOrder,Item."No.");
+      UnitAmount := CreateAndPostItemJournalLine(ChildItem."No.",ProductionOrder.Quantity,'');
+
+      // Exercise: Run Update Unit Cost batch Report.
+      LibraryCosting.UpdateUnitCost(ProductionOrder,CalcMethod::"One Level",FALSE);
+
+      // Verify: Verify that Unit Cost on Prod. Order Line is updated from Child Item Unit Amount.
+      VerifyUnitCostInProductionOrderLine(ProductionOrder,UnitAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE RollUpStandardCostWithProdBOMVersionClosed@24();
+    VAR
+      ProductionBOMVersion@1003 : Record 99000779;
+    BEGIN
+      // Setup.
+      Initialize;
+      RollUpStandardCostWithDifferentVersionStatus(ProductionBOMVersion.Status::Closed,TRUE);  // Prod BOM Version as True.
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE RollUpStandardCostWithProdBOMVersionUnderDevelopment@42();
+    VAR
+      ProductionBOMVersion@1003 : Record 99000779;
+    BEGIN
+      // Setup.
+      Initialize;
+      RollUpStandardCostWithDifferentVersionStatus(ProductionBOMVersion.Status::"Under Development",TRUE);  // Prod BOM Version as True.
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE RollUpStandardCostWithProdBOMVersionNew@43();
+    VAR
+      ProductionBOMVersion@1003 : Record 99000779;
+    BEGIN
+      // Setup.
+      Initialize;
+      RollUpStandardCostWithDifferentVersionStatus(ProductionBOMVersion.Status::New,TRUE);  // Prod BOM Version as True.
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE RollUpStandardCostWithProdBOMVersionCertified@44();
+    VAR
+      ProductionBOMVersion@1003 : Record 99000779;
+    BEGIN
+      // Setup.
+      Initialize;
+      RollUpStandardCostWithDifferentVersionStatus(ProductionBOMVersion.Status::Certified,TRUE);  // Prod BOM Version as True.
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE RollUpStandardCostWithRoutingVersionClosed@56();
+    VAR
+      RoutingVersion@1003 : Record 99000786;
+    BEGIN
+      // Setup.
+      Initialize;
+      RollUpStandardCostWithDifferentVersionStatus(RoutingVersion.Status::Closed,FALSE);  // Prod BOM Version as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE RollUpStandardCostWithRoutingVersionUnderDevelopment@55();
+    VAR
+      RoutingVersion@1000 : Record 99000786;
+    BEGIN
+      // Setup.
+      Initialize;
+      RollUpStandardCostWithDifferentVersionStatus(RoutingVersion.Status::"Under Development",FALSE);  // Prod BOM Version as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE RollUpStandardCostWithRoutingVersionNew@54();
+    VAR
+      RoutingVersion@1000 : Record 99000786;
+    BEGIN
+      // Setup.
+      Initialize;
+      RollUpStandardCostWithDifferentVersionStatus(RoutingVersion.Status::New,FALSE);  // Prod BOM Version as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE RollUpStandardCostWithRoutingVersionCertified@52();
+    VAR
+      RoutingVersion@1000 : Record 99000786;
+    BEGIN
+      // Setup.
+      Initialize;
+      RollUpStandardCostWithDifferentVersionStatus(RoutingVersion.Status::Certified,FALSE);  // Prod BOM Version as False.
+    END;
+
+    LOCAL PROCEDURE RollUpStandardCostWithDifferentVersionStatus@22(VersionStatus@1010 : Option;ProdBOMVersion@1002 : Boolean);
+    VAR
+      Item@1001 : Record 27;
+      StandardCostWorksheet@1006 : Record 5841;
+      RoutingHeader@1000 : Record 99000763;
+      ChildItem@1003 : Record 27;
+      StandardCostWkshName@1005 : Code[10];
+    BEGIN
+      // Create Item and Production BOM.
+      CreateItemsSetup(Item,ChildItem);
+      UpdateStandardCostOnItem(Item);
+
+      // Create Production BOM Version and update Status or create Routing Setup, Routing Version and update Status.
+      IF ProdBOMVersion THEN
+        CreateProductionBOMVersionAndUpdateStatus(Item."Production BOM No.",VersionStatus)
+      ELSE BEGIN
+        CreateRoutingSetup(RoutingHeader);
+        UpdateRoutingNoOnItem(Item,RoutingHeader."No.");
+        CreateRoutingVersionAndUpdateStatus(RoutingHeader,VersionStatus);
+      END;
+
+      // Create Standard Cost Worksheet Name. Run Suggest Item Standard Cost and update New Standard Cost value.
+      StandardCostWkshName := CreateAndUpdateStandardCostWorksheet(Item);
+      LibraryVariableStorage.Enqueue(StandardCostRolledUpMessage);
+
+      // Exercise: Run Roll Up Standard Cost.
+      LibraryManufacturing.RunRollUpStandardCost(Item,StandardCostWkshName);
+
+      // Verify: Verify that Roll Up Standard Cost run without any error and verify New Standard Cost on Standard Cost Worksheet.
+      FindStandardCostWorksheet(StandardCostWorksheet,StandardCostWkshName,Item."No.");
+      StandardCostWorksheet.TESTFIELD("New Standard Cost",0);  // Value required.
+    END;
+
+    [Test]
+    [HandlerFunctions(BOMStructurePageHandler)]
+    PROCEDURE BOMStructureWithMultipleBOMVersion@35();
+    VAR
+      Item@1001 : Record 27;
+      ChildItem@1000 : Record 27;
+      ProductionBOMVersion@1002 : Record 99000779;
+      ProductionBOMVersion2@1003 : Record 99000779;
+      ProductionBOMHeader@1006 : Record 99000771;
+      ChildItemNo@1005 : ARRAY [2] OF Code[20];
+      i@1004 : Integer;
+    BEGIN
+      // Verify BOM Structure shows correct Active Version with Starting Date = Work Date when there are different BOM Versions with different Starting Date.
+
+      // Setup: Create certified BOM with Item. Create other two items.
+      CreateItemsSetup(Item,ChildItem);
+      FOR i := 1 TO 2 DO
+        ChildItemNo[i] := LibraryInventory.CreateItem(ChildItem);
+
+      // Create Production BOM Version with diffrent Starting Date.
+      ProductionBOMHeader.GET(Item."Production BOM No.");
+      CreateProdBOMVersionWithStartingDate(
+        ProductionBOMVersion,ProductionBOMHeader,Item."Base Unit of Measure",ChildItemNo[1],WORKDATE);
+      CreateProdBOMVersionWithStartingDate(
+        ProductionBOMVersion2,ProductionBOMHeader,Item."Base Unit of Measure",ChildItemNo[2],
+        CALCDATE('<-' + FORMAT(RANDOM(5)) + 'D>',WORKDATE));
+
+      // Exercise: Run BOM Structure page.
+      // Verify: Verify BOM Structure in BOMStructurePageHandler Handler.
+      LibraryVariableStorage.Enqueue(ChildItemNo[1]);
+      RunBOMStructurePage(Item);
+    END;
+
+    [Test]
+    PROCEDURE BOMStructureWithProductionBOMTypeComponent@46();
+    VAR
+      Item@1001 : Record 27;
+      Item2@1000 : Record 27;
+      QtyPerTopItem@1002 : Integer;
+    BEGIN
+      // Verify BOM Structure shows correct "Qty. Per Top Item" when there is Production Item with Production BOM Type component.
+
+      // Setup: Create Production BOM with Production BOM Type component, Create item with the Production BOM.
+      QtyPerTopItem := CreateItemsSetupWithProductionBOMTypeComponent(Item,Item2);
+
+      // Exercise: Create BOM Tree on BOM Buffer to show the data in BOM Structure page
+      // due to "Qty. Per Top Item" in BOM Structure page is hidden by default.
+      CreateBOMTree(Item);
+
+      // Verify: Verify the field Qty. Per Top Item on BOM Buffer.
+      VerifyQtyPerTopItemOnBOMBuffer(Item2."No.",QtyPerTopItem);
+    END;
+
+    [Test]
+    PROCEDURE ComponentIsActiveBOMVersionInOrderPlanning@111();
+    VAR
+      RequisitionLine@1007 : Record 246;
+      ChildItem@1006 : Record 27;
+      ChildItem2@1004 : Record 27;
+      Item@1000 : Record 27;
+      PlanningComponent@1001 : Record 99000829;
+      ProductionBOMHeader@1002 : Record 99000771;
+      ProductionBOMVersion@1005 : Record 99000779;
+      SalesHeader@1010 : Record 36;
+    BEGIN
+      // Test Component Item is from Active BOM version when running Order Planning
+
+      // Setup: Create Item with Production BOM
+      Initialize;
+      CreateItemsSetup(Item,ChildItem);
+      ProductionBOMHeader.GET(Item."Production BOM No.");
+
+      // Create a new Production BOM Version with diffrent Child Item and Starting Date.
+      LibraryInventory.CreateItem(ChildItem2);
+      CreateProdBOMVersionWithStartingDate(
+        ProductionBOMVersion,ProductionBOMHeader,Item."Base Unit of Measure",ChildItem2."No.",
+        CALCDATE('<-' + FORMAT(RANDOM(5)) + 'D>',WORKDATE));
+
+      // Create a Sales Order
+      CreateSalesOrder(SalesHeader,Item."No.",LibraryRandom.RandDec(20,2));
+
+      // Exercise: Calculate Plan in Order Planning
+      LibraryPlanning.CalculateOrderPlanSales(RequisitionLine);
+
+      // Verify: Component Item is Active BOM version item
+      PlanningComponent.SETRANGE("Item No.",ChildItem2."No.");
+      Assert.IsFalse(PlanningComponent.ISEMPTY,STRSUBSTNO(PlanningComponentErr,SalesHeader."No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE PostCostToGLAfterDropExpectCostPostingToGL@47();
+    VAR
+      Item@1000 : Record 27;
+      CostAmount@1003 : Decimal;
+    BEGIN
+      // Test expected cost is posted to G/L after implementing RFH 245349
+
+      // Setup
+      Initialize;
+
+      // set "Expected Cost Posting to G/L" = Yes
+      LibraryVariableStorage.Enqueue(ExpCostPostToGLChangedMsg);
+      SetExpectedCostPostingToGL(TRUE);
+      // create item and make a few incoming operations without posting cost to G/L
+      CreateItemWithCostingMethod(Item,Item."Costing Method"::Standard);
+      CreatePostPositiveAdjustment(Item,LibraryRandom.RandInt(10));
+      CreatePostRevaluation(Item,CostAmount);
+      SetExpectedCostPostingToGL(FALSE);
+
+      // Exercise: run report Post Inventory Cost to G/L
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // Verify:
+      VerifyValueEntryCostPostedToGL(Item."No.",CostAmount);
+    END;
+
+    [Test]
+    PROCEDURE SuggestItemStandardCostCopiesCostsFromItemCardMfgItem@25();
+    VAR
+      Item@1000 : Record 27;
+      StandardCostWkshName@1003 : Code[10];
+    BEGIN
+      // [FEATURE] [Standard Cost Worksheet] [Suggest Item Standard Cost]
+      // [SCENARIO 377601] "Suggest Item Standard Cost" should copy manufacturing costs from item card if item's replenishment system is "Prod. Order"
+
+      // [GIVEN] Create item with replenishment system = "Prod. Order"
+      MockItemWithManufacturingCosts(Item,Item."Replenishment System"::"Prod. Order");
+
+      // [WHEN] Open standard cost worksheet and run "Suggest Item Standard Cost"
+      StandardCostWkshName := CreateAndUpdateStandardCostWorksheet(Item);
+      LibraryCosting.SuggestItemStandardCost(Item,StandardCostWkshName,1,'');
+
+      // [THEN] Manufacturing cost components are copied from item card
+      VerifyStdCostWorksheetMfgItem(StandardCostWkshName,Item);
+    END;
+
+    [Test]
+    PROCEDURE SuggestItemStandardCostZeroCostsPurchasedItem@38();
+    VAR
+      Item@1000 : Record 27;
+      StandardCostWkshName@1001 : Code[10];
+    BEGIN
+      // [FEATURE] [Standard Cost Worksheet] [Suggest Item Standard Cost]
+      // [SCENARIO 377601] "Suggest Item Standard Cost" should copy standard cost from item card and leave other costs 0 if item's replenishment system is "Purchase"
+
+      // [GIVEN] Create item with replenishment system = "Purchase"
+      MockItemWithManufacturingCosts(Item,Item."Replenishment System"::Purchase);
+
+      // [WHEN] Open standard cost worksheet and run "Suggest Item Standard Cost"
+      StandardCostWkshName := CreateAndUpdateStandardCostWorksheet(Item);
+      LibraryCosting.SuggestItemStandardCost(Item,StandardCostWkshName,1,'');
+
+      // [THEN] Standard cost amount is copied from item card, other cost components are 0
+      VerifyStdCostWorksheetPurchItem(StandardCostWkshName,Item);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandlerOK)]
+    PROCEDURE RevaluateItemWithAvgCostingMethodAndBigStockQuantityWhenAvgCalcIsBasedOnItem@64();
+    VAR
+      ItemJournalLine@1001 : Record 83;
+      RevaluedAmount@1004 : Decimal;
+    BEGIN
+      // [FEATURE] [Revaluation] [Average Costing Method]
+      // [SCENARIO 379224] Cost Amount of Item with Average Costing Method and big Inventory should be equal to what was posted by Revaluation Journal. Average Cost is calculated by Item.
+      Initialize;
+
+      RaiseMessageHandler;
+      RaiseConfirmHandler;
+      LibraryInventory.SetAverageCostSetup(AverageCostCalcType::Item,AverageCostPeriod::Week);
+
+      // [GIVEN] Item with Average Costing Method and big Inventory.
+      // [GIVEN] Calculated Inventory Value by Item in Revaluation Journal, "Inventory Value (Revalued)" field is updated to 'R'.
+      CreateAndRevalueInventory(ItemJournalLine,RevaluedAmount,FALSE,FALSE);
+
+      // [WHEN] Post Revaluation.
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+
+      // [THEN] Sum of "Cost Amount (Actual)" in Value Entry is equal to 'R'.
+      VerifyValueEntryCostAmount(ItemJournalLine,RevaluedAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandlerOK)]
+    PROCEDURE RevaluateItemWithAvgCostingMethodAndBigStockQuantityWhenAvgCalcIsBasedOnItemLocVar@80();
+    VAR
+      ItemJournalLine@1001 : Record 83;
+      RevaluedAmount@1004 : Decimal;
+    BEGIN
+      // [FEATURE] [Revaluation] [Average Costing Method]
+      // [SCENARIO 379224] Cost Amount of Item with Average Costing Method and big Inventory should be equal to what was posted by Revaluation Journal. Average Cost is calculated by Item & Location & Variant.
+      Initialize;
+
+      RaiseMessageHandler;
+      RaiseConfirmHandler;
+      LibraryInventory.SetAverageCostSetup(AverageCostCalcType::"Item & Location & Variant",AverageCostPeriod::Week);
+
+      // [GIVEN] Item with Average Costing Method and big Inventory.
+      // [GIVEN] Calculated Inventory Value by Item & Location & Variant in Revaluation Journal, "Inventory Value (Revalued)" field is updated to 'R'.
+      CreateAndRevalueInventory(ItemJournalLine,RevaluedAmount,TRUE,TRUE);
+
+      // [WHEN] Post Revaluation.
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+
+      // [THEN] Sum of "Cost Amount (Actual)" in Value Entry is equal to 'R'.
+      VerifyValueEntryCostAmount(ItemJournalLine,RevaluedAmount);
+    END;
+
+    [Test]
+    PROCEDURE AdjustCostDoesNotUpdateSKULastDirectCost@51();
+    VAR
+      Item@1000 : Record 27;
+      Location@1001 : ARRAY [2] OF Record 14;
+      UnitCost@1009 : ARRAY [2] OF Decimal;
+    BEGIN
+      // [FEATURE] [Transfer] [Adjust Cost - Item Entries] [Last Direct Cost] [Stockkeeping Unit]
+      // [SCENARIO 379749] "Adjust Cost - Item Entries" should not not update last direct cost of a stockkeeping unit
+
+      Initialize;
+
+      // [GIVEN] Item "I" with Average costing method
+      CreateItemWithCostingMethod(Item,Item."Costing Method"::Average);
+
+      // [GIVEN] Two locations "L1" and "L2" with stockkeeping unit for item "I" on each location ("SKU1" and "SKU2")
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location[1]);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location[2]);
+      Item.SETRECFILTER;
+      Item.SETFILTER("Location Filter",'%1|%2',Location[1].Code,Location[2].Code);
+      LibraryInventory.CreateStockKeepingUnit(Item,0,FALSE,TRUE); // Create stockkeeping units per location
+
+      // [GIVEN] Post item stock on location "L1". Unit cost = "X1"
+      UnitCost[1] := CreateAndPostItemJournalLine(Item."No.",LibraryRandom.RandInt(10),Location[1].Code);
+      // [GIVEN] Post item stock on location "L2". Unit cost = "X2"
+      UnitCost[2] := CreateAndPostItemJournalLine(Item."No.",LibraryRandom.RandInt(10),Location[2].Code);
+
+      // [GIVEN] Transfer item from location "L1" to location "L2"
+      CreatePostTransferJournalLine(Item."No.",1,Location[1].Code,Location[2].Code);
+
+      // [WHEN] Run "Adjust Cost - Item Entries"
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // [THEN] Last direct cost in "SKU1" = "X1", Last direct cost in "SKU2" = "X2"
+      VerifySKULastDirectCost(Item."No.",Location[1].Code,UnitCost[1]);
+      VerifySKULastDirectCost(Item."No.",Location[2].Code,UnitCost[2]);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE SKUUnitCostIsUpdatedByTransferWithAvgCostCalcTypeItem@85();
+    VAR
+      Item@1001 : Record 27;
+      Location@1002 : ARRAY [3] OF Record 14;
+      UnitAmount@1003 : Decimal;
+    BEGIN
+      // [FEATURE] [Transfer] [Last Direct Cost] [Stockkeeping Unit]
+      // [SCENARIO 170483] "Unit Cost" of the stockkeeping unit is updated by transfer order when average cost calc. type = Item
+
+      Initialize;
+
+      // [GIVEN] Set "Average Cost Calcultion Type" = "Item"
+      UpdateAverageCostCalcType(AverageCostCalcType::Item);
+
+      // [GIVEN] Item "I" with 2 stockkeeping units on locations "L1" and "L2"
+      CreateItemAndLocationSetup(Item,Location);
+
+      // [GIVEN] Item "I" is purchased on location "L1" with unit cost = "X" and location "L2", unit cost = "Y"
+      UnitAmount := CreateAndPostItemJournalLine(Item."No.",LibraryRandom.RandIntInRange(50,100),Location[1].Code);
+      CreateAndPostItemJournalLine(Item."No.",LibraryRandom.RandInt(100),Location[2].Code);
+
+      // [WHEN] Item "I" is transferred from location "L1" to location "L2"
+      CreateAndPostTransferOrder(Location[1].Code,Location[2].Code,Location[3].Code,Item."No.",LibraryRandom.RandInt(50));
+
+      // [THEN] Unit cost of SKU on location "L2" is "X"
+      VerifySKUUnitCost(Item."No.",Location[2].Code,UnitAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandlerOK)]
+    PROCEDURE SKUUnitCostIsNotUpdatedByTransferWithAvgCostCalcTypeItemLocationVariant@84();
+    VAR
+      Item@1005 : Record 27;
+      Location@1004 : ARRAY [3] OF Record 14;
+      UnitAmount@1001 : Decimal;
+    BEGIN
+      // [FEATURE] [Transfer] [Last Direct Cost] [Stockkeeping Unit]
+      // [SCENARIO 170483] "Unit Cost" of the stockkeeping unit is not updated by transfer order when average cost calc. type = "Item & Location & Variant"
+      Initialize;
+
+      // [GIVEN] Set "Average Cost Calcultion Type" = "Item & Location & Variant"
+      UpdateAverageCostCalcType(AverageCostCalcType::"Item & Location & Variant");
+
+      // [GIVEN] Item "I" with 2 stockkeeping units on locations "L1" and "L2"
+      CreateItemAndLocationSetup(Item,Location);
+
+      // [GIVEN] Item "I" is purchased on location "L1" with unit cost = "X" and location "L2", unit cost = "Y"
+      CreateAndPostItemJournalLine(Item."No.",LibraryRandom.RandIntInRange(50,100),Location[1].Code);
+      UnitAmount := CreateAndPostItemJournalLine(Item."No.",LibraryRandom.RandInt(100),Location[2].Code);
+
+      // [WHEN] Item "I" is transferred from location "L1" to location "L2"
+      CreateAndPostTransferOrder(Location[1].Code,Location[2].Code,Location[3].Code,Item."No.",LibraryRandom.RandInt(50));
+
+      // [THEN] Unit cost of SKU on location "L2" is "Y"
+      VerifySKUUnitCost(Item."No.",Location[2].Code,UnitAmount);
+    END;
+
+    [Test]
+    PROCEDURE AppliedToAdjustRemovedWhenInboundInvoicedAndOpenOutboundHasOtherCostSource@86();
+    VAR
+      Item@1006 : Record 27;
+      Location@1005 : ARRAY [3] OF Record 14;
+      PurchaseHeader@1004 : ARRAY [2] OF Record 38;
+      TransferHeader@1002 : Record 5740;
+      TransferLine@1001 : Record 5741;
+      PurchInvoiceNo@1000 : Code[20];
+    BEGIN
+      // [FEATURE] [Adjust Cost - Item Entries]
+      // [SCENARIO 380442] "Applied Enry to Adjust" mark should be removed when the entry is closed and invoiced, and all open applied outbounds have other cost sources
+
+      Initialize;
+      // [GIVEN] Item "I" with FIFO costing method
+      CreateItemWithCostingMethod(Item,Item."Costing Method"::FIFO);
+
+      // [GIVEN] Two locations "L1" and "L2", and a transit location
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location[1]);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location[2]);
+      LibraryWarehouse.CreateInTransitLocation(Location[3]);
+
+      // [GIVEN] Purchase 3 pcs of item "I" on location "L1". Unit cost = 2.4875. Receive only.
+      CreatePurchaseOrderPostReceipt(PurchaseHeader[1],LibraryPurchase.CreateVendorNo,Location[1].Code,Item."No.",3,2.4875);
+      // [GIVEN] Purchase 3 pcs of item "I" on location "L2". Unit cost = 2.48827. Receive only.
+      CreatePurchaseOrderPostReceipt(PurchaseHeader[2],PurchaseHeader[1]."Buy-from Vendor No.",Location[1].Code,Item."No.",3,2.48827);
+
+      // [GIVEN] Create a transfer order from location "L1" to "L2". Split transfer into 5 lines with quantitues: 1, 1, 2, 1, 1
+      // [GIVEN] Post transfer
+      LibraryInventory.CreateTransferHeader(TransferHeader,Location[1].Code,Location[2].Code,Location[3].Code);
+      LibraryInventory.CreateTransferLine(TransferHeader,TransferLine,Item."No.",1);
+      LibraryInventory.CreateTransferLine(TransferHeader,TransferLine,Item."No.",1);
+      LibraryInventory.CreateTransferLine(TransferHeader,TransferLine,Item."No.",2);
+      LibraryInventory.CreateTransferLine(TransferHeader,TransferLine,Item."No.",1);
+      LibraryInventory.CreateTransferLine(TransferHeader,TransferLine,Item."No.",1);
+      LibraryInventory.PostTransferHeader(TransferHeader,TRUE,TRUE);
+
+      // [GIVEN] Invoice the first purchase order
+      PurchInvoiceNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader[1],FALSE,TRUE);
+
+      // [WHEN] Run cost adjustment
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // [THEN] First receipt item ledger entry is rounded
+      // [THEN] Receipt entry is not marked as "Applied entry to adjust"
+      VerifyAppliedEntryToAdjust(Item."No.");
+      VerifyItemLedgerEntryRounding(PurchInvoiceNo);
+
+      // [WHEN] Invoice remaining purchase quantity, adjust cost
+      PurchInvoiceNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader[2],FALSE,TRUE);
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // [THEN] Second receipt item ledger entry is rounded
+      VerifyAppliedEntryToAdjust(Item."No.");
+      VerifyItemLedgerEntryRounding(PurchInvoiceNo);
+    END;
+
+    [Test]
+    PROCEDURE LastSelectedStdCostWorksheetNameIsSaved@83();
+    VAR
+      StdCostWorksheetName@1001 : Record 5840;
+      StandardCostWorksheet@1000 : TestPage 5841;
+    BEGIN
+      // [FEATURE] [Standard Cost Worksheet] [UI]
+      // [SCENARIO 210317] Standard Cost Worksheet (SCW) is opened with last selected SCW Name.
+      Initialize;
+
+      // [GIVEN] New SCW Name "X" is created.
+      LibraryInventory.CreateStandardCostWorksheetName(StdCostWorksheetName);
+
+      // [GIVEN] SCW Name is updated to "X" on the worksheet, and the page is closed.
+      StandardCostWorksheet.OPENEDIT;
+      StandardCostWorksheet.CurrWkshName.SETVALUE(StdCostWorksheetName.Name);
+      StandardCostWorksheet.CLOSE;
+
+      // [WHEN] Open SCW page again.
+      StandardCostWorksheet.OPENVIEW;
+
+      // [THEN] SCW Name on the page = "X".
+      StandardCostWorksheet.CurrWkshName.ASSERTEQUALS(StdCostWorksheetName.Name);
+    END;
+
+    [Test]
+    PROCEDURE StdCostWorksheetIsOpenedWithFirstFoundNameIfSavedNameDeleted@68();
+    VAR
+      StdCostWorksheetName@1000 : Record 5840;
+      StandardCostWorksheet@1001 : TestPage 5841;
+    BEGIN
+      // [FEATURE] [Standard Cost Worksheet] [UI]
+      // [SCENARIO 210317] Standard Cost Worksheet (SCW) is opened with the first found SCW Name is the last used SCW Name has been deleted.
+      Initialize;
+
+      // [GIVEN] New SCW Name "X" is created.
+      LibraryInventory.CreateStandardCostWorksheetName(StdCostWorksheetName);
+
+      // [GIVEN] SCW Name is updated to "X" on the worksheet, and the page is closed.
+      StandardCostWorksheet.OPENEDIT;
+      StandardCostWorksheet.CurrWkshName.SETVALUE(StdCostWorksheetName.Name);
+      StandardCostWorksheet.CLOSE;
+
+      // [GIVEN] Delete "X".
+      StdCostWorksheetName.DELETE(TRUE);
+
+      // [WHEN] Open SCW page again.
+      StandardCostWorksheet.OPENVIEW;
+
+      // [THEN] SCW Name on the page is equal to the first found SCW Name on the table.
+      StdCostWorksheetName.FINDFIRST;
+      StandardCostWorksheet.CurrWkshName.ASSERTEQUALS(StdCostWorksheetName.Name);
+    END;
+
+    [Test]
+    PROCEDURE StdCostWorksheetIsOpenedWithDefaultNameIfAllNamesDeleted@89();
+    VAR
+      StdCostWorksheetName@1001 : Record 5840;
+      StandardCostWorksheet@1000 : TestPage 5841;
+    BEGIN
+      // [FEATURE] [Standard Cost Worksheet] [UI]
+      // [SCENARIO 210317] Standard Cost Worksheet (SCW) Name with Name = 'DEFAULT' is created when SCW is opened and no SCW Name existed.
+      Initialize;
+
+      // [GIVEN] Delete all SCW names.
+      StdCostWorksheetName.DELETEALL(TRUE);
+
+      // [WHEN] Open SCW page.
+      StandardCostWorksheet.OPENEDIT;
+
+      // [THEN] SCW Name on the page is equal to the default name.
+      StdCostWorksheetName.FINDFIRST;
+      StdCostWorksheetName.TESTFIELD(Name,UPPERCASE('Default'));
+    END;
+
+    [Test]
+    PROCEDURE StdCostWorksheetIsOpenedWithSelectedNameOnEditWorksheetAction@18();
+    VAR
+      StdCostWorksheetName@1001 : Record 5840;
+      StandardCostWorksheet@1000 : TestPage 5841;
+      StandardCostWorksheetNames@1002 : TestPage 5840;
+    BEGIN
+      // [FEATURE] [Standard Cost Worksheet] [UI]
+      // [SCENARIO 210317] Standard Cost Worksheet (SCW) is opened with selected SCW Name when Edit Worksheet is invoked on SCW Names page.
+      Initialize;
+
+      // [GIVEN] New SCW Name "X" is created.
+      LibraryInventory.CreateStandardCostWorksheetName(StdCostWorksheetName);
+
+      // [GIVEN] "X" is selected on SCW Names page.
+      StandardCostWorksheetNames.OPENVIEW;
+      StandardCostWorksheetNames.FILTER.SETFILTER(Name,StdCostWorksheetName.Name);
+
+      // [WHEN] Click "Edit Worksheet" on the page.
+      StandardCostWorksheet.TRAP;
+      StandardCostWorksheetNames.EditWorksheet.INVOKE;
+
+      // [THEN] SCW is opened. SCW Name on the worksheet is equal to "X".
+      StandardCostWorksheet.CurrWkshName.ASSERTEQUALS(StdCostWorksheetName.Name);
+    END;
+
+    [Test]
+    PROCEDURE PostRevaluationWithPurchInvoiceBeforeReceipt@60();
+    VAR
+      Item@1000 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      UnitCostOriginal@1005 : Decimal;
+      UnitCostRevalued@1006 : Decimal;
+      Quantity@1007 : Integer;
+    BEGIN
+      // [FEATURE] [Revaluation]
+      // [SCENARIO 206777] Item revaluation can be posted when a purchase order invoiced on a revaluation date has a receipt in a later period
+
+      Initialize;
+
+      // [GIVEN] Item "I" with Average costing method, Unit Cost = 100
+      UnitCostOriginal := LibraryRandom.RandDec(100,2);
+      UnitCostRevalued := UnitCostOriginal + LibraryRandom.RandDec(50,2);
+      Quantity := LibraryRandom.RandInt(20);
+
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Costing Method",Item."Costing Method"::Average);
+      Item.VALIDATE("Unit Cost",UnitCostOriginal);
+      Item.VALIDATE("Last Direct Cost",UnitCostOriginal);
+      Item.MODIFY(TRUE);
+
+      // [GIVEN] Purchase order for 10 pcs of item "I". Posting Date = 01/01/17. Post receipt without invoicing.
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,LibraryPurchase.CreateVendorNo);
+      PurchaseHeader.SetHideValidationDialog(TRUE);
+      PurchaseHeader.VALIDATE("Posting Date",WORKDATE + 1);
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",Quantity);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+
+      // [GIVEN] Invoice the purchase on 31/12/16
+      PurchaseHeader.VALIDATE("Posting Date",WORKDATE);
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",LibraryUtility.GenerateGUID);
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+
+      // [GIVEN] Post positive adjustment for another 10 pcs of item "I" on 31/12/16
+      LibraryInventory.CreateItemJournalLineInItemTemplate(ItemJournalLine,Item."No.",'','',Quantity);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+
+      // [GIVEN] Run cost adjustment to be able to revalue the item
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+
+      // [WHEN] Calculate inventory value for item "I" on 31/12/16, set "Unit Cost (Revalued)" = 150, and post revaluation
+      CreatePostRevaluation(Item,UnitCostRevalued);
+
+      // [THEN] "Cost Amount (Actual)" on 31/12/16 is 150 * 10 = 1500 - revalued
+      // [THEN] "Cost Amount (Actual)" on 01/01/17 is 100 * 10 = 1000 - not revalued
+      VerifyActualCostAmount(ItemJournalLine."Item No.",WORKDATE,UnitCostRevalued * Quantity);
+      VerifyActualCostAmount(ItemJournalLine."Item No.",WORKDATE + 1,UnitCostOriginal * Quantity);
+    END;
+
+    LOCAL PROCEDURE Initialize@110();
+    VAR
+      LibraryERMCountryData@1007 : Codeunit 131305;
+    BEGIN
+      // Initialize setup.
+      LibraryVariableStorage.Clear;
+      LibrarySetupStorage.Restore;
+
+      IF isInitialized THEN
+        EXIT;
+
+      // Setup Demonstration data.
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      LibrarySetupStorage.Save(DATABASE::"Inventory Setup");
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE FIFOAutomaticCostPostToGL@6(AutomaticCostPosting@1000 : Boolean;CostExpected@1001 : Boolean;PartialRecvInv@1016 : Boolean;MultiplePartialRecvInv@1017 : Boolean);
+    VAR
+      InventorySetup@1014 : Record 313;
+      Item@1013 : Record 27;
+      PurchaseHeader@1012 : Record 38;
+      PurchaseLine@1011 : Record 39;
+      PurchInvHeader@1010 : Record 122;
+      ItemNo@1009 : Code[20];
+      ItemNo2@1008 : Code[20];
+      ItemNo3@1007 : Code[20];
+      FlushingMethod@1006 : 'Manual,Forward,Backward';
+      AutomaticCostAdjustment@1005 : 'Never,Day,Week,Month,Quarter,Year,Always';
+    BEGIN
+      // Steps describing the sequence of actions for Test Case.
+
+      // 1. Create required Inventory setups.
+      // Update Inventory Setup True if Automatic cost posting.
+      Initialize;
+      RaiseConfirmHandler;
+      LibraryVariableStorage.Enqueue(AutomaticCostPostingMessage);  // Enqueue for Message Handler.
+      LibraryERM.SetUseLegacyGLEntryLocking(AutomaticCostPosting);
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,AutomaticCostPosting,FALSE,AutomaticCostAdjustment::Never,AverageCostCalcType::Item,AverageCostPeriod::Day);
+
+      // Create Items with Costing Method FIFO, False if Cost is different from expected.
+      CreateItem(Item,Item."Costing Method"::FIFO,Item."Reordering Policy"::"Lot-for-Lot",FlushingMethod::Forward,'','',CostExpected);
+      ItemNo := Item."No.";
+      CLEAR(Item);
+      CreateItem(Item,Item."Costing Method"::FIFO,Item."Reordering Policy"::"Lot-for-Lot",FlushingMethod::Forward,'','',CostExpected);
+      ItemNo2 := Item."No.";
+      CLEAR(Item);
+      CreateItem(Item,Item."Costing Method"::FIFO,Item."Reordering Policy"::"Lot-for-Lot",FlushingMethod::Forward,'','',CostExpected);
+      ItemNo3 := Item."No.";
+
+      // 2.1 Execute: Create and Post Purchase Order, True if partial receive and Invoice.
+      // Post Inventory Cost to GL if Automatic Cost Posting True.
+      CreatePurchaseOrder(
+        PurchaseHeader,PurchaseLine,ItemNo,ItemNo2,ItemNo3,RANDOM(100) + 50,PartialRecvInv);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      IF NOT AutomaticCostPosting THEN
+        LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // 3.1 Verify: Verify General Ledger Entries that WIP Account does not exist and Total Inventory amount equals calculated amount.
+      PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+      PurchInvHeader.FINDFIRST;
+      VerifyInvtAmountGLEntry(PurchInvHeader."No.",ItemNo);
+
+      // 2.2. Execute: Update and Post Purchase Order with Partial Quantity.
+      // Post Inventory Cost to GL if Automatic Cost Posting True.
+      // 3.2. Verify: Verify General Ledger Entries that WIP Account does not exist and Total Inventory amount equals calculated amount.
+      IF MultiplePartialRecvInv THEN BEGIN
+        UpdatePurchaseHeader(PurchaseHeader."No.",ItemNo,ItemNo2,ItemNo3);
+        IF NOT AutomaticCostPosting THEN
+          LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+        PurchInvHeader.SETRANGE("Order No.",PurchaseHeader."No.");
+        PurchInvHeader.FINDLAST;
+        VerifyInvtAmountGLEntry(PurchInvHeader."No.",ItemNo);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostTransferOrder@92(FromLocationCode@1000 : Code[10];ToLocationCode@1001 : Code[10];InTransitLocationCode@1002 : Code[10];ItemNo@1003 : Code[20];Quantity@1004 : Decimal);
+    VAR
+      TransferHeader@1005 : Record 5740;
+      TransferLine@1006 : Record 5741;
+    BEGIN
+      LibraryInventory.CreateTransferHeader(TransferHeader,FromLocationCode,ToLocationCode,InTransitLocationCode);
+      LibraryInventory.CreateTransferLine(TransferHeader,TransferLine,ItemNo,Quantity);
+      LibraryInventory.PostTransferHeader(TransferHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItem@7(VAR Item@1008 : Record 27;ItemCostingMethod@1001 : 'Standard,Average';ItemReorderPolicy@1002 : Option;FlushingMethod@1003 : Option;RoutingNo@1004 : Code[20];ProductionBOMNo@1005 : Code[20];CostExpected@1000 : Boolean);
+    BEGIN
+      // Create Item with required fields where random and other values are not important for test.
+      LibraryManufacturing.CreateItemManufacturing(
+        Item,ItemCostingMethod,0,ItemReorderPolicy,FlushingMethod,RoutingNo,ProductionBOMNo);
+      Item.VALIDATE("Overhead Rate",RANDOM(5));
+      Item.VALIDATE("Indirect Cost %",RANDOM(5));
+      IF  NOT CostExpected THEN
+        Item.VALIDATE("Unit Cost",RANDOM(10));
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeader@108(VAR PurchaseHeader@1000 : Record 38;DocumentType@1001 : Option;BuyfromVendorNo@1002 : Code[20];LocationCode@1003 : Code[10]);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocumentType,BuyfromVendorNo);
+      PurchaseHeader.VALIDATE("Location Code",LocationCode);
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",LibraryUtility.GenerateGUID);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@26(VAR PurchaseHeader@1002 : Record 38;VAR PurchaseLine@1003 : Record 39;ItemNo@1000 : Code[20];ItemNo2@1001 : Code[20];ItemNo3@1006 : Code[20];Quantity@1004 : Decimal;PartialRecvInv@1005 : Boolean);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo,Quantity,PartialRecvInv);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo2,Quantity,PartialRecvInv);
+      CreatePurchaseLine(PurchaseLine,PurchaseHeader,ItemNo3,Quantity,PartialRecvInv);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderPostReceipt@136(VAR PurchaseHeader@1000 : Record 38;VendorNo@1001 : Code[20];LocationCode@1002 : Code[10];ItemNo@1004 : Code[20];Quantity@1005 : Decimal;UnitCost@1006 : Decimal);
+    VAR
+      PurchaseLine@1003 : Record 39;
+    BEGIN
+      CreatePurchaseHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,VendorNo,LocationCode);
+      CreatePurchaseLineWithUnitCost(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity,UnitCost);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@14(VAR PurchaseLine@1005 : Record 39;PurchaseHeader@1004 : Record 38;ItemNo@1003 : Code[20];Qty@1002 : Decimal;PartialRecvInv@1000 : Boolean);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Qty);
+      IF PartialRecvInv THEN
+        PurchaseLine.VALIDATE("Qty. to Receive",Qty - 5);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLineWithUnitCost@63(VAR PurchaseLine@1000 : Record 39;PurchaseHeader@1001 : Record 38;Type@1002 : Option;No@1003 : Code[20];Quantity@1005 : Decimal;DirectUnitCost@1004 : Decimal);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,Type,No,Quantity);
+      PurchaseLine.VALIDATE("Direct Unit Cost",DirectUnitCost);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemAndLocationSetup@98(VAR Item@1000 : Record 27;VAR Location@1001 : ARRAY [3] OF Record 14);
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location[1]);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location[2]);
+      LibraryWarehouse.CreateInTransitLocation(Location[3]);
+      CreateItemWithStockkeepingUnitsPerLocation(Item);
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalLine@73(VAR ItemJournalBatch@1004 : Record 233;VAR ItemJournalLine@1000 : Record 83;EntryType@1006 : Option;ItemNo@1005 : Code[20];Quantity@1002 : Decimal);
+    BEGIN
+      SelectItemJournalBatch(ItemJournalBatch);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,EntryType,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateManufacturingItem@16(VAR Item@1001 : Record 27;ProductionBOMNo@1000 : Code[20]);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      WITH Item DO BEGIN
+        VALIDATE("Production BOM No.",ProductionBOMNo);
+        VALIDATE("Replenishment System","Replenishment System"::"Prod. Order");
+        VALIDATE("Costing Method","Costing Method"::FIFO);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateItemsSetup@21(VAR Item@1005 : Record 27;VAR Item2@1001 : Record 27);
+    VAR
+      ProductionBOMHeader@1000 : Record 99000771;
+      ProductionBOMLine@1003 : Record 99000772;
+    BEGIN
+      // Create Child Item.
+      LibraryInventory.CreateItem(Item2);
+
+      // Create Production BOM, Parent Item and attach Production BOM.
+      CreateCertifiedProductionBOM(ProductionBOMHeader,Item2."Base Unit of Measure",ProductionBOMLine.Type::Item,Item2."No.",1); // Value 1 is important.
+      CreateManufacturingItem(Item,ProductionBOMHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemsSetupWithProductionBOMTypeComponent@41(VAR Item@1005 : Record 27;VAR Item2@1001 : Record 27) : Integer;
+    VAR
+      ProductionBOMHeader@1000 : Record 99000771;
+      ProductionBOMLine@1003 : Record 99000772;
+      QtyPer@1006 : Integer;
+      QtyPer2@1002 : Integer;
+    BEGIN
+      // Create Child Item.
+      LibraryInventory.CreateItem(Item2);
+
+      // Create Production BOM, Create Production BOM with Production BOM Component, Create Parent Item and attach Production BOM.
+      QtyPer := LibraryRandom.RandIntInRange(2,100); // Value is not important, but should not be 1.
+      QtyPer2 := LibraryRandom.RandIntInRange(1,100);
+      CreateCertifiedProductionBOM(
+        ProductionBOMHeader,Item2."Base Unit of Measure",ProductionBOMLine.Type::Item,Item2."No.",QtyPer);
+      CreateCertifiedProductionBOM(
+        ProductionBOMHeader,ProductionBOMHeader."Unit of Measure Code",
+        ProductionBOMLine.Type::"Production BOM",ProductionBOMHeader."No.",QtyPer2); // Value is not important
+      CreateManufacturingItem(Item,ProductionBOMHeader."No.");
+      EXIT(QtyPer * QtyPer2);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithCostingMethod@97(VAR Item@1000 : Record 27;CostingMethod@1001 : Option);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Costing Method",CostingMethod);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithStockkeepingUnitsPerLocation@82(VAR Item@1000 : Record 27);
+    BEGIN
+      CreateItemWithCostingMethod(Item,Item."Costing Method"::Average);
+      LibraryInventory.CreateStockKeepingUnit(Item,0,FALSE,TRUE); // Create stockkeeping units per location
+    END;
+
+    LOCAL PROCEDURE CreateCertifiedProductionBOM@15(VAR ProductionBOMHeader@1001 : Record 99000771;UnitOfMeasure@1002 : Code[10];ProductionBOMLineType@1003 : Option;No@1004 : Code[20];QuantityPer@1005 : Decimal);
+    VAR
+      ProductionBOMLine@1000 : Record 99000772;
+    BEGIN
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,UnitOfMeasure);
+      LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLineType,No,QuantityPer);
+      ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::Certified);
+      ProductionBOMHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshReleasedProductionOrder@70(VAR ProductionOrder@1000 : Record 5405;ItemNo@1002 : Code[20]);
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo,LibraryRandom.RandInt(10));  // Taking Random Quantity.
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLine@88(ItemNo@1002 : Code[20];Quantity@1003 : Decimal;LocationCode@1004 : Code[10]) : Decimal;
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      CreateItemJournalLine(ItemJournalBatch,ItemJournalLine,ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.VALIDATE("Unit Amount",LibraryRandom.RandDec(100,2));
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      EXIT(ItemJournalLine."Unit Amount");
+    END;
+
+    LOCAL PROCEDURE CreateProductionBOMVersion@106(VAR ProductionBOMVersion@1000 : Record 99000779;ProductionBOMHeader@1001 : Record 99000771;ItemBaseUnitOfMeasure@1002 : Code[10];ItemNo@1004 : Code[20]);
+    VAR
+      ProductionBOMLine@1003 : Record 99000772;
+    BEGIN
+      LibraryManufacturing.CreateProductionBOMVersion(ProductionBOMVersion,ProductionBOMHeader."No.",
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(ProductionBOMVersion.FIELDNO("Version Code"),DATABASE::"Production BOM Version"),1,
+          LibraryUtility.GetFieldLength(DATABASE::"Production BOM Version",ProductionBOMVersion.FIELDNO("Version Code"))),
+        ItemBaseUnitOfMeasure);
+      LibraryManufacturing.CreateProductionBOMLine(
+        ProductionBOMHeader,ProductionBOMLine,ProductionBOMVersion."Version Code",ProductionBOMLine.Type::Item,ItemNo,
+        LibraryRandom.RandInt(10)); // Random Quantity.
+    END;
+
+    LOCAL PROCEDURE CreateProdBOMVersionWithStartingDate@59(VAR ProductionBOMVersion@1001 : Record 99000779;ProductionBOMHeader@1000 : Record 99000771;ItemBaseUnitOfMeasure@1006 : Code[10];ChildItemNo@1009 : Code[20];StartingDate@1002 : Date);
+    BEGIN
+      CreateProductionBOMVersion(ProductionBOMVersion,ProductionBOMHeader,ItemBaseUnitOfMeasure,ChildItemNo);
+      UpdateStartingDateOnProductionBOMVersion(ProductionBOMVersion,StartingDate);
+      UpdateStatusOnProductionBOMVersion(ProductionBOMVersion,ProductionBOMVersion.Status::Certified);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@120(VAR SalesHeader@1001 : Record 36;ItemNo@1004 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateRevalutionItemJournalBatch@58(VAR ItemJournalBatch@1000 : Record 233);
+    VAR
+      ItemJournalTemplate@1001 : Record 82;
+    BEGIN
+      SelectRevaluationItemJournalTemplate(ItemJournalTemplate);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      ItemJournalBatch.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateRevalutionJournal@57(VAR Item@1000 : Record 27;VAR ItemJournalLine@1001 : Record 83;ByLocation@1006 : Boolean;ByVariant@1007 : Boolean);
+    VAR
+      ItemJournalBatch@1005 : Record 233;
+      CalculateInventoryValue@1004 : Report 5899;
+      CalculatePer@1003 : 'Item Ledger Entry,Item';
+      CalculationBase@1002 : ' ,Last Direct Unit Cost,Standard Cost - Assembly List,Standard Cost - Manufacturing';
+    BEGIN
+      CreateRevalutionItemJournalBatch(ItemJournalBatch);
+      ItemJournalLine.VALIDATE("Journal Template Name",ItemJournalBatch."Journal Template Name");
+      ItemJournalLine.VALIDATE("Journal Batch Name",ItemJournalBatch.Name);
+      CalculateInventoryValue.InitializeRequest(WORKDATE,ItemJournalLine."Document No.",TRUE,
+        CalculatePer::Item,ByLocation,ByVariant,TRUE,CalculationBase::" ",FALSE);
+      COMMIT;
+      CalculateInventoryValue.USEREQUESTPAGE(FALSE);
+      CalculateInventoryValue.SetItemJnlLine(ItemJournalLine);
+      Item.SETRANGE("No.",Item."No.");
+      CalculateInventoryValue.SETTABLEVIEW(Item);
+      CalculateInventoryValue.RUNMODAL;
+
+      ItemJournalLine.SETRANGE("Journal Template Name",ItemJournalLine."Journal Template Name");
+      ItemJournalLine.SETRANGE("Journal Batch Name",ItemJournalLine."Journal Batch Name");
+      ItemJournalLine.SETRANGE("Item No.",Item."No.");
+      ItemJournalLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreatePostTransferJournalLine@107(ItemNo@1002 : Code[20];Quantity@1003 : Decimal;FromLocationCode@1004 : Code[10];ToLocationCode@1005 : Code[10]);
+    VAR
+      ItemJournalBatch@1001 : Record 233;
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      LibraryInventory.CreateItemJournalBatchByType(ItemJournalBatch,ItemJournalBatch."Template Type"::Transfer);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::Transfer,ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Location Code",FromLocationCode);
+      ItemJournalLine.VALIDATE("New Location Code",ToLocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreatePostPositiveAdjustment@65(VAR Item@1008 : Record 27;Quantity@1002 : Decimal);
+    VAR
+      ItemJournalBatch@1000 : Record 233;
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      CreateItemJournalLine(ItemJournalBatch,ItemJournalLine,ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",Quantity);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreatePostPositiveAdjustmentWithUnitAmount@78(VAR Item@1008 : Record 27) PostedAmount : Decimal;
+    VAR
+      ItemJournalBatch@1000 : Record 233;
+      ItemJournalLine@1001 : Record 83;
+      Quantity@1002 : Decimal;
+      UnitAmount@1005 : Decimal;
+    BEGIN
+      Quantity := LibraryRandom.RandIntInRange(500000,3000000);
+      UnitAmount := LibraryRandom.RandDec(10,2);
+      PostedAmount := Quantity * UnitAmount;
+
+      CreateItemJournalLine(ItemJournalBatch,ItemJournalLine,ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",Quantity);
+      ItemJournalLine.VALIDATE("Unit Amount",UnitAmount);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreatePostRevaluation@71(VAR Item@1008 : Record 27;VAR CostAmount@1000 : Decimal);
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      CreateRevalutionJournal(Item,ItemJournalLine,FALSE,FALSE);
+      CostAmount := LibraryRandom.RandInt(10);
+      ItemJournalLine.VALIDATE("Unit Cost (Revalued)",CostAmount);
+      ItemJournalLine.MODIFY;
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE MockItemWithManufacturingCosts@49(VAR Item@1000 : Record 27;ReplenishmentSystem@1001 : Option);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item."Costing Method" := Item."Costing Method"::Standard;
+      Item."Replenishment System" := ReplenishmentSystem;
+
+      Item."Single-Level Material Cost" := LibraryRandom.RandDec(1000,2);
+      Item."Single-Level Capacity Cost" := LibraryRandom.RandDec(1000,2);
+      Item."Single-Level Subcontrd. Cost" := LibraryRandom.RandDec(1000,2);
+      Item."Single-Level Cap. Ovhd Cost" := LibraryRandom.RandDec(1000,2);
+      Item."Single-Level Mfg. Ovhd Cost" := LibraryRandom.RandDec(1000,2);
+
+      Item."Rolled-up Material Cost" := Item."Single-Level Material Cost";
+      Item."Rolled-up Capacity Cost" := Item."Single-Level Capacity Cost";
+      Item."Rolled-up Subcontracted Cost" := Item."Single-Level Subcontrd. Cost";
+      Item."Rolled-up Cap. Overhead Cost" := Item."Single-Level Cap. Ovhd Cost";
+      Item."Rolled-up Mfg. Ovhd Cost" := Item."Single-Level Mfg. Ovhd Cost";
+
+      Item."Standard Cost" :=
+        Item."Single-Level Material Cost" +
+        Item."Single-Level Mfg. Ovhd Cost" +
+        Item."Single-Level Capacity Cost" +
+        Item."Single-Level Subcontrd. Cost" +
+        Item."Single-Level Cap. Ovhd Cost";
+
+      Item.MODIFY;
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseHeader@17(PurchaseOrderNo@1004 : Code[20];ItemNo@1003 : Code[20];ItemNo2@1002 : Code[20];ItemNo3@1005 : Code[20]);
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      // Update Purchase Header with new vendor Invoice.
+      PurchaseHeader.GET(PurchaseHeader."Document Type"::Order,PurchaseOrderNo);
+      PurchaseHeader.VALIDATE(
+        "Vendor Invoice No.",
+        LibraryUtility.GenerateRandomCode(PurchaseHeader.FIELDNO("Vendor Invoice No."),DATABASE::"Purchase Header"));
+      PurchaseHeader.MODIFY(TRUE);
+
+      // Update Purchase Lines with partial quantity,value used are important for test.
+      UpdatePurchaseLine(PurchaseHeader."No.",ItemNo,2);
+      UpdatePurchaseLine(PurchaseHeader."No.",ItemNo2,0);
+      UpdatePurchaseLine(PurchaseHeader."No.",ItemNo3,5);
+
+      // Post Purchase order.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseLine@12(PurchaseOrderNo@1004 : Code[20];ItemNo@1003 : Code[20];QtyToReceive@1001 : Decimal);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",PurchaseOrderNo);
+      PurchaseLine.SETRANGE(Type,PurchaseLine.Type::Item);
+      PurchaseLine.SETRANGE("No.",ItemNo);
+      PurchaseLine.FINDFIRST;
+      PurchaseLine.VALIDATE("Qty. to Receive",PurchaseLine."Qty. to Receive" - QtyToReceive);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectGLEntry@37(VAR GLEntry@1000 : Record 17;InventoryPostingSetupAccount@1002 : Code[20];PurchaseInvoiceNo@1003 : Code[20]);
+    BEGIN
+      // Select set of G/L Entries for the specified Account.
+      GLEntry.SETRANGE("Document No.",PurchaseInvoiceNo);
+      GLEntry.SETRANGE("G/L Account No.",InventoryPostingSetupAccount);
+      GLEntry.FINDSET;
+    END;
+
+    LOCAL PROCEDURE SelectInventoryPostingSetup@2(VAR InventoryPostingSetup@1002 : Record 5813;ItemNo@1000 : Code[20]);
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.GET(ItemNo);
+      InventoryPostingSetup.SETRANGE("Invt. Posting Group Code",Item."Inventory Posting Group");
+      InventoryPostingSetup.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SelectRevaluationItemJournalTemplate@61(VAR ItemJournalTemplate@1001 : Record 82);
+    BEGIN
+      // Select Item Journal Template Name for General Journal Line.
+      ItemJournalTemplate.SETRANGE(Type,ItemJournalTemplate.Type::Revaluation);
+      IF NOT ItemJournalTemplate.FINDFIRST THEN BEGIN
+        ItemJournalTemplate.INIT;
+        ItemJournalTemplate.VALIDATE(
+          Name,COPYSTR(LibraryUtility.GenerateRandomCode(ItemJournalTemplate.FIELDNO(Name),DATABASE::"Item Journal Template"),1,
+            MAXSTRLEN(ItemJournalTemplate.Name)));
+        ItemJournalTemplate.INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE SelectItemJournalBatch@75(VAR ItemJournalBatch@1002 : Record 233);
+    VAR
+      ItemJournalTemplate@1000 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE CalculateGLEntryTotalAmount@74(VAR GLEntry@1001 : Record 17) : Decimal;
+    VAR
+      TotalAmount@1002 : Decimal;
+    BEGIN
+      REPEAT
+        TotalAmount += GLEntry.Amount;
+      UNTIL GLEntry.NEXT = 0;
+      EXIT(TotalAmount);
+    END;
+
+    LOCAL PROCEDURE DirectIndirectItemCost@11(PurchaseInvoiceNo@1000 : Code[20]) : Decimal;
+    VAR
+      PurchInvLine@1001 : Record 123;
+      DirectIndirectPOCost@1002 : Decimal;
+    BEGIN
+      // Calculate Direct and Indirect Cost purchase order Cost.
+      PurchInvLine.SETRANGE("Document No.",PurchaseInvoiceNo);
+      PurchInvLine.SETRANGE(Type,PurchInvLine.Type::Item);
+      IF PurchInvLine.FINDSET THEN
+        REPEAT
+          DirectIndirectPOCost +=
+            (PurchInvLine.Quantity * PurchInvLine."Direct Unit Cost") +
+            (PurchInvLine.Quantity *
+             ((PurchInvLine."Indirect Cost %" / 100) * PurchInvLine."Direct Unit Cost" + PurchInvLine."Overhead Rate"));
+        UNTIL PurchInvLine.NEXT = 0;
+
+      EXIT(DirectIndirectPOCost);
+    END;
+
+    LOCAL PROCEDURE UpdateStatusOnProductionBOMVersion@32(ProductionBOMVersion@1000 : Record 99000779;Status@1001 : Option);
+    BEGIN
+      ProductionBOMVersion.VALIDATE(Status,Status);
+      ProductionBOMVersion.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateStartingDateOnProductionBOMVersion@39(VAR ProductionBOMVersion@1000 : Record 99000779;StartingDate@1001 : Date);
+    BEGIN
+      ProductionBOMVersion.VALIDATE("Starting Date",StartingDate);
+      ProductionBOMVersion.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE FindStandardCostWorksheet@31(VAR StandardCostWorksheet@1000 : Record 5841;StandardCostWorksheetName@1001 : Code[10];ItemNo@1002 : Code[20]);
+    BEGIN
+      StandardCostWorksheet.SETRANGE("Standard Cost Worksheet Name",StandardCostWorksheetName);
+      StandardCostWorksheet.SETRANGE(Type,StandardCostWorksheet.Type::Item);
+      StandardCostWorksheet.SETRANGE("No.",ItemNo);
+      StandardCostWorksheet.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdateNewStandardCostOnStandardCostWorksheet@30(StandardCostWorksheetName@1001 : Code[10];ItemNo@1000 : Code[20]);
+    VAR
+      StandardCostWorksheet@1002 : Record 5841;
+    BEGIN
+      FindStandardCostWorksheet(StandardCostWorksheet,StandardCostWorksheetName,ItemNo);
+      StandardCostWorksheet.VALIDATE(
+        "New Standard Cost",StandardCostWorksheet."New Standard Cost" + LibraryRandom.RandDec(10,2));
+      StandardCostWorksheet.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateProductionBOMVersionAndUpdateStatus@34(ProductionBOMNo@1001 : Code[20];Status@1003 : Option);
+    VAR
+      ProductionBOMVersion@1000 : Record 99000779;
+      ProductionBOMHeader@1002 : Record 99000771;
+      ProductionBOMCopy@1004 : Codeunit 99000768;
+    BEGIN
+      ProductionBOMHeader.GET(ProductionBOMNo);
+      LibraryManufacturing.CreateProductionBOMVersion(
+        ProductionBOMVersion,ProductionBOMHeader."No.",FORMAT(LibraryRandom.RandInt(10)),
+        ProductionBOMHeader."Unit of Measure Code");  // Use Random Version Code.
+      ProductionBOMCopy.CopyBOM(ProductionBOMVersion."Production BOM No.",'',ProductionBOMHeader,ProductionBOMVersion."Version Code");
+      UpdateStatusOnProductionBOMVersion(ProductionBOMVersion,Status);
+    END;
+
+    LOCAL PROCEDURE CreateRoutingSetup@76(VAR RoutingHeader@1001 : Record 99000763);
+    VAR
+      WorkCenter@1000 : Record 99000754;
+      RoutingLine@1006 : Record 99000764;
+    BEGIN
+      CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine,'',FORMAT(LibraryRandom.RandInt(5)),RoutingLine.Type::"Work Center",WorkCenter."No.");
+      RoutingHeader.VALIDATE(Status,RoutingHeader.Status::Certified);
+      RoutingHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateWorkCenter@53(VAR WorkCenter@1004 : Record 99000754);
+    BEGIN
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+    END;
+
+    LOCAL PROCEDURE UpdateStatusOnRoutingVersion@29(RoutingVersion@1000 : Record 99000786;Status@1001 : Option);
+    BEGIN
+      RoutingVersion.VALIDATE(Status,Status);
+      RoutingVersion.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateRoutingVersionAndUpdateStatus@28(RoutingHeader@1001 : Record 99000763;Status@1003 : Option);
+    VAR
+      RoutingVersion@1005 : Record 99000786;
+      RoutingLineCopyLines@1007 : Codeunit 99000753;
+    BEGIN
+      LibraryManufacturing.CreateRoutingVersion(RoutingVersion,RoutingHeader."No.",FORMAT(LibraryRandom.RandInt(10)));  // Use Random Version Code.
+      RoutingLineCopyLines.CopyRouting(RoutingVersion."Routing No.",'',RoutingHeader,RoutingVersion."Version Code");
+      UpdateStatusOnRoutingVersion(RoutingVersion,Status);
+    END;
+
+    LOCAL PROCEDURE UpdateRoutingNoOnItem@27(VAR Item@1000 : Record 27;RoutingNo@1001 : Code[20]);
+    BEGIN
+      Item.VALIDATE("Routing No.",RoutingNo);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateStandardCostOnItem@48(VAR Item@1000 : Record 27);
+    BEGIN
+      Item.VALIDATE("Costing Method",Item."Costing Method"::Standard);
+      Item.VALIDATE("Standard Cost",LibraryRandom.RandDec(10,2));
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateAverageCostCalcType@87(AvgCostCalcType@1000 : Option);
+    VAR
+      InventorySetup@1001 : Record 313;
+    BEGIN
+      RaiseConfirmHandler;
+      LibraryInventory.UpdateInventorySetup(
+        InventorySetup,FALSE,FALSE,InventorySetup."Automatic Cost Adjustment"::Never,AvgCostCalcType,AverageCostPeriod::Day);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateStandardCostWorksheet@33(Item@1001 : Record 27) : Code[10];
+    VAR
+      StandardCostWorksheetName@1000 : Record 5840;
+    BEGIN
+      // Create Standard Cost Worksheet Name. Run Suggest Item Standard Cost and update New Standard Cost value.
+      LibraryInventory.CreateStandardCostWorksheetName(StandardCostWorksheetName);
+      LibraryCosting.SuggestItemStandardCost(Item,StandardCostWorksheetName.Name,LibraryRandom.RandInt(5),'');  // Use random value for Standard Cost Adjustment Factor.
+      UpdateNewStandardCostOnStandardCostWorksheet(StandardCostWorksheetName.Name,Item."No.");
+      EXIT(StandardCostWorksheetName.Name);
+    END;
+
+    LOCAL PROCEDURE CreateAndRevalueInventory@77(VAR ItemJournalLine@1006 : Record 83;VAR RevaluedAmount@1007 : Decimal;ByLocation@1001 : Boolean;ByVariant@1002 : Boolean);
+    VAR
+      Item@1005 : Record 27;
+      PostedAmount@1008 : Decimal;
+    BEGIN
+      CreateItemWithCostingMethod(Item,Item."Costing Method"::Average);
+
+      PostedAmount := CreatePostPositiveAdjustmentWithUnitAmount(Item);
+      PostedAmount += CreatePostPositiveAdjustmentWithUnitAmount(Item);
+      RevaluedAmount := PostedAmount + LibraryRandom.RandInt(100);
+
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+      CreateRevalutionJournal(Item,ItemJournalLine,ByLocation,ByVariant);
+      ItemJournalLine.VALIDATE("Inventory Value (Revalued)",RevaluedAmount);
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateBOMTree@117(Item@1000 : Record 27);
+    VAR
+      BOMBuffer@1002 : Record 5870;
+      CalculateBOMTree@1004 : Codeunit 5870;
+      TreeType@1001 : ' ,Availability,Cost';
+    BEGIN
+      Item.SETRANGE("Date Filter",0D,WORKDATE);
+      CalculateBOMTree.SetShowTotalAvailability(TRUE);
+      CalculateBOMTree.GenerateTreeForItems(Item,BOMBuffer,TreeType::Availability);
+    END;
+
+    LOCAL PROCEDURE SetExpectedCostPostingToGL@50(ExpectedCostPostingtoGL@1000 : Boolean);
+    VAR
+      InventorySetup@1001 : Record 313;
+    BEGIN
+      LibraryInventory.UpdateInventorySetup(InventorySetup,InventorySetup."Automatic Cost Posting",ExpectedCostPostingtoGL,
+        InventorySetup."Automatic Cost Adjustment"::Never,InventorySetup."Average Cost Calc. Type",
+        InventorySetup."Average Cost Period");
+    END;
+
+    LOCAL PROCEDURE RunBOMStructurePage@40(VAR Item@1000 : Record 27);
+    VAR
+      BOMStructure@1001 : Page 5870;
+    BEGIN
+      BOMStructure.InitItem(Item);
+      BOMStructure.RUN;
+    END;
+
+    LOCAL PROCEDURE VerifyActualCostAmount@116(ItemNo@1001 : Code[20];ValuationDate@1004 : Date;ExpectedAmount@1002 : Decimal);
+    VAR
+      ValueEntry@1000 : Record 5802;
+      ItemJournalLine@1003 : Record 83;
+    BEGIN
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.SETRANGE("Valuation Date",ValuationDate);
+      ValueEntry.CALCSUMS("Cost Amount (Actual)");
+      Assert.AreEqual(
+        ExpectedAmount,ValueEntry."Cost Amount (Actual)",
+        STRSUBSTNO(
+          UnexpectedCostAmtErr,ValueEntry.FIELDCAPTION("Cost Amount (Actual)"),
+          ItemJournalLine.FIELDCAPTION("Inventory Value (Revalued)")));
+    END;
+
+    LOCAL PROCEDURE VerifyAppliedEntryToAdjust@127(ItemNo@1001 : Code[20]);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::Purchase);
+      ItemLedgerEntry.FINDSET;
+      REPEAT
+        ItemLedgerEntry.TESTFIELD("Applied Entry to Adjust",NOT ItemLedgerEntry."Completely Invoiced");
+      UNTIL ItemLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyWIPAccountNotInGLEntry@45(PurchaseInvoiceNo@1001 : Code[20];ItemNo@1000 : Code[20]);
+    VAR
+      InventoryPostingSetup@1004 : Record 5813;
+      GLEntry@1003 : Record 17;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+      GLEntry.SETRANGE("Document No.",PurchaseInvoiceNo);
+      GLEntry.SETRANGE("G/L Account No.",InventoryPostingSetup."WIP Account");
+
+      // Verify no row exist for WIP Account in G/L Entry.
+      Assert.IsFalse(GLEntry.FINDFIRST,ErrMessageGLEntryNoRowExist);
+    END;
+
+    LOCAL PROCEDURE VerifyInvtAmountGLEntry@5(PurchaseInvoiceNo@1000 : Code[20];ItemNo@1001 : Code[20]);
+    VAR
+      GLEntry@1003 : Record 17;
+      InventoryPostingSetup@1004 : Record 5813;
+    BEGIN
+      SelectInventoryPostingSetup(InventoryPostingSetup,ItemNo);
+
+      // Verify that no row exists for WIP Account.
+      VerifyWIPAccountNotInGLEntry(PurchaseInvoiceNo,ItemNo);
+
+      // Verify sum of Inventory Account amounts equal to calculated amount.
+      SelectGLEntry(GLEntry,InventoryPostingSetup."Inventory Account",PurchaseInvoiceNo);
+      VerifyTotalInvtAmount(CalculateGLEntryTotalAmount(GLEntry),PurchaseInvoiceNo);
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntryRounding@130(DocumentNo@1003 : Code[20]);
+    VAR
+      ValueEntry@1002 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Document Type",ValueEntry."Document Type"::"Purchase Invoice");
+      ValueEntry.SETRANGE("Document No.",DocumentNo);
+      ValueEntry.FINDLAST;
+      ValueEntry.TESTFIELD("Entry Type",ValueEntry."Entry Type"::Rounding);
+    END;
+
+    LOCAL PROCEDURE VerifyTotalInvtAmount@23(TotalAmount@1000 : Decimal;PurchaseInvoiceNo@1001 : Code[20]);
+    VAR
+      CalculatedInventoryAmount@1004 : Decimal;
+    BEGIN
+      CalculatedInventoryAmount := DirectIndirectItemCost(PurchaseInvoiceNo);
+
+      // Verify Inventory Account amounts and calculated Inventory amounts are equal.
+      Assert.AreEqual(TotalAmount,CalculatedInventoryAmount,ErrMessageInvAmountDoNotMatch);
+    END;
+
+    LOCAL PROCEDURE VerifyUnitCostInProductionOrderLine@72(ProductionOrder@1000 : Record 5405;UnitCost@1001 : Decimal);
+    VAR
+      ProdOrderLine@1002 : Record 5406;
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+      ProdOrderLine.TESTFIELD("Unit Cost",UnitCost);
+    END;
+
+    LOCAL PROCEDURE VerifyQtyPerTopItemOnBOMBuffer@113(ItemNo@1003 : Code[20];QtyPerTopItem@1000 : Decimal);
+    VAR
+      BOMBuffer@1001 : Record 5870;
+    BEGIN
+      WITH BOMBuffer DO BEGIN
+        SETRANGE(Type,Type::Item);
+        SETRANGE("No.",ItemNo);
+        FINDFIRST;
+        Assert.AreEqual(QtyPerTopItem,"Qty. per Top Item",QtyPerTopItemErr);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntryCostPostedToGL@90(ItemNo@1000 : Code[20];ExpectedCostAmount@1002 : Decimal);
+    VAR
+      ValueEntry@1001 : Record 5802;
+    BEGIN
+      ValueEntry.SETRANGE("Item No.",ItemNo);
+      ValueEntry.FINDLAST;
+      Assert.AreEqual(ExpectedCostAmount,ValueEntry."Cost Posted to G/L",IncorrectCostPostedToGLErr);
+    END;
+
+    LOCAL PROCEDURE VerifyStdCostWorksheetMfgItem@79(StandardCostWkshName@1000 : Code[10];Item@1001 : Record 27);
+    VAR
+      StandardCostWorksheet@1002 : Record 5841;
+    BEGIN
+      FindStandardCostWorksheet(StandardCostWorksheet,StandardCostWkshName,Item."No.");
+
+      WITH StandardCostWorksheet DO BEGIN
+        TESTFIELD("Single-Lvl Material Cost",Item."Single-Level Material Cost");
+        TESTFIELD("New Single-Lvl Material Cost",Item."Single-Level Material Cost");
+        TESTFIELD("Single-Lvl Cap. Cost",Item."Single-Level Capacity Cost");
+        TESTFIELD("New Single-Lvl Cap. Cost",Item."Single-Level Capacity Cost");
+        TESTFIELD("Single-Lvl Subcontrd Cost",Item."Single-Level Subcontrd. Cost");
+        TESTFIELD("Single-Lvl Subcontrd Cost",Item."Single-Level Subcontrd. Cost");
+        TESTFIELD("Single-Lvl Cap. Ovhd Cost",Item."Single-Level Cap. Ovhd Cost");
+        TESTFIELD("New Single-Lvl Cap. Ovhd Cost",Item."Single-Level Cap. Ovhd Cost");
+        TESTFIELD("Single-Lvl Mfg. Ovhd Cost",Item."Single-Level Mfg. Ovhd Cost");
+        TESTFIELD("New Single-Lvl Mfg. Ovhd Cost",Item."Single-Level Mfg. Ovhd Cost");
+
+        TESTFIELD("Rolled-up Material Cost",Item."Rolled-up Material Cost");
+        TESTFIELD("New Rolled-up Material Cost",Item."Rolled-up Material Cost");
+        TESTFIELD("Rolled-up Cap. Cost",Item."Rolled-up Capacity Cost");
+        TESTFIELD("New Rolled-up Cap. Cost",Item."Rolled-up Capacity Cost");
+        TESTFIELD("Rolled-up Subcontrd Cost",Item."Rolled-up Subcontracted Cost");
+        TESTFIELD("New Rolled-up Subcontrd Cost",Item."Rolled-up Subcontracted Cost");
+        TESTFIELD("Rolled-up Cap. Ovhd Cost",Item."Rolled-up Cap. Overhead Cost");
+        TESTFIELD("New Rolled-up Cap. Ovhd Cost",Item."Rolled-up Cap. Overhead Cost");
+        TESTFIELD("Rolled-up Mfg. Ovhd Cost",Item."Rolled-up Mfg. Ovhd Cost");
+        TESTFIELD("New Rolled-up Mfg. Ovhd Cost",Item."Rolled-up Mfg. Ovhd Cost");
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyStdCostWorksheetPurchItem@81(StandardCostWkshName@1000 : Code[10];Item@1001 : Record 27);
+    VAR
+      StandardCostWorksheet@1002 : Record 5841;
+    BEGIN
+      FindStandardCostWorksheet(StandardCostWorksheet,StandardCostWkshName,Item."No.");
+
+      WITH StandardCostWorksheet DO BEGIN
+        TESTFIELD("Single-Lvl Material Cost",Item."Standard Cost");
+        TESTFIELD("New Single-Lvl Material Cost",Item."Standard Cost");
+        TESTFIELD("Single-Lvl Cap. Cost",0);
+        TESTFIELD("New Single-Lvl Cap. Cost",0);
+        TESTFIELD("Single-Lvl Subcontrd Cost",0);
+        TESTFIELD("Single-Lvl Subcontrd Cost",0);
+        TESTFIELD("Single-Lvl Cap. Ovhd Cost",0);
+        TESTFIELD("New Single-Lvl Cap. Ovhd Cost",0);
+        TESTFIELD("Single-Lvl Mfg. Ovhd Cost",0);
+        TESTFIELD("New Single-Lvl Mfg. Ovhd Cost",0);
+
+        TESTFIELD("Rolled-up Material Cost",Item."Standard Cost");
+        TESTFIELD("New Rolled-up Material Cost",Item."Standard Cost");
+        TESTFIELD("Rolled-up Cap. Cost",0);
+        TESTFIELD("New Rolled-up Cap. Cost",0);
+        TESTFIELD("Rolled-up Subcontrd Cost",0);
+        TESTFIELD("New Rolled-up Subcontrd Cost",0);
+        TESTFIELD("Rolled-up Cap. Ovhd Cost",0);
+        TESTFIELD("New Rolled-up Cap. Ovhd Cost",0);
+        TESTFIELD("Rolled-up Mfg. Ovhd Cost",0);
+        TESTFIELD("New Rolled-up Mfg. Ovhd Cost",0);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifySKULastDirectCost@109(ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];ExpectedAmount@1003 : Decimal);
+    VAR
+      StockkeepingUnit@1000 : Record 5700;
+    BEGIN
+      WITH StockkeepingUnit DO BEGIN
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Location Code",LocationCode);
+        FINDFIRST;
+        TESTFIELD("Last Direct Cost",ExpectedAmount);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifySKUUnitCost@96(ItemNo@1002 : Code[20];LocationCode@1003 : Code[10];ExpectedUnitCost@1001 : Decimal);
+    VAR
+      StockkeepingUnit@1000 : Record 5700;
+    BEGIN
+      StockkeepingUnit.GET(LocationCode,ItemNo,'');
+      StockkeepingUnit.TESTFIELD("Unit Cost",ExpectedUnitCost);
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntryCostAmount@62(ItemJournalLine@1000 : Record 83;RevaluedAmount@1001 : Decimal);
+    VAR
+      ValueEntry@1002 : Record 5802;
+    BEGIN
+      WITH ValueEntry DO BEGIN
+        SETRANGE("Item No.",ItemJournalLine."Item No.");
+        CALCSUMS("Cost Amount (Actual)");
+        Assert.AreEqual(
+          RevaluedAmount,"Cost Amount (Actual)",
+          STRSUBSTNO(
+            UnexpectedCostAmtErr,FIELDCAPTION("Cost Amount (Actual)"),ItemJournalLine.FIELDCAPTION("Inventory Value (Revalued)")));
+      END;
+    END;
+
+    LOCAL PROCEDURE RaiseMessageHandler@67();
+    BEGIN
+      MESSAGE(ErrMessageGLEntryNoRowExist);
+    END;
+
+    LOCAL PROCEDURE RaiseConfirmHandler@1114();
+    BEGIN
+      IF CONFIRM('') THEN;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@13(Message@1000 : Text[1024]);
+    VAR
+      ExpectedMessage@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ExpectedMessage);
+      Assert.ExpectedMessage(ExpectedMessage,Message);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandlerOK@69(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@1111(Question@1112 : Text[1024];VAR Reply@1113 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [PageHandler]
+    PROCEDURE BOMStructurePageHandler@36(VAR BOMStructure@1000 : TestPage 5870);
+    VAR
+      BOMBuffer@1005 : Record 5870;
+      ItemNo@1004 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ItemNo);
+      WITH BOMStructure DO BEGIN
+        FILTER.SETFILTER(Type,FORMAT(BOMBuffer.Type::Item));
+        EXPAND(TRUE);
+        NEXT;
+        "No.".ASSERTEQUALS(ItemNo);
+      END;
+      Assert.IsFalse(BOMStructure.NEXT,BOMStructureErr);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [SCM]
+      Test for Inventory Costing:
+        1. Test FIFO Costing with Automatic Cost Posting True.
+        2. Test FIfO Costing with Automatic Cost Posting False.
+        3. Test FIFO Costing with Automatic Cost Posting True and Cost different from expected.
+        4. Test FIFO Costing with Automatic Cost Posting False and Cost different from expected.
+        5. Test FIFO Costing with Automatic Cost Posting True, partial receive and Invoice.
+        6. Test FIFO Costing with Automatic Cost Posting False, partial receive and Invoice.
+        7. Test FIFO Costing with Automatic Cost Posting True, partial receive and Invoice twice.
+        8. Test FIFO Costing with Automatic Cost Posting False, partial receive and Invoice twice.
+        9. Test to verify that Unit Cost on Production order line changes when we run Update Unit Cost batch job after posting Item Journal with updated Unit Amount for Child Item.
+       10. Test the Production BOM Version is ignored if status is set to Closed while running the rollup standard cost in the standard cost worksheet.
+       11. Test the Production BOM Version is ignored if status is set to Under Development while running the rollup standard cost in the standard cost worksheet.
+       12. Test the Production BOM Version is ignored if status is set to New while running the rollup standard cost in the standard cost worksheet.
+       13. Test the Production BOM Version is ignored if status is set to Certified while running the rollup standard cost in the standard cost worksheet.
+       14. Test the Routing Version is ignored if status is set to Closed while running the rollup standard cost in the standard cost worksheet.
+       15. Test the Routing Version is ignored if status is set to Under Development while running the rollup standard cost in the standard cost worksheet.
+       16. Test the Routing Version is ignored if status is set to New while running the rollup standard cost in the standard cost worksheet.
+       17. Test the Routing Version is ignored if status is set to Certified while running the rollup standard cost in the standard cost worksheet.
+       18. Test the BOM Structure shows correct Active Version with Starting Date = Work Date when there are different BOM Versions with different Starting Date.
+       19. Test BOM Structure shows correct "Qty. Per Top Item" when there is Production Item with Production BOM Type component.
+       20. Test Component Item is from Active BOM version when running Order Planning
+       21. Test expected cost is posted to G/L after implementing RFH 245349
+
+      TFS_TS_ID = 19684
+      Covers Test cases:
+        TC0331 TFS_TC_ID = 3477,3478,3479,3480,3481,3482,3483,3484
+
+        Covers Test Cases for WI - 298239
+        ---------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        ---------------------------------------------------------------
+        ProdOrderLineAfterUpdateUnitCostOnComponent              127517
+
+        Covers Test Cases for WI - 302728
+        ---------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        ---------------------------------------------------------------
+        RollUpStandardCostWithProdBOMVersionClosed               239421
+        RollUpStandardCostWithProdBOMVersionUnderDevelopment     239421
+        RollUpStandardCostWithProdBOMVersionNew                  239421
+        RollUpStandardCostWithProdBOMVersionCertified            239421
+        RollUpStandardCostWithRoutingVersionClosed               239421
+        RollUpStandardCostWithRoutingVersionUnderDevelopment     239421
+        RollUpStandardCostWithRoutingVersionNew                  239421
+        RollUpStandardCostWithRoutingVersionCertified            239421
+
+        Covers Test Cases for Hotfix
+        ---------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        ---------------------------------------------------------------
+        BOMStructureWithMultipleBOMVersion                       346113
+
+        Covers Test Cases for Hotfix
+        ---------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        ---------------------------------------------------------------
+        BOMStructureWithProductionBOMTypeComponent                72463
+
+        Covers Test Cases for Hotfix
+        ---------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        ---------------------------------------------------------------
+        ComponentIsActiveBOMVersionInOrderPlanning                88418
+        PostCostToGLAfterDropExpectCostPostingToGL               355572
+    }
+    END.
+  }
+}
+

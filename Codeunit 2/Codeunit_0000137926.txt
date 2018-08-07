@@ -1,0 +1,815 @@
+OBJECT Codeunit 137926 SCM Assembly Item Tracking
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 6550=rimd;
+    Subtype=Test;
+    OnRun=VAR
+            MfgSetup@1000 : Record 99000765;
+          BEGIN
+            MfgSetup.GET;
+            WorkDate2 := CALCDATE(MfgSetup."Default Safety Lead Time",WORKDATE); // to avoid Due Date Before Work Date message.
+            Initialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1000 : Codeunit 130000;
+      LibraryAssembly@1017 : Codeunit 132207;
+      LibraryInventory@1002 : Codeunit 132201;
+      LibraryItemTracking@1001 : Codeunit 130502;
+      LibraryManufacturing@1006 : Codeunit 132202;
+      SNMissingErr@1004 : TextConst '@@@=%1 - Item No.;ENU=You must assign a serial number for item';
+      LNMissingErr@1005 : TextConst '@@@=%1 - Item No.;ENU=You must assign a lot number for item';
+      WrongSN@1007 : TextConst 'ENU=SN different from what expected';
+      WrongLN@1008 : TextConst 'ENU=LN different from what expected';
+      MessageInvtMvmtCreated@1009 : TextConst 'ENU=Number of Invt. Movement activities created: 1 out of a total of 1.';
+      WrongNoOfT337Records@1010 : TextConst 'ENU=Wrong no of T337 records';
+      MessageWhsePickCreated@1011 : TextConst 'ENU=has been created';
+      LibraryPatterns@1015 : Codeunit 132212;
+      LibraryWarehouse@1016 : Codeunit 132204;
+      WorkDate2@1012 : Date;
+      Initialized@1013 : Boolean;
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@34();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      IF Initialized THEN
+        EXIT;
+
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryPatterns.SETNoSeries;
+      Initialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    PROCEDURE SalesQuoteToOrderCompSN@30();
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+      ItemParent@1001 : Record 27;
+      ItemChild@1002 : Record 27;
+      SalesHeader@1005 : Record 36;
+      SalesLine@1006 : Record 37;
+      ATOLink@1007 : Record 904;
+      AssemblyLine@1008 : Record 901;
+      ReservEntry@1009 : Record 337;
+      SalesOrderHeader@1011 : Record 36;
+      BOMComponent@1012 : Record 90;
+      SalesQuoteToOrder@1010 : Codeunit 86;
+      LibrarySales@1004 : Codeunit 130509;
+      SNChild@1003 : Code[20];
+    BEGIN
+      Initialize;
+      LibrarySales.SetCreditWarningsToNoWarnings;
+
+      // Create items
+      CreateItemTrackingCode(ItemTrackingCode,TRUE,FALSE);
+      CreateItems(ItemParent,ItemTrackingCode,ItemChild,ItemTrackingCode);
+      ItemParent.VALIDATE("Replenishment System",ItemParent."Replenishment System"::Assembly);
+      ItemParent.VALIDATE("Assembly Policy",ItemParent."Assembly Policy"::"Assemble-to-Order");
+      ItemParent.MODIFY(TRUE);
+
+      // Add child to parent BOM
+      LibraryManufacturing.CreateBOMComponent(
+        BOMComponent,ItemParent."No.",BOMComponent.Type::Item,ItemChild."No.",1,'');
+
+      // Add component to inventory
+      SNChild := ItemChild."No.";
+      AddItemToInventory(ItemChild,1,SNChild,'');
+
+      // Create Sales Quote
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Quote,'20000');
+      SalesHeader.VALIDATE("Shipment Date",WorkDate2);
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemParent."No.",1);
+
+      // Add SN to Asm Quote Comp
+      ATOLink.SETRANGE("Assembly Document Type",ATOLink."Assembly Document Type"::Quote);
+      ATOLink.SETRANGE(Type,ATOLink.Type::Sale);
+      ATOLink.SETRANGE("Document Type",ATOLink."Document Type"::Quote);
+      ATOLink.SETRANGE("Document No.",SalesHeader."No.");
+      ATOLink.FINDFIRST;
+      AssemblyLine.GET(AssemblyLine."Document Type"::Quote,ATOLink."Assembly Document No.",10000);
+      LibraryItemTracking.CreateAssemblyLineItemTracking(ReservEntry,AssemblyLine,SNChild,'',1);
+
+      // Validate SN on asm order comp
+      ValidateQuoteSN(ItemChild."No.",SNChild,-1,0);
+
+      // Make Sales Order from Quote
+      SalesHeader.GET(SalesLine."Document Type",SalesLine."Document No.");
+      SalesQuoteToOrder.RUN(SalesHeader);
+      SalesQuoteToOrder.GetSalesOrderHeader(SalesOrderHeader);
+
+      // Validate SN on asm order comp
+      ValidateQuoteSN(ItemChild."No.",SNChild,-1,1);
+    END;
+
+    [Test]
+    PROCEDURE FullPostingWithSN@2();
+    VAR
+      ItemTrackingCodeSN@1002 : Record 6502;
+    BEGIN
+      Initialize;
+      CreateItemTrackingCode(ItemTrackingCodeSN,TRUE,FALSE);
+      FullPosting(ItemTrackingCodeSN,TRUE,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE FullPostingWithLot@1();
+    VAR
+      ItemTrackingCodeLot@1002 : Record 6502;
+    BEGIN
+      Initialize;
+      CreateItemTrackingCode(ItemTrackingCodeLot,FALSE,TRUE);
+      FullPosting(ItemTrackingCodeLot,FALSE,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE PostNotAllwdIfMissingLineSN@7();
+    VAR
+      ItemTrackingCodeSN@1000 : Record 6502;
+      ItemParent@1005 : Record 27;
+      ItemChild@1004 : Record 27;
+      AssemblyHeader@1003 : Record 900;
+      AssemblyLine@1002 : Record 901;
+    BEGIN
+      Initialize;
+      CreateItemTrackingCode(ItemTrackingCodeSN,TRUE,FALSE);
+
+      MockItem(ItemParent);
+      MockItem(ItemChild);
+      ItemChild."Item Tracking Code" := ItemTrackingCodeSN.Code;
+      ItemChild.MODIFY(TRUE);
+
+      AddItemToInventory(ItemChild,1,'SN0001','');
+
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,ItemParent."No.",'',1,'');
+      LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,1,ItemChild."No.",ItemChild."Base Unit of Measure",1,1,'');
+
+      ASSERTERROR LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,SNMissingErr) > 0,'Wrong error: ' + GETLASTERRORTEXT + '; Expected: ' + SNMissingErr);
+      CLEARLASTERROR;
+    END;
+
+    [Test]
+    PROCEDURE PostNotAllwdIfMissingHeadSN@4();
+    VAR
+      ItemTrackingCodeSN@1000 : Record 6502;
+      ItemParent@1005 : Record 27;
+      ItemChild@1004 : Record 27;
+      AssemblyHeader@1003 : Record 900;
+      AssemblyLine@1002 : Record 901;
+    BEGIN
+      Initialize;
+      CreateItemTrackingCode(ItemTrackingCodeSN,TRUE,FALSE);
+
+      MockItem(ItemParent);
+      MockItem(ItemChild);
+      ItemParent."Item Tracking Code" := ItemTrackingCodeSN.Code;
+      ItemParent.MODIFY(TRUE);
+
+      AddItemToInventory(ItemChild,1,'','');
+
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,ItemParent."No.",'',1,'');
+      LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,1,ItemChild."No.",ItemChild."Base Unit of Measure",1,1,'');
+
+      ASSERTERROR LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,SNMissingErr) > 0,'Wrong error: ' + GETLASTERRORTEXT + '; Expected: ' + SNMissingErr);
+      CLEARLASTERROR;
+    END;
+
+    [Test]
+    PROCEDURE PostNotAllwdIfMissingLineLN@9();
+    VAR
+      ItemTrackingCodeLN@1000 : Record 6502;
+      ItemParent@1005 : Record 27;
+      ItemChild@1004 : Record 27;
+      AssemblyHeader@1003 : Record 900;
+      AssemblyLine@1002 : Record 901;
+    BEGIN
+      Initialize;
+      CreateItemTrackingCode(ItemTrackingCodeLN,FALSE,TRUE);
+
+      MockItem(ItemParent);
+      MockItem(ItemChild);
+      ItemChild."Item Tracking Code" := ItemTrackingCodeLN.Code;
+      ItemChild.MODIFY(TRUE);
+
+      AddItemToInventory(ItemChild,1,'','LOT0001');
+
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,ItemParent."No.",'',1,'');
+      LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,1,ItemChild."No.",ItemChild."Base Unit of Measure",1,1,'');
+
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,LNMissingErr);
+    END;
+
+    [Test]
+    PROCEDURE PostNotAllwdIfMissingHeadLN@8();
+    VAR
+      ItemTrackingCodeLN@1000 : Record 6502;
+      ItemParent@1005 : Record 27;
+      ItemChild@1004 : Record 27;
+      AssemblyHeader@1003 : Record 900;
+      AssemblyLine@1002 : Record 901;
+    BEGIN
+      Initialize;
+      CreateItemTrackingCode(ItemTrackingCodeLN,FALSE,TRUE);
+
+      MockItem(ItemParent);
+      MockItem(ItemChild);
+      ItemParent."Item Tracking Code" := ItemTrackingCodeLN.Code;
+      ItemParent.MODIFY(TRUE);
+
+      AddItemToInventory(ItemChild,1,'','');
+
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,ItemParent."No.",'',1,'');
+      LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,1,ItemChild."No.",ItemChild."Base Unit of Measure",1,1,'');
+
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,LNMissingErr);
+    END;
+
+    [Test]
+    PROCEDURE PartialPostingWithLot@10();
+    VAR
+      ItemTrackingCodeLot@1000 : Record 6502;
+    BEGIN
+      Initialize;
+      CreateItemTrackingCode(ItemTrackingCodeLot,FALSE,TRUE);
+      PartialPosting(ItemTrackingCodeLot,'','','LOTA','LOT0001');
+    END;
+
+    [Test]
+    [HandlerFunctions(MessagePickCreated)]
+    PROCEDURE WMS_Pick_AssignITOnAsmLine@13();
+    BEGIN
+      Initialize;
+      WhseScenario(0,FALSE,FALSE,TRUE,0); // LN
+      WhseScenario(0,FALSE,TRUE,FALSE,0); // SN
+    END;
+
+    [Test]
+    [HandlerFunctions(MessagePickCreated)]
+    PROCEDURE WMS_Pick_AssignITOnPick@14();
+    BEGIN
+      Initialize;
+      WhseScenario(0,FALSE,FALSE,TRUE,1); // LN
+      WhseScenario(0,FALSE,TRUE,FALSE,1); // SN
+    END;
+
+    [Test]
+    PROCEDURE WMS_PickWksh_AssingITOnAsmLine@15();
+    BEGIN
+      Initialize;
+      WhseScenario(0,TRUE,FALSE,TRUE,0);  // LN
+      WhseScenario(0,TRUE,TRUE,FALSE,0);  // SN
+    END;
+
+    [Test]
+    PROCEDURE WMS_PickWksh_AssingITOnWksh@16();
+    BEGIN
+      Initialize;
+      WhseScenario(0,TRUE,FALSE,TRUE,3);  // LN
+      WhseScenario(0,TRUE,TRUE,FALSE,3);  // SN
+    END;
+
+    [Test]
+    PROCEDURE WMS_PickWksh_AssingITOnPick@17();
+    BEGIN
+      Initialize;
+      WhseScenario(0,TRUE,FALSE,TRUE,1);  // LN
+      WhseScenario(0,TRUE,TRUE,FALSE,1);  // SN
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageInvtMovementCreated)]
+    PROCEDURE BW_AssignITOnAsmLine@20();
+    BEGIN
+      Initialize;
+      WhseScenario(1,FALSE,FALSE,TRUE,0); // LN
+      WhseScenario(1,FALSE,TRUE,FALSE,0); // SN
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageInvtMovementCreated)]
+    PROCEDURE BW_AssignITOnInvtMovement@21();
+    BEGIN
+      Initialize;
+      WhseScenario(1,FALSE,FALSE,TRUE,2); // LN
+      WhseScenario(1,FALSE,TRUE,FALSE,2); // SN
+    END;
+
+    LOCAL PROCEDURE WhseScenario@23(WhseType@1008 : 'WMS,BW';UsePickWorksheet@1009 : Boolean;SN@1010 : Boolean;LN@1011 : Boolean;AssignITOn@1012 : 'AsmLine,Pick,InvtMovement,PickWorksheet');
+    VAR
+      WhseWkshTemplate@1019 : Record 7328;
+      AssemblyHeader@1006 : Record 900;
+      Location@1005 : Record 14;
+      AssemblyLine@1004 : Record 901;
+      ItemTrackingCode@1003 : Record 6502;
+      ItemParent@1002 : Record 27;
+      ItemChild@1001 : Record 27;
+      ReservEntry@1000 : Record 337;
+      WarehouseActivityLine@1007 : Record 5767;
+      WhseWkshLine@1015 : Record 7326;
+      WhsePickRequest@1016 : Record 7325;
+      WhseItemTrackingLine@1017 : Record 6550;
+      WarehouseRequest@1018 : Record 5765;
+      CreatePick@1021 : Report 5754;
+      SerialNo@1013 : Code[20];
+      LotNo@1014 : Code[20];
+    BEGIN
+      // Create Location
+      IF WhseType = WhseType::WMS THEN
+        MockLocation(Location,TRUE,TRUE,TRUE,TRUE)
+      ELSE
+        MockLocation(Location,TRUE,TRUE,FALSE,FALSE);
+
+      // Create Item Tracking Code
+      CreateItemTrackingCode(ItemTrackingCode,SN,LN);
+
+      // Create Items
+      MockItem(ItemParent);
+      MockItem(ItemChild);
+      ItemChild."Item Tracking Code" := ItemTrackingCode.Code;
+      ItemChild.MODIFY(TRUE);
+
+      // Add component to inventory
+      IF SN THEN
+        SerialNo := 'SN0001';
+      IF LN THEN
+        LotNo := 'LOT0001';
+
+      AddItemToWhseLocation(ItemChild,Location,'BIN1',1,SerialNo,LotNo);
+
+      // Create Asm order
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,ItemParent."No.",'',1,'');
+      AssemblyHeader.VALIDATE("Location Code",Location.Code);
+      AssemblyHeader.MODIFY(TRUE);
+      LibraryAssembly.CreateAssemblyLine(
+        AssemblyHeader,AssemblyLine,AssemblyLine.Type::Item,ItemChild."No.",ItemChild."Base Unit of Measure",1,1,'');
+      AssemblyLine.VALIDATE("Location Code",Location.Code);
+      AssemblyLine.VALIDATE("Bin Code",'BIN3');
+      AssemblyLine.MODIFY(TRUE);
+
+      // Assign IT on Line
+      IF AssignITOn = AssignITOn::AsmLine THEN
+        LibraryItemTracking.CreateAssemblyLineItemTracking(ReservEntry,AssemblyLine,SerialNo,LotNo,1);
+
+      // Relase Asm Order
+      LibraryAssembly.ReleaseAO(AssemblyHeader);
+      IF WhseType = WhseType::WMS THEN
+        WhsePickRequest.GET(3,1,AssemblyHeader."No.",Location.Code)
+      ELSE
+        WarehouseRequest.GET(1,Location.Code,DATABASE::"Assembly Line",1,AssemblyHeader."No.");
+
+      IF UsePickWorksheet THEN BEGIN
+        LibraryWarehouse.GetWhseDocsPickWorksheet(WhseWkshLine,WhsePickRequest,Location.Code);
+        IF AssignITOn = AssignITOn::AsmLine THEN
+          ValidateITOnPW(AssemblyHeader."No.",ItemChild."No.",SerialNo,LotNo,1,TRUE)
+        ELSE
+          IF AssignITOn = AssignITOn::PickWorksheet THEN BEGIN
+            WhseWkshTemplate.SETRANGE(Type,WhseWkshTemplate.Type::Pick);
+            WhseWkshTemplate.FINDFIRST;
+            WhseWkshLine.GET(WhseWkshTemplate.Name,Location.Code,Location.Code,10000);
+            LibraryItemTracking.CreateWhseWkshItemTracking(WhseItemTrackingLine,WhseWkshLine,SerialNo,LotNo,1);
+          END;
+      END;
+
+      // Create whse pick or invt movement
+      IF WhseType = WhseType::WMS THEN
+        IF UsePickWorksheet THEN BEGIN
+          CreatePick.SetWkshPickLine(WhseWkshLine);
+          CreatePick.USEREQUESTPAGE(FALSE);
+          CreatePick.RUNMODAL;
+        END ELSE
+          LibraryAssembly.CreateWhsePick(AssemblyHeader,'',0,FALSE,FALSE,FALSE) // create pick
+      ELSE
+        IF  WhseType = WhseType::BW THEN
+          LibraryAssembly.CreateInvtMovement(AssemblyHeader."No.",FALSE,FALSE,TRUE);
+
+      // Validate IT on Pick/invt Movement
+      IF (AssignITOn = AssignITOn::PickWorksheet) OR (AssignITOn = AssignITOn::AsmLine) THEN
+        CheckPick(AssemblyHeader."No.",SerialNo,LotNo);
+
+      // Choose IT on Pick
+      IF (AssignITOn = AssignITOn::Pick) OR (AssignITOn = AssignITOn::InvtMovement) THEN
+        AssignITToWhseActivity(AssemblyHeader."No.",SerialNo,LotNo);
+
+      // Register pick/Invt movement
+      IF WhseType = WhseType::WMS THEN
+        RegisterWhseActivity(WarehouseActivityLine."Activity Type"::Pick,AssemblyHeader."No.")
+      ELSE
+        RegisterWhseActivity(WarehouseActivityLine."Activity Type"::"Invt. Movement",AssemblyHeader."No.");
+
+      // Validate IT on asm line in T337
+      ValidateT337(AssemblyLine."Document No.",ItemChild,SerialNo,LotNo,-1,TRUE,1);
+    END;
+
+    LOCAL PROCEDURE FullPosting@3(ItemTrackingCode@1010 : Record 6502;SN@1008 : Boolean;LN@1007 : Boolean);
+    VAR
+      ItemParent@1004 : Record 27;
+      ItemChild@1003 : Record 27;
+      AssemblyHeader@1001 : Record 900;
+      AssemblyLine@1000 : Record 901;
+      ReservEntry@1005 : Record 337;
+      ItemTracingPage@1011 : TestPage 6520;
+      NavigatePage@1009 : TestPage 344;
+      SNChild@1002 : Code[20];
+      LNChild@1006 : Code[20];
+      SNParent@1013 : Code[20];
+      LNParent@1012 : Code[20];
+    BEGIN
+      CreateItems(ItemParent,ItemTrackingCode,ItemChild,ItemTrackingCode);
+
+      IF SN THEN BEGIN
+        SNChild := ItemChild."No.";
+        SNParent := ItemParent."No."
+      END;
+      IF LN THEN BEGIN
+        LNChild := ItemChild."No.";
+        LNParent := ItemParent."No."
+      END;
+
+      AddItemToInventory(ItemChild,1,SNChild,LNChild);
+
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,ItemParent."No.",'',1,'');
+      LibraryAssembly.CreateAssemblyLine(
+        AssemblyHeader,AssemblyLine,1,ItemChild."No.",ItemChild."Base Unit of Measure",1,1,'');
+      LibraryItemTracking.CreateAssemblyHeaderItemTracking(ReservEntry,AssemblyHeader,SNParent,LNParent,1);
+      LibraryItemTracking.CreateAssemblyLineItemTracking(ReservEntry,AssemblyLine,SNChild,LNChild,1);
+
+      ValidateT337(AssemblyHeader."No.",ItemParent,SNParent,LNParent,1,TRUE,1);
+      ValidateT337(AssemblyLine."Document No.",ItemChild,SNChild,LNChild,-1,TRUE,1);
+
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+
+      ValidateT32(AssemblyHeader."No.",ItemParent,SNParent,LNParent,1,TRUE);
+      ValidateT32(AssemblyLine."Document No.",ItemChild,SNChild,LNChild,-1,TRUE);
+
+      ValidateT337(AssemblyHeader."No.",ItemParent,SNParent,LNParent,0,FALSE,0);
+      ValidateT337(AssemblyLine."Document No.",ItemChild,SNChild,LNChild,0,FALSE,0);
+
+      // Validate Item Tracing
+      ItemTracingPage.OPENEDIT;
+      ItemTracingPage.LotNoFilter.SETVALUE(LNParent);
+      ItemTracingPage.SerialNoFilter.SETVALUE(SNParent);
+      ItemTracingPage.TraceMethod.SETVALUE('Usage -> Origin');
+      ItemTracingPage.ShowComponents.SETVALUE('All');
+
+      ItemTracingPage.Trace.INVOKE; // Trace
+
+      ItemTracingPage.EXPAND(TRUE);
+      ValidateItemTracingLine(ItemTracingPage,'Assembly Output',SNParent,LNParent,ItemParent."No.",1);
+
+      ItemTracingPage.NEXT;
+      ItemTracingPage.EXPAND(TRUE);
+      ValidateItemTracingLine(ItemTracingPage,'Assembly Consumption',SNChild,LNChild,ItemChild."No.",-1);
+
+      ItemTracingPage.NEXT;
+      ValidateItemTracingLine(ItemTracingPage,'Item Ledger Entry',SNChild,LNChild,ItemChild."No.",1);
+
+      ItemTracingPage.TraceOppositeFromLine.INVOKE; // Trace opposite from line
+      ItemTracingPage.FIRST;
+
+      ItemTracingPage.EXPAND(TRUE);
+      ValidateItemTracingLine(ItemTracingPage,'Item Ledger Entry',SNChild,LNChild,ItemChild."No.",1);
+
+      ItemTracingPage.NEXT;
+      ItemTracingPage.EXPAND(TRUE);
+      ValidateItemTracingLine(ItemTracingPage,'Assembly Consumption',SNChild,LNChild,ItemChild."No.",-1);
+
+      ItemTracingPage.NEXT;
+      ValidateItemTracingLine(ItemTracingPage,'Assembly Output',SNParent,LNParent,ItemParent."No.",1);
+
+      // Validate Navigate result parent
+      NavigatePage.OPENEDIT;
+      NavigatePage.SerialNoFilter.VALUE(SNParent);
+      NavigatePage.LotNoFilter.VALUE(LNParent);
+      NavigatePage.Find.INVOKE;
+      ValidateNavigateLine(NavigatePage,'Item Ledger Entry',1);
+      NavigatePage.NEXT;
+      ValidateNavigateLine(NavigatePage,'Posted Assembly Header',1);
+
+      // Validate Navigate result child
+      NavigatePage.SerialNoFilter.VALUE(SNChild);
+      NavigatePage.LotNoFilter.VALUE(LNChild);
+      NavigatePage.Find.INVOKE;
+      ValidateNavigateLine(NavigatePage,'Item Ledger Entry',2);
+      NavigatePage.NEXT;
+      ValidateNavigateLine(NavigatePage,'Posted Assembly Header',1);
+    END;
+
+    LOCAL PROCEDURE PartialPosting@12(ItemTrackingCode@1010 : Record 6502;SNChild@1008 : Code[10];SNParent@1007 : Code[10];LNParent@1006 : Code[10];LNChild@1002 : Code[10]);
+    VAR
+      ItemParent@1004 : Record 27;
+      ItemChild@1003 : Record 27;
+      AssemblyHeader@1001 : Record 900;
+      AssemblyLine@1000 : Record 901;
+      ReservEntry@1005 : Record 337;
+    BEGIN
+      CreateItems(ItemParent,ItemTrackingCode,ItemChild,ItemTrackingCode);
+      AddItemToInventory(ItemChild,100,SNChild,LNChild);
+
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,WorkDate2,ItemParent."No.",'',3,'');
+      AssemblyHeader.VALIDATE("Quantity to Assemble",2);
+      AssemblyHeader.MODIFY(TRUE);
+      LibraryAssembly.CreateAssemblyLine(AssemblyHeader,AssemblyLine,1,ItemChild."No.",ItemChild."Base Unit of Measure",6,1,'');
+      AssemblyLine."Quantity to Consume" := 4;
+      AssemblyLine.MODIFY(TRUE);
+      LibraryItemTracking.CreateAssemblyHeaderItemTracking(ReservEntry,AssemblyHeader,SNParent,LNParent,3);
+      LibraryItemTracking.CreateAssemblyLineItemTracking(ReservEntry,AssemblyLine,SNChild,LNChild,4);
+
+      LibraryAssembly.PostAssemblyHeader(AssemblyHeader,'');
+
+      ValidateT32(AssemblyHeader."No.",ItemParent,SNParent,LNParent,2,TRUE);
+      ValidateT32(AssemblyLine."Document No.",ItemChild,SNChild,LNChild,-4,TRUE);
+
+      ValidateT337(AssemblyHeader."No.",ItemParent,SNParent,LNParent,1,TRUE,1);
+      ValidateT337(AssemblyLine."Document No.",ItemChild,SNChild,LNChild,0,FALSE,0);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE AssignITToWhseActivity@28(SourceNo@1004 : Code[20];SN@1007 : Code[20];LN@1008 : Code[20]);
+    VAR
+      WhseActivityLine@1001 : Record 5767;
+    BEGIN
+      CLEAR(WhseActivityLine);
+      WhseActivityLine.RESET;
+      WhseActivityLine.SETRANGE("Source Type",DATABASE::"Assembly Line");
+      WhseActivityLine.SETRANGE("Source Document",WhseActivityLine."Source Document"::"Assembly Consumption");
+      WhseActivityLine.SETRANGE("Source No.",SourceNo);
+      WhseActivityLine.FINDSET;
+      REPEAT
+        WhseActivityLine.VALIDATE("Lot No.",LN);
+        WhseActivityLine.VALIDATE("Serial No.",SN);
+        WhseActivityLine.MODIFY;
+      UNTIL WhseActivityLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE RegisterWhseActivity@26(ActivityType@1005 : ',Put-away,Pick,Movement,Invt. Put-away,Invt. Pick,Invt. Movement';SourceNo@1004 : Code[20]);
+    VAR
+      WhseActivityLine@1001 : Record 5767;
+      WhseActivityHeader@1002 : Record 5766;
+      WhseActivityRegister@1000 : Codeunit 7307;
+    BEGIN
+      CLEAR(WhseActivityLine);
+      WhseActivityLine.RESET;
+      WhseActivityLine.SETRANGE("Source Type",DATABASE::"Assembly Line");
+      WhseActivityLine.SETRANGE("Source Document",WhseActivityLine."Source Document"::"Assembly Consumption");
+      WhseActivityLine.SETRANGE("Source No.",SourceNo);
+      WhseActivityLine.FINDFIRST;
+
+      CLEAR(WhseActivityHeader);
+      WhseActivityHeader.SETRANGE(Type,ActivityType);
+      WhseActivityHeader.SETRANGE("No.",WhseActivityLine."No.");
+      WhseActivityHeader.FINDFIRST;
+      LibraryWarehouse.AutoFillQtyInventoryActivity(WhseActivityHeader);
+      IF (ActivityType = ActivityType::"Put-away") OR (ActivityType = ActivityType::Pick) THEN BEGIN
+        LibraryWarehouse.RegisterWhseActivity(WhseActivityHeader);
+      END ELSE
+        WhseActivityRegister.RUN(WhseActivityLine);
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingCode@11(VAR ItemTrackingCode@1000 : Record 6502;SN@1001 : Boolean;Lot@1002 : Boolean);
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,SN,Lot);
+      ItemTrackingCode."SN Warehouse Tracking" := SN;
+      ItemTrackingCode."Lot Warehouse Tracking" := Lot;
+      ItemTrackingCode.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItems@19(VAR ItemParent@1000 : Record 27;ItemTrackingCodeParent@1001 : Record 6502;VAR ItemChild@1002 : Record 27;ItemTrackingCodeChild@1003 : Record 6502);
+    BEGIN
+      MockItem(ItemParent);
+      MockItem(ItemChild);
+      ItemParent."Item Tracking Code" := ItemTrackingCodeParent.Code;
+      ItemParent.MODIFY(TRUE);
+      ItemChild."Item Tracking Code" := ItemTrackingCodeChild.Code;
+      ItemChild.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE MockLocation@22(VAR Location@1000 : Record 14;BinMandatory@1002 : Boolean;RequirePick@1003 : Boolean;RequireShipment@1004 : Boolean;DirectedPutPick@1008 : Boolean);
+    VAR
+      BinTypePick@1007 : Record 7303;
+      BinTypePutaway@1009 : Record 7303;
+      Zone@1006 : Record 7300;
+      Bin@1005 : Record 7354;
+      WhseEmployee@1011 : Record 7301;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      LibraryWarehouse.CreateWarehouseEmployee(WhseEmployee,Location.Code,TRUE);
+      IF DirectedPutPick THEN
+        BinMandatory := TRUE;
+      Location."Bin Mandatory" := BinMandatory;
+      Location."Require Pick" := RequirePick;
+      Location."Require Shipment" := RequireShipment;
+      Location."Directed Put-away and Pick" := DirectedPutPick;
+      Location.MODIFY(TRUE);
+
+      IF DirectedPutPick THEN BEGIN // create a zone and set bin type code
+        BinTypePick.SETRANGE(Pick,TRUE);
+        BinTypePick.FINDFIRST;
+        LibraryWarehouse.CreateZone(Zone,'ZONE',Location.Code,BinTypePick.Code,'','',0,FALSE);
+        BinTypePutaway.SETRANGE("Put Away",TRUE);
+        BinTypePutaway.FINDFIRST;
+        LibraryWarehouse.CreateBin(Bin,Location.Code,'BINX',Zone.Code,BinTypePick.Code);
+        Location.VALIDATE("Adjustment Bin Code",'BINX');
+        Location.MODIFY(TRUE);
+      END;
+
+      // create 4 bins - 2 for Picking and 2 for put-awaying
+      LibraryWarehouse.CreateBin(Bin,Location.Code,'BIN1',Zone.Code,BinTypePick.Code);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,'BIN2',Zone.Code,BinTypePick.Code);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,'BIN3',Zone.Code,BinTypePutaway.Code);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,'BIN4',Zone.Code,BinTypePutaway.Code);
+    END;
+
+    LOCAL PROCEDURE AddItemToInventory@18(Item@1000 : Record 27;Quantity@1001 : Decimal;SN@1005 : Code[20];LN@1006 : Code[20]);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+      ItemJournalTemplate@1003 : Record 82;
+      ItemJournalBatch@1004 : Record 233;
+      ReservEntry@1007 : Record 337;
+    BEGIN
+      // IF SN is used Quantity must be 1
+      ItemJournalTemplate.SETRANGE(Type,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.SETRANGE(Recurring,FALSE);
+      ItemJournalTemplate.FINDFIRST;
+      ItemJournalBatch.SETRANGE("Journal Template Name",ItemJournalTemplate.Name);
+      ItemJournalBatch.FINDFIRST;
+
+      LibraryInventory.CreateItemJournalLine(ItemJournalLine,ItemJournalTemplate.Name,ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",Quantity);
+      IF (SN <> '') OR (LN <> '') THEN
+        LibraryItemTracking.CreateItemJournalLineItemTracking(ReservEntry,ItemJournalLine,SN,LN,Quantity);
+
+      LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE AddItemToWhseLocation@25(Item@1000 : Record 27;Location@1001 : Record 14;BinCode@1002 : Code[20];Quantity@1003 : Decimal;SerialNo@1010 : Code[20];LotNo@1011 : Code[20]);
+    VAR
+      ItemJournalLine@1004 : Record 83;
+      ItemJournalTemplate@1005 : Record 82;
+      ItemJournalBatch@1006 : Record 233;
+      WarehouseJournalLine@1007 : Record 7311;
+      WarehouseJournalTemplate@1009 : Record 7309;
+      WarehouseJournalBatch@1008 : Record 7310;
+      WhseItemTrackingLine@1012 : Record 6550;
+      ReservEntry@1013 : Record 337;
+    BEGIN
+      ItemJournalTemplate.SETRANGE(Type,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.SETRANGE(Recurring,FALSE);
+      ItemJournalTemplate.FINDFIRST;
+      ItemJournalBatch.SETRANGE("Journal Template Name",ItemJournalTemplate.Name);
+      ItemJournalBatch.FINDFIRST;
+
+      IF Location."Directed Put-away and Pick" THEN BEGIN
+        WarehouseJournalTemplate.SETRANGE(Type,WarehouseJournalTemplate.Type::Item);
+        WarehouseJournalTemplate.FINDFIRST;
+        WarehouseJournalBatch.SETRANGE("Journal Template Name",WarehouseJournalTemplate.Name);
+        WarehouseJournalBatch.FINDFIRST;
+        LibraryWarehouse.CreateWhseJournalLine(
+          WarehouseJournalLine,WarehouseJournalTemplate.Name,WarehouseJournalBatch.Name,
+          Location.Code,'',BinCode,WarehouseJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",Quantity);
+        IF (SerialNo <> '') OR (LotNo <> '') THEN
+          LibraryItemTracking.CreateWhseJournalLineItemTracking(WhseItemTrackingLine,WarehouseJournalLine,SerialNo,LotNo,Quantity);
+        LibraryWarehouse.PostWhseJournalLine(WarehouseJournalTemplate.Name,WarehouseJournalBatch.Name,Location.Code);
+        LibraryWarehouse.CalculateWhseAdjustmentItemJournal(Item,WorkDate2,'');
+        LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+      END ELSE BEGIN
+        LibraryInventory.CreateItemJournalLine(ItemJournalLine,ItemJournalTemplate.Name,ItemJournalBatch.Name,
+          ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",Quantity);
+        ItemJournalLine.VALIDATE("Location Code",Location.Code);
+        ItemJournalLine.VALIDATE("Bin Code",BinCode);
+        ItemJournalLine.MODIFY(TRUE);
+        IF (SerialNo <> '') OR (LotNo <> '') THEN
+          LibraryItemTracking.CreateItemJournalLineItemTracking(ReservEntry,ItemJournalLine,SerialNo,LotNo,Quantity);
+        LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+      END;
+    END;
+
+    LOCAL PROCEDURE ValidateT337@5(AssemblyOrderNo@1000 : Code[20];Item@1001 : Record 27;SerialNo@1002 : Code[20];LotNo@1003 : Code[20];Quantity@1004 : Decimal;RecordsShouldExist@1006 : Boolean;ExpectedNumberOfRecords@1007 : Integer);
+    VAR
+      ReservEntry@1005 : Record 337;
+    BEGIN
+      ReservEntry.SETRANGE("Source ID",AssemblyOrderNo);
+      ReservEntry.SETRANGE("Item No.",Item."No.");
+      ReservEntry.SETRANGE("Serial No.",SerialNo);
+      ReservEntry.SETRANGE("Lot No.",LotNo);
+      IF RecordsShouldExist THEN
+        ReservEntry.SETRANGE("Quantity (Base)",Quantity);
+
+      Assert.AreEqual(ReservEntry.COUNT,ExpectedNumberOfRecords,WrongNoOfT337Records);
+      Assert.AreEqual(RecordsShouldExist,ReservEntry.FINDFIRST,'T337 records are different from what expected :(');
+    END;
+
+    LOCAL PROCEDURE ValidateT32@6(AssemblyOrderNo@1006 : Code[20];Item@1005 : Record 27;SN@1004 : Code[20];LN@1003 : Code[20];Quantity@1002 : Decimal;RecordsShouldExist@1001 : Boolean);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Order No.",AssemblyOrderNo);
+      ItemLedgerEntry.SETRANGE("Item No.",Item."No.");
+      ItemLedgerEntry.SETRANGE("Serial No.",SN);
+      ItemLedgerEntry.SETRANGE("Lot No.",LN);
+      ItemLedgerEntry.SETRANGE(Quantity,Quantity);
+
+      Assert.AreEqual(RecordsShouldExist,ItemLedgerEntry.FINDFIRST,'T32 records are different from what expected :(');
+    END;
+
+    LOCAL PROCEDURE ValidateITOnPW@33(AssemblyOrderNo@1000 : Code[20];ItemNo@1002 : Code[20];SN@1003 : Code[20];LN@1004 : Code[20];Quantity@1005 : Decimal;RecordsShouldExist@1006 : Boolean);
+    VAR
+      WhseItemTrackingLine@1001 : Record 6550;
+    BEGIN
+      WhseItemTrackingLine.SETRANGE("Source Type",DATABASE::"Assembly Line");
+      WhseItemTrackingLine.SETRANGE("Source ID",AssemblyOrderNo);
+      WhseItemTrackingLine.SETRANGE("Item No.",ItemNo);
+      WhseItemTrackingLine.SETRANGE("Serial No.",SN);
+      WhseItemTrackingLine.SETRANGE("Lot No.",LN);
+      WhseItemTrackingLine.SETRANGE("Quantity (Base)",Quantity);
+
+      Assert.AreEqual(RecordsShouldExist,WhseItemTrackingLine.FINDFIRST,'T6550 records are different from what expected :(');
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CheckPick@27(AsmOrderNo@1003 : Code[20];ExpectedSN@1001 : Code[20];ExpectedLN@1004 : Code[20]);
+    VAR
+      WhseActivityLine@1002 : Record 5767;
+    BEGIN
+      CLEAR(WhseActivityLine);
+      WhseActivityLine.SETRANGE("Source Type",DATABASE::"Assembly Line");
+      WhseActivityLine.SETRANGE("Source Document",WhseActivityLine."Source Document"::"Assembly Consumption");
+      WhseActivityLine.SETRANGE("Source No.",AsmOrderNo);
+      WhseActivityLine.FINDFIRST;
+      IF ExpectedSN <> '' THEN
+        Assert.AreEqual(WhseActivityLine."Serial No.",ExpectedSN,WrongSN);
+      IF ExpectedLN <> '' THEN
+        Assert.AreEqual(WhseActivityLine."Lot No.",ExpectedLN,WrongLN);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageInvtMovementCreated@45(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,MessageInvtMvmtCreated) > 0,'Wrong Message: ' + Message + '; Expected: ' + MessageInvtMvmtCreated);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessagePickCreated@24(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,MessageWhsePickCreated) > 0,'Wrong Message: ' + Message + '; Expected: ' + MessageWhsePickCreated);
+    END;
+
+    LOCAL PROCEDURE MockItem@29(VAR Item@1000 : Record 27);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+    END;
+
+    LOCAL PROCEDURE ValidateItemTracingLine@31(ItemTracingPage@1000 : TestPage 6520;Description@1001 : Text[1000];SN@1002 : Code[20];LN@1003 : Code[20];ItemNo@1004 : Code[20];Quantity@1005 : Decimal);
+    BEGIN
+      Assert.IsTrue(STRPOS(ItemTracingPage.Description.VALUE,Description) > 0,'Wrong description');
+      ItemTracingPage."Serial No.".ASSERTEQUALS(SN);
+      ItemTracingPage."Lot No.".ASSERTEQUALS(LN);
+      ItemTracingPage."Item No.".ASSERTEQUALS(ItemNo);
+      ItemTracingPage.Quantity.ASSERTEQUALS(Quantity);
+    END;
+
+    LOCAL PROCEDURE ValidateNavigateLine@36(NavigatePage@1000 : TestPage 344;TableName@1001 : Text[1000];NoOfRecords@1002 : Integer);
+    BEGIN
+      NavigatePage."Table Name".ASSERTEQUALS(TableName);
+      NavigatePage."No. of Records".ASSERTEQUALS(NoOfRecords);
+    END;
+
+    LOCAL PROCEDURE ValidateQuoteSN@32(ItemNo@1000 : Code[20];SerialNo@1001 : Code[20];Qty@1002 : Decimal;SourceSubType@1004 : Option);
+    VAR
+      ReservEntry@1003 : Record 337;
+    BEGIN
+      ReservEntry.SETRANGE("Item No.",ItemNo);
+      ReservEntry.SETRANGE("Serial No.",SerialNo);
+      ReservEntry.SETRANGE("Quantity (Base)",Qty);
+      ReservEntry.SETRANGE("Source Type",DATABASE::"Assembly Line");
+      ReservEntry.SETRANGE("Source Subtype",SourceSubType);
+      Assert.AreEqual(1,ReservEntry.COUNT,WrongNoOfT337Records);
+      Assert.AreEqual(TRUE,ReservEntry.FINDFIRST,'T337 records are different from what expected :(');
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Assembly] [Item Tracking] [SCM]
+      Unsupported version tags:
+      NZ: Unable to Execute
+      SE: Unable to Execute
+    }
+    END.
+  }
+}
+

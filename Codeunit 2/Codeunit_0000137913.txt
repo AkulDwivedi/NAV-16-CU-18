@@ -1,0 +1,1299 @@
+OBJECT Codeunit 137913 SCM Whse.-Asm. To Stock
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=VAR
+            MfgSetup@1000 : Record 99000765;
+          BEGIN
+            MfgSetup.GET;
+            WorkDate2 := CALCDATE(MfgSetup."Default Safety Lead Time",WORKDATE); // to avoid Due Date Before Work Date message.
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Item@1016 : Record 27;
+      AsmItem@1015 : Record 27;
+      CompItem@1014 : Record 27;
+      Location@1013 : Record 14;
+      BOMComponent@1012 : Record 90;
+      AsmHeader@1011 : Record 900;
+      AsmLine@1018 : Record 901;
+      Resource@1017 : Record 156;
+      BinContent@1019 : Record 7302;
+      WarehouseClass@1020 : Record 7304;
+      ProductGroup@1021 : Record 5723;
+      Bin@1022 : Record 7354;
+      Assert@1001 : Codeunit 130000;
+      LibraryAssembly@1046 : Codeunit 132207;
+      ErrBinMandatory1@1002 : TextConst 'ENU="must be set up with Bin Mandatory "';
+      ErrBinMandatory2@1004 : TextConst 'ENU=Bin Mandatory must have a value in Location';
+      ErrWrongBinType@1003 : TextConst 'ENU=You cannot enter a bin code of bin type Receive, Ship, or %1.';
+      ErrWrongBinTypeRecShip@1042 : TextConst 'ENU=You cannot enter a bin code of bin type Receive or Ship.';
+      ErrWhseClass@1008 : TextConst 'ENU="Warehouse Class Code must be equal to "';
+      ErrTypeToBeItem@1010 : TextConst 'ENU=Type must be equal to ''Item''  in Assembly Line';
+      ErrNothingToRelease@1024 : TextConst 'ENU="There is nothing to release for Order "';
+      ErrLocationMustBeFilled@1025 : TextConst 'ENU=Location Code must have a value in Assembly Line';
+      ErrStatusMustBeOpen@1027 : TextConst 'ENU=Status must be equal to ''Open''  in Assembly Header';
+      ConfirmUpdateLoc@1023 : TextConst 'ENU=Do you want to update the Location Code on the lines?';
+      ConfirmItemNoChange@1026 : TextConst 'ENU="Changing Item No. will change all the lines. Do you want to change the Item No. from "';
+      MessageNothngToCreate@1029 : TextConst 'ENU=There is nothing to create.';
+      MessageNothngToHandle@1031 : TextConst 'ENU=There is nothing to handle.';
+      MessageInvtMvmtCreated@1030 : TextConst 'ENU=Number of Invt. Movement activities created: 1 out of a total of 1.';
+      MessagePickCreated@1032 : TextConst 'ENU="Pick activity no. "';
+      MessageCreated@1033 : TextConst 'ENU=has been created.';
+      LibraryInventory@1006 : Codeunit 132201;
+      LibraryManufacturing@1009 : Codeunit 132202;
+      LibraryPatterns@1044 : Codeunit 132212;
+      LibraryResource@1028 : Codeunit 130511;
+      LibraryUtility@1045 : Codeunit 131000;
+      LibraryWarehouse@1047 : Codeunit 132204;
+      WorkDate2@1034 : Date;
+      Initialized@1035 : Boolean;
+      ErrWhseHandlingReqd@1036 : TextConst 'ENU="Warehouse handling is required for Entry Type = Assembly Consumption, Order No. = %1, Order Line No. = %2."';
+      MessageExpectedActual@1037 : TextConst 'ENU="Expected: %1; Actual: %2"';
+      Bin1@1038 : TextConst 'ENU=BIN1';
+      Bin2@1039 : TextConst 'ENU=BIN2';
+      Bin3@1040 : TextConst 'ENU=BIN3';
+      Bin4@1041 : TextConst 'ENU=BIN4';
+      Bin5@1043 : TextConst 'ENU=BIN5';
+      ConfirmChangeOfAsmItemNoCount@1005 : Integer;
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@28();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      ConfirmChangeOfAsmItemNoCount := 0;
+
+      IF Initialized THEN
+        EXIT;
+
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+
+      LibraryPatterns.SETNoSeries;
+      Initialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE MockItem@1(VAR Item@1000 : Record 27;VAR ItemVariant@1001 : Record 5401);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItemVariant(ItemVariant,Item."No.");
+    END;
+
+    LOCAL PROCEDURE MockLocation@5(VAR Location@1000 : Record 14;BinMandatory@1002 : Boolean;RequirePick@1003 : Boolean;RequireShipment@1004 : Boolean;DirectedPutPick@1008 : Boolean);
+    VAR
+      BinTypePick@1007 : Record 7303;
+      BinTypePutaway@1009 : Record 7303;
+      BinTypeReceive@1010 : Record 7303;
+      Zone@1006 : Record 7300;
+      Bin@1005 : Record 7354;
+      WhseEmployee@1011 : Record 7301;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      WhseEmployee.INIT;
+      WhseEmployee.VALIDATE("User ID",USERID);
+      WhseEmployee.VALIDATE("Location Code",Location.Code);
+      WhseEmployee.INSERT(TRUE);
+
+      WhseEmployee.SETRANGE("User ID",USERID);
+      WhseEmployee.SETRANGE(Default,TRUE);
+      IF WhseEmployee.COUNT = 0 THEN BEGIN
+        WhseEmployee.GET(USERID,Location.Code);
+        WhseEmployee.VALIDATE(Default,TRUE);
+        WhseEmployee.MODIFY(TRUE);
+      END;
+      IF DirectedPutPick THEN
+        BinMandatory := TRUE;
+      Location.VALIDATE("Bin Mandatory",BinMandatory);
+      Location.VALIDATE("Require Pick",RequirePick);
+      Location.VALIDATE("Require Shipment",RequireShipment);
+      Location.VALIDATE("Directed Put-away and Pick",DirectedPutPick);
+      Location.MODIFY(TRUE);
+
+      IF DirectedPutPick THEN BEGIN // create a zone and set bin type code
+        BinTypePick.SETRANGE(Pick,TRUE);
+        BinTypePick.SETRANGE("Put Away",FALSE);
+        BinTypePick.FINDFIRST;
+        LibraryWarehouse.CreateZone(Zone,'ZONE',Location.Code,BinTypePick.Code,'','',0,FALSE);
+        BinTypePutaway.SETRANGE("Put Away",TRUE);
+        BinTypePutaway.SETRANGE(Pick,FALSE);
+        BinTypePutaway.FINDFIRST;
+        BinTypeReceive.SETRANGE(Receive,TRUE);
+        BinTypeReceive.FINDFIRST;
+        LibraryWarehouse.CreateBin(Bin,Location.Code,'BINX',Zone.Code,BinTypePick.Code);
+        Location.VALIDATE("Adjustment Bin Code",'BINX');
+        Location.MODIFY(TRUE);
+      END;
+
+      // create 4 bins - 2 for Picking and 2 for put-awaying and one for receiving
+      LibraryWarehouse.CreateBin(Bin,Location.Code,Bin1,Zone.Code,BinTypePick.Code);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,Bin2,Zone.Code,BinTypePick.Code);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,Bin3,Zone.Code,BinTypePutaway.Code);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,Bin4,Zone.Code,BinTypePutaway.Code);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,Bin5,Zone.Code,BinTypeReceive.Code);
+    END;
+
+    LOCAL PROCEDURE MockProductGroup@3(VAR ProductGroup@1000 : Record 5723;ItemCategoryCode@1002 : Code[10];WhseClassCode@1003 : Code[10]);
+    BEGIN
+      LibraryInventory.CreateProductGroup(ProductGroup,ItemCategoryCode);
+      ProductGroup.VALIDATE("Warehouse Class Code",WhseClassCode);
+      ProductGroup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE MockResource@7(VAR Resource@1000 : Record 156);
+    BEGIN
+      LibraryResource.CreateResourceNew(Resource);
+    END;
+
+    LOCAL PROCEDURE MockAsmOrderWithComp@15(VAR AsmHeader@1000 : Record 900;VAR AsmItem@1001 : Record 27;VAR CompItem@1002 : Record 27;Quantity@1003 : Decimal);
+    BEGIN
+      LibraryInventory.CreateItem(CompItem);
+      LibraryInventory.CreateItem(AsmItem);
+      LibraryManufacturing.CreateBOMComponent(
+        BOMComponent,AsmItem."No.",BOMComponent.Type::Item,CompItem."No.",1,CompItem."Base Unit of Measure");
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,AsmItem."No.",'',Quantity,'');
+      COMMIT; // committing as subsequent errors might roll back bin content creation
+    END;
+
+    LOCAL PROCEDURE AddItemToInventory@4(Item@1000 : Record 27;Location@1001 : Record 14;BinCode@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ItemJournalLine@1004 : Record 83;
+      ItemJournalTemplate@1005 : Record 82;
+      ItemJournalBatch@1006 : Record 233;
+      WarehouseJournalLine@1007 : Record 7311;
+      WarehouseJournalTemplate@1009 : Record 7309;
+      WarehouseJournalBatch@1008 : Record 7310;
+    BEGIN
+      ItemJournalTemplate.SETRANGE(Type,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.SETRANGE(Recurring,FALSE);
+      ItemJournalTemplate.FINDFIRST;
+      ItemJournalBatch.SETRANGE("Journal Template Name",ItemJournalTemplate.Name);
+      ItemJournalBatch.FINDFIRST;
+
+      IF Location."Directed Put-away and Pick" THEN BEGIN
+        WarehouseJournalTemplate.SETRANGE(Type,WarehouseJournalTemplate.Type::Item);
+        WarehouseJournalTemplate.FINDFIRST;
+        WarehouseJournalBatch.SETRANGE("Journal Template Name",WarehouseJournalTemplate.Name);
+        WarehouseJournalBatch.FINDFIRST;
+        LibraryWarehouse.CreateWhseJournalLine(
+          WarehouseJournalLine,WarehouseJournalTemplate.Name,WarehouseJournalBatch.Name,
+          Location.Code,'',BinCode,WarehouseJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",Quantity);
+        LibraryWarehouse.PostWhseJournalLine(WarehouseJournalTemplate.Name,WarehouseJournalBatch.Name,Location.Code);
+        LibraryWarehouse.CalculateWhseAdjustmentItemJournal(Item,WorkDate2,'');
+        LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+      END ELSE BEGIN
+        ItemJournalLine.SETRANGE("Journal Template Name",ItemJournalTemplate.Name);
+        ItemJournalLine.SETRANGE("Journal Batch Name",ItemJournalBatch.Name);
+        ItemJournalLine.DELETEALL;
+        LibraryInventory.CreateItemJournalLine(ItemJournalLine,ItemJournalTemplate.Name,ItemJournalBatch.Name,
+          ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",Quantity);
+        ItemJournalLine.VALIDATE("Location Code",Location.Code);
+        ItemJournalLine.VALIDATE("Bin Code",BinCode);
+        ItemJournalLine.MODIFY(TRUE);
+        LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateInvtPickMvmt@25(CreatePick@1000 : Boolean;CreateMvmt@1001 : Boolean);
+    VAR
+      WarehouseRequest@1002 : Record 5765;
+    BEGIN
+      WarehouseRequest.SETCURRENTKEY("Source Document","Source No.");
+      WarehouseRequest.SETRANGE("Source Document",WarehouseRequest."Source Document"::"Assembly Consumption");
+      WarehouseRequest.SETRANGE("Source No.",AsmHeader."No.");
+      LibraryAssembly.AsmOrder_CreateInvtMovement(WarehouseRequest,FALSE,CreatePick,CreateMvmt,FALSE,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE UT5111@11();
+    VAR
+      BinType@1000 : Record 7303;
+    BEGIN
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      COMMIT; // committing as subsequent errors might roll back item creation
+
+      // THE NEW BIN CODES MAY BE CHANGED ONLY WHEN Bin Mandatory = TRUE
+      // ** negative test
+      MockLocation(Location,FALSE,FALSE,FALSE,FALSE);
+      ASSERTERROR Location.VALIDATE("To-Assembly Bin Code",Bin1);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrBinMandatory1) > 0,'Expected: ' + ErrBinMandatory1 + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      MockLocation(Location,FALSE,FALSE,FALSE,FALSE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      COMMIT; // committing as subsequent errors might roll back item creation
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      ASSERTERROR AsmHeader.VALIDATE("Bin Code",Bin1);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrBinMandatory2) > 0,'Expected: ' + ErrBinMandatory2 + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,Item."No.",'',1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      ASSERTERROR AsmLine.VALIDATE("Bin Code",Bin1);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrBinMandatory2) > 0,'Expected: ' + ErrBinMandatory2 + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // ** positive test
+      MockLocation(Location,TRUE,FALSE,FALSE,FALSE);
+      Location.VALIDATE("To-Assembly Bin Code",Bin1); // expected: no errors
+
+      MockLocation(Location,TRUE,FALSE,FALSE,FALSE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      AsmHeader.VALIDATE("Bin Code",Bin1); // expected: no errors
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,Item."No.",'',1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin1); // expected: no errors
+
+      // TO-ASSEMBLY BIN CCOD FROM LOCATION CARD SHOULD TAKE ONLY SUCH BINS IN DIRECTED PUT-AWAY & PICK LOCATION WHICH HAS Put-away=TRUE
+      // ** negative test
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      ASSERTERROR Location.VALIDATE("To-Assembly Bin Code",Bin1);
+      Assert.IsTrue(
+        STRPOS(GETLASTERRORTEXT,STRSUBSTNO(ErrWrongBinType,BinType.FIELDCAPTION(Pick))) > 0,
+        'Expected: ' + STRSUBSTNO(ErrWrongBinType,BinType.FIELDCAPTION(Pick)) + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,Item."No.",'',1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      ASSERTERROR AsmLine.VALIDATE("Bin Code",Bin1);
+      Assert.IsTrue(
+        STRPOS(GETLASTERRORTEXT,STRSUBSTNO(ErrWrongBinType,BinType.FIELDCAPTION(Pick))) > 0,
+        'Expected: ' + STRSUBSTNO(ErrWrongBinType,BinType.FIELDCAPTION(Pick)) + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // ** positive test
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      Location.VALIDATE("To-Assembly Bin Code",Bin3); // expected: no errors
+
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,Item."No.",'',1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin3); // expected: no errors
+
+      // FROM-ASSEMBLY BIN CODE FROM LOCATION CARD SHOULD TAKE ONLY SUCH BINS IN DIRECTED PUT-AWAY & PICK LOCATION WHICH HAS Receive=TRUE
+      // ** negative test
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      ASSERTERROR Location.VALIDATE("From-Assembly Bin Code",Bin5); // error expected on Receive bin
+      Assert.IsTrue(
+        STRPOS(GETLASTERRORTEXT,STRSUBSTNO(ErrWrongBinTypeRecShip)) > 0,
+        STRSUBSTNO(MessageExpectedActual,STRSUBSTNO(ErrWrongBinTypeRecShip),GETLASTERRORTEXT));
+      CLEARLASTERROR;
+
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      ASSERTERROR AsmHeader.VALIDATE("Bin Code",Bin5); // error expected on Receive bin
+      Assert.IsTrue(
+        STRPOS(GETLASTERRORTEXT,STRSUBSTNO(ErrWrongBinTypeRecShip)) > 0,
+        STRSUBSTNO(MessageExpectedActual,STRSUBSTNO(ErrWrongBinTypeRecShip),GETLASTERRORTEXT));
+      CLEARLASTERROR;
+
+      // ** positive test
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      Location.VALIDATE("From-Assembly Bin Code",Bin1);
+      Location.VALIDATE("From-Assembly Bin Code",Bin3); // no error on pick type bin
+
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      AsmHeader.VALIDATE("Bin Code",Bin1);
+      AsmHeader.VALIDATE("Bin Code",Bin3); // no error on pick type bin
+    END;
+
+    [Test]
+    PROCEDURE UT5112@2();
+    VAR
+      ItemVariant@1000 : Record 5401;
+    BEGIN
+      Initialize;
+      // BIN CODE IS DEFAULTED TO WHEN CHANGES ARE MADE TO ITEM, VARIANT OR LOCATION
+      MockItem(Item,ItemVariant);
+      MockLocation(Location,TRUE,FALSE,FALSE,FALSE);
+      // add a default bin content with variant
+      LibraryWarehouse.CreateBinContent(BinContent,Location.Code,'',Bin1,Item."No.",ItemVariant.Code,Item."Base Unit of Measure");
+      BinContent.VALIDATE(Default,TRUE);
+      BinContent.MODIFY(TRUE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      // as no location has been chosen Bin Code on Asm header should be blank
+      Assert.AreEqual('',AsmHeader."Bin Code",'as no location has been chosen Bin Code on Asm header should be blank');
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      // location has been chosen but variant not chosen - no bin content should be found
+      Assert.AreEqual('',AsmHeader."Bin Code",'location has been chosen but variant not chosen - no bin content should be found');
+      AsmHeader.VALIDATE("Variant Code",ItemVariant.Code);
+      // location, variant chosen- bin code to be fetched from bin content
+      Assert.AreEqual(STRSUBSTNO(Bin1),AsmHeader."Bin Code",'location, variant chosen- bin code to be fetched from bin content');
+
+      // BIN CODE IS DEFAULTED TO FROM-ASSEMBLY BIN ON LOCATION CARD
+      MockItem(Item,ItemVariant);
+      MockLocation(Location,TRUE,FALSE,FALSE,FALSE);
+      // add a default bin content with variant
+      Location.VALIDATE("From-Assembly Bin Code",Bin2);
+      Location.MODIFY(TRUE);
+      // add a default bin content with variant
+      LibraryWarehouse.CreateBinContent(BinContent,Location.Code,'',Bin1,Item."No.",ItemVariant.Code,Item."Base Unit of Measure");
+      BinContent.VALIDATE(Default,TRUE);
+      BinContent.MODIFY(TRUE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      // location has been chosen bin code shud be pulled from From-Assembly Bin Code
+      Assert.AreEqual(Location."From-Assembly Bin Code",AsmHeader."Bin Code",
+        'location has been chosen bin code shud be pulled from From-Assembly Bin Code');
+      AsmHeader.VALIDATE("Variant Code",ItemVariant.Code);
+      // although variant and location filled in, bin code should still be From-Assembly Bin Code
+      Assert.AreEqual(Location."From-Assembly Bin Code",AsmHeader."Bin Code",
+        'location has been chosen bin code shud be pulled from From-Assembly Bin Code');
+
+      // IF QTY ON ASM HEADER < 0, BIN CODE SHOULD ACCEPT VALID BIN CONTENT
+      MockItem(Item,ItemVariant);
+      MockLocation(Location,TRUE,FALSE,FALSE,FALSE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      COMMIT; // committing as subsequent errors might roll back data creation
+      // ** negative test
+      AsmHeader.Quantity := -1;
+      // no bin content exists- bin code should always be blank
+      ASSERTERROR AsmHeader.VALIDATE("Bin Code",Bin1);
+      Assert.AssertNothingInsideFilter;
+
+      // ** positive test
+      // add a non-default bin content
+      LibraryWarehouse.CreateBinContent(BinContent,Location.Code,'',Bin2,Item."No.",'',Item."Base Unit of Measure");
+      AsmHeader.VALIDATE("Bin Code",Bin2); // no errors expected
+
+      // OTHERWISE IT SHOULD POINT TO EXISTING BIN
+      AsmHeader.Quantity := 1;
+      // ** negative test
+      // error expected for non-existing bin
+      ASSERTERROR AsmHeader.VALIDATE("Bin Code",'BIN100');
+      Assert.AssertRecordNotFound;
+
+      // ** positive test
+      AsmHeader.VALIDATE("Bin Code",Bin3); // no errors expected
+
+      // IN CASE OF WMS LOCATIONS, IF A BIN CONTENT EXISTS, WAREHOUSE CLASS CODE IS CHECKED
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      MockItem(Item,ItemVariant);
+      WarehouseClass.FINDFIRST;
+      MockProductGroup(ProductGroup,Item."Item Category Code",WarehouseClass.Code);
+      Item.VALIDATE("Product Group Code",ProductGroup.Code);
+      Item.MODIFY(TRUE);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WorkDate2,Item."No.",'',1,'');
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      COMMIT; // committing as subsequent errors might roll back data creation
+      // ** negative test with bin
+      ASSERTERROR AsmHeader.VALIDATE("Bin Code",Bin1);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrWhseClass) > 0,'Expected: ' + ErrWhseClass + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // ** positive test with bin
+      Bin.GET(Location.Code,Bin1);
+      Bin.VALIDATE("Warehouse Class Code",WarehouseClass.Code);
+      Bin.MODIFY(TRUE);
+      AsmHeader.VALIDATE("Bin Code",Bin1); // no errors expected
+
+      // ** negative test with bin content
+      LibraryWarehouse.CreateBinContent(BinContent,Location.Code,'',Bin1,Item."No.",'',Item."Base Unit of Measure");
+      COMMIT; // committing as subsequent errors might roll back bin content creation
+      ASSERTERROR AsmHeader.VALIDATE("Bin Code",Bin1);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrWhseClass) > 0,'Expected: ' + ErrWhseClass + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // ** positive test with bin content
+      BinContent.VALIDATE("Warehouse Class Code",WarehouseClass.Code);
+      BinContent.MODIFY(TRUE);
+      AsmHeader.VALIDATE("Bin Code",Bin1); // no errors expected
+    END;
+
+    [Test]
+    PROCEDURE UT5113@6();
+    VAR
+      ParentItem@1000 : Record 27;
+      ItemVariant@1001 : Record 5401;
+    BEGIN
+      Initialize;
+      // IF TYPE IS CHANGED TO RESOURCE, BIN CODE IS EMPTIED AND BIN CODE IS EMPTY WHEN RESOURCE IS CHANGED
+      MockLocation(Location,TRUE,FALSE,FALSE,FALSE);
+      MockItem(Item,ItemVariant);
+      LibraryInventory.CreateItem(ParentItem);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WORKDATE,ParentItem."No.",Location.Code,1,'');
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,Item."No.",'',1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin1);
+      AsmLine.VALIDATE(Type,AsmLine.Type::Resource);
+      Assert.AreEqual('',AsmLine."Bin Code",'Bin Code needs to blank for resource lines');
+      MockResource(Resource);
+      AsmLine.VALIDATE("No.",Resource."No.");
+      Assert.AreEqual('',AsmLine."Bin Code",'Bin Code needs to blank for resource lines');
+
+      // ** negative test
+      AsmLine."Location Code" := Location.Code;
+      ASSERTERROR AsmLine.VALIDATE("Bin Code",Bin1);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrTypeToBeItem) > 0,'Expected: ' + ErrTypeToBeItem + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // BIN CODE IS DEFAULTED TO WHEN CHANGES ARE MADE TO ITEM, VARIANT OR LOCATION
+      MockItem(Item,ItemVariant);
+      MockLocation(Location,TRUE,FALSE,FALSE,FALSE);
+      // add a default bin content with variant
+      LibraryWarehouse.CreateBinContent(BinContent,Location.Code,'',Bin1,Item."No.",ItemVariant.Code,Item."Base Unit of Measure");
+      BinContent.VALIDATE(Default,TRUE);
+      BinContent.MODIFY(TRUE);
+      LibraryInventory.CreateItem(ParentItem);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WORKDATE,ParentItem."No.",Location.Code,1,'');
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,Item."No.",'',1,1,'');
+      // as no location has been chosen Bin Code on Asm line should be blank
+      Assert.AreEqual('',AsmLine."Bin Code",'as no location has been chosen Bin Code on Asm line should be blank');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      // location has been chosen but variant not chosen - no bin content should be found
+      Assert.AreEqual('',AsmLine."Bin Code",'location has been chosen but variant not chosen - no bin content should be found');
+      AsmLine.VALIDATE("Variant Code",ItemVariant.Code);
+      // location, variant chosen- bin code to be fetched from bin content
+      Assert.AreEqual(STRSUBSTNO(Bin1),AsmLine."Bin Code",'location, variant chosen- bin code to be fetched from bin content');
+
+      // BIN CODE IS DEFAULTED TO TO-ASSEMBLY BIN ON LOCATION CARD
+      MockItem(Item,ItemVariant);
+      MockLocation(Location,TRUE,FALSE,FALSE,FALSE);
+      // add a default bin content with variant
+      Location.VALIDATE("To-Assembly Bin Code",Bin2);
+      Location.MODIFY(TRUE);
+      // add a default bin content with variant
+      LibraryWarehouse.CreateBinContent(BinContent,Location.Code,'',Bin1,Item."No.",ItemVariant.Code,Item."Base Unit of Measure");
+      BinContent.VALIDATE(Default,TRUE);
+      BinContent.MODIFY(TRUE);
+      LibraryInventory.CreateItem(ParentItem);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WORKDATE,ParentItem."No.",Location.Code,1,'');
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,Item."No.",'',1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      // location has been chosen bin code shud be pulled from From-Assembly Bin Code
+      Assert.AreEqual(Location."To-Assembly Bin Code",AsmLine."Bin Code",
+        'location has been chosen bin code shud be pulled from To-Assembly Bin Code');
+      AsmLine.VALIDATE("Variant Code",ItemVariant.Code);
+      // although variant and location filled in, bin code should still be To-Assembly Bin Code
+      Assert.AreEqual(Location."To-Assembly Bin Code",AsmLine."Bin Code",
+        'location has been chosen bin code shud be pulled from To-Assembly Bin Code');
+
+      // BIN CODE SHOULD POINT TO EXISTING BIN
+      LibraryInventory.CreateItem(Item);
+      MockLocation(Location,TRUE,FALSE,FALSE,FALSE);
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,Item."No.",'',1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      COMMIT; // committing as subsequent errors might roll back data creation
+      // ** negative test
+      // error expected for non-existing bin
+      ASSERTERROR AsmLine.VALIDATE("Bin Code",'BIN100');
+      Assert.AssertRecordNotFound;
+
+      // ** positive test
+      AsmLine.VALIDATE("Bin Code",Bin3); // no errors expected
+
+      // IN CASE OF WMS LOCATIONS, IF A BIN CONTENT EXISTS, WAREHOUSE CLASS CODE IS CHECKED
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE);
+      LibraryInventory.CreateItem(Item);
+      WarehouseClass.FINDFIRST;
+      MockProductGroup(ProductGroup,Item."Item Category Code",WarehouseClass.Code);
+      Item.VALIDATE("Product Group Code",ProductGroup.Code);
+      Item.MODIFY(TRUE);
+      LibraryInventory.CreateItem(ParentItem);
+      LibraryAssembly.CreateAssemblyHeader(AsmHeader,WORKDATE,ParentItem."No.",Location.Code,1,'');
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,Item."No.",'',1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      COMMIT; // committing as subsequent errors might roll back data creation
+      // ** negative test with bin
+      ASSERTERROR AsmLine.VALIDATE("Bin Code",Bin3);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrWhseClass) > 0,'Expected: ' + ErrWhseClass + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // ** positive test with bin
+      Bin.GET(Location.Code,Bin3);
+      Bin.VALIDATE("Warehouse Class Code",WarehouseClass.Code);
+      Bin.MODIFY(TRUE);
+      AsmLine.VALIDATE("Bin Code",Bin3); // no errors expected
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmUpdateLocationOnLines,AvailabilityWindowHandler)]
+    PROCEDURE UT5121@8();
+    BEGIN
+      Initialize;
+      // POSTING ASSEMBLY RELEASES IT BEFORE PROCEEDING
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,2);
+      MockLocation(Location,FALSE,FALSE,FALSE,FALSE);
+      AddItemToInventory(CompItem,Location,'',2);
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      Assert.AreEqual(AsmHeader.Status::Open,AsmHeader.Status,'Status should be open right after creation.');
+      AsmHeader.VALIDATE("Quantity to Assemble",1); // change qty to 1 for partial posting
+      AsmHeader.MODIFY(TRUE);
+      LibraryAssembly.PostAssemblyHeader(AsmHeader,'');
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE UT5122@9();
+    VAR
+      InventorySetup@1000 : Record 313;
+    BEGIN
+      Initialize;
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+
+      // RELEASE OF ASSEMBLY RAISES ERROR IN CASE THERE ARE NO LINES WITH ITEMS WITH NON-ZERO QTY
+      // check for line with zero qty
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.VALIDATE(Quantity,0);
+      AsmLine.MODIFY(TRUE);
+      ASSERTERROR LibraryAssembly.ReleaseAO(AsmHeader);
+      Assert.IsTrue(
+        STRPOS(GETLASTERRORTEXT,ErrNothingToRelease) > 0,'Expected: ' + ErrNothingToRelease + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // check for no lines
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.DELETE(TRUE);
+      ASSERTERROR LibraryAssembly.ReleaseAO(AsmHeader);
+      Assert.IsTrue(
+        STRPOS(GETLASTERRORTEXT,ErrNothingToRelease) > 0,'Expected: ' + ErrNothingToRelease + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // IN CASE INVENTORY SETUP HAS Location Mandatory, RELEASING ORDER WITH A LINE FOR ITEM WITH BLANK LOCATION RAISES ERROR
+      InventorySetup.GET;
+      InventorySetup.VALIDATE("Location Mandatory",TRUE);
+      InventorySetup.MODIFY(TRUE);
+      ASSERTERROR LibraryAssembly.ReleaseAO(AsmHeader);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrLocationMustBeFilled) > 0,
+        'Expected: ' + ErrLocationMustBeFilled + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // RELEASE SETS STATUS TO Released
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      Assert.AreEqual(AsmHeader.Status::Released,AsmHeader.Status,'Wrong status set');
+
+      // REOPEN SETS STATUS TO Open
+      LibraryAssembly.ReopenAO(AsmHeader);
+      Assert.AreEqual(AsmHeader.Status::Open,AsmHeader.Status,'Wrong status set');
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmChangeOfAsmItemNo,AvailabilityWindowHandler)]
+    PROCEDURE UT5123@12();
+    VAR
+      CompItem2@1000 : Record 27;
+      AsmItem2@1001 : Record 27;
+    BEGIN
+      Initialize;
+      // ASSEMBLY ORDER CAN ONLY BE MODIFIED WHEN STATUS IS OPEN
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      LibraryInventory.CreateItem(CompItem2);
+      LibraryInventory.CreateItem(AsmItem2);
+      LibraryManufacturing.CreateBOMComponent(
+        BOMComponent,AsmItem2."No.",BOMComponent.Type::Item,CompItem2."No.",1,CompItem2."Base Unit of Measure");
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      // ** negative test - modify assembly header
+      ASSERTERROR AsmHeader.VALIDATE("Item No.",AsmItem2."No.");
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrStatusMustBeOpen) > 0,
+        'Expected: ' + ErrStatusMustBeOpen + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // ** positive test
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      LibraryInventory.CreateItem(CompItem2);
+      LibraryInventory.CreateItem(AsmItem2);
+      LibraryManufacturing.CreateBOMComponent(
+        BOMComponent,AsmItem2."No.",BOMComponent.Type::Item,CompItem2."No.",1,CompItem2."Base Unit of Measure");
+      ASSERTERROR BEGIN
+        COMMIT;
+        AsmHeader.VALIDATE("Item No.",AsmItem2."No."); // first time answer is "no" to confirm question
+      END;
+      CLEARLASTERROR;
+
+      Assert.AreEqual(AsmItem."No.",AsmHeader."Item No.",'');
+
+      AsmHeader.VALIDATE("Item No.",AsmItem2."No."); // second time answer is "yes" to confirm question and no errors are expected
+      Assert.AreEqual(AsmItem2."No.",AsmHeader."Item No.",'');
+
+      // ASSEMBLY ORDER CAN BE DELETED WHEN STATUS IS RELEASED
+      // reuse previous asm order
+      AsmHeader.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      AsmHeader.DELETE(TRUE); // no errors expected
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE UT5124@14();
+    BEGIN
+      Initialize;
+      // ASSEMBLY LINE CANNOT BE INSERTED IF STATUS NOT EQUAL Open
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      ASSERTERROR LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,CompItem."No.",'',3,1,'');
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrStatusMustBeOpen) > 0,
+        'Expected: ' + ErrStatusMustBeOpen + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // FIELDS ON ASSEMBLY LINE CANNOT BE CHANGED IF STATUS NOT EQUAL Open
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      ASSERTERROR AsmLine.VALIDATE("Quantity per",10);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrStatusMustBeOpen) > 0,
+        'Expected: ' + ErrStatusMustBeOpen + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+
+      // ASSEMBLY LINE CANNOT BE DELETED IF STATUS NOT EQUAL Open
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      ASSERTERROR AsmLine.DELETE(TRUE);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrStatusMustBeOpen) > 0,
+        'Expected: ' + ErrStatusMustBeOpen + ' Actual: ' + GETLASTERRORTEXT);
+      CLEARLASTERROR;
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler)]
+    PROCEDURE UT5131@16();
+    VAR
+      Location1@1000 : Record 14;
+      Location2@1001 : Record 14;
+      Location3@1002 : Record 14;
+      Location4@1003 : Record 14;
+      Location5@1006 : Record 14;
+      Location6@1007 : Record 14;
+      WhseRequest@1004 : Record 5765;
+      WhsePickRequest@1005 : Record 7325;
+    BEGIN
+      Initialize;
+      // RELEASE SHOULD CREATE A Warehouse Request FOR EVERY UNIQUE LOCATION CODE ON ASSEMBLY LINE
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      AsmLine.SETRANGE("Document Type",AsmHeader."Document Type");
+      AsmLine.SETRANGE("Document No.",AsmHeader."No.");
+      AsmLine.DELETEALL(TRUE); // delete all lines
+      MockLocation(Location1,FALSE,FALSE,FALSE,FALSE); // no bin location
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,CompItem."No.",CompItem."Base Unit of Measure",1,1,'');
+      AsmLine.VALIDATE("Location Code",Location1.Code);
+      AsmLine.MODIFY(TRUE);
+      MockLocation(Location2,TRUE,FALSE,FALSE,FALSE); // Bin Mandatory location
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,CompItem."No.",CompItem."Base Unit of Measure",1,1,'');
+      AsmLine.VALIDATE("Location Code",Location2.Code);
+      AsmLine.MODIFY(TRUE);
+      MockLocation(Location3,TRUE,TRUE,FALSE,FALSE); // Require Pick location
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,CompItem."No.",CompItem."Base Unit of Measure",1,1,'');
+      AsmLine.VALIDATE("Location Code",Location3.Code);
+      AsmLine.MODIFY(TRUE);
+      MockLocation(Location4,TRUE,TRUE,TRUE,FALSE); // Require Shipment location
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,CompItem."No.",CompItem."Base Unit of Measure",1,1,'');
+      AsmLine.VALIDATE("Location Code",Location4.Code);
+      AsmLine.MODIFY(TRUE);
+      MockLocation(Location5,TRUE,FALSE,TRUE,FALSE); // Require Shipment but not pick location
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,CompItem."No.",CompItem."Base Unit of Measure",1,1,'');
+      AsmLine.VALIDATE("Location Code",Location5.Code);
+      AsmLine.MODIFY(TRUE);
+      MockLocation(Location6,FALSE,FALSE,FALSE,TRUE); // WMS location
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,CompItem."No.",CompItem."Base Unit of Measure",1,1,'');
+      AsmLine.VALIDATE("Location Code",Location6.Code);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      // check for warehouse request
+      Assert.AreEqual(FALSE,
+        WhseRequest.GET(WhseRequest.Type::Outbound,Location1.Code,DATABASE::"Assembly Line",
+          AsmHeader."Document Type",AsmHeader."No."),
+        'Whse. Request should be empty for ' + Location1.Code);
+      Assert.AreEqual(FALSE,
+        WhseRequest.GET(WhseRequest.Type::Outbound,Location2.Code,DATABASE::"Assembly Line",
+          AsmHeader."Document Type",AsmHeader."No."),
+        'Whse. Request should be empty for ' + Location2.Code);
+      Assert.AreEqual(TRUE,
+        WhseRequest.GET(WhseRequest.Type::Outbound,Location3.Code,DATABASE::"Assembly Line",
+          AsmHeader."Document Type",AsmHeader."No."),
+        'Whse. Request should be filled for ' + Location3.Code);
+      Assert.AreEqual(WhseRequest."Document Status"::Released,WhseRequest."Document Status",'');
+      Assert.AreEqual(FALSE,
+        WhseRequest.GET(WhseRequest.Type::Outbound,Location4.Code,DATABASE::"Assembly Line",
+          AsmHeader."Document Type",AsmHeader."No."),
+        'Whse. Request should be empty for ' + Location4.Code);
+      Assert.AreEqual(FALSE,
+        WhseRequest.GET(WhseRequest.Type::Outbound,Location5.Code,DATABASE::"Assembly Line",
+          AsmHeader."Document Type",AsmHeader."No."),
+        'Whse. Request should be empty for ' + Location5.Code);
+      Assert.AreEqual(FALSE,
+        WhseRequest.GET(WhseRequest.Type::Outbound,Location6.Code,DATABASE::"Assembly Line",
+          AsmHeader."Document Type",AsmHeader."No."),
+        'Whse. Request should be empty for ' + Location6.Code);
+      // check for warehouse pick request
+      Assert.AreEqual(FALSE,
+        WhsePickRequest.GET(WhsePickRequest."Document Type"::Assembly,AsmHeader."Document Type",AsmHeader."No.",Location1.Code),
+        'Whse. Pick Request should be empty for ' + Location1.Code);
+      Assert.AreEqual(FALSE,
+        WhsePickRequest.GET(WhsePickRequest."Document Type"::Assembly,AsmHeader."Document Type",AsmHeader."No.",Location2.Code),
+        'Whse. Pick Request should be empty for ' + Location2.Code);
+      Assert.AreEqual(FALSE,
+        WhsePickRequest.GET(WhsePickRequest."Document Type"::Assembly,AsmHeader."Document Type",AsmHeader."No.",Location3.Code),
+        'Whse. Pick Request should be empty for ' + Location3.Code);
+      Assert.AreEqual(TRUE,
+        WhsePickRequest.GET(WhsePickRequest."Document Type"::Assembly,AsmHeader."Document Type",AsmHeader."No.",Location4.Code),
+        'Whse. Pick Request should be filled for ' + Location4.Code);
+      Assert.AreEqual(WhsePickRequest.Status::Released,WhsePickRequest.Status,'');
+      Assert.AreEqual(FALSE,
+        WhsePickRequest.GET(WhsePickRequest."Document Type"::Assembly,AsmHeader."Document Type",AsmHeader."No.",Location5.Code),
+        'Whse. Pick Request should be empty for ' + Location5.Code);
+      Assert.AreEqual(TRUE,
+        WhsePickRequest.GET(WhsePickRequest."Document Type"::Assembly,AsmHeader."Document Type",AsmHeader."No.",Location6.Code),
+        'Whse. Pick Request should be filled for ' + Location6.Code);
+      Assert.AreEqual(WhsePickRequest.Status::Released,WhsePickRequest.Status,'');
+
+      // REOPEN SETS Document Status OF THE Warehouse Request TO Open
+      // reuse previous assembly header
+      LibraryAssembly.ReopenAO(AsmHeader);
+      WhseRequest.GET(WhseRequest.Type::Outbound,Location3.Code,DATABASE::"Assembly Line",AsmHeader."Document Type",AsmHeader."No.");
+      Assert.AreEqual(WhseRequest."Document Status"::Open,WhseRequest."Document Status",'');
+      WhsePickRequest.GET(WhsePickRequest."Document Type"::Assembly,AsmHeader."Document Type",AsmHeader."No.",Location4.Code);
+      Assert.AreEqual(WhsePickRequest.Status::Open,WhsePickRequest.Status,'');
+      WhsePickRequest.GET(WhsePickRequest."Document Type"::Assembly,AsmHeader."Document Type",AsmHeader."No.",Location6.Code);
+      Assert.AreEqual(WhsePickRequest.Status::Open,WhsePickRequest.Status,'');
+
+      // DELETING ASSEMBLY LINE DOES NOT DELETE Warehouse Request IF LINES EXIST FOR SAME LOCATION
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      AsmLine.SETRANGE("Document Type",AsmHeader."Document Type");
+      AsmLine.SETRANGE("Document No.",AsmHeader."No.");
+      AsmLine.DELETEALL(TRUE); // delete all lines
+      // make 2 asm lines with same location
+      MockLocation(Location,TRUE,TRUE,FALSE,FALSE); // Require Pick location
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,CompItem."No.",CompItem."Base Unit of Measure",1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.CreateAssemblyLine(AsmHeader,AsmLine,AsmLine.Type::Item,CompItem."No.",CompItem."Base Unit of Measure",1,1,'');
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.MODIFY(TRUE);
+      // release and reopen asm order
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      LibraryAssembly.ReopenAO(AsmHeader);
+      // delete 2nd line
+      AsmLine.SETRANGE("Document Type",AsmHeader."Document Type");
+      AsmLine.SETRANGE("Document No.",AsmHeader."No.");
+      AsmLine.FINDLAST;
+      AsmLine.DELETE(TRUE);
+      // verify that warehouse request stays
+      Assert.AreEqual(TRUE,
+        WhseRequest.GET(WhseRequest.Type::Outbound,Location.Code,DATABASE::"Assembly Line",
+          AsmHeader."Document Type",AsmHeader."No."),
+        'Whse. Request should be filled for ' + Location.Code);
+      // delete 1st line as well.
+      AsmLine.SETRANGE("Document Type",AsmHeader."Document Type");
+      AsmLine.SETRANGE("Document No.",AsmHeader."No.");
+      AsmLine.FINDFIRST;
+      AsmLine.DELETE(TRUE);
+      // verify that warehouse request is deleted.
+      Assert.AreEqual(FALSE,
+        WhseRequest.GET(WhseRequest.Type::Outbound,Location.Code,DATABASE::"Assembly Line",
+          AsmHeader."Document Type",AsmHeader."No."),
+        'Whse. Request should be empty for ' + Location.Code);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageNothingToCreate,AvailabilityWindowHandler)]
+    PROCEDURE UT5132@17();
+    VAR
+      WhseActivityLine@1001 : Record 5767;
+      CountOfWhseActivityLines@1002 : Integer;
+    BEGIN
+      Initialize;
+      // CREATING INVENTORY PICK FOR ASSEMBLY COMPONENTS LEADS TO MESSAGE "Nothing to Handle"
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      MockLocation(Location,TRUE,TRUE,FALSE,FALSE); // Require Pick location
+      AddItemToInventory(CompItem,Location,Bin1,10);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin2);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      // create inventory pick
+      CountOfWhseActivityLines := WhseActivityLine.COUNT;
+      CreateInvtPickMvmt(TRUE,FALSE); // create pick
+      Assert.AreEqual(CountOfWhseActivityLines,WhseActivityLine.COUNT,'Count should be the same as before');
+
+      // CREATING INVENTORY MOVEMENT FOR NON BIN MANDATORY LEADS TO MESSAGE "Nothing to Handle"
+      // reuse above order
+      MockLocation(Location,FALSE,TRUE,FALSE,FALSE); // Require Pick location
+      AddItemToInventory(CompItem,Location,'',10);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.MODIFY(TRUE);
+      CreateInvtPickMvmt(FALSE,TRUE); // create movement
+      Assert.AreEqual(CountOfWhseActivityLines,WhseActivityLine.COUNT,'Count should be the same as before');
+
+      // CREATING INVENTORY MOVEMENT FOR COMP BIN BEING SAME AS BIN CONTENT LEADS TO MESSAGE "Nothing to Handle"
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      MockLocation(Location,TRUE,TRUE,FALSE,FALSE); // Require Pick location
+      AddItemToInventory(CompItem,Location,Bin1,10);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin1);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      // create inventory pick
+      CountOfWhseActivityLines := WhseActivityLine.COUNT;
+      CreateInvtPickMvmt(TRUE,FALSE); // create pick
+      Assert.AreEqual(CountOfWhseActivityLines,WhseActivityLine.COUNT,'Count should be the same as before');
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageInvtMovementCreated,AvailabilityWindowHandler)]
+    PROCEDURE UT5133A@19();
+    VAR
+      WhseActivityLine@1001 : Record 5767;
+      CountOfWhseActivityLines@1000 : Integer;
+    BEGIN
+      Initialize;
+      // CREATING INVENTORY MOVEMENT MAKES AN INVENTORY MOVEMENT
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      MockLocation(Location,TRUE,TRUE,FALSE,FALSE); // Require Pick location
+      AddItemToInventory(CompItem,Location,Bin1,10);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin2);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      // create inventory movement
+      WhseActivityLine.SETRANGE("Source Document",WhseActivityLine."Source Document"::"Assembly Consumption");
+      WhseActivityLine.SETRANGE("Source No.",AsmHeader."No.");
+      WhseActivityLine.SETRANGE("Item No.",CompItem."No.");
+      CountOfWhseActivityLines := WhseActivityLine.COUNT;
+      CreateInvtPickMvmt(FALSE,TRUE); // create movement
+      Assert.AreEqual(CountOfWhseActivityLines + 2,WhseActivityLine.COUNT,'Count should be the more than before by 2');
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageNothingToCreate,AvailabilityWindowHandler)]
+    PROCEDURE UT5133B@22();
+    VAR
+      WhseActivityLine@1001 : Record 5767;
+      CountOfWhseActivityLines@1000 : Integer;
+    BEGIN
+      Initialize;
+      // CREATING INVENTORY MOVEMENT FOR WMS LOCATIONS NOT ALLOWED
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE); // WMS location
+      AddItemToInventory(CompItem,Location,Bin1,10);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin3);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      // create inventory movement
+      WhseActivityLine.SETRANGE("Source Document",WhseActivityLine."Source Document"::"Assembly Consumption");
+      WhseActivityLine.SETRANGE("Source No.",AsmHeader."No.");
+      WhseActivityLine.SETRANGE("Item No.",CompItem."No.");
+      CountOfWhseActivityLines := WhseActivityLine.COUNT;
+      CreateInvtPickMvmt(FALSE,TRUE); // create movement
+      Assert.AreEqual(CountOfWhseActivityLines,WhseActivityLine.COUNT,'Count should be the same as before.');
+      // no invt movement created
+    END;
+
+    [Test]
+    [HandlerFunctions(UT5134HandlePickCreatedMsg,AvailabilityWindowHandler)]
+    PROCEDURE UT5134@21();
+    VAR
+      WhseActivityLine@1001 : Record 5767;
+      CountOfWhseActivityLines@1000 : Integer;
+    BEGIN
+      Initialize;
+      // CREATE PICK CREATES A WAREHOUSE PICK
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      MockLocation(Location,TRUE,TRUE,TRUE,FALSE); // Require Shipment & Pick location
+      AddItemToInventory(CompItem,Location,Bin1,10);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin2);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      // create warehouse pick
+      WhseActivityLine.SETRANGE("Source Document",WhseActivityLine."Source Document"::"Assembly Consumption");
+      WhseActivityLine.SETRANGE("Source No.",AsmHeader."No.");
+      WhseActivityLine.SETRANGE("Item No.",CompItem."No.");
+      CountOfWhseActivityLines := WhseActivityLine.COUNT;
+      LibraryAssembly.CreateWhsePick(AsmHeader,USERID,0,FALSE,FALSE,FALSE); // create pick
+      Assert.AreEqual(CountOfWhseActivityLines + 2,WhseActivityLine.COUNT,'Count should be the more than before by 2'); // Take & Place
+
+      // ALSO FOR WMS LOCATIONS
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      MockLocation(Location,FALSE,FALSE,FALSE,TRUE); // WMS location
+      AddItemToInventory(CompItem,Location,Bin1,10);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin3);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      // create warehouse pick
+      WhseActivityLine.SETRANGE("Source Document",WhseActivityLine."Source Document"::"Assembly Consumption");
+      WhseActivityLine.SETRANGE("Source No.",AsmHeader."No.");
+      WhseActivityLine.SETRANGE("Item No.",CompItem."No.");
+      CountOfWhseActivityLines := WhseActivityLine.COUNT;
+      LibraryAssembly.CreateWhsePick(AsmHeader,USERID,0,FALSE,FALSE,FALSE); // create pick
+      Assert.AreEqual(CountOfWhseActivityLines + 2,WhseActivityLine.COUNT,'Count should be the more than before by 2'); // Take & Place
+    END;
+
+    [MessageHandler]
+    PROCEDURE UT5134HandlePickCreatedMsg@26(Msg@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Msg,MessagePickCreated) > 0,'Wrong message. Expected: ' + MessagePickCreated + '; Actual: ' + Msg);
+      Assert.IsTrue(STRPOS(Msg,MessageCreated) > 0,'Wrong message. Expected: ' + MessageCreated + '; Actual: ' + Msg);
+    END;
+
+    [Test]
+    [HandlerFunctions(FormSourceDocuments,MessageNothingToHandle,AvailabilityWindowHandler)]
+    PROCEDURE UTInvtPickFromPage@23();
+    VAR
+      WarehouseActivityHeader@1000 : Record 5766;
+      WhseActivityLine@1001 : Record 5767;
+    BEGIN
+      Initialize;
+      // CREATING INVENTORY PICK FROM THE INVENTORY PICK PAGE DOES NOT CREATE INVENTORY PICK
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      MockLocation(Location,TRUE,TRUE,FALSE,FALSE); // Require Pick location
+      AddItemToInventory(CompItem,Location,Bin1,10);
+      AsmLine.GET(AsmHeader."Document Type",AsmHeader."No.",10000);
+      AsmLine.VALIDATE("Location Code",Location.Code);
+      AsmLine.VALIDATE("Bin Code",Bin2);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+
+      // create empty whse. activity header for inventory pick
+      CLEAR(WarehouseActivityHeader);
+      WarehouseActivityHeader.Type := WarehouseActivityHeader.Type::"Invt. Pick";
+      WarehouseActivityHeader.INSERT(TRUE);
+      WarehouseActivityHeader.VALIDATE("Location Code",Location.Code);
+      WarehouseActivityHeader.MODIFY(TRUE);
+      // create inventory pick from the inventory pick page
+      LibraryWarehouse.GetSourceDocInventoryPick(WarehouseActivityHeader); // throws Nothing to Handle message
+      WhseActivityLine.SETRANGE("Activity Type",WarehouseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WarehouseActivityHeader."No.");
+      Assert.AreEqual(0,WhseActivityLine.COUNT,'Count should be zero as no pick should have been created');
+
+      // ABOVE SCENARIO USING SAME COMP BIN AS BIN CONTENT
+      LibraryAssembly.ReopenAO(AsmHeader);
+      AsmLine.VALIDATE("Bin Code",Bin1);
+      AsmLine.MODIFY(TRUE);
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      // create inventory pick from the inventory pick page
+      LibraryWarehouse.GetSourceDocInventoryPick(WarehouseActivityHeader); // throws Nothing to Handle message
+      Assert.AreEqual(0,WhseActivityLine.COUNT,'Count should be zero as no pick should have been created');
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmUpdateLocationOnLines@10(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.IsTrue(STRPOS(Question,ConfirmUpdateLoc) > 0,STRSUBSTNO(MessageExpectedActual,ConfirmUpdateLoc,Question));
+      Reply := TRUE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmChangeOfAsmItemNo@13(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.IsTrue(STRPOS(Question,ConfirmItemNoChange) > 0,STRSUBSTNO(MessageExpectedActual,ConfirmItemNoChange,Question));
+
+      ConfirmChangeOfAsmItemNoCount += 1;
+      IF ConfirmChangeOfAsmItemNoCount = 1 THEN
+        Reply := FALSE
+      ELSE
+        Reply := TRUE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageNothingToCreate@18(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,MessageNothngToCreate) > 0,STRSUBSTNO(MessageExpectedActual,MessageNothngToCreate,Message));
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageNothingToHandle@29(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,MessageNothngToHandle) > 0,STRSUBSTNO(MessageExpectedActual,MessageNothngToCreate,Message));
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageInvtMovementCreated@20(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,MessageInvtMvmtCreated) > 0,STRSUBSTNO(MessageExpectedActual,MessageInvtMvmtCreated,Message));
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE FormSourceDocuments@24(VAR SourceDocuments@1000 : TestPage 5793);
+    VAR
+      WarehouseRequest@1002 : Record 5765;
+      RecordReached@1001 : Boolean;
+    BEGIN
+      WarehouseRequest.SETRANGE("Source Type",DATABASE::"Assembly Line");
+      WarehouseRequest.SETRANGE("Source Subtype",AsmHeader."Document Type");
+      WarehouseRequest.SETRANGE("Source No.",AsmHeader."No.");
+      WarehouseRequest.FINDFIRST;
+
+      SourceDocuments.FIRST;
+      IF (SourceDocuments."Source Document".ASINTEGER <> WarehouseRequest."Source Document") OR
+         (SourceDocuments."Source No.".VALUE <> WarehouseRequest."Source No.")
+      THEN BEGIN
+        RecordReached := FALSE;
+        WHILE NOT RecordReached DO BEGIN
+          Assert.IsTrue(SourceDocuments.NEXT,'');
+          IF (SourceDocuments."Source Document".ASINTEGER = WarehouseRequest."Source Document") AND
+             (SourceDocuments."Source No.".VALUE = WarehouseRequest."Source No.")
+          THEN
+            RecordReached := TRUE;
+        END;
+      END;
+
+      SourceDocuments.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AvailabilityWindowHandler@27(VAR AsmAvailability@1000 : TestPage 908);
+    BEGIN
+      AsmAvailability.Yes.INVOKE;
+    END;
+
+    [Test]
+    [HandlerFunctions(AvailabilityWindowHandler,ConfirmUpdateLocationOnLines,MessageInvtMovementCreated)]
+    PROCEDURE VSTF278221@30();
+    BEGIN
+      Initialize;
+      // create inventory pick location
+      MockLocation(Location,TRUE,TRUE,FALSE,FALSE); // Require Pick location
+      Location.VALIDATE("To-Assembly Bin Code",Bin1);
+      Location.VALIDATE("From-Assembly Bin Code",Bin3);
+      Location.MODIFY;
+      // Create asm order
+      MockAsmOrderWithComp(AsmHeader,AsmItem,CompItem,1);
+      AsmHeader.VALIDATE("Location Code",Location.Code);
+      AsmHeader.MODIFY;
+      // add items to inventory: both to the ToAsmBin as well as some other bin.
+      AddItemToInventory(CompItem,Location,Bin1,10);
+      AddItemToInventory(CompItem,Location,Bin2,10);
+      // create inventory movement for asm order- From Bin2 To ToAsmBin
+      LibraryAssembly.ReleaseAO(AsmHeader);
+      CreateInvtPickMvmt(FALSE,TRUE); // create movement
+      // now post the asm order- error expected
+      ASSERTERROR LibraryAssembly.PostAssemblyHeader(AsmHeader,'');
+      Assert.IsTrue(
+        STRPOS(GETLASTERRORTEXT,STRSUBSTNO(ErrWhseHandlingReqd,AsmHeader."No.",10000)) > 0,
+        STRSUBSTNO(MessageExpectedActual,STRSUBSTNO(ErrWhseHandlingReqd,AsmHeader."No.",10000),GETLASTERRORTEXT));
+    END;
+
+    [Test]
+    PROCEDURE DefaultBinCodeToBeFilledOnCarryoutAMForAsm@31();
+    VAR
+      ParentItem@1000 : Record 27;
+      CompItem@1001 : Record 27;
+      InventoryPostingGroup@1012 : Record 94;
+      BomComp@1002 : Record 90;
+      ToAsmBin@1005 : Record 7354;
+      FromAsmBin@1004 : Record 7354;
+      ReqLine@1006 : Record 246;
+      AsmHeader@1009 : Record 900;
+      AsmLine@1010 : Record 901;
+      CarryOutAction@1007 : Codeunit 99000813;
+      TrySourceType@1008 : ',,,Assembly';
+    BEGIN
+      // See VSTF 329733 for details
+      Initialize;
+
+      // SETUP : Make location with To and From Asm bins and make a req line for asm order
+      ParentItem."No." := LibraryUtility.GenerateRandomCode(ParentItem.FIELDNO("No."),DATABASE::Item);
+      ParentItem.INSERT;
+      CompItem."No." := LibraryUtility.GenerateRandomCode(CompItem.FIELDNO("No."),DATABASE::Item);
+      InventoryPostingGroup.FINDFIRST;
+      CompItem."Inventory Posting Group" := InventoryPostingGroup.Code;
+      CompItem.INSERT;
+      DefaultBinCodeToBeFilledSetupBOMLine(BomComp,ParentItem."No.",BomComp.Type::Item,CompItem."No.");
+
+      DefaultBinCodeToBeFilledSetupPlanningLine(ParentItem,BomComp,ToAsmBin,FromAsmBin,ReqLine);
+
+      // EXERCISE : call carry out action message on the above req line
+      CarryOutAction.SetTryParameters(TrySourceType::Assembly,0,'','');
+      CarryOutAction.RUN(ReqLine);
+
+      // VERIFY : in the asm header and lines created, the bin codes are the ones from location card.
+      AsmHeader.SETRANGE("Document Type",AsmHeader."Document Type"::Order);
+      AsmHeader.SETRANGE("Item No.",ParentItem."No.");
+      AsmHeader.FINDLAST;
+      Assert.AreEqual(FromAsmBin.Code,AsmHeader."Bin Code",'Bin Code on header matches From Asm bin');
+      AsmLine.SETRANGE("Document Type",AsmHeader."Document Type");
+      AsmLine.SETRANGE("Document No.",AsmHeader."No.");
+      AsmLine.FINDLAST;
+      Assert.AreEqual(ToAsmBin.Code,AsmLine."Bin Code",'Bin Code on line matches To Asm bin');
+    END;
+
+    [Test]
+    PROCEDURE DefaultBinCodeToBeFilledOnExplodingOfBOM@32();
+    VAR
+      ParentItem@1006 : Record 27;
+      CompItem@1005 : Record 27;
+      CompResource@1009 : Record 156;
+      InventoryPostingGroup@1004 : Record 94;
+      GenProdPostingGroup@1010 : Record 251;
+      BomComp@1003 : Record 90;
+      ToAsmBin@1002 : Record 7354;
+      FromAsmBin@1007 : Record 7354;
+      AsmHeader@1001 : Record 900;
+      AsmLine@1000 : Record 901;
+    BEGIN
+      // SETUP : Make location with To Asm bin and create the asm header
+      ParentItem."No." := LibraryUtility.GenerateRandomCode(ParentItem.FIELDNO("No."),DATABASE::Item);
+      ParentItem.INSERT;
+      CompItem."No." := LibraryUtility.GenerateRandomCode(CompItem.FIELDNO("No."),DATABASE::Item);
+      InventoryPostingGroup.FINDFIRST;
+      CompItem."Inventory Posting Group" := InventoryPostingGroup.Code;
+      CompItem.INSERT;
+      CompResource."No." := LibraryUtility.GenerateRandomCode(CompResource.FIELDNO("No."),DATABASE::Resource);
+      GenProdPostingGroup.FINDFIRST;
+      CompResource."Gen. Prod. Posting Group" := GenProdPostingGroup.Code;
+      CompResource.INSERT;
+      DefaultBinCodeToBeFilledSetupBOMLine(BomComp,ParentItem."No.",BomComp.Type::Item,CompItem."No.");
+      DefaultBinCodeToBeFilledSetupBOMLine(BomComp,ParentItem."No.",BomComp.Type::Resource,CompResource."No.");
+
+      DefaultBinCodeToBeFilledSetupLocation(ToAsmBin,FromAsmBin);
+
+      AsmHeader."Document Type" := AsmHeader."Document Type"::Order;
+      AsmHeader."Starting Date" := WORKDATE;
+      AsmHeader."Location Code" := ToAsmBin."Location Code";
+      AsmHeader."Quantity (Base)" := 1;
+      AsmHeader.INSERT;
+
+      // EXERCISE : Explode BOM on assembly order
+      AsmLine."Document Type" := AsmHeader."Document Type";
+      AsmLine."Document No." := AsmHeader."No.";
+      AsmLine."Line No." := 10000;
+      AsmLine.Type := AsmLine.Type::Item;
+      AsmLine."No." := ParentItem."No.";
+      AsmLine.INSERT;
+      AsmLine.ExplodeAssemblyList;
+
+      // VERIFY : Asm line has To asm bin filled in for item and blank for resource
+      AsmLine.SETRANGE("Document Type",AsmHeader."Document Type");
+      AsmLine.SETRANGE("Document No.",AsmHeader."No.");
+      AsmLine.SETRANGE(Type,AsmLine.Type::Item);
+      AsmLine.FINDLAST;
+      Assert.AreEqual(ToAsmBin.Code,AsmLine."Bin Code",'Bin Code on line matches To Asm bin');
+      AsmLine.SETRANGE(Type,AsmLine.Type::Resource);
+      AsmLine.FINDLAST;
+      Assert.AreEqual('',AsmLine."Bin Code",'Bin Code on resource line matches blank');
+    END;
+
+    [Test]
+    PROCEDURE DefaultBinCodeNotToBeFilledForResourceComponent@33();
+    VAR
+      ParentItem@1010 : Record 27;
+      CompResource@1009 : Record 156;
+      GenProdPostingGroup@1008 : Record 251;
+      BomComp@1007 : Record 90;
+      ToAsmBin@1006 : Record 7354;
+      FromAsmBin@1005 : Record 7354;
+      ReqLine@1004 : Record 246;
+      AsmHeader@1003 : Record 900;
+      AsmLine@1002 : Record 901;
+      CarryOutAction@1001 : Codeunit 99000813;
+      TrySourceType@1000 : ',,,Assembly';
+    BEGIN
+      Initialize;
+
+      // SETUP : Make location with To and From Asm bins and make a req line for asm order
+      ParentItem."No." := LibraryUtility.GenerateRandomCode(ParentItem.FIELDNO("No."),DATABASE::Item);
+      ParentItem.INSERT;
+      CompResource."No." := LibraryUtility.GenerateRandomCode(CompResource.FIELDNO("No."),DATABASE::Resource);
+      GenProdPostingGroup.FINDFIRST;
+      CompResource."Gen. Prod. Posting Group" := GenProdPostingGroup.Code;
+      CompResource.INSERT;
+      DefaultBinCodeToBeFilledSetupBOMLine(BomComp,ParentItem."No.",BomComp.Type::Resource,CompResource."No.");
+
+      DefaultBinCodeToBeFilledSetupPlanningLine(ParentItem,BomComp,ToAsmBin,FromAsmBin,ReqLine);
+
+      // EXERCISE : call carry out action message on the above req line
+      CarryOutAction.SetTryParameters(TrySourceType::Assembly,0,'','');
+      CarryOutAction.RUN(ReqLine);
+
+      // VERIFY : in the asm header created, the bin code is the one from location card.
+      AsmHeader.SETRANGE("Document Type",AsmHeader."Document Type"::Order);
+      AsmHeader.SETRANGE("Item No.",ParentItem."No.");
+      AsmHeader.FINDLAST;
+      Assert.AreEqual(FromAsmBin.Code,AsmHeader."Bin Code",'Bin Code on header matches From Asm bin');
+      // VERIFY : in the asm line created, the bin code is blank as this is a resource line
+      AsmLine.SETRANGE("Document Type",AsmHeader."Document Type");
+      AsmLine.SETRANGE("Document No.",AsmHeader."No.");
+      AsmLine.FINDLAST;
+      Assert.AreEqual('',AsmLine."Bin Code",'Bin Code on resource line matches blank');
+    END;
+
+    LOCAL PROCEDURE DefaultBinCodeToBeFilledSetupBOMLine@45(VAR BomComp@1000 : Record 90;ParentItem@1004 : Code[20];Type@1001 : Option;No@1002 : Code[20]);
+    VAR
+      RecRef@1003 : RecordRef;
+    BEGIN
+      BomComp."Parent Item No." := ParentItem;
+      RecRef.GETTABLE(BomComp);
+      BomComp."Line No." := LibraryUtility.GetNewLineNo(RecRef,BomComp.FIELDNO("Line No."));
+      BomComp.Type := Type;
+      BomComp."No." := No;
+      BomComp."Quantity per" := 1;
+      BomComp.INSERT;
+    END;
+
+    LOCAL PROCEDURE DefaultBinCodeToBeFilledSetupPlanningLine@57(ParentItem@1005 : Record 27;BomComp@1006 : Record 90;VAR ToAsmBin@1002 : Record 7354;VAR FromAsmBin@1001 : Record 7354;VAR ReqLine@1000 : Record 246);
+    VAR
+      PlanningComponent@1003 : Record 99000829;
+    BEGIN
+      DefaultBinCodeToBeFilledSetupLocation(ToAsmBin,FromAsmBin);
+
+      ReqLine."Action Message" := ReqLine."Action Message"::New;
+      ReqLine."Starting Date" := WORKDATE;
+      ReqLine.Type := ReqLine.Type::Item;
+      ReqLine."No." := ParentItem."No.";
+      ReqLine."Location Code" := ToAsmBin."Location Code";
+      ReqLine."Quantity (Base)" := 2;
+      ReqLine.INSERT;
+
+      IF BomComp.Type <> BomComp.Type::Item THEN
+        EXIT;
+      PlanningComponent.INIT;
+      PlanningComponent."Item No." := BomComp."No.";
+      PlanningComponent."Quantity (Base)" := ReqLine."Quantity (Base)" * BomComp."Quantity per";
+      PlanningComponent."Qty. per Unit of Measure" := 1;
+      PlanningComponent."Location Code" := Location.Code;
+      PlanningComponent.INSERT;
+    END;
+
+    LOCAL PROCEDURE DefaultBinCodeToBeFilledSetupLocation@43(VAR ToAsmBin@1000 : Record 7354;VAR FromAsmBin@1001 : Record 7354);
+    BEGIN
+      Location.Code := LibraryUtility.GenerateRandomCode(Location.FIELDNO(Code),DATABASE::Location);
+      Location."Bin Mandatory" := TRUE;
+      ToAsmBin."Location Code" := Location.Code;
+      ToAsmBin.Code := LibraryUtility.GenerateRandomCode(ToAsmBin.FIELDNO(Code),DATABASE::Bin);
+      ToAsmBin.INSERT;
+      Location."To-Assembly Bin Code" := ToAsmBin.Code;
+      FromAsmBin."Location Code" := Location.Code;
+      FromAsmBin.Code := LibraryUtility.GenerateRandomCode(FromAsmBin.FIELDNO(Code),DATABASE::Bin);
+      FromAsmBin.INSERT;
+      Location."From-Assembly Bin Code" := FromAsmBin.Code;
+      Location.INSERT;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Assembly] [Warehouse] [SCM]
+      Unsupported version tags:
+      NZ: Unable to Execute
+      SE: Unable to Execute
+    }
+    END.
+  }
+}
+

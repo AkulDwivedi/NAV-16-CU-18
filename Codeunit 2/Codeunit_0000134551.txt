@@ -1,0 +1,1746 @@
+OBJECT Codeunit 134551 ERM Cash Flow Filling I
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 21=m,
+                TableData 25=m;
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryRandom@1000 : Codeunit 130440;
+      LibraryERM@1003 : Codeunit 131300;
+      LibrarySales@1004 : Codeunit 130509;
+      LibraryPurchase@1005 : Codeunit 130512;
+      LibraryInventory@1170000000 : Codeunit 132201;
+      CFHelper@1007 : Codeunit 131332;
+      LibraryCF@1009 : Codeunit 131331;
+      LibraryUtility@1012 : Codeunit 131000;
+      LibraryDimension@1019 : Codeunit 131001;
+      Assert@1011 : Codeunit 130000;
+      IsInitialized@1008 : Boolean;
+      DocumentType@1002 : 'Sale,Purchase,Service';
+      DateFieldOption@1001 : 'DueDate,DiscountDate';
+      UnsupportedDateField@1006 : TextConst 'ENU=''Unsupported Date Field Option: %1''';
+      SourceType@1010 : ' ,Receivables,Payables,Liquid Funds,Cash Flow Manual Expense,Cash Flow Manual Revenue,Sales Orders,Purchase Orders,Fixed Assets Budget,Fixed Assets Disposal,Service Orders,G/L Budget';
+      AmountError@1014 : TextConst '@@@="%1 = Expected Amount %2 = Actual Amount.";ENU=%1 must be equal to %2.';
+      NoLinesForAppliedPrepaymentErr@1015 : TextConst 'ENU=There should not be any %1 for the posted Prepayment Invoice.';
+      CFSourceExistsInJnlErr@1016 : TextConst 'ENU=%1 exists in Cash Flow Journal.';
+      ManualPmtRevExpNeedsUpdateMsg@1017 : TextConst 'ENU=There are one or more Cash Flow Manual Revenues/Expenses with a Recurring Frequency';
+      UnexpectedMessageErr@1018 : TextConst 'ENU=Unexpected message.';
+
+    [Test]
+    PROCEDURE FillCFJnlWithManRevenue@1();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      CFManualRevenue@1001 : Record 849;
+      CFWorksheetLine@1004 : Record 846;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal using Fill batch with a manual revenue
+      // and verify computed due and cash flow date
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CFHelper.CreateManualRevenue(CFManualRevenue);
+
+      // Exercise
+      ConsiderSource[SourceType::"Cash Flow Manual Revenue"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,CFManualRevenue.Code,SourceType::"Cash Flow Manual Revenue",
+        CashFlowForecast."No.",CFManualRevenue.Amount,CFManualRevenue."Starting Date");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithManExpense@2();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      CFManualExpense@1001 : Record 850;
+      CFWorksheetLine@1004 : Record 846;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal using Fill batch with a manual expense
+      // and verify computed due and cash flow date
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CFHelper.CreateManualPayment(CFManualExpense);
+
+      // Exercise
+      ConsiderSource[SourceType::"Cash Flow Manual Expense"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,CFManualExpense.Code,SourceType::"Cash Flow Manual Expense",
+        CashFlowForecast."No.",-CFManualExpense.Amount,CFManualExpense."Starting Date");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithManRevenueOutOfDate@40();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      CFManualRevenue@1001 : ARRAY [2] OF Record 849;
+      CFWorksheetLine@1004 : Record 846;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+      i@1003 : Integer;
+    BEGIN
+      // Test filling a CF journal using Fill batch with a manual revenue out of forecast date
+      // and verify that it does not exist in journal
+
+      // Setup
+      Initialize;
+      CreateCashFlowForecastDefaultWithManualPmtDates(CashFlowForecast,WORKDATE,CALCDATE('<1M>',WORKDATE));
+      CreateManualRevenueWithStartingDate(CFManualRevenue[1],CALCDATE('<-1D>',CashFlowForecast."Manual Payments From"));
+      CreateManualRevenueWithStartingDate(CFManualRevenue[2],CALCDATE('<+1D>',CashFlowForecast."Manual Payments To"));
+
+      // Exercise
+      ConsiderSource[SourceType::"Cash Flow Manual Revenue"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      FOR i := 1 TO ARRAYLEN(CFManualRevenue) DO
+        Assert.AreEqual(
+          0,
+          CFHelper.FilterSingleJournalLine(
+            CFWorksheetLine,CFManualRevenue[i].Code,SourceType::"Cash Flow Manual Revenue",CashFlowForecast."No."),
+          STRSUBSTNO(CFSourceExistsInJnlErr,SourceType::"Cash Flow Manual Revenue"));
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithManExpenseOutOfDate@32();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      CFManualExpense@1001 : ARRAY [2] OF Record 850;
+      CFWorksheetLine@1004 : Record 846;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+      i@1003 : Integer;
+    BEGIN
+      // Test filling a CF journal using Fill batch with a manual expense out of forecast date
+      // and verify that it does not exist in journal
+
+      // Setup
+      Initialize;
+      CreateCashFlowForecastDefaultWithManualPmtDates(CashFlowForecast,WORKDATE,CALCDATE('<1M>',WORKDATE));
+      CreateManualExpenseWithStartingDate(CFManualExpense[1],CALCDATE('<-1D>',CashFlowForecast."Manual Payments From"));
+      CreateManualExpenseWithStartingDate(CFManualExpense[2],CALCDATE('<+1D>',CashFlowForecast."Manual Payments To"));
+
+      // Exercise
+      ConsiderSource[SourceType::"Cash Flow Manual Expense"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      FOR i := 1 TO ARRAYLEN(CFManualExpense) DO
+        Assert.AreEqual(
+          0,
+          CFHelper.FilterSingleJournalLine(
+            CFWorksheetLine,CFManualExpense[i].Code,SourceType::"Cash Flow Manual Expense",CashFlowForecast."No."),
+          STRSUBSTNO(CFSourceExistsInJnlErr,SourceType::"Cash Flow Manual Expense"));
+    END;
+
+    [Test]
+    [HandlerFunctions(ManPmtRevExptNeedsUpdateMessageHandler)]
+    PROCEDURE FillCFJnlWithManRevenueWithoutManPmtToDate@107();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      CFManualRevenue@1001 : Record 849;
+      CFWorksheetLine@1004 : Record 846;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal using Fill batch with a manual revenue out of forecast date
+      // and verify that it does not exist in journal
+
+      // Setup
+      Initialize;
+      CreateCashFlowForecastDefaultWithManualPmtDates(CashFlowForecast,WORKDATE,0D);
+      CreateManualRevenueWithStartingDate(CFManualRevenue,CashFlowForecast."Manual Payments From");
+
+      // Exercise
+      ConsiderSource[SourceType::"Cash Flow Manual Revenue"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      Assert.AreEqual(
+        1,
+        CFHelper.FilterSingleJournalLine(
+          CFWorksheetLine,CFManualRevenue.Code,SourceType::"Cash Flow Manual Revenue",CashFlowForecast."No."),
+        STRSUBSTNO(CFSourceExistsInJnlErr,SourceType::"Cash Flow Manual Revenue"));
+    END;
+
+    [Test]
+    [HandlerFunctions(ManPmtRevExptNeedsUpdateMessageHandler)]
+    PROCEDURE FillCFJnlWithManExpenseWithoutManPmtToDate@105();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      CFManualExpense@1001 : Record 850;
+      CFWorksheetLine@1004 : Record 846;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal using Fill batch with a manual expense out of forecast date
+      // and verify that it does not exist in journal
+
+      // Setup
+      Initialize;
+      CreateCashFlowForecastDefaultWithManualPmtDates(CashFlowForecast,WORKDATE,0D);
+      CreateManualExpenseWithStartingDate(CFManualExpense,CashFlowForecast."Manual Payments From");
+
+      // Exercise
+      ConsiderSource[SourceType::"Cash Flow Manual Expense"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify: Check text message in ManPmtRevExptNeedsUpdateMessageHandler
+      Assert.AreEqual(
+        1,
+        CFHelper.FilterSingleJournalLine(
+          CFWorksheetLine,CFManualExpense.Code,SourceType::"Cash Flow Manual Expense",CashFlowForecast."No."),
+        STRSUBSTNO(CFSourceExistsInJnlErr,SourceType::"Cash Flow Manual Expense"));
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithSalesOrder@3();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      SalesHeader@1001 : Record 36;
+      CFWorksheetLine@1004 : Record 846;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a 3-line sales order
+      // and verify computed due and cash flow date
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CFHelper.CreateDefaultSalesOrder(SalesHeader);
+
+      // Exercise
+      ConsiderSource[SourceType::"Sales Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,SalesHeader."No.",SourceType::"Sales Orders",
+        CashFlowForecast."No.",CFHelper.GetTotalSalesAmount(SalesHeader,FALSE),SalesHeader."Due Date");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithPurchOrder@4();
+    VAR
+      CashFlowForecast@1004 : Record 840;
+      PurchaseHeader@1003 : Record 38;
+      CFWorksheetLine@1002 : Record 846;
+      ConsiderSource@1000 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a 3-line purchase order
+      // and verify computed due and cash flow date
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CFHelper.CreateDefaultPurchaseOrder(PurchaseHeader);
+
+      // Exercise
+      ConsiderSource[SourceType::"Purchase Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,PurchaseHeader."No.",SourceType::"Purchase Orders",
+        CashFlowForecast."No.",-CFHelper.GetTotalPurchaseAmount(PurchaseHeader,FALSE),PurchaseHeader."Due Date");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithServiceOrder@5();
+    VAR
+      CashFlowForecast@1004 : Record 840;
+      ServiceHeader@1003 : Record 5900;
+      CFWorksheetLine@1002 : Record 846;
+      ConsiderSource@1000 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a 3-line service order
+      // and verify computed due and cash flow date
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CFHelper.CreateDefaultServiceOrder(ServiceHeader);
+
+      // Exercise
+      ConsiderSource[SourceType::"Service Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,ServiceHeader."No.",SourceType::"Service Orders",
+        CashFlowForecast."No.",CFHelper.GetTotalServiceAmount(ServiceHeader,FALSE),ServiceHeader."Document Date");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithCustomerLE@6();
+    VAR
+      CashFlowForecast@1004 : Record 840;
+      SalesHeader@1003 : Record 36;
+      CFWorksheetLine@1002 : Record 846;
+      CustLedgerEntry@1006 : Record 21;
+      ConsiderSource@1000 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a single customer ledger entry
+      // Verify computed due and cash flow date
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CFHelper.CreateDefaultSalesOrder(SalesHeader);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      CFHelper.FindFirstCustLEFromSO(CustLedgerEntry,SalesHeader."No.");
+
+      // Exercise
+      ConsiderSource[SourceType::Receivables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CustLedgerEntry.CALCFIELDS("Amount (LCY)");
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,CustLedgerEntry."Document No.",SourceType::Receivables,
+        CashFlowForecast."No.",CustLedgerEntry."Amount (LCY)",CustLedgerEntry."Due Date");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithVendorLE@7();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      PurchaseHeader@1001 : Record 38;
+      CFWorksheetLine@1007 : Record 846;
+      VendorLedgerEntry@1006 : Record 25;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a single vendor ledger entry
+      // Verify computed due and cash flow date
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CFHelper.CreateDefaultPurchaseOrder(PurchaseHeader);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      CFHelper.FindFirstVendorLEFromPO(VendorLedgerEntry,PurchaseHeader."No.");
+
+      // Exercise
+      ConsiderSource[SourceType::Payables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      VendorLedgerEntry.CALCFIELDS("Amount (LCY)");
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,VendorLedgerEntry."Document No.",SourceType::Payables,
+        CashFlowForecast."No.",VendorLedgerEntry."Amount (LCY)",VendorLedgerEntry."Due Date");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlFixedAssetAquisition@26();
+    VAR
+      CashFlowForecast@1005 : Record 840;
+      FixedAsset@1004 : Record 5600;
+      CFWorksheetLine@1001 : Record 846;
+      FASetup@1006 : Record 5603;
+      ExpectedDueAndCFDate@1000 : Date;
+      InvestmentAmount@1002 : Decimal;
+      FAPostingDateFormula@1010 : DateFormula;
+      ConsiderSource@1003 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with budgeted fixed asset acquisition costs (planned FA investment)
+      // Verify due and CF date match the posting date of the FA acquisition journal
+
+      // Setup
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      InvestmentAmount := LibraryRandom.RandDec(2000,2);
+      EVALUATE(FAPostingDateFormula,'<1M>');
+      FASetup.GET;
+      CFHelper.CreateFixedAssetForInvestment(FixedAsset,FASetup."Default Depr. Book",FAPostingDateFormula,InvestmentAmount);
+      ExpectedDueAndCFDate := CALCDATE(FAPostingDateFormula,WORKDATE);
+
+      // Exercise
+      ConsiderSource[SourceType::"Fixed Assets Budget"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,FixedAsset."No.",SourceType::"Fixed Assets Budget",
+        CashFlowForecast."No.",-InvestmentAmount,ExpectedDueAndCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlFixedAssetDisposal@27();
+    VAR
+      CashFlowForecast@1003 : Record 840;
+      FixedAsset@1000 : Record 5600;
+      CFWorksheetLine@1004 : Record 846;
+      FASetup@1008 : Record 5603;
+      ExpectedDueAndCFDate@1005 : Date;
+      ExpectedDisposalDateFormula@1001 : DateFormula;
+      DeprecStartDateFormula@1002 : DateFormula;
+      DeprecEndDateFormula@1006 : DateFormula;
+      ExpectedDisposalAmount@1007 : Decimal;
+      ConsiderSource@1009 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with planned sale of fixed asset
+      // Verify due and CF date match the planned disposal date
+
+      // Setup
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      EVALUATE(DeprecStartDateFormula,'<-2Y>');
+      EVALUATE(DeprecEndDateFormula,'<1M-D5>');
+      EVALUATE(ExpectedDisposalDateFormula,'<1M+1W-WD1>');
+      ExpectedDisposalAmount := LibraryRandom.RandDec(2000,2);
+      FASetup.GET;
+      CFHelper.CreateFixedAssetForDisposal(FixedAsset,FASetup."Default Depr. Book",DeprecStartDateFormula,DeprecEndDateFormula,
+        ExpectedDisposalDateFormula,ExpectedDisposalAmount);
+      ExpectedDueAndCFDate := CALCDATE(ExpectedDisposalDateFormula,WORKDATE);
+
+      // Exercise
+      ConsiderSource[SourceType::"Fixed Assets Disposal"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,FixedAsset."No.",SourceType::"Fixed Assets Disposal",
+        CashFlowForecast."No.",ExpectedDisposalAmount,ExpectedDueAndCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlSODiscount@9();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      SalesHeader@1001 : Record 36;
+      CFWorksheetLine@1004 : Record 846;
+      PaymentTerms@1002 : Record 3;
+      ExpectedAmount@1006 : Decimal;
+      ConsiderSource@1003 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted 3-line sales order
+      // Verify computed due and cash flow date, discounted amount and discount percentage
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscount(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificSalesOrder(SalesHeader,PaymentTerms.Code,'');
+      ExpectedAmount := CFHelper.GetTotalSalesAmount(SalesHeader,TRUE);
+
+      // Exercise
+      ConsiderSource[SourceType::"Sales Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,SalesHeader."No.",SourceType::"Sales Orders",
+        CashFlowForecast."No.",ExpectedAmount,CALCDATE(PaymentTerms."Discount Date Calculation",SalesHeader."Document Date"));
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlSOCFPmtTerms@10();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      SalesHeader@1001 : Record 36;
+      CFWorksheetLine@1004 : Record 846;
+      PaymentTerms@1002 : Record 3;
+      ExpectedCFDate@1006 : Date;
+      ExpectedAmount@1007 : Decimal;
+      ConsiderSource@1003 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a 3-line sales order where customer has
+      // CF payment terms set. Verify computed due and cash flow date and discounted amount
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderCFPmtTerms(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificSalesOrder(SalesHeader,'',PaymentTerms.Code);
+      // set expected values considering only CF payment terms
+      CFHelper.SetExpectedDsctAPmtTermValues(DocumentType::Sale,SalesHeader."No.",
+        SalesHeader."Sell-to Customer No.",SalesHeader."Document Date",FALSE,
+        ExpectedCFDate,ExpectedAmount);
+
+      // Exercise
+      ConsiderSource[SourceType::"Sales Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify - passing 0 as expected discount amount since discount is not considered on the CF card
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,SalesHeader."No.",SourceType::"Sales Orders",
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlSODsctAndCFPmtTerms@11();
+    VAR
+      CashFlowForecast@1007 : Record 840;
+      SalesHeader@1006 : Record 36;
+      CFWorksheetLine@1005 : Record 846;
+      PaymentTerms@1002 : Record 3;
+      PaymentTerms2@1004 : Record 3;
+      ExpectedCFDate@1000 : Date;
+      ExpectedAmount@1003 : Decimal;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted 3-line sales order
+      // where customer has CF payment terms set. Verify computed due and cash flow date and discounted amount
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscountAndCFPmtTerms(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms); // default pmt terms
+      CFHelper.GetDifferentDsctPaymentTerms(PaymentTerms2,PaymentTerms.Code); // cf pmt terms
+      CFHelper.CreateSpecificSalesOrder(SalesHeader,PaymentTerms.Code,PaymentTerms2.Code);
+      // set expected vales considering CF payment terms and line discount
+      CFHelper.SetExpectedDsctAPmtTermValues(DocumentType::Sale,SalesHeader."No.",
+        SalesHeader."Sell-to Customer No.",SalesHeader."Document Date",TRUE,
+        ExpectedCFDate,ExpectedAmount);
+
+      // Exercise
+      ConsiderSource[SourceType::"Sales Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,SalesHeader."No.",SourceType::"Sales Orders",
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlSOPmtDscTolDate@12();
+    VAR
+      CashFlowForecast@1006 : Record 840;
+      SalesHeader@1005 : Record 36;
+      GeneralLedgerSetup@1004 : Record 98;
+      CFWorksheetLine@1003 : Record 846;
+      PaymentTerms@1008 : Record 3;
+      ExpectedCFDate@1000 : Date;
+      PmtDiscountGracePeriod@1007 : DateFormula;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a 3-line sales order
+      // and a payment discount grace period set. Verify computed due and cash flow date and discounted amount
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscount(CashFlowForecast);
+      CFHelper.SetPmtToleranceOptionsOnCashFlowForecast(CashFlowForecast,TRUE,FALSE);
+      GeneralLedgerSetup.GET;
+      CFHelper.CreateRandomDateFormula(PmtDiscountGracePeriod);
+      CFHelper.SetupPmtDsctGracePeriod(PmtDiscountGracePeriod);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificSalesOrder(SalesHeader,PaymentTerms.Code,'');
+      ExpectedCFDate :=
+        CALCDATE(PaymentTerms."Discount Date Calculation",
+          CALCDATE(PmtDiscountGracePeriod,SalesHeader."Document Date"));
+
+      // Exercise
+      ConsiderSource[SourceType::"Sales Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.FilterSingleJournalLine(CFWorksheetLine,SalesHeader."No.",SourceType::"Sales Orders",CashFlowForecast."No.");
+      CFHelper.VerifyCFDateOnCFJnlLine(CFWorksheetLine,ExpectedCFDate);
+
+      // Tear down
+      CFHelper.SetupPmtDsctGracePeriod(GeneralLedgerSetup."Payment Discount Grace Period");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlCustLEDiscount@13();
+    VAR
+      PaymentTerms@1000 : Record 3;
+      CashFlowForecast@1007 : Record 840;
+      SalesHeader@1006 : Record 36;
+      CFWorksheetLine@1004 : Record 846;
+      CustLedgerEntry@1003 : Record 21;
+      ExpectedAmount@1009 : Decimal;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted single customer ledger entry
+      // Verify computed due and cash flow date, discounted amount and discount percentage
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscount(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificSalesOrder(SalesHeader,PaymentTerms.Code,'');
+      ExpectedAmount := CFHelper.GetTotalSalesAmount(SalesHeader,TRUE);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      CFHelper.FindFirstCustLEFromSO(CustLedgerEntry,SalesHeader."No.");
+
+      // Exercise
+      ConsiderSource[SourceType::Receivables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,CustLedgerEntry."Document No.",SourceType::Receivables,
+        CashFlowForecast."No.",ExpectedAmount,CustLedgerEntry."Pmt. Discount Date");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlCustLEPmtTerms@14();
+    VAR
+      CashFlowForecast@1011 : Record 840;
+      SalesHeader@1010 : Record 36;
+      CFWorksheetLine@1008 : Record 846;
+      CustLedgerEntry@1007 : Record 21;
+      PaymentTerms@1002 : Record 3;
+      ExpectedCFDate@1003 : Date;
+      ExpectedAmount@1001 : Decimal;
+      ConsiderSource@1000 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a single customer ledger entry
+      // where customer CF payment terms are set.
+      // Verify computed due and cash flow date, discounted amount and discount percentage
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderCFPmtTerms(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificSalesOrder(SalesHeader,'',PaymentTerms.Code);
+
+      // Set expected values
+      CFHelper.SetExpectedDsctAPmtTermValues(DocumentType::Sale,SalesHeader."No.",SalesHeader."Sell-to Customer No.",
+        SalesHeader."Posting Date",FALSE,ExpectedCFDate,ExpectedAmount);
+
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      CFHelper.FindFirstCustLEFromSO(CustLedgerEntry,SalesHeader."No.");
+
+      // Exercise
+      ConsiderSource[SourceType::Receivables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,CustLedgerEntry."Document No.",SourceType::Receivables,
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlCustLEDsctCFPmtTerms@15();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      CustLedgerEntry@1001 : Record 21;
+      SalesHeader@1002 : Record 36;
+      CFWorksheetLine@1007 : Record 846;
+      PaymentTerms@1003 : Record 3;
+      PaymentTerms2@1005 : Record 3;
+      ExpectedCFDate@1006 : Date;
+      ExpectedAmount@1008 : Decimal;
+      ConsiderSource@1004 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted single customer ledger entry
+      // and customer CF payment terms set. Verify computed due and cash flow date, discounted amount and discount percentage
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscountAndCFPmtTerms(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.GetDifferentDsctPaymentTerms(PaymentTerms2,PaymentTerms.Code);
+      CFHelper.CreateSpecificSalesOrder(SalesHeader,PaymentTerms.Code,PaymentTerms2.Code);
+      CFHelper.SetExpectedDsctAPmtTermValues(DocumentType::Sale,SalesHeader."No.",
+        SalesHeader."Sell-to Customer No.",SalesHeader."Posting Date",TRUE,
+        ExpectedCFDate,ExpectedAmount);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      CFHelper.FindFirstCustLEFromSO(CustLedgerEntry,SalesHeader."No.");
+
+      // Exercise
+      ConsiderSource[SourceType::Receivables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,CustLedgerEntry."Document No.",SourceType::Receivables,
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlVendorLEDiscount@16();
+    VAR
+      CashFlowForecast@1007 : Record 840;
+      PurchaseHeader@1006 : Record 38;
+      CFWorksheetLine@1004 : Record 846;
+      VendorLedgerEntry@1003 : Record 25;
+      PaymentTerms@1000 : Record 3;
+      ExpectedAmount@1009 : Decimal;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted single vendor ledger entry
+      // Verify computed due and cash flow date, discounted amount and discount percentage
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscount(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificPurchaseOrder(PurchaseHeader,PaymentTerms.Code,'');
+      ExpectedAmount := -CFHelper.GetTotalPurchaseAmount(PurchaseHeader,TRUE);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      CFHelper.FindFirstVendorLEFromPO(VendorLedgerEntry,PurchaseHeader."No.");
+
+      // Exercise
+      ConsiderSource[SourceType::Payables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,VendorLedgerEntry."Document No.",SourceType::Payables,
+        CashFlowForecast."No.",ExpectedAmount,VendorLedgerEntry."Pmt. Discount Date");
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlVendorLECFPmtTerms@17();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      PurchaseHeader@1001 : Record 38;
+      VendorLedgerEntry@1003 : Record 25;
+      CFWorksheetLine@1004 : Record 846;
+      PaymentTerms@1002 : Record 3;
+      ExpectedCFDate@1006 : Date;
+      ExpectedAmount@1007 : Decimal;
+      ConsiderSource@1005 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a single vendor ledger entry where vendor has
+      // CF payment terms set. Verify computed due, cash flow date and expected amount
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderCFPmtTerms(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificPurchaseOrder(PurchaseHeader,'',PaymentTerms.Code);
+
+      // Set expected values
+      CFHelper.SetExpectedDsctAPmtTermValues(DocumentType::Purchase,PurchaseHeader."No.",
+        PurchaseHeader."Buy-from Vendor No.",PurchaseHeader."Posting Date",FALSE,
+        ExpectedCFDate,ExpectedAmount);
+
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      CFHelper.FindFirstVendorLEFromPO(VendorLedgerEntry,PurchaseHeader."No.");
+
+      // Exercise
+      ConsiderSource[SourceType::Payables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,VendorLedgerEntry."Document No.",SourceType::Payables,
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlVendorLEDsctCFPmtTerm@18();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      VendorLedgerEntry@1001 : Record 25;
+      PurchaseHeader@1002 : Record 38;
+      CFWorksheetLine@1007 : Record 846;
+      PaymentTerms@1003 : Record 3;
+      PaymentTerms2@1005 : Record 3;
+      ExpectedCFDate@1006 : Date;
+      ExpectedAmount@1008 : Decimal;
+      ConsiderSource@1004 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted single vendor ledger entry
+      // and vendor CF payment terms set. Verify computed due and cash flow date, discounted amount and discount percentage
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscountAndCFPmtTerms(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.GetDifferentDsctPaymentTerms(PaymentTerms2,PaymentTerms.Code);
+      CFHelper.CreateSpecificPurchaseOrder(PurchaseHeader,PaymentTerms.Code,PaymentTerms2.Code);
+      CFHelper.SetExpectedDsctAPmtTermValues(DocumentType::Purchase,PurchaseHeader."No.",
+        PurchaseHeader."Buy-from Vendor No.",PurchaseHeader."Posting Date",TRUE,
+        ExpectedCFDate,ExpectedAmount);
+
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      CFHelper.FindFirstVendorLEFromPO(VendorLedgerEntry,PurchaseHeader."No.");
+
+      // Exercise
+      ConsiderSource[SourceType::Payables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,VendorLedgerEntry."Document No.",SourceType::Payables,
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlPODiscount@19();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      PurchaseHeader@1001 : Record 38;
+      CFWorksheetLine@1004 : Record 846;
+      PaymentTerms@1005 : Record 3;
+      ExpectedAmount@1006 : Decimal;
+      ExpectedCFDate@1003 : Date;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted 3-line purchase order
+      // Verify computed due and cash flow date, discounted amount and discount percentage
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscount(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificPurchaseOrder(PurchaseHeader,PaymentTerms.Code,'');
+      ExpectedAmount := -CFHelper.GetTotalPurchaseAmount(PurchaseHeader,TRUE);
+      ExpectedCFDate := PurchaseHeader."Pmt. Discount Date";
+
+      // Exercise
+      ConsiderSource[SourceType::"Purchase Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,PurchaseHeader."No.",SourceType::"Purchase Orders",
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlPOCFPmtTerms@20();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      PurchaseHeader@1001 : Record 38;
+      CFWorksheetLine@1004 : Record 846;
+      PaymentTerms@1002 : Record 3;
+      ExpectedCFDate@1006 : Date;
+      ExpectedAmount@1007 : Decimal;
+      ConsiderSource@1003 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a 3-line purchase order where vendor has
+      // CF payment terms set. Verify computed due and cash flow date and non-discounted amount
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderCFPmtTerms(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificPurchaseOrder(PurchaseHeader,'',PaymentTerms.Code);
+      CFHelper.SetExpectedDsctAPmtTermValues(DocumentType::Purchase,PurchaseHeader."No.",
+        PurchaseHeader."Buy-from Vendor No.",PurchaseHeader."Document Date",FALSE,
+        ExpectedCFDate,ExpectedAmount);
+
+      // Exercise
+      ConsiderSource[SourceType::"Purchase Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,PurchaseHeader."No.",SourceType::"Purchase Orders",
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlPODsctAndCFPmtTerms@21();
+    VAR
+      CashFlowForecast@1007 : Record 840;
+      PurchaseHeader@1006 : Record 38;
+      CFWorksheetLine@1005 : Record 846;
+      PaymentTerms@1002 : Record 3;
+      PaymentTerms2@1008 : Record 3;
+      ExpectedCFDate@1000 : Date;
+      ExpectedAmount@1004 : Decimal;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted 3-line purchase order where vendor has
+      // CF payment terms set. Verify computed due and cash flow date and discounted amount
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscountAndCFPmtTerms(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.GetDifferentDsctPaymentTerms(PaymentTerms2,PaymentTerms.Code);
+      CFHelper.CreateSpecificPurchaseOrder(PurchaseHeader,PaymentTerms.Code,PaymentTerms2.Code);
+      CFHelper.SetExpectedDsctAPmtTermValues(DocumentType::Purchase,PurchaseHeader."No.",
+        PurchaseHeader."Buy-from Vendor No.",PurchaseHeader."Document Date",TRUE,
+        ExpectedCFDate,ExpectedAmount);
+
+      // Exercise
+      ConsiderSource[SourceType::"Purchase Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,PurchaseHeader."No.",SourceType::"Purchase Orders",
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlSvcDiscount@22();
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      ServiceHeader@1001 : Record 5900;
+      CFWorksheetLine@1004 : Record 846;
+      PaymentTerms@1005 : Record 3;
+      ExpectedAmount@1006 : Decimal;
+      ExpectedCFDate@1003 : Date;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted 3-line service order
+      // Verify computed due and cash flow date, discounted amount and order discount percentage
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastConsiderDiscount(CashFlowForecast);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      CFHelper.CreateSpecificServiceOrder(ServiceHeader,PaymentTerms.Code,'');
+      ExpectedAmount := CFHelper.GetTotalServiceAmount(ServiceHeader,TRUE);
+      ExpectedCFDate := ServiceHeader."Pmt. Discount Date";
+
+      // Exercise
+      ConsiderSource[SourceType::"Service Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,ServiceHeader."No.",SourceType::"Service Orders",
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlSvcCFPmtTerms@23();
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a 3-line service order where vendor has
+      // CF payment terms set. Verify computed due and cash flow date and the full order amount
+      FillCFJnlSvcOrderWithCFPmtTerms(FALSE,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlSvcDsctAndCFPmtTerms@24();
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted 3-line service order where vendor has
+      // CF payment terms set. Verify computed due and cash flow date and discounted amount
+      FillCFJnlSvcOrderWithCFPmtTerms(TRUE,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlSvcCFPmtTermsAndGroupBy@62();
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a 3-line service order where vendor has
+      // CF payment terms set. Verify computed due and cash flow date and the full order amount
+      FillCFJnlSvcOrderWithCFPmtTerms(FALSE,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlSvcDsctAndCFPmtTermsAndGroupBy@59();
+    BEGIN
+      // Test filling a CF journal by using Fill batch with a discounted 3-line service order where vendor has
+      // CF payment terms set. Verify computed due and cash flow date and discounted amount
+      FillCFJnlSvcOrderWithCFPmtTerms(TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE FillCFJnlSvcOrderWithCFPmtTerms@46(ConsiderDiscount@1008 : Boolean;GroupByDocumentType@1011 : Boolean);
+    VAR
+      CashFlowForecast@1000 : Record 840;
+      ServiceHeader@1001 : Record 5900;
+      CFWorksheetLine@1005 : Record 846;
+      PaymentTerms@1006 : Record 3;
+      PaymentTerms2@1007 : Record 3;
+      ExpectedCFDate@1003 : Date;
+      ExpectedAmount@1004 : Decimal;
+      ConsiderSource@1002 : ARRAY [11] OF Boolean;
+      PaymentTermsCode@1009 : Code[10];
+      PaymentTermsCode2@1010 : Code[10];
+    BEGIN
+      // Test filling a CF journal by using Fill batch with/without a discounted 3-line service order where vendor has
+      // CF payment terms set. Verify computed due and cash flow date and discounted/full amount
+
+      // Setup
+      Initialize;
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      IF ConsiderDiscount THEN BEGIN
+        CFHelper.GetDifferentDsctPaymentTerms(PaymentTerms2,PaymentTerms.Code);
+        CFHelper.CreateCashFlowForecastConsiderDiscountAndCFPmtTerms(CashFlowForecast);
+        PaymentTermsCode := PaymentTerms.Code;
+        PaymentTermsCode2 := PaymentTerms2.Code;
+      END ELSE BEGIN
+        CFHelper.CreateCashFlowForecastConsiderCFPmtTerms(CashFlowForecast);
+        PaymentTermsCode2 := PaymentTerms.Code;
+      END;
+      CFHelper.CreateSpecificServiceOrder(ServiceHeader,PaymentTermsCode,PaymentTermsCode2);
+
+      CFHelper.SetExpectedDsctAPmtTermValues(DocumentType::Service,ServiceHeader."No.",ServiceHeader."Customer No.",
+        ServiceHeader."Document Date",ConsiderDiscount,ExpectedCFDate,ExpectedAmount);
+
+      // Exercise
+      ConsiderSource[SourceType::"Service Orders"] := TRUE;
+      CFHelper.FillJournal(ConsiderSource,CashFlowForecast."No.",GroupByDocumentType);
+
+      // Verify
+      CFHelper.VerifyCFDataOnSnglJnlLine(CFWorksheetLine,ServiceHeader."No.",SourceType::"Service Orders",
+        CashFlowForecast."No.",ExpectedAmount,ExpectedCFDate);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithModifiedCustLEDueDate@33();
+    BEGIN
+      // Filling CF journal lines without considering CF Payment Terms where the due date field on the customer ledger entries
+      // has been manually modified before running the fill batch job
+
+      // Exercise and Verify
+      VerifyModifiedCustLEDatesOnCFJnl(DateFieldOption::DueDate,FALSE,FALSE,0);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithModifiedCustLEDueDateConsiderCFPmtTerms@53();
+    VAR
+      PaymentTerms@1001 : Record 3;
+    BEGIN
+      // Filling CF journal lines considering CF Payment Terms where the due date field on the customer ledger entries
+      // has been manually modified before running the fill batch job
+
+      // Exercise and Verify - dont consider discount but CF Pmt Terms
+      VerifyModifiedCustLEDatesOnCFJnl(DateFieldOption::DueDate,FALSE,TRUE,PaymentTerms.FIELDNO("Due Date Calculation"));
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithModifiedVendLEDueDate@34();
+    BEGIN
+      // Filling CF journal lines without considering CF Payment Terms where the due date field on the vendor ledger entries
+      // has been manually modified before running the fill batch job
+
+      // Exercise and Verify - dont consider discount and CF Pmt Terms
+      VerifyModifiedVendLEDatesOnCFJnl(DateFieldOption::DueDate,FALSE,FALSE,0);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithModifiedVendLEDueDateConsiderCFPmtTerms@55();
+    VAR
+      PaymentTerms@1002 : Record 3;
+    BEGIN
+      // Filling CF journal lines considering CF Payment Terms where the due date field on the vendor ledger entries
+      // has been manually modified before running the fill batch job
+
+      // Exercise and Verify - dont consider discount but CF Pmt Terms
+      VerifyModifiedVendLEDatesOnCFJnl(DateFieldOption::DueDate,FALSE,TRUE,PaymentTerms.FIELDNO("Due Date Calculation"));
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithModifiedCustLEDsctDate@35();
+    BEGIN
+      // Filling CF journal lines without considering CF Payment Terms where the discount date field on the customer ledger entries
+      // has been manually modified before running the fill batch job
+
+      // Exercise and Verify - consider discount but not CF Pmt Terms
+      VerifyModifiedCustLEDatesOnCFJnl(DateFieldOption::DiscountDate,TRUE,FALSE,0);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithModifiedCustLEDsctDateConsiderCFPmtTerms@60();
+    VAR
+      PaymentTerms@1000 : Record 3;
+    BEGIN
+      // Filling CF journal lines considering CF Payment Terms where the discount date field on the customer ledger entries
+      // has been manually modified before running the fill batch job
+
+      // Exercise and Verify - consider discount and CF Pmt Terms
+      VerifyModifiedCustLEDatesOnCFJnl(DateFieldOption::DiscountDate,TRUE,TRUE,PaymentTerms.FIELDNO("Discount Date Calculation"));
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithModifiedVendLEDsctDate@36();
+    BEGIN
+      // Filling CF journal lines without considering CF Payment Terms where the discount date field on the vendor ledger entries
+      // has been manually modified before running the fill batch job
+
+      // Exercise and Verify - consider discount but not CF Pmt Terms
+      VerifyModifiedVendLEDatesOnCFJnl(DateFieldOption::DiscountDate,TRUE,FALSE,0);
+    END;
+
+    [Test]
+    PROCEDURE FillCFJnlWithModifiedVendLEDsctDateConsiderCFPmtTerms@61();
+    VAR
+      PaymentTerms@1001 : Record 3;
+    BEGIN
+      // Filling CF journal lines considering CF Payment Terms where the discount date field on the vendor ledger entries
+      // has been manually modified before running the fill batch job
+
+      // Exercise and Verify - consider discount and CF Pmt Terms
+      VerifyModifiedVendLEDatesOnCFJnl(DateFieldOption::DiscountDate,TRUE,TRUE,PaymentTerms.FIELDNO("Discount Date Calculation"));
+    END;
+
+    [Test]
+    PROCEDURE VerifyServiceOrderSourceTypeInJnlLine@37();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      CFWorksheetLine@1001 : Record 846;
+      CashFlowForecast@1002 : Record 840;
+      ConsiderSource@1003 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CFHelper.CreateDefaultServiceOrder(ServiceHeader);
+
+      // Exercise
+      ConsiderSource[SourceType::"Service Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      CFHelper.FilterSingleJournalLine(CFWorksheetLine,ServiceHeader."No.",SourceType::"Service Orders",CashFlowForecast."No.");
+      CFWorksheetLine.TESTFIELD("Source Type",CFWorksheetLine."Source Type"::"Service Orders");
+    END;
+
+    [Test]
+    PROCEDURE VerifyServiceOrderSourceTypeInLedgEntry@41();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      CFWorksheetLine@1001 : Record 846;
+      CashFlowForecast@1002 : Record 840;
+      CFForecastEntry@1003 : Record 847;
+      ConsiderSource@1004 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CFHelper.CreateDefaultServiceOrder(ServiceHeader);
+
+      // Exercise
+      ConsiderSource[SourceType::"Service Orders"] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+      CFHelper.FilterSingleJournalLine(CFWorksheetLine,ServiceHeader."No.",SourceType::"Service Orders",CashFlowForecast."No.");
+
+      LibraryCF.PostJournalLines(CFWorksheetLine);
+
+      // Verify
+      CFForecastEntry.SETRANGE("Document No.",ServiceHeader."No.");
+      CFForecastEntry.FINDFIRST;
+      CFForecastEntry.TESTFIELD("Source Type",CFForecastEntry."Source Type"::"Service Orders");
+    END;
+
+    [Test]
+    PROCEDURE SuggestLinesConsideringGLBudget@38();
+    VAR
+      CashFlowForecast@1001 : Record 840;
+      CFWorksheetLine@1002 : Record 846;
+      GLBudgetEntry@1005 : Record 96;
+    BEGIN
+      // Suggest lines should set source type accordingly
+
+      // Setup
+      Initialize;
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      CashFlowForecast.VALIDATE("G/L Budget From",WORKDATE);
+      CashFlowForecast.VALIDATE("G/L Budget To",WORKDATE);
+      CashFlowForecast.MODIFY(TRUE);
+      CFHelper.CreateBudgetEntry(GLBudgetEntry,CashFlowForecast."G/L Budget To");
+
+      // Exercise
+      LibraryCF.FillBudgetJournal(FALSE,CashFlowForecast."No.",GLBudgetEntry."Budget Name");
+
+      // Verify
+      CFHelper.FilterSingleJournalLine(CFWorksheetLine,FORMAT(GLBudgetEntry."Entry No."),
+        CFWorksheetLine."Source Type"::"G/L Budget",CashFlowForecast."No.");
+      CFWorksheetLine.TESTFIELD("Source Type",CFWorksheetLine."Source Type"::"G/L Budget");
+      CFWorksheetLine.TESTFIELD("G/L Budget Name",GLBudgetEntry."Budget Name");
+      CFHelper.VerifyExpectedCFAmount(-GLBudgetEntry.Amount,CFWorksheetLine."Amount (LCY)");
+    END;
+
+    LOCAL PROCEDURE VerifySalesOrderInCashFlowWorksheet@96(SalesHeader@1000 : Record 36);
+    VAR
+      CFWorksheetLine@1002 : Record 846;
+      ExpectedAmount@1001 : Decimal;
+    BEGIN
+      ExpectedAmount := GetSalesActualAmount(SalesHeader);
+
+      FindFilledCashFlowJnlLine(CFWorksheetLine,CFWorksheetLine."Source Type"::"Sales Orders",SalesHeader."No.");
+      Assert.AreNearlyEqual(
+        ExpectedAmount,CFWorksheetLine."Amount (LCY)",LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(AmountError,ExpectedAmount,CFWorksheetLine."Amount (LCY)"));
+    END;
+
+    LOCAL PROCEDURE VerifyPurchaseOrderInCashFlowWorksheet@99(PurchaseHeader@1000 : Record 38);
+    VAR
+      CFWorksheetLine@1002 : Record 846;
+      ExpectedAmount@1001 : Decimal;
+    BEGIN
+      ExpectedAmount := -GetPurchaseActualAmount(PurchaseHeader);
+
+      FindFilledCashFlowJnlLine(CFWorksheetLine,CFWorksheetLine."Source Type"::"Purchase Orders",PurchaseHeader."No.");
+      Assert.AreNearlyEqual(
+        ExpectedAmount,CFWorksheetLine."Amount (LCY)",LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(AmountError,ExpectedAmount,CFWorksheetLine."Amount (LCY)"));
+    END;
+
+    [Test]
+    PROCEDURE MovingDefDimAfterRenameCashFlowManualRevenue@119();
+    VAR
+      CashFlowManualRevenue@1000 : Record 849;
+      DimensionValue@1001 : ARRAY [2] OF Record 349;
+    BEGIN
+      // [SCENARIO 208630] Default dimension have to been exist after renaming record of "Cash Flow Manual Revenue"
+      Initialize;
+
+      // [GIVEN] "Cash Flow Manual Revenue" with Code = "NAME1"
+      LibraryCF.CreateManualLineRevenue(CashFlowManualRevenue,'');
+
+      // [GIVEN] Default dimension DIM1 with value DIMVALUE1
+      CreateDefDimForRecord(DimensionValue[1],DATABASE::"Cash Flow Manual Revenue",CashFlowManualRevenue.Code);
+
+      // [GIVEN] Default dimension DIM2 with value DIMVALUE2
+      CreateDefDimForRecord(DimensionValue[2],DATABASE::"Cash Flow Manual Revenue",CashFlowManualRevenue.Code);
+
+      // [WHEN] Rename "Cash Flow Manual Revenue" to "NAME2"
+      CashFlowManualRevenue.RENAME(
+        LibraryUtility.GenerateRandomCode(CashFlowManualRevenue.FIELDNO(Code),DATABASE::"Cash Flow Manual Revenue"));
+
+      // [THEN] Renamed record has values:
+      // [THEN] Global Dimension 1 Code = "DIM1" with value = "DIMVALUE1"
+      VerifyDefaultDimension(DimensionValue[1],DATABASE::"Cash Flow Manual Revenue",CashFlowManualRevenue.Code);
+
+      // [THEN] Global Dimension 2 Code = "DIM2" with value = "DIMVALUE2"
+      VerifyDefaultDimension(DimensionValue[2],DATABASE::"Cash Flow Manual Revenue",CashFlowManualRevenue.Code);
+    END;
+
+    [Test]
+    PROCEDURE MovingDefDimAfterRenameCashFlowManualExpense@117();
+    VAR
+      CashFlowManualExpense@1000 : Record 850;
+      DimensionValue@1001 : ARRAY [2] OF Record 349;
+    BEGIN
+      // [SCENARIO 208630] Default dimension have to been exist after renaming record of "Cash Flow Manual Expense"
+      Initialize;
+
+      // [GIVEN] "Cash Flow Manual Expense" with Code = "NAME1"
+      LibraryCF.CreateManualLinePayment(CashFlowManualExpense,'');
+
+      // [GIVEN] Default dimension DIM1 with value DIMVALUE1
+      CreateDefDimForRecord(DimensionValue[1],DATABASE::"Cash Flow Manual Expense",CashFlowManualExpense.Code);
+
+      // [GIVEN] Default dimension DIM2 with value DIMVALUE2
+      CreateDefDimForRecord(DimensionValue[2],DATABASE::"Cash Flow Manual Expense",CashFlowManualExpense.Code);
+
+      // [WHEN] Rename "Cash Flow Manual Expense" to "NAME2"
+      CashFlowManualExpense.RENAME(
+        LibraryUtility.GenerateRandomCode(CashFlowManualExpense.FIELDNO(Code),DATABASE::"Cash Flow Manual Expense"));
+
+      // [THEN] Renamed record has values:
+      // [THEN] Global Dimension 1 Code = "DIM1" with value = "DIMVALUE1"
+      VerifyDefaultDimension(DimensionValue[1],DATABASE::"Cash Flow Manual Expense",CashFlowManualExpense.Code);
+
+      // [THEN] Global Dimension 2 Code = "DIM2" with value = "DIMVALUE2"
+      VerifyDefaultDimension(DimensionValue[2],DATABASE::"Cash Flow Manual Expense",CashFlowManualExpense.Code);
+    END;
+
+    LOCAL PROCEDURE Initialize@57();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      LibraryRandom.SetSeed(1);
+
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CalculatePurchaseActualAmountInclPrepayment@121(PurchaseHeader@1001 : Record 38;InvoiceRoundingPrecision@1003 : Decimal) Amount : Decimal;
+    VAR
+      PurchaseLine@1000 : Record 39;
+      PrepaymentAmount@1002 : Decimal;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseHeader."Document Type");
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      IF PurchaseLine.FINDSET THEN
+        REPEAT
+          PrepaymentAmount := ROUND(PurchaseLine.Amount * PurchaseHeader."Prepayment %" / 100,InvoiceRoundingPrecision);
+          PrepaymentAmount += ROUND(PrepaymentAmount * PurchaseLine."VAT %" / 100,InvoiceRoundingPrecision);
+          Amount += PurchaseLine."Amount Including VAT" - PrepaymentAmount;
+        UNTIL PurchaseLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CalculateSalesActualAmountInclPrepayment@123(SalesHeader@1001 : Record 36;InvoiceRoundingPrecision@1003 : Decimal) Amount : Decimal;
+    VAR
+      SalesLine@1000 : Record 37;
+      PrepaymentAmount@1002 : Decimal;
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      IF SalesLine.FINDSET THEN
+        REPEAT
+          PrepaymentAmount := ROUND(SalesLine.Amount * SalesHeader."Prepayment %" / 100,InvoiceRoundingPrecision);
+          PrepaymentAmount += ROUND(PrepaymentAmount * SalesLine."VAT %" / 100,InvoiceRoundingPrecision);
+          Amount += SalesLine."Amount Including VAT" - PrepaymentAmount;
+        UNTIL SalesLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateSalesPrepaymentInvoice@84(VAR SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37;PricesInclVAT@1002 : Boolean);
+    VAR
+      VATPostingSetup@1003 : Record 325;
+    BEGIN
+      LibraryInventory.SelectVATPostingSetup(VATPostingSetup);
+      CreateSalesOrder(SalesHeader,PricesInclVAT,VATPostingSetup."VAT Bus. Posting Group");
+      SetPrepaymentPctOnSalesHeader(SalesHeader,SalesHeader."Prepayment %" + LibraryRandom.RandDec(10,2));
+      CreateTwoSalesOrderLines(SalesHeader,SalesLine,VATPostingSetup."VAT Prod. Posting Group");
+    END;
+
+    LOCAL PROCEDURE CreatePurchasePrepaymentInvoice@85(VAR PurchaseHeader@1000 : Record 38;VAR PurchaseLine@1001 : Record 39;PricesInclVAT@1002 : Boolean);
+    VAR
+      VATPostingSetup@1003 : Record 325;
+    BEGIN
+      LibraryInventory.SelectVATPostingSetup(VATPostingSetup);
+      CreatePurchaseOrder(PurchaseHeader,PricesInclVAT,VATPostingSetup."VAT Bus. Posting Group");
+      SetPrepaymentPctOnPurchaseHeader(PurchaseHeader,PurchaseHeader."Prepayment %" + LibraryRandom.RandDec(10,2));
+      CreateTwoPurchaseOrderLines(PurchaseHeader,PurchaseLine,VATPostingSetup."VAT Prod. Posting Group");
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@70(VAR SalesHeader@1001 : Record 36;PricesInclVAT@1000 : Boolean;VATBusPostingGroup@1002 : Code[10]);
+    BEGIN
+      LibrarySales.CreateSalesHeader(
+        SalesHeader,SalesHeader."Document Type"::Order,CreateCustomerWithVATBusPostGr(VATBusPostingGroup));
+      SetPrepaymentPctOnSalesHeader(SalesHeader,LibraryRandom.RandDecInRange(10,90,2));
+      SetPricesInclVATOnSalesHeader(SalesHeader,PricesInclVAT);
+    END;
+
+    LOCAL PROCEDURE CreateTwoSalesOrderLines@91(SalesHeader@1001 : Record 36;VAR SalesLine@1000 : Record 37;VATProdPostingGroup@1004 : Code[10]);
+    VAR
+      Index@1002 : Integer;
+      Item@1500000 : Record 27;
+    BEGIN
+      FOR Index := 1 TO 2 DO BEGIN
+        LibrarySales.CreateSalesLine(
+          SalesLine,SalesHeader,SalesLine.Type::Item,LibraryInventory.CreateItem(Item),LibraryRandom.RandDec(10,2));
+        SalesLine.VALIDATE("Unit Price",LibraryRandom.RandDecInRange(10,100,2));
+        SalesLine.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@87(VAR PurchaseHeader@1001 : Record 38;PricesInclVAT@1004 : Boolean;VATBusPostingGroup@1000 : Code[10]);
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(
+        PurchaseHeader,PurchaseHeader."Document Type"::Order,CreateVendorWithVATBusPostGr(VATBusPostingGroup));
+      SetPrepaymentPctOnPurchaseHeader(PurchaseHeader,LibraryRandom.RandDecInRange(10,90,2));
+      SetPricesInclVATOnPurchaseHeader(PurchaseHeader,PricesInclVAT);
+    END;
+
+    LOCAL PROCEDURE CreateTwoPurchaseOrderLines@93(PurchaseHeader@1001 : Record 38;VAR PurchaseLine@1000 : Record 39;VATProdPostingGroup@1004 : Code[10]);
+    VAR
+      Index@1002 : Integer;
+      Item@1500000 : Record 27;
+    BEGIN
+      FOR Index := 1 TO 2 DO BEGIN
+        LibraryPurchase.CreatePurchaseLine(
+          PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,LibraryInventory.CreateItem(Item),
+          LibraryRandom.RandDec(10,2));
+        PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandDecInRange(10,100,2));
+        PurchaseLine.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateCustomerWithVATBusPostGr@72(VATBusPostingGroup@1000 : Code[10]) : Code[20];
+    VAR
+      Customer@1001 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("VAT Bus. Posting Group",VATBusPostingGroup);
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateVendorWithVATBusPostGr@90(VATBusPostingGroup@1000 : Code[10]) : Code[20];
+    VAR
+      Vendor@1001 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      Vendor.VALIDATE("VAT Bus. Posting Group",VATBusPostingGroup);
+      Vendor.MODIFY(TRUE);
+      EXIT(Vendor."No.");
+    END;
+
+    LOCAL PROCEDURE CreateCashFlowForecastDefaultWithManualPmtDates@100(VAR CashFlowForecast@1000 : Record 840;ManualPaymentsFrom@1001 : Date;ManualPaymentsTo@1002 : Date);
+    BEGIN
+      WITH CashFlowForecast DO BEGIN
+        CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+        "Manual Payments From" := ManualPaymentsFrom;
+        "Manual Payments To" := ManualPaymentsTo;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateManualRevenueWithStartingDate@95(VAR CFManualRevenue@1000 : Record 849;StartingDate@1001 : Date);
+    BEGIN
+      WITH CFManualRevenue DO BEGIN
+        CFHelper.CreateManualRevenue(CFManualRevenue);
+        EVALUATE("Recurring Frequency",'');
+        "Starting Date" := StartingDate;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateManualExpenseWithStartingDate@110(VAR CFManualExpense@1000 : Record 850;StartingDate@1001 : Date);
+    BEGIN
+      WITH CFManualExpense DO BEGIN
+        CFHelper.CreateManualPayment(CFManualExpense);
+        EVALUATE("Recurring Frequency",'');
+        "Starting Date" := StartingDate;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateDefDimForRecord@118(VAR DimensionValue@1000 : Record 349;TableID@1002 : Integer;Code@1003 : Code[20]);
+    VAR
+      DefaultDimension@1001 : Record 352;
+    BEGIN
+      LibraryDimension.CreateDimWithDimValue(DimensionValue);
+      LibraryDimension.CreateDefaultDimension(DefaultDimension,TableID,Code,DimensionValue."Dimension Code",DimensionValue.Code);
+    END;
+
+    LOCAL PROCEDURE FindFilledCashFlowJnlLine@74(VAR CashFlowWorksheetLine@1004 : Record 846;SourceType@1002 : Option;DocumentNo@1000 : Code[20]);
+    VAR
+      CashFlowForecast@1003 : Record 840;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      CFHelper.CreateCashFlowForecastDefault(CashFlowForecast);
+      ConsiderSource[SourceType] := TRUE;
+      CFHelper.FillJournal(ConsiderSource,CashFlowForecast."No.",TRUE);
+      CFHelper.FilterSingleJournalLine(CashFlowWorksheetLine,DocumentNo,SourceType,CashFlowForecast."No.");
+    END;
+
+    LOCAL PROCEDURE GetSalesActualAmount@78(SalesHeader@1000 : Record 36) Amount : Decimal;
+    VAR
+      Currency@1002 : Record 4;
+      ReleaseSalesDocument@1003 : Codeunit 414;
+    BEGIN
+      ReleaseSalesDocument.PerformManualRelease(SalesHeader);
+      IF SalesHeader."Currency Code" = '' THEN
+        Currency.InitRoundingPrecision
+      ELSE
+        Currency.GET(SalesHeader."Currency Code");
+
+      IF SalesHeader."Prices Including VAT" THEN BEGIN
+        SalesHeader.CALCFIELDS("Amount Including VAT");
+        Amount := SalesHeader."Amount Including VAT" - ROUND(SalesHeader."Amount Including VAT" * SalesHeader."Prepayment %" / 100,
+            Currency."Invoice Rounding Precision",'=');
+      END ELSE
+        Amount := CalculateSalesActualAmountInclPrepayment(SalesHeader,Currency."Invoice Rounding Precision");
+    END;
+
+    LOCAL PROCEDURE GetPurchaseActualAmount@92(PurchaseHeader@1000 : Record 38) Amount : Decimal;
+    VAR
+      Currency@1002 : Record 4;
+      ReleasePurchaseDocument@1001 : Codeunit 415;
+    BEGIN
+      ReleasePurchaseDocument.PerformManualRelease(PurchaseHeader);
+      IF PurchaseHeader."Currency Code" = '' THEN
+        Currency.InitRoundingPrecision
+      ELSE
+        Currency.GET(PurchaseHeader."Currency Code");
+
+      IF PurchaseHeader."Prices Including VAT" THEN BEGIN
+        PurchaseHeader.CALCFIELDS("Amount Including VAT");
+        Amount :=
+          PurchaseHeader."Amount Including VAT" - ROUND(PurchaseHeader."Amount Including VAT" * PurchaseHeader."Prepayment %" / 100,
+            Currency."Invoice Rounding Precision",'=');
+      END ELSE
+        Amount := CalculatePurchaseActualAmountInclPrepayment(PurchaseHeader,Currency."Invoice Rounding Precision");
+    END;
+
+    LOCAL PROCEDURE SetPrepaymentPctOnSalesHeader@69(VAR SalesHeader@1001 : Record 36;PrepaymentPct@1000 : Decimal);
+    BEGIN
+      SalesHeader.VALIDATE("Prepayment %",PrepaymentPct);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetPrepaymentPctOnPurchaseHeader@86(VAR PurchaseHeader@1001 : Record 38;PrepaymentPct@1000 : Decimal);
+    BEGIN
+      PurchaseHeader.VALIDATE("Prepayment %",PrepaymentPct);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetPrepaymentPctOnPurchaseLines@79(PurchaseHeader@1000 : Record 38);
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseHeader."Document Type");
+      PurchaseLine.SETRANGE("Document No.",PurchaseHeader."No.");
+      PurchaseLine.FINDSET;
+      REPEAT
+        PurchaseLine.VALIDATE("Prepayment %",PurchaseHeader."Prepayment %");
+        PurchaseLine.MODIFY(TRUE);
+      UNTIL PurchaseLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyModifiedCustLEDatesOnCFJnl@115(DateField@1002 : Option;ConsiderDiscount@1015 : Boolean;ConsiderCFPmtTerms@1012 : Boolean;CFPmtTermsDateCalculationFieldNo@1013 : Integer);
+    VAR
+      GenJournalLine@1000 : Record 81;
+      CashFlowForecast@1005 : Record 840;
+      PaymentTerms@1004 : Record 3;
+      Customer@1008 : Record 18;
+      CFWorksheetLine@1011 : Record 846;
+      RecRef@1007 : RecordRef;
+      FieldRef@1003 : FieldRef;
+      ExpectedDate@1010 : Date;
+      CFPmtTermsDateFormula@1014 : DateFormula;
+      Amount@1017 : Decimal;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Setup
+      Initialize;
+      CFHelper.CreateSpecificCashFlowCard(CashFlowForecast,ConsiderDiscount,ConsiderCFPmtTerms);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      LibrarySales.CreateCustomer(Customer);
+      CFHelper.AssignPaymentTermToCustomer(Customer,PaymentTerms.Code);
+      IF ConsiderCFPmtTerms THEN
+        CFHelper.AssignCFPaymentTermToCustomer(Customer,PaymentTerms.Code);
+      Amount := LibraryRandom.RandDec(100,2);
+      CFHelper.CreateLedgerEntry(
+        GenJournalLine,Customer."No.",Amount,GenJournalLine."Account Type"::Customer,GenJournalLine."Document Type"::Invoice);
+
+      // Exercise
+      ExpectedDate := UpdateCustLedgerEntry(GenJournalLine."Document No.",GenJournalLine."Document Type",DateField);
+      ConsiderSource[SourceType::Receivables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      // The expected behavior is that the CF Journal line must reflect the modified date if CF pmt terms are not considered,
+      // otherwise the CF pmt terms should be reflected
+      IF ConsiderCFPmtTerms THEN BEGIN
+        RecRef.GETTABLE(PaymentTerms);
+        FieldRef := RecRef.FIELD(CFPmtTermsDateCalculationFieldNo);
+        EVALUATE(CFPmtTermsDateFormula,FORMAT(FieldRef.VALUE));
+        ExpectedDate := CALCDATE(FORMAT(FieldRef.VALUE),GenJournalLine."Posting Date");
+      END;
+
+      CFHelper.FilterSingleJournalLine(CFWorksheetLine,GenJournalLine."Document No.",SourceType::Receivables,CashFlowForecast."No.");
+      CFHelper.VerifyCFDateOnCFJnlLine(CFWorksheetLine,ExpectedDate);
+    END;
+
+    LOCAL PROCEDURE VerifyModifiedVendLEDatesOnCFJnl@114(DateField@1002 : Option;ConsiderDiscount@1015 : Boolean;ConsiderCFPmtTerms@1012 : Boolean;CFPmtTermsDateCalculationFieldNo@1013 : Integer);
+    VAR
+      GenJournalLine@1000 : Record 81;
+      CashFlowForecast@1005 : Record 840;
+      PaymentTerms@1004 : Record 3;
+      Vendor@1009 : Record 23;
+      CFWorksheetLine@1011 : Record 846;
+      RecRef@1007 : RecordRef;
+      FieldRef@1003 : FieldRef;
+      ExpectedDate@1010 : Date;
+      CFPmtTermsDateFormula@1014 : DateFormula;
+      Amount@1017 : Decimal;
+      ConsiderSource@1001 : ARRAY [11] OF Boolean;
+    BEGIN
+      // Setup
+      Initialize;
+      CFHelper.CreateSpecificCashFlowCard(CashFlowForecast,ConsiderDiscount,ConsiderCFPmtTerms);
+      LibraryERM.GetDiscountPaymentTerm(PaymentTerms);
+      LibraryPurchase.CreateVendor(Vendor);
+      CFHelper.AssignPaymentTermToVendor(Vendor,PaymentTerms.Code);
+      IF ConsiderCFPmtTerms THEN
+        CFHelper.AssignCFPaymentTermToVendor(Vendor,PaymentTerms.Code);
+      Amount := -LibraryRandom.RandDec(100,2);
+      CFHelper.CreateLedgerEntry(
+        GenJournalLine,Vendor."No.",Amount,GenJournalLine."Account Type"::Vendor,GenJournalLine."Document Type"::Invoice);
+
+      // Exercise
+      ExpectedDate := UpdateVendLedgerEntry(GenJournalLine."Document No.",GenJournalLine."Document Type",DateField);
+      ConsiderSource[SourceType::Payables] := TRUE;
+      FillJournalWithoutGroupBy(ConsiderSource,CashFlowForecast."No.");
+
+      // Verify
+      // The expected behavior is that the CF Journal line must reflect the modified date if CF pmt terms are not considered,
+      // otherwise the CF pmt terms should be reflected
+      IF ConsiderCFPmtTerms THEN BEGIN
+        RecRef.GETTABLE(PaymentTerms);
+        FieldRef := RecRef.FIELD(CFPmtTermsDateCalculationFieldNo);
+        EVALUATE(CFPmtTermsDateFormula,FORMAT(FieldRef.VALUE));
+        ExpectedDate := CALCDATE(FORMAT(FieldRef.VALUE),GenJournalLine."Posting Date");
+      END;
+
+      CFHelper.FilterSingleJournalLine(CFWorksheetLine,GenJournalLine."Document No.",SourceType::Payables,CashFlowForecast."No.");
+      CFHelper.VerifyCFDateOnCFJnlLine(CFWorksheetLine,ExpectedDate);
+    END;
+
+    LOCAL PROCEDURE VerifyDefaultDimension@116(DimensionValue@1001 : Record 349;TableID@1003 : Integer;No@1000 : Code[20]);
+    VAR
+      DefaultDimension@1002 : Record 352;
+    BEGIN
+      DefaultDimension.GET(TableID,No,DimensionValue."Dimension Code");
+      DefaultDimension.TESTFIELD("Dimension Code",DimensionValue."Dimension Code");
+      DefaultDimension.TESTFIELD("Dimension Value Code",DimensionValue.Code);
+    END;
+
+    LOCAL PROCEDURE UpdateCustLedgerEntry@112(DocumentNo@1003 : Code[20];DocumentType@1001 : Option;DateField@1004 : Option) ExpectedDate : Date;
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+    BEGIN
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,DocumentType,DocumentNo);
+      IF DateField = DateFieldOption::DueDate THEN BEGIN
+        CFHelper.UpdateDueDateOnCustomerLedgerEntry(CustLedgerEntry);
+        ExpectedDate := CustLedgerEntry."Due Date";
+      END ELSE BEGIN
+        IF DateField = DateFieldOption::DiscountDate THEN BEGIN
+          CFHelper.UpdatePmtDiscountDateOnCustomerLedgerEntry(CustLedgerEntry);
+          ExpectedDate := CustLedgerEntry."Pmt. Discount Date";
+        END ELSE
+          ERROR(STRSUBSTNO(UnsupportedDateField,DateField));
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateVendLedgerEntry@113(DocumentNo@1003 : Code[20];DocumentType@1002 : Option;DateField@1001 : Option) ExpectedDate : Date;
+    VAR
+      VendorLedgerEntry@1004 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,DocumentType,DocumentNo);
+      IF DateField = DateFieldOption::DueDate THEN BEGIN
+        CFHelper.UpdateDueDateOnVendorLedgerEntry(VendorLedgerEntry);
+        ExpectedDate := VendorLedgerEntry."Due Date";
+      END ELSE BEGIN
+        IF DateField = DateFieldOption::DiscountDate THEN BEGIN
+          CFHelper.UpdatePmtDiscountDateOnVendorLedgerEntry(VendorLedgerEntry);
+          ExpectedDate := VendorLedgerEntry."Pmt. Discount Date";
+        END ELSE
+          ERROR(STRSUBSTNO(UnsupportedDateField,DateField));
+      END;
+    END;
+
+    LOCAL PROCEDURE FillJournalWithoutGroupBy@39(ConsiderSource@1000 : ARRAY [11] OF Boolean;CashFlowForecastNo@1001 : Code[20]);
+    BEGIN
+      CFHelper.FillJournal(ConsiderSource,CashFlowForecastNo,FALSE);
+    END;
+
+    LOCAL PROCEDURE SetSalesPrepaymentAccount@71(GenBusPostingGroup@1003 : Code[10];GenProdPostingGroup@1000 : Code[10]) SalesPrepaymentAccount : Code[20];
+    VAR
+      GeneralPostingSetup@1001 : Record 252;
+      GLAccount@1004 : Record 15;
+    BEGIN
+      LibraryERM.FindGLAccount(GLAccount);
+      GeneralPostingSetup.GET(GenBusPostingGroup,GenProdPostingGroup);
+      GeneralPostingSetup.VALIDATE("Sales Prepayments Account",GLAccount."No.");
+      GeneralPostingSetup.MODIFY(TRUE);
+      SalesPrepaymentAccount := GeneralPostingSetup."Sales Prepayments Account";
+    END;
+
+    LOCAL PROCEDURE SetPurchasePrepaymentAccount@88(GenBusPostingGroup@1003 : Code[10];GenProdPostingGroup@1000 : Code[10]) PurchasePrepaymentsAccount : Code[20];
+    VAR
+      GeneralPostingSetup@1001 : Record 252;
+      GLAccount@1004 : Record 15;
+    BEGIN
+      LibraryERM.FindGLAccount(GLAccount);
+      GeneralPostingSetup.GET(GenBusPostingGroup,GenProdPostingGroup);
+      GeneralPostingSetup.VALIDATE("Purch. Prepayments Account",GLAccount."No.");
+      GeneralPostingSetup.MODIFY(TRUE);
+      PurchasePrepaymentsAccount := GeneralPostingSetup."Purch. Prepayments Account";
+    END;
+
+    LOCAL PROCEDURE SetPricesInclVATOnSalesHeader@77(VAR SalesHeader@1000 : Record 36;PricesInclVAT@1001 : Boolean);
+    BEGIN
+      SalesHeader.VALIDATE("Prices Including VAT",PricesInclVAT);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SetPricesInclVATOnPurchaseHeader@89(VAR PurchaseHeader@1000 : Record 38;PricesInclVAT@1001 : Boolean);
+    BEGIN
+      PurchaseHeader.VALIDATE("Prices Including VAT",PricesInclVAT);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetCustomerLedgerEntryAmount@68(DocumentNo@1000 : Code[20];DocumentType@1001 : Option) : Decimal;
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+    BEGIN
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,DocumentType,DocumentNo);
+      CustLedgerEntry.CALCFIELDS("Amount (LCY)");
+      EXIT(CustLedgerEntry."Amount (LCY)");
+    END;
+
+    LOCAL PROCEDURE GetVendorLedgerEntryAmount@58(DocumentNo@1000 : Code[20];DocumentType@1001 : Option) : Decimal;
+    VAR
+      VendorLedgerEntry@1002 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,DocumentType,DocumentNo);
+      VendorLedgerEntry.CALCFIELDS("Amount (LCY)");
+      EXIT(VendorLedgerEntry."Amount (LCY)");
+    END;
+
+    [MessageHandler]
+    PROCEDURE ManPmtRevExptNeedsUpdateMessageHandler@126(Message@1000 : Text);
+    BEGIN
+      Assert.IsFalse(STRPOS(Message,ManualPmtRevExpNeedsUpdateMsg) = 0,UnexpectedMessageErr);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Cash Flow]
+      Unsupported version tags:
+      SE: Unable to Execute
+
+      Feature:  Cash Flow
+      Area:     Filling Cash Flow Journal
+                Basic date and amount test cases
+
+      Test cases:
+        1.  Test filling a cash flow journal by using the Fill batch with option Manual Revenue enabled. Verify
+            due and cash flow date.
+        2.  Test filling a cash flow journal by using the Fill batch with option Manual Expense enabled. Verify
+            due and cash flow date.
+        3.  Test filling a cash flow journal using the fill batch with option Sales Order enabled. Verify due and
+            cash flow date.
+        4.  Test filling a cash flow journal using the fill batch with option Purchase Order enabled. Verify due and
+            cash flow date.
+        5.  Test filling a cash flow journal using the fill batch with option Service Order enabled. Verify due and
+            cash flow date.
+        6.  Test filling a cash flow journal using the fill batch with option Customer Ledger Entry enabled. Verify due and
+            cash flow date.
+        7.  Test filling a cash flow journal using the fill batch with option Vendor Ledger Entry enabled. Verify due and
+            cash flow date.
+        8.  Test filling a cash flow journal using the fill batch with option Budgeted Fixed Asset enabled.
+            Verify due and CF date match the posting date of the FA acquisition journal
+        9.  Test filling a cash flow journal by using the fill batch with Sale of fixed asset enabled.
+            Verify due and CF date match the planned disposal date
+        9.  Test filling a cash flow journal using the fill batch with a discounted 3-line sales order. Verify due,
+            cash flow date and cash flow amount.
+        10.  Test filling a cash flow journal using the fill batch with a 3-line sales order and customer CF payment terms
+            Verify due, cash flow date and cash flow amount.
+        11. Test filling a cash flow journal using the fill batch with a discounted 3-line sales order and customer CF pa
+            Verify due, cash flow date and cash flow amount.
+        12. Test filling a cash flow journal using the fill batch with a 3-line sales order and payment discount toleranc
+            Verify due, cash flow date and cash flow amount.
+        13. Test filling a cash flow journal using the fill batch with a 3-line sales order with customer CF payment term
+            Verify due, cash flow date and cash flow amount.
+        14. Test filling a CF journal using Fill batch with a discounted single customer ledger entry.
+            Verify computed due and cash flow date, discounted amount.
+        15. Test filling a CF journal using Fill batch with a single customer ledger entry where customer CF payment terms are
+            Verify computed due and cash flow date, discounted amount.
+        16. Test filling a CF journal using Fill batch with a discounted single customer ledger entry and customer CF payment
+            Verify computed due and cash flow date, discounted amount.
+        17. Test filling a CF journal using Fill batch with a discounted single vendor ledger entry.
+            Verify computed due and cash flow date, discounted amount.
+        18. Test filling a CF journal using Fill batch with a single vendor ledger entry where vendor CF payment terms are
+            Verify computed due and cash flow date, discounted amount.
+        19. Test filling a CF journal using Fill batch with a discounted single vendor ledger entry and vendor CF payment
+            Verify computed due and cash flow date, discounted amount.
+        20. Test filling a CF journal using Fill batch with a discounted 3-line purchase order
+            Verify computed due and cash flow date, discounted amount.
+        21. Test filling a CF journal using Fill batch with a 3-line purchase order where vendor has
+            CF payment terms set. Verify computed due and cash flow date and discounted amount
+        22. Test filling a CF journal using Fill batch with a discounted 3-line purchase order where vendor has
+            CF payment terms set. Verify computed due and cash flow date and discounted amount
+        23. Test filling a CF journal using Fill batch with a discounted 3-line service order
+            Verify computed due and cash flow date, discounted amount
+        24. Test filling a CF journal using Fill batch with a 3-line service order where vendor has
+            CF payment terms set. Verify computed due and cash flow date and discounted amount
+        25. Test filling a CF journal using Fill batch with a discounted 3-line service order where vendor has
+            CF payment terms set. Verify computed due and cash flow date and discounted amount
+
+      Cover Test cases for Bug - 284433,288605
+        ---------------------------------------------------------------------------------
+        Test Function Name                                          TFS ID
+        ---------------------------------------------------------------------------------
+        SingleSalesPrepaymentInvoicePriceExclVat                    284433
+        SingleSalesPrepaymentInvoicePriceIncVat                     284433
+        SinglePurchasePrepaymentInvoicePriceExclVat                 284433
+        SinglePurchasePrepaymentInvoicePriceIncVat                  284433
+        MultipleSalesPrepaymentInvoicePriceExclVat                  288605
+        MultipleSalesPrepaymentInvoicePriceIncVat                   288605
+        MultiplePurchasePrepaymentInvoicePriceExclVat               288605
+        MultiplePurchasePrepaymentInvoicePriceIncVat                288605
+
+        FillCFJnlWithManRevenueOutOfDate,                           358372
+        FillCFJnlWithManExpenseOutOfDate                            358372
+        FillCFJnlWithManRevenueWithoutManPmtToDate,                 358372
+        FillCFJnlWithManExpenseWithoutManPmtToDate                  358372
+    }
+    END.
+  }
+}
+

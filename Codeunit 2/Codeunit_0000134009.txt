@@ -1,0 +1,301 @@
+OBJECT Codeunit 134009 ERM Finance Charge Memo Apply
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 21=rimd;
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryInventory@1003 : Codeunit 132201;
+      LibrarySales@1006 : Codeunit 130509;
+      LibraryERM@1002 : Codeunit 131300;
+      LibraryRandom@1001 : Codeunit 130440;
+      Assert@1005 : Codeunit 130000;
+      isInitialized@1000 : Boolean;
+      RemainingAmountError@1008 : TextConst 'ENU=%1 must be %2.';
+      FinanceChargeMemoError@1009 : TextConst 'ENU=Finance Charge Memo must not be exist.';
+      UnappliedError@1004 : TextConst 'ENU=%1 %2 field must be true after Unapply entries.';
+
+    [Test]
+    PROCEDURE FinanceChargeMemoAndApply@19();
+    VAR
+      FinanceChargeMemoHeader@1000 : Record 302;
+      GenJournalLine@1007 : Record 81;
+      CurrentDate@1006 : Date;
+      ChargeMemoNo@1011 : Code[20];
+    BEGIN
+      // Covers documents TC_ID= 122636 AND 137015.
+      // Check that Finance Charge memo does not exist after issue and Customer Ledger Entry for Remaining amount after Post General
+      // Journal Lines.
+
+      // Create Sales Invoice, Finance Charge Memo and Issue it, Post General Journal Lines and Take backup for Current Workdate.
+      Initialize;
+      CurrentDate := WORKDATE;
+      ChargeMemoNo := CreateInvoiceFinanceChargeMemo(GenJournalLine);
+
+      // Verify: Check Finance Charge Memo is no more after issuing and Customer Ledger Entry for Remaining Amount after Post General
+      // Journal Lines.
+      Assert.IsFalse(FinanceChargeMemoHeader.GET(ChargeMemoNo),FinanceChargeMemoError);
+      VerifyCustLedgerEntryForRemAmt(GenJournalLine);
+
+      // Cleanup: Roll back the previous Workdate.
+      WORKDATE := CurrentDate;
+    END;
+
+    [Test]
+    PROCEDURE ApplyAndUnapplyCustEntries@12();
+    VAR
+      GenJournalLine@1009 : Record 81;
+      CurrentDate@1000 : Date;
+    BEGIN
+      // Covers documents TC_ID= 122637 AND 137016.
+      // Check Customer Ledger Entry for Remaining Amount, Detailed Ledger Entry for Unapplied Entries after Post General
+      // Journal Lines, Apply and Unapply Customer Ledger Entries.
+
+      // Create Sales Invoice, Finance Charge Memo and Issue it, Post General Journal Lines, Apply and unapply them and
+      // Take backup for Current Workdate
+      Initialize;
+      CurrentDate := WORKDATE;
+      CreateInvoiceFinanceChargeMemo(GenJournalLine);
+      ApplyAndPostCustomerEntry(GenJournalLine."Document No.",GenJournalLine.Amount);
+      UnapplyCustLedgerEntry(GenJournalLine."Account No.",GenJournalLine."Document No.");
+
+      // Verify: Detailed Ledger Entry for Unapplied Entries and Customer Ledger Entries for Remaining Amount.
+      VerifyUnappliedDtldLedgEntry(GenJournalLine."Account No.",GenJournalLine."Document No.");
+      VerifyCustLedgerEntryForRemAmt(GenJournalLine);
+
+      // Cleanup: Roll back the previous Workdate.
+      WORKDATE := CurrentDate;
+    END;
+
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateInvoiceFinanceChargeMemo@6(VAR GenJournalLine@1006 : Record 81) ChargeMemoNo : Code[20];
+    VAR
+      SalesHeader@1005 : Record 36;
+      PostedDocumentNo@1002 : Code[20];
+    BEGIN
+      // Setup: Create Sales Invoice.
+      CreateSalesInvoice(SalesHeader);
+
+      // Exercise: Post Sales Invoice, Create and Issue Finance Charge Memo then Create and Post General Journal Lines.
+      PostedDocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      CreateFinanceChargeMemo(PostedDocumentNo,SalesHeader."Sell-to Customer No.");
+      ChargeMemoNo := IssueFinanceChargeMemo(PostedDocumentNo);
+      CreateGeneralJournalLines(GenJournalLine,SalesHeader."Sell-to Customer No.",-CalculateTotalAmount(PostedDocumentNo));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      EXIT(ChargeMemoNo);
+    END;
+
+    LOCAL PROCEDURE CreateSalesInvoice@1(VAR SalesHeader@1001 : Record 36);
+    VAR
+      SalesLine@1000 : Record 37;
+      Counter@1003 : Integer;
+    BEGIN
+      // Random use for Quantity Sales Invoice Line and use for Greater than 1 for Sales Invoice Line.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,CreateCustomer);
+      FOR Counter := 1 TO 2 * LibraryRandom.RandInt(3) DO
+        LibrarySales.CreateSalesLine(
+          SalesLine,SalesHeader,SalesLine.Type::Item,CreateItem(GetFinanceChargeMinAmount(SalesHeader."Sell-to Customer No.")),
+          LibraryRandom.RandInt(100));
+    END;
+
+    LOCAL PROCEDURE ApplyAndPostCustomerEntry@7(DocumentNo@1002 : Code[20];AmountToApply@1003 : Decimal);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+      CustLedgerEntry2@1004 : Record 21;
+    BEGIN
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,CustLedgerEntry."Document Type"::Payment,DocumentNo);
+      LibraryERM.SetApplyCustomerEntry(CustLedgerEntry,AmountToApply);
+      CustLedgerEntry2.SETRANGE("Document Type",CustLedgerEntry2."Document Type"::Invoice);
+      CustLedgerEntry2.SETRANGE("Customer No.",CustLedgerEntry."Customer No.");
+      CustLedgerEntry2.SETRANGE(Open,TRUE);
+      CustLedgerEntry2.FINDSET;
+      REPEAT
+        CustLedgerEntry2.CALCFIELDS("Remaining Amount");
+        CustLedgerEntry2.VALIDATE("Amount to Apply",CustLedgerEntry2."Remaining Amount");
+        CustLedgerEntry2.MODIFY(TRUE);
+      UNTIL CustLedgerEntry2.NEXT = 0;
+
+      LibraryERM.SetAppliestoIdCustomer(CustLedgerEntry2);
+      LibraryERM.PostCustLedgerApplication(CustLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@16() : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+      FinanceChargeTerms@1001 : Record 5;
+    BEGIN
+      FinanceChargeTerms.FINDFIRST;
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Fin. Charge Terms Code",FinanceChargeTerms.Code);
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalLines@23(VAR GenJournalLine@1000 : Record 81;CustomerNo@1002 : Code[20];Amount@1003 : Decimal);
+    VAR
+      GenJournalBatch@1001 : Record 232;
+    BEGIN
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      LibraryERM.CreateGeneralJnlLine(GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,
+        GenJournalLine."Document Type"::Payment,GenJournalLine."Account Type"::Customer,CustomerNo,Amount);
+    END;
+
+    LOCAL PROCEDURE CreateItem@10(MinPrice@1005 : Decimal) : Code[20];
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Unit Price",MinPrice + LibraryRandom.RandInt(100));
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateFinanceChargeMemo@4(DocumentNo@1006 : Code[20];CustomerNo@1002 : Code[20]);
+    VAR
+      FinanceChargeMemoHeader@1004 : Record 302;
+      FinanceChargeTerms@1005 : Record 5;
+      CustLedgerEntry@1000 : Record 21;
+      Customer@1001 : Record 18;
+      FinChrgMemoMake@1007 : Codeunit 394;
+    BEGIN
+      Customer.GET(CustomerNo);
+      FinanceChargeTerms.GET(Customer."Fin. Charge Terms Code");
+
+      // Set Workdate according to Finance Charge Terms with Grace Period and Due Date Calculation.
+      WORKDATE := CALCDATE(FinanceChargeTerms."Grace Period",CALCDATE(FinanceChargeTerms."Due Date Calculation",WORKDATE));
+      FinanceChargeMemoHeader.INIT;
+      FinanceChargeMemoHeader.INSERT(TRUE);
+      CustLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CustLedgerEntry.FINDFIRST;
+      FinChrgMemoMake.Set(Customer,CustLedgerEntry,FinanceChargeMemoHeader);
+      FinChrgMemoMake.Code;
+    END;
+
+    LOCAL PROCEDURE GetFinanceChargeMinAmount@15(CustomerNo@1000 : Code[20]) : Decimal;
+    VAR
+      FinanceChargeTerms@1001 : Record 5;
+      Customer@1002 : Record 18;
+    BEGIN
+      Customer.GET(CustomerNo);
+      FinanceChargeTerms.GET(Customer."Fin. Charge Terms Code");
+      EXIT(FinanceChargeTerms."Minimum Amount (LCY)");
+    END;
+
+    LOCAL PROCEDURE IssueFinanceChargeMemo@13(DocumentNo@1003 : Code[20]) : Code[20];
+    VAR
+      FinanceChargeMemoHeader@1000 : Record 302;
+      FinanceChargeMemoLine@1001 : Record 303;
+    BEGIN
+      FinanceChargeMemoLine.SETRANGE("Document Type",FinanceChargeMemoLine."Document Type"::Invoice);
+      FinanceChargeMemoLine.SETRANGE("Document No.",DocumentNo);
+      FinanceChargeMemoLine.FINDFIRST;
+      FinanceChargeMemoHeader.GET(FinanceChargeMemoLine."Finance Charge Memo No.");
+      LibraryERM.IssueFinanceChargeMemo(FinanceChargeMemoHeader);
+      EXIT(FinanceChargeMemoHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CalculateTotalAmount@21(OrderNo@1003 : Code[20]) TotalAmount : Decimal;
+    VAR
+      Customer@1000 : Record 18;
+      SalesInvoiceHeader@1002 : Record 112;
+      FinanceChargeTerms@1004 : Record 5;
+    BEGIN
+      SalesInvoiceHeader.GET(OrderNo);
+      Customer.GET(SalesInvoiceHeader."Sell-to Customer No.");
+      FinanceChargeTerms.GET(Customer."Fin. Charge Terms Code");
+      SalesInvoiceHeader.CALCFIELDS(Amount);
+      TotalAmount :=
+        (SalesInvoiceHeader.Amount * FinanceChargeTerms."Interest Rate") / 100 + FinanceChargeTerms."Minimum Amount (LCY)" +
+        SalesInvoiceHeader.Amount;
+      EXIT(TotalAmount);
+    END;
+
+    LOCAL PROCEDURE UnapplyCustLedgerEntry@20(CustomerNo@1003 : Code[20];DocumentNo@1002 : Code[20]);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+    BEGIN
+      CustLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CustLedgerEntry.SETRANGE("Customer No.",CustomerNo);
+      CustLedgerEntry.FINDLAST;
+      LibraryERM.UnapplyCustomerLedgerEntry(CustLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE VerifyUnappliedDtldLedgEntry@11(CustomerNo@1000 : Code[20];DocumentNo@1002 : Code[20]);
+    VAR
+      DetailedCustLedgEntry@1001 : Record 379;
+    BEGIN
+      DetailedCustLedgEntry.SETRANGE("Entry Type",DetailedCustLedgEntry."Entry Type"::Application);
+      DetailedCustLedgEntry.SETRANGE("Document No.",DocumentNo);
+      DetailedCustLedgEntry.SETRANGE("Customer No.",CustomerNo);
+      DetailedCustLedgEntry.FINDSET;
+      REPEAT
+        Assert.IsTrue(DetailedCustLedgEntry.Unapplied,STRSUBSTNO(UnappliedError,DetailedCustLedgEntry.TABLECAPTION,
+            DetailedCustLedgEntry.Unapplied));
+      UNTIL DetailedCustLedgEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyCustLedgerEntryForRemAmt@3(GenJournalLine@1000 : Record 81);
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+      GeneralLedgerSetup@1003 : Record 98;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      CustLedgerEntry.SETRANGE("Document Type",GenJournalLine."Document Type");
+      CustLedgerEntry.SETRANGE("Document No.",GenJournalLine."Document No.");
+      CustLedgerEntry.SETRANGE("Customer No.",GenJournalLine."Account No.");
+      CustLedgerEntry.FINDFIRST;
+      CustLedgerEntry.CALCFIELDS("Remaining Amount");
+      Assert.AreNearlyEqual(GenJournalLine.Amount,CustLedgerEntry."Remaining Amount",GeneralLedgerSetup."Amount Rounding Precision",
+        STRSUBSTNO(RemainingAmountError,CustLedgerEntry."Remaining Amount",GenJournalLine.Amount));
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Finance Charge Memo] [Sales]
+      Unsupported version tags:
+      NA: Unable to Compile
+
+      Test for ERM - Check Finance Charge Memo, Detailed Ledger Entry and Customer Ledger Entry
+      1. Check that Finance Charge memo does not exist after issue and Customer Ledger Entry for Remaining amount after Post General
+         Journal Lines.
+      2. Check Customer Ledger Entry for Remaining Amount, Detailed Ledger Entry for Unapplied Entries after Post General
+         Journal Lines, Apply and Unapply Customer Ledger Entries.
+
+      This test code unit replaces Manual Test Suite (TS0160).
+      TFS_TS_ID = 21568
+
+      Cover Test cases:
+        TFS_TC_ID-122636 and 137015 TC_ID= 00866
+        TFS_TC_ID-122637 and 137016 TC_ID= 00867
+    }
+    END.
+  }
+}
+

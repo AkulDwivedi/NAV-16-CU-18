@@ -1,0 +1,203 @@
+OBJECT Codeunit 143002 Service Tax FCY Helper
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryERM@1500006 : Codeunit 131300;
+      LibraryServiceTax@1500005 : Codeunit 143001;
+      LibraryRandom@1500004 : Codeunit 130440;
+      ReverseServiceTaxHelper@1500003 : Codeunit 143006;
+      ServiceTaxVerify@1500000 : Codeunit 143004;
+
+    PROCEDURE ConvertFCYAmountToLCY@1500000(GenJournalLine@1500000 : Record 81) : Decimal;
+    BEGIN
+      EXIT(ROUND(LibraryERM.ConvertCurrency(GenJournalLine.Amount,GenJournalLine."Currency Code",'',GenJournalLine."Posting Date")));
+    END;
+
+    PROCEDURE CreateRandomExchangeRate@25(CurrencyCode@1001 : Code[10];Date@1500000 : Date;PrevCurrExchangeRate@1500001 : Decimal;PrevRelationalCurrExchRate@1500002 : Integer);
+    VAR
+      CurrencyExchangeRate@1000 : Record 330;
+    BEGIN
+      WITH CurrencyExchangeRate DO BEGIN
+        SETFILTER("Currency Code",CurrencyCode);
+        SETRANGE("Starting Date",Date);
+        IF NOT FINDFIRST THEN BEGIN
+          INIT;
+          VALIDATE("Currency Code",CurrencyCode);
+          VALIDATE("Starting Date",Date);
+          INSERT(TRUE);
+          VALIDATE("Exchange Rate Amount",PrevCurrExchangeRate);
+          VALIDATE("Adjustment Exch. Rate Amount","Exchange Rate Amount");
+          VALIDATE("Relational Exch. Rate Amount",
+            PrevRelationalCurrExchRate + LibraryRandom.RandInt(100));
+          VALIDATE("Relational Adjmt Exch Rate Amt","Relational Exch. Rate Amount");
+          MODIFY(TRUE);
+        END;
+      END;
+    END;
+
+    PROCEDURE GetSecondDocDate@1500018(FirstDocDate@1500000 : Date) : Date;
+    BEGIN
+      EXIT(CALCDATE('<+1M>',FirstDocDate));
+    END;
+
+    PROCEDURE GetThirdDocDate@1500029(FirstDocDate@1500000 : Date) : Date;
+    BEGIN
+      EXIT(CALCDATE('<+2M>',FirstDocDate));
+    END;
+
+    PROCEDURE InitExchRatesForSTReturnPeriod@1500010(CurrencyCode@1500000 : Code[10]);
+    VAR
+      ServiceTaxReturnPeriod@1500001 : Record 16588;
+    BEGIN
+      ReverseServiceTaxHelper.GetServiceTaxReturnPeriod(ServiceTaxReturnPeriod);
+      CreateRandomExchangeRate(CurrencyCode,
+        LibraryServiceTax.GetSrvTaxReturnPeriodStartDate(ServiceTaxReturnPeriod),100,100 + LibraryRandom.RandInt(100));
+    END;
+
+    PROCEDURE SetCurrencyOnGenJnl@1500006(VAR GenJournalLine@1500000 : Record 81);
+    VAR
+      CurrencyCode@1500001 : Code[10];
+    BEGIN
+      CurrencyCode := ReverseServiceTaxHelper.FindCurrencyCode;
+      InitExchRatesForSTReturnPeriod(CurrencyCode);
+      GenJournalLine.VALIDATE("Currency Code",CurrencyCode);
+      GenJournalLine.MODIFY;
+    END;
+
+    PROCEDURE SetFCYNonResPmtOnJnlLine@1500056(VAR GenJournalLine@1500000 : Record 81);
+    BEGIN
+      SetCurrencyOnGenJnl(GenJournalLine);
+      SetNonResidentPmtOnTDSGroup(GenJournalLine,TRUE);
+    END;
+
+    PROCEDURE SetNonResidentPmtOnTDSGroup@1500045(GenJournalLine@1500000 : Record 81;NonResidentPayments@1500001 : Boolean);
+    VAR
+      TDSGroup@1500002 : Record 13731;
+    BEGIN
+      WITH TDSGroup DO BEGIN
+        SETRANGE("TDS Group",GenJournalLine."TDS Group");
+        SETFILTER("Effective Date",STRSUBSTNO('<=%1',GenJournalLine."Posting Date"));
+        FINDLAST;
+        VALIDATE("Non Resident Payments",NonResidentPayments);
+        MODIFY;
+      END;
+      COMMIT;
+    END;
+
+    PROCEDURE SetupExchangeRates@1500027(GenJournalLine@1500000 : Record 81);
+    VAR
+      CurrencyExchangeRate@1500001 : Record 330;
+    BEGIN
+      LibraryERM.FindExchRate(CurrencyExchangeRate,GenJournalLine."Currency Code",GenJournalLine."Posting Date");
+      CreateRandomExchangeRate(GenJournalLine."Currency Code",GetSecondDocDate(GenJournalLine."Posting Date"),
+        CurrencyExchangeRate."Exchange Rate Amount",CurrencyExchangeRate."Relational Exch. Rate Amount");
+      LibraryERM.FindExchRate(CurrencyExchangeRate,GenJournalLine."Currency Code",GetSecondDocDate(GenJournalLine."Posting Date"));
+      CreateRandomExchangeRate(GenJournalLine."Currency Code",GetThirdDocDate(GenJournalLine."Posting Date"),
+        CurrencyExchangeRate."Exchange Rate Amount",CurrencyExchangeRate."Relational Exch. Rate Amount");
+    END;
+
+    PROCEDURE VerifyServiceTaxInvBalances@1500015(GenJournalLine@1500008 : Record 81;LastTransactionNo@1500000 : Integer);
+    VAR
+      ServiceTaxSetup@1500006 : Record 16472;
+      ServiceTaxAmount@1500009 : Decimal;
+      SBCAmount@1500001 : Decimal;
+      KKCAmount@1500002 : Decimal;
+    BEGIN
+      GenJournalLine.Amount := ConvertFCYAmountToLCY(GenJournalLine);
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      ServiceTaxAmount := ReverseServiceTaxHelper.CalculateServTaxTotal(GenJournalLine.Amount,ServiceTaxSetup);
+      SBCAmount := ReverseServiceTaxHelper.CalculateSBC(GenJournalLine.Amount,ServiceTaxSetup);
+      KKCAmount := ReverseServiceTaxHelper.CalculateKKCess(GenJournalLine.Amount,ServiceTaxSetup);
+
+      ServiceTaxVerify.STRecAccBalance(ServiceTaxSetup,-ServiceTaxAmount);
+      ServiceTaxVerify.STRecInterimAccBalance(ServiceTaxSetup,0);
+      ServiceTaxVerify.SBCRecAccBalance(ServiceTaxSetup,-SBCAmount);
+      ServiceTaxVerify.SBCRecInterimAccBalance(ServiceTaxSetup,0);
+      ServiceTaxVerify.KKCRecAccBalance(ServiceTaxSetup,-KKCAmount);
+      ServiceTaxVerify.KKCRecInterimAccBalance(ServiceTaxSetup,0);
+
+      ServiceTaxVerify.STEntryDtlsFullTaxBalance(LastTransactionNo,-ServiceTaxAmount);
+      ServiceTaxVerify.STEntryDtlsSBCBalance(LastTransactionNo,-SBCAmount);
+      ServiceTaxVerify.STEntryDtlsKKCBalance(LastTransactionNo,-KKCAmount);
+
+      ServiceTaxVerify.STEntryDetailsRemainingCredit(LastTransactionNo,-ServiceTaxAmount);
+      ServiceTaxVerify.STEntryDetailsKKCRemainingCredit(LastTransactionNo,-KKCAmount);
+
+      ServiceTaxVerify.PostedInvoiceRounding(GenJournalLine."Posting Group",LastTransactionNo);
+    END;
+
+    PROCEDURE VerifyServiceTaxAdvPmtBalances@1500025(GenJournalLine@1500008 : Record 81;LastTransactionNo@1500000 : Integer;Applied@1500001 : Boolean);
+    VAR
+      ServiceTaxSetup@1500006 : Record 16472;
+      ServiceTaxAmount@1500009 : Decimal;
+      SBCAmount@1500002 : Decimal;
+      KKCAmount@1500003 : Decimal;
+    BEGIN
+      VerifyServiceTaxAdvPmtBal(GenJournalLine,ServiceTaxSetup,ServiceTaxAmount,SBCAmount,KKCAmount,LastTransactionNo,Applied);
+      ServiceTaxVerify.STEntryDtlsFullTaxBalance(LastTransactionNo,ServiceTaxAmount);
+      ServiceTaxVerify.STRecAccBalance(ServiceTaxSetup,ServiceTaxAmount);
+      ServiceTaxVerify.STEntryDtlsSBCBalance(LastTransactionNo,SBCAmount);
+      ServiceTaxVerify.SBCRecAccBalance(ServiceTaxSetup,SBCAmount);
+    END;
+
+    PROCEDURE VerifyServTaxAdvPmtBalRounding@1500001(GenJournalLine@1500008 : Record 81;LastTransactionNo@1500000 : Integer;Applied@1500001 : Boolean);
+    VAR
+      ServiceTaxSetup@1500006 : Record 16472;
+      ServiceTaxAmount@1500009 : Decimal;
+      SBCAmount@1500003 : Decimal;
+      KKCAmount@1500002 : Decimal;
+    BEGIN
+      VerifyServiceTaxAdvPmtBal(GenJournalLine,ServiceTaxSetup,ServiceTaxAmount,SBCAmount,KKCAmount,LastTransactionNo,Applied);
+      ServiceTaxVerify.STEntryDtlsFullTaxBalNearly(LastTransactionNo,ServiceTaxAmount);
+      ServiceTaxVerify.STRecAccBalanceNearly(ServiceTaxSetup,ServiceTaxAmount);
+      ServiceTaxVerify.STEntryDtlsSBCBalNearly(LastTransactionNo,SBCAmount);
+      ServiceTaxVerify.SBCRecAccBalanceNearly(ServiceTaxSetup,SBCAmount);
+      ServiceTaxVerify.STEntryDtlsKKCBalNearly(LastTransactionNo,KKCAmount);
+      ServiceTaxVerify.KKCRecAccBalanceNearly(ServiceTaxSetup,KKCAmount);
+    END;
+
+    PROCEDURE VerifyServiceTaxAdvPmtBal@1500002(VAR GenJournalLine@1500008 : Record 81;VAR ServiceTaxSetup@1500002 : Record 16472;VAR ServiceTaxAmount@1500001 : Decimal;VAR SBCAmount@1500004 : Decimal;VAR KKCAmount@1500005 : Decimal;LastTransactionNo@1500000 : Integer;Applied@1500003 : Boolean);
+    BEGIN
+      GenJournalLine.Amount := ConvertFCYAmountToLCY(GenJournalLine);
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      ServiceTaxAmount := ReverseServiceTaxHelper.CalculateServTaxTotal(
+        ReverseServiceTaxHelper.GetBaseAmountFromGenJnlLine(GenJournalLine),ServiceTaxSetup);
+      SBCAmount :=
+        ReverseServiceTaxHelper.CalculateSBC(ReverseServiceTaxHelper.GetBaseAmountFromGenJnlLine(GenJournalLine),ServiceTaxSetup);
+      KKCAmount :=
+        ReverseServiceTaxHelper.CalculateKKCess(ReverseServiceTaxHelper.GetBaseAmountFromGenJnlLine(GenJournalLine),ServiceTaxSetup);
+
+      ServiceTaxVerify.STEntryDetailsRemainingCredit(LastTransactionNo,ServiceTaxAmount);
+      ServiceTaxVerify.STEntryDetailsKKCRemainingCredit(LastTransactionNo,KKCAmount);
+
+      ServiceTaxVerify.PostedInvoiceRounding(GenJournalLine."Posting Group",LastTransactionNo);
+
+      IF Applied THEN BEGIN
+        ServiceTaxVerify.STRecInterimAccBalance(ServiceTaxSetup,0);
+        ServiceTaxVerify.SBCRecInterimAccBalance(ServiceTaxSetup,0);
+        ServiceTaxVerify.KKCRecInterimAccBalance(ServiceTaxSetup,0);
+      END ELSE BEGIN
+        ServiceTaxVerify.STRecInterimAccBalance(ServiceTaxSetup,-ServiceTaxAmount);
+        ServiceTaxVerify.SBCRecInterimAccBalance(ServiceTaxSetup,-SBCAmount);
+        ServiceTaxVerify.KKCRecInterimAccBalance(ServiceTaxSetup,-KKCAmount);
+      END;
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

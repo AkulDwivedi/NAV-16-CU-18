@@ -1,0 +1,916 @@
+OBJECT Codeunit 137037 SCM Inventory Adjustment
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryRandom@1000 : Codeunit 130440;
+      LibraryPurchase@1011 : Codeunit 130512;
+      LibrarySales@1006 : Codeunit 130509;
+      LibraryManufacturing@1002 : Codeunit 132202;
+      LibraryCosting@1013 : Codeunit 132200;
+      LibrarySetupStorage@1005 : Codeunit 131009;
+      LibraryUtility@1008 : Codeunit 131000;
+      isInitialized@1001 : Boolean;
+      ProductionOrderNo@1003 : Code[20];
+      RandomConsumptionQty@1004 : Integer;
+      ErrMsgAmounts@1007 : TextConst 'ENU=The Amounts must match.';
+      RandomScrapQty@1010 : Integer;
+
+    [Test]
+    [HandlerFunctions(ProdJournalConsumpPageHandler)]
+    PROCEDURE ProdOrderPostProdJnlFIFO@2();
+    VAR
+      TempItem@1002 : TEMPORARY Record 27;
+      Item@1004 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      ProductionBOMLine@1008 : Record 99000772;
+      PurchaseHeader@1000 : Record 38;
+      CostingMethod@1005 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::FIFO;
+
+      // Random Consumption Quantity used inside page handler - ProdJournalConsumpPageHandler.
+      RandomConsumptionQty := LibraryRandom.RandInt(5);
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,1,FALSE);
+      SelectProdBOMLine(ProductionBOMLine,ProductionOrder."Source No.");
+
+      // Verify: Verification of Quantity for Consumption in Item Ledger Entry.
+      VerifyConsumptionQuantity(
+        ProductionOrder."No.",ProductionOrder.Quantity * ProductionBOMLine."Quantity per",RandomConsumptionQty);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalConsumpPageHandler)]
+    PROCEDURE FinishProdOrderFIFO@17();
+    VAR
+      TempItem@1004 : TEMPORARY Record 27;
+      Item@1005 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      ProductionBOMLine@1010 : Record 99000772;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1006 : Record 39;
+      ItemLedgerEntry@1000 : Record 32;
+      TotalCostAmount@1009 : Decimal;
+      CostingMethod@1007 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::FIFO;
+
+      // Random Consumption Quantity used inside page handler - ProdJournalConsumpPageHandler.
+      RandomConsumptionQty := LibraryRandom.RandInt(5);
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,1,FALSE);
+      SelectProdBOMLine(ProductionBOMLine,ProductionOrder."Source No.");
+      SelectPurchaseLine(PurchaseLine,PurchaseHeader."No.",PurchaseLine."Document Type"::Order);
+      TotalCostAmount :=
+        PurchaseLine."Unit Cost" * ((ProductionOrder.Quantity * ProductionBOMLine."Quantity per") + RandomConsumptionQty);
+
+      // Exercise: Change Status of Production Order to Finished. Run Adjust Cost Item Entries report.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+      AdjustCostItemEntries(TempItem,ProductionOrder."Source No.");
+
+      // Verify: Verification of Consumption Quantity and Cost Amount(Actual) in Item Ledger Entry.
+      VerifyConsumptionQuantity(
+        ProductionOrder."No.",ProductionOrder.Quantity * ProductionBOMLine."Quantity per",RandomConsumptionQty);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption,-TotalCostAmount);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Output,TotalCostAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalConsumpPageHandler)]
+    PROCEDURE FinishProdOrderFullInvoiceFIFO@18();
+    VAR
+      TempItem@1002 : TEMPORARY Record 27;
+      Item@1005 : Record 27;
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1012 : Record 39;
+      ProductionOrder@1003 : Record 5405;
+      ProductionBOMLine@1011 : Record 99000772;
+      ItemLedgerEntry@1000 : Record 32;
+      TotalCostAmount@1010 : Decimal;
+      CostingMethod@1006 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::FIFO;
+
+      // Random Consumption Quantity used inside page handler - ProdJournalConsumpPageHandler.
+      RandomConsumptionQty := LibraryRandom.RandInt(5);
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,1,FALSE);
+      SelectProdBOMLine(ProductionBOMLine,ProductionOrder."Source No.");
+
+      // Change Status of Production Order to Finished. Re-open Purchase Order And Update Direct Unit Cost. Random values not important.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      ReopenPurchaseOrder(PurchaseHeader,PurchaseLine);
+      UpdatePurchaseLine(
+        PurchaseLine,PurchaseLine.FIELDNO("Direct Unit Cost"),PurchaseLine."Direct Unit Cost" + LibraryRandom.RandInt(5));
+      TotalCostAmount :=
+        PurchaseLine."Direct Unit Cost" * ((ProductionOrder.Quantity * ProductionBOMLine."Quantity per") + RandomConsumptionQty);
+
+      // Exercise: Post Purchase Order as Invoice. Run Adjust Cost Item Entries report.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+      AdjustCostItemEntries(TempItem,ProductionOrder."Source No.");
+
+      // Verify: Verification of Consumption Quantity and Cost Amount(Actual) in Item Ledger Entry.
+      VerifyConsumptionQuantity(
+        ProductionOrder."No.",ProductionOrder.Quantity * ProductionBOMLine."Quantity per",RandomConsumptionQty);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption,-TotalCostAmount);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Output,TotalCostAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalPostPageHandler)]
+    PROCEDURE ProdOrderPostProdJnlStandard@32();
+    VAR
+      TempItem@1002 : TEMPORARY Record 27;
+      Item@1004 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      PurchaseHeader@1000 : Record 38;
+      ItemConsumptionQuantity@1005 : Integer;
+      ItemConsumptionQuantity2@1006 : Integer;
+      CostingMethod@1007 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::Standard;
+      CostingMethod[2] := Item."Costing Method"::FIFO;
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,2,FALSE);
+
+      // Calculate Consumption Quantity for Item Ledger Entry.
+      ItemConsumptionQuantity := ProductionOrder.Quantity * SelectBOMLineQuantityPer(TempItem,TempItem."Costing Method"::Standard);
+      ItemConsumptionQuantity2 := ProductionOrder.Quantity * SelectBOMLineQuantityPer(TempItem,TempItem."Costing Method"::FIFO);
+
+      // Verify: Verification of Quantity for Consumption in Item Ledger Entry.
+      VerifyConsumptionQuantity(ProductionOrder."No.",ItemConsumptionQuantity,ItemConsumptionQuantity2);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalPostPageHandler)]
+    PROCEDURE FinishProdOrderStandard@31();
+    VAR
+      TempItem@1004 : TEMPORARY Record 27;
+      Item@1005 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1006 : Record 39;
+      ItemLedgerEntry@1000 : Record 32;
+      ConsumptionCostAmount@1009 : Decimal;
+      OutputCostAmount@1013 : Decimal;
+      ItemConsumptionQuantity@1008 : Integer;
+      ItemConsumptionQuantity2@1007 : Integer;
+      StandardCost@1011 : Decimal;
+      ChildItemNo@1014 : Code[20];
+      CostingMethod@1010 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::Standard;
+      CostingMethod[2] := Item."Costing Method"::FIFO;
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,2,FALSE);
+
+      // Calculate Expected Consumption Cost Amount and Component Consumption Quantity.
+      ItemConsumptionQuantity := ProductionOrder.Quantity * SelectBOMLineQuantityPer(TempItem,TempItem."Costing Method"::Standard);
+      StandardCost := TempItem."Standard Cost";
+      ItemConsumptionQuantity2 := ProductionOrder.Quantity * SelectBOMLineQuantityPer(TempItem,TempItem."Costing Method"::FIFO);
+      ChildItemNo := TempItem."No.";
+      SelectPurchaseLine(PurchaseLine,PurchaseHeader."No.",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("No.",ChildItemNo);
+      PurchaseLine.FINDFIRST;
+      ConsumptionCostAmount := (ItemConsumptionQuantity * StandardCost) + (ItemConsumptionQuantity2 * PurchaseLine."Direct Unit Cost");
+
+      // Calculate Expected Output Cost Amount.
+      OutputCostAmount := ProductionOrder.Quantity * SelectItemCost(ProductionOrder."Source No.",Item.FIELDNO("Standard Cost"));
+
+      // Exercise: Change Status of Production Order to Finished. Run Adjust Cost Item Entries report.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+      AdjustCostItemEntries(TempItem,ProductionOrder."Source No.");
+
+      // Verify: Verification of Consumption Quantity and Cost Amount(Actual) in Item Ledger Entry.
+      VerifyConsumptionQuantity(ProductionOrder."No.",ItemConsumptionQuantity,ItemConsumptionQuantity2);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption,-ConsumptionCostAmount);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Output,OutputCostAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalPostPageHandler)]
+    PROCEDURE FinishProdOrderInvoiceStandard@30();
+    VAR
+      TempItem@1002 : TEMPORARY Record 27;
+      Item@1005 : Record 27;
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1012 : Record 39;
+      ProductionOrder@1003 : Record 5405;
+      ItemLedgerEntry@1000 : Record 32;
+      ChildItemNo@1007 : Code[20];
+      ConsumptionCostAmount@1010 : Decimal;
+      OutputCostAmount@1008 : Decimal;
+      ItemConsumptionQuantity@1014 : Integer;
+      ItemConsumptionQuantity2@1013 : Integer;
+      StandardCost@1016 : Decimal;
+      CostingMethod@1011 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::Standard;
+      CostingMethod[2] := Item."Costing Method"::FIFO;
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,2,FALSE);
+
+      // Change Status of Production Order to Finished. Re-open Purchase Order And Update Direct Unit Cost and Qty to Invoice.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      ReopenPurchaseOrder(PurchaseHeader,PurchaseLine);
+      UpdateDirectUnitCostInvoiceQty(PurchaseLine);
+
+      // Calculate Component Item Consumption Quantity.
+      ItemConsumptionQuantity := ProductionOrder.Quantity * SelectBOMLineQuantityPer(TempItem,TempItem."Costing Method"::Standard);
+      StandardCost := TempItem."Standard Cost";
+      ItemConsumptionQuantity2 := ProductionOrder.Quantity * SelectBOMLineQuantityPer(TempItem,TempItem."Costing Method"::FIFO);
+      ChildItemNo := TempItem."No.";
+
+      // Calculate Expected Output Cost Amount.
+      OutputCostAmount := ProductionOrder.Quantity * SelectItemCost(ProductionOrder."Source No.",Item.FIELDNO("Standard Cost"));
+
+      // Exercise: Post Purchase Order as Invoice. Run Adjust Cost Item Entries report.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+      AdjustCostItemEntries(TempItem,ProductionOrder."Source No.");
+
+      // Verify: Verification of Consumption Quantity and Cost Amount(Actual) in Item Ledger Entry.
+      Item.GET(ChildItemNo);
+      ConsumptionCostAmount := (ItemConsumptionQuantity * StandardCost) + (ItemConsumptionQuantity2 * Item."Unit Cost");
+      VerifyConsumptionQuantity(ProductionOrder."No.",ItemConsumptionQuantity,ItemConsumptionQuantity2);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption,-ConsumptionCostAmount);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Output,OutputCostAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalPostPageHandler)]
+    PROCEDURE ProdOrderPostProdJnlLIFO@15();
+    VAR
+      TempItem@1002 : TEMPORARY Record 27;
+      Item@1004 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      PurchaseHeader@1000 : Record 38;
+      ItemConsumptionQuantity@1005 : Integer;
+      ItemConsumptionQuantity2@1006 : Integer;
+      CostingMethod@1007 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::LIFO;
+      CostingMethod[2] := Item."Costing Method"::LIFO;
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,2,TRUE);
+
+      // Calculate Consumption Quantity for Item Ledger Entry.
+      TempItem.FINDSET;
+      ItemConsumptionQuantity := SelectItemConsumptionQuantity(ProductionOrder.Quantity,TempItem."No.");
+      TempItem.NEXT;
+      ItemConsumptionQuantity2 := SelectItemConsumptionQuantity(ProductionOrder.Quantity,TempItem."No.");
+
+      // Verify: Verification of Quantity for Consumption in Item Ledger Entry.
+      VerifyConsumptionQuantity(ProductionOrder."No.",ItemConsumptionQuantity,ItemConsumptionQuantity2);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalPostPageHandler)]
+    PROCEDURE FinishProdOrderLIFO@14();
+    VAR
+      TempItem@1004 : TEMPORARY Record 27;
+      Item@1005 : Record 27;
+      Item2@1017 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      PurchaseHeader@1002 : Record 38;
+      ItemLedgerEntry@1000 : Record 32;
+      ConsumptionCostAmount@1009 : Decimal;
+      OutputCostAmount@1013 : Decimal;
+      ItemConsumptionQuantity@1008 : Integer;
+      ItemConsumptionQuantity2@1007 : Integer;
+      ChildItemNo@1014 : Code[20];
+      ChildItemNo2@1016 : Code[20];
+      CostingMethod@1010 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::LIFO;
+      CostingMethod[2] := Item."Costing Method"::LIFO;
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,2,TRUE);
+
+      // Calculate Expected Consumption Cost Amount and Component Consumption Quantity.
+      TempItem.FINDSET;
+      ChildItemNo := TempItem."No.";
+      ItemConsumptionQuantity := SelectItemConsumptionQuantity(ProductionOrder.Quantity,ChildItemNo);
+      TempItem.NEXT;
+      ChildItemNo2 := TempItem."No.";
+      ItemConsumptionQuantity2 := SelectItemConsumptionQuantity(ProductionOrder.Quantity,ChildItemNo2);
+
+      // Exercise: Change Status of Production Order to Finished. Run Adjust Cost Item Entries report.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+      AdjustCostItemEntries(TempItem,ProductionOrder."Source No.");
+
+      // Verify: Verification of Consumption Quantity and Cost Amount(Actual) in Item Ledger Entry.
+      Item.GET(ChildItemNo);
+      Item2.GET(ChildItemNo2);
+      ConsumptionCostAmount := (ItemConsumptionQuantity * Item."Unit Cost") + (ItemConsumptionQuantity2 * Item2."Unit Cost");
+      VerifyConsumptionQuantity(ProductionOrder."No.",ItemConsumptionQuantity,ItemConsumptionQuantity2);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption,-ConsumptionCostAmount);
+
+      // Calculate Expected Output Cost Amount.
+      OutputCostAmount := ProductionOrder.Quantity * SelectItemCost(ProductionOrder."Source No.",Item.FIELDNO("Unit Cost"));
+
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Output,OutputCostAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalPostPageHandler)]
+    PROCEDURE FinishProdOrderFullInvoiceLIFO@16();
+    VAR
+      TempItem@1004 : TEMPORARY Record 27;
+      Item@1005 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1006 : Record 39;
+      ItemLedgerEntry@1000 : Record 32;
+      ConsumptionCostAmount@1009 : Decimal;
+      OutputCostAmount@1013 : Decimal;
+      ItemConsumptionQuantity@1008 : Integer;
+      ItemConsumptionQuantity2@1007 : Integer;
+      CostingMethod@1010 : ARRAY [2] OF Option;
+      LastDirectCost@1014 : Decimal;
+      LastDirectCost2@1016 : Decimal;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::LIFO;
+      CostingMethod[2] := Item."Costing Method"::LIFO;
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,2,TRUE);
+
+      // Change Status of Production Order to Finished.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+      ReopenPurchaseOrder(PurchaseHeader,PurchaseLine);
+      UpdateDirectUnitCostInvoiceQty(PurchaseLine);
+      UpdateVendorInvoiceNo(PurchaseHeader);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+      AdjustCostItemEntries(TempItem,ProductionOrder."Source No.");
+      ReopenPurchaseOrder(PurchaseHeader,PurchaseLine);
+      UpdatePurchaseLine(PurchaseLine,PurchaseLine.FIELDNO("Qty. to Invoice"),1);
+      UpdateVendorInvoiceNo(PurchaseHeader);
+
+      // Exercise: Invoice Purchase Order Completely and Execute Adjust Cost Item Entries.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+      AdjustCostItemEntries(TempItem,ProductionOrder."Source No.");
+
+      // Verify: Verification of Consumption Quantity and Cost Amount(Actual) in Item Ledger Entry.
+      // Calculate Expected Consumption Cost Amount and Component Consumption Quantity.
+      TempItem.FINDSET;
+      LastDirectCost := SelectItemCost(TempItem."No.",Item.FIELDNO("Last Direct Cost"));
+      ItemConsumptionQuantity := SelectItemConsumptionQuantity(ProductionOrder.Quantity,TempItem."No.");
+      TempItem.NEXT;
+      LastDirectCost2 := SelectItemCost(TempItem."No.",Item.FIELDNO("Last Direct Cost"));
+      ItemConsumptionQuantity2 := SelectItemConsumptionQuantity(ProductionOrder.Quantity,TempItem."No.");
+      ConsumptionCostAmount := (ItemConsumptionQuantity * LastDirectCost) + (ItemConsumptionQuantity2 * LastDirectCost2);
+
+      VerifyConsumptionQuantity(ProductionOrder."No.",ItemConsumptionQuantity,ItemConsumptionQuantity2);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption,-ConsumptionCostAmount);
+
+      // Calculate Expected Output Cost Amount.
+      OutputCostAmount := ProductionOrder.Quantity * SelectItemCost(ProductionOrder."Source No.",Item.FIELDNO("Unit Cost"));
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Output,OutputCostAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalScrapPageHandler)]
+    PROCEDURE PostProdJnlWithScrapStandard@23();
+    VAR
+      TempItem@1002 : TEMPORARY Record 27;
+      Item@1004 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      PurchaseHeader@1000 : Record 38;
+      ItemLedgerEntry@1008 : Record 32;
+      ItemConsumptionQuantity@1005 : Integer;
+      CostingMethod@1007 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::Standard;
+
+      // Random Scrap Quantity used inside page handler - ProdJournalScrapPageHandler.
+      RandomScrapQty := LibraryRandom.RandInt(5);
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,1,FALSE);
+
+      // Calculate Consumption Quantity for Item Ledger Entry.
+      ItemConsumptionQuantity := ProductionOrder.Quantity * SelectBOMLineQuantityPer(TempItem,TempItem."Costing Method"::Standard);
+
+      // Verify: Verification of Scrap Quantity in Capacity Ledger Entry and Quantity for Consumption in Item Ledger Entry.
+      VerifyCapacityLedgerEntry(ProductionOrder."No.",RandomScrapQty);
+      SelectItemLedgerEntries(ItemLedgerEntry,ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption);
+      ItemLedgerEntry.TESTFIELD(Quantity,-ItemConsumptionQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalScrapPageHandler)]
+    PROCEDURE FinishProdWithScrapStandard@22();
+    VAR
+      TempItem@1004 : TEMPORARY Record 27;
+      Item@1005 : Record 27;
+      ProductionOrder@1003 : Record 5405;
+      PurchaseHeader@1002 : Record 38;
+      ItemLedgerEntry@1000 : Record 32;
+      ConsumptionCostAmount@1009 : Decimal;
+      OutputCostAmount@1013 : Decimal;
+      ItemConsumptionQuantity@1008 : Integer;
+      CostingMethod@1010 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::Standard;
+
+      // Random Scrap Quantity used inside page handler - ProdJournalScrapPageHandler.
+      RandomScrapQty := LibraryRandom.RandInt(5);
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,1,FALSE);
+
+      // Calculate Expected Consumption Cost Amount and Component Consumption Quantity.
+      ItemConsumptionQuantity := ProductionOrder.Quantity * SelectBOMLineQuantityPer(TempItem,TempItem."Costing Method"::Standard);
+      ConsumptionCostAmount := ItemConsumptionQuantity * TempItem."Standard Cost";
+
+      // Calculate Expected Output Cost Amount.
+      OutputCostAmount := ProductionOrder.Quantity * SelectItemCost(ProductionOrder."Source No.",Item.FIELDNO("Standard Cost"));
+
+      // Exercise: Change Status of Production Order to Finished. Run Adjust Cost Item Entries report.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+      AdjustCostItemEntries(TempItem,ProductionOrder."Source No.");
+
+      // Verify: Verification of Scrap Quantity in Capacity Ledger Entry and Quantity for Consumption in Item Ledger Entry.
+      VerifyCapacityLedgerEntry(ProductionOrder."No.",RandomScrapQty);
+      SelectItemLedgerEntries(ItemLedgerEntry,ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption);
+      ItemLedgerEntry.TESTFIELD(Quantity,-ItemConsumptionQuantity);
+
+      // Verification of Cost Amount(Actual) in Item Ledger Entry.
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption,-ConsumptionCostAmount);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Output,OutputCostAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProdJournalScrapPageHandler)]
+    PROCEDURE FinishProdWithScrapInvoiceStd@10();
+    VAR
+      TempItem@1002 : TEMPORARY Record 27;
+      Item@1005 : Record 27;
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1012 : Record 39;
+      ProductionOrder@1003 : Record 5405;
+      ItemLedgerEntry@1000 : Record 32;
+      ConsumptionCostAmount@1010 : Decimal;
+      OutputCostAmount@1008 : Decimal;
+      ItemConsumptionQuantity@1014 : Integer;
+      CostingMethod@1011 : ARRAY [2] OF Option;
+    BEGIN
+      // Setup.
+      Initialize;
+      CostingMethod[1] := Item."Costing Method"::Standard;
+
+      // Random Scrap Quantity used inside page handler - ProdJournalScrapPageHandler.
+      RandomScrapQty := LibraryRandom.RandInt(5);
+      ReleasedProductionOrderSetup(TempItem,PurchaseHeader,ProductionOrder,CostingMethod,1,FALSE);
+
+      // Change Status of Production Order to Finished. Re-open Purchase Order And Update Direct Unit Cost and Qty to Invoice.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrderNo);
+      ReopenPurchaseOrder(PurchaseHeader,PurchaseLine);
+      UpdateDirectUnitCostInvoiceQty(PurchaseLine);
+
+      // Calculate Expected Component Item Consumption Quantity.
+      ItemConsumptionQuantity := ProductionOrder.Quantity * SelectBOMLineQuantityPer(TempItem,TempItem."Costing Method"::Standard);
+
+      // Calculate Expected Output Cost Amount.
+      OutputCostAmount := ProductionOrder.Quantity * SelectItemCost(ProductionOrder."Source No.",Item.FIELDNO("Standard Cost"));
+
+      // Exercise: Post Purchase Order as Invoice. Run Adjust Cost Item Entries report.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,FALSE,TRUE);
+      AdjustCostItemEntries(TempItem,ProductionOrder."Source No.");
+      ConsumptionCostAmount := ItemConsumptionQuantity * TempItem."Standard Cost";
+
+      // Verify: Verification of Scrap Quantity in Capacity Ledger Entry and Quantity for Consumption in Item Ledger Entry.
+      VerifyCapacityLedgerEntry(ProductionOrder."No.",RandomScrapQty);
+      SelectItemLedgerEntries(ItemLedgerEntry,ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption);
+      ItemLedgerEntry.TESTFIELD(Quantity,-ItemConsumptionQuantity);
+
+      // Verification of Cost Amount(Actual) in Item Ledger Entry.
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Consumption,-ConsumptionCostAmount);
+      VerifyProductionILECostAmount(ProductionOrder."No.",ItemLedgerEntry."Entry Type"::Output,OutputCostAmount);
+    END;
+
+    LOCAL PROCEDURE ReleasedProductionOrderSetup@11(VAR TempItem@1002 : TEMPORARY Record 27;VAR PurchaseHeader@1001 : Record 38;VAR ProductionOrder@1000 : Record 5405;CostingMethod@1006 : ARRAY [2] OF Option;NoOfComponents@1005 : Integer;PartialInvoice@1007 : Boolean);
+    VAR
+      Item@1010 : Record 27;
+      ProductionBOMHeader@1003 : Record 99000771;
+      PurchaseLine@1008 : Record 39;
+    BEGIN
+      // Update Sales Setup, Create Child Items with respective costing method. Create Purchase Order and Receive only.
+      // Create Production BOM and Create Parent Item and attach Production BOM.
+      LibrarySales.SetCreditWarningsToNoWarnings;
+      LibrarySales.SetStockoutWarning(FALSE);
+
+      CreateItemsAndCopyToTemp(TempItem,CostingMethod,NoOfComponents);
+      CreatePurchaseOrder(PurchaseHeader,TempItem);
+      IF PartialInvoice THEN BEGIN
+        SelectPurchaseLine(PurchaseLine,PurchaseHeader."No.",PurchaseLine."Document Type"::Order);
+        UpdatePurchaseLine(PurchaseLine,PurchaseLine.FIELDNO("Qty. to Invoice"),1);
+      END;
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,PartialInvoice);
+      CreateProductionBOM(ProductionBOMHeader,TempItem);
+      CreateItem(Item,CostingMethod[1],ProductionBOMHeader."No.");
+
+      // Create and Refresh Released Production Order.
+      CreateAndRefreshRelProdOrder(ProductionOrder,Item."No.");
+      ProductionOrderNo := ProductionOrder."No.";
+
+      // Open and perform required actions in Production Journal Handler. Post Production Journal.
+      // Exercise for Test method : RelProdOrderPostProdJnl.
+      // ----------------------------------------------------------------
+      // Function                         Page Handler Invoked
+      // ----------------------------------------------------------------
+      // ProdOrderPostProdJnlFIFO         ProdJournalConsumpPageHandler
+      // FinishProdOrderFIFO              ProdJournalConsumpPageHandler
+      // FinishProdOrderInvoiceFIFO       ProdJournalConsumpPageHandler
+      // ProdOrderPostProdJnlStandard     ProdJournalPostPageHandler
+      // FinishProdOrderStandard          ProdJournalPostPageHandler
+      // FinishProdOrderInvoiceStandard   ProdJournalPostPageHandler
+      // ProdOrderPostProdJnlLIFO         ProdJournalPostPageHandler
+      // FinishProdOrderLIFO              ProdJournalPostPageHandler
+      // FinishProdOrderFullInvoiceLIFO   ProdJournalPostPageHandler
+      // PostProdJnlWithScrapStandard     ProdJournalScrapPageHandler
+      // FinishProdWithScrapStandard      ProdJournalScrapPageHandler
+      // FinishProdWithScrapInvoiceStd    ProdJournalScrapPageHandler
+      // ----------------------------------------------------------------
+
+      OpenProductionJournal(ProductionOrder);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1004 : Codeunit 131305;
+    BEGIN
+      LibrarySetupStorage.Restore;
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibrarySetupStorage.Save(DATABASE::"Sales & Receivables Setup");
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateItemsAndCopyToTemp@13(VAR TempItem@1000 : TEMPORARY Record 27;CostingMethod@1004 : ARRAY [2] OF Option;NoOfItems@1002 : Integer);
+    VAR
+      Item@1001 : Record 27;
+      Counter@1003 : Integer;
+    BEGIN
+      FOR Counter := 1 TO NoOfItems DO BEGIN
+        CLEAR(Item);
+        CreateItem(Item,CostingMethod[Counter],'');
+        TempItem := Item;
+        TempItem.INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@7(VAR PurchaseHeader@1000 : Record 38;VAR TempItem@1001 : TEMPORARY Record 27);
+    VAR
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      TempItem.FINDSET;
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      UpdateVendorInvoiceNo(PurchaseHeader);
+      REPEAT
+        LibraryPurchase.CreatePurchaseLine(
+          PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,TempItem."No.",LibraryRandom.RandInt(10) + 100);  // Value important.
+        PurchaseLine.VALIDATE("Direct Unit Cost",LibraryRandom.RandDec(10,2));  // Random value not important.
+        PurchaseLine.MODIFY(TRUE);
+      UNTIL TempItem.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateProductionBOM@6(VAR ProductionBOMHeader@1006 : Record 99000771;VAR TempItem@1000 : TEMPORARY Record 27);
+    VAR
+      ManufacturingSetup@1003 : Record 99000765;
+      ProductionBOMLine@1002 : Record 99000772;
+    BEGIN
+      // Random values not important.
+      ManufacturingSetup.GET;
+      TempItem.FINDSET;
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,TempItem."Base Unit of Measure");
+      REPEAT
+        LibraryManufacturing.CreateProductionBOMLine(
+          ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,TempItem."No.",LibraryRandom.RandInt(5));
+      UNTIL TempItem.NEXT = 0;
+      ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::Certified);
+      ProductionBOMHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItem@24(VAR Item@1002 : Record 27;ItemCostingMethod@1003 : Option;ProductionBOMNo@1000 : Code[20]);
+    BEGIN
+      // Random values not important.
+      LibraryManufacturing.CreateItemManufacturing(
+        Item,ItemCostingMethod,LibraryRandom.RandInt(5),Item."Reordering Policy",Item."Flushing Method"::Manual,'',
+        ProductionBOMNo);
+      Item.VALIDATE("Manufacturing Policy",Item."Manufacturing Policy"::"Make-to-Order");
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshRelProdOrder@58(VAR ProductionOrder@1000 : Record 5405;SourceNo@1002 : Code[20]);
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,SourceNo,
+        LibraryRandom.RandInt(5));  // Value not important.
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE OpenProductionJournal@21(ProductionOrder@1003 : Record 5405);
+    VAR
+      ProdOrderLine@1001 : Record 5406;
+      ProductionJournalMgt@1000 : Codeunit 5510;
+    BEGIN
+      // Open Production Journal based on selected Production Order Line.
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status::Released);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+      ProductionJournalMgt.Handling(ProductionOrder,ProdOrderLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE SelectPurchaseLine@1(VAR PurchaseLine@1000 : Record 39;DocumentNo@1001 : Code[20];DocumentType@1002 : Option);
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",DocumentType);
+      PurchaseLine.SETRANGE("Document No.",DocumentNo);
+      PurchaseLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE SelectProdBOMLine@28(VAR ProductionBOMLine@1000 : Record 99000772;ItemNo@1001 : Code[20]);
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      Item.GET(ItemNo);
+      ProductionBOMLine.SETRANGE("Production BOM No.",Item."Production BOM No.");
+      ProductionBOMLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE SelectBOMLineQuantityPer@12(VAR TempItem@1000 : TEMPORARY Record 27;ItemCostingMethod@1002 : Option) : Integer;
+    VAR
+      ProductionBOMLine@1001 : Record 99000772;
+    BEGIN
+      TempItem.RESET;
+      TempItem.SETRANGE("Costing Method",ItemCostingMethod);
+      TempItem.FINDFIRST;
+      ProductionBOMLine.SETRANGE("No.",TempItem."No.");
+      ProductionBOMLine.FINDFIRST;
+      EXIT(ProductionBOMLine."Quantity per");
+    END;
+
+    LOCAL PROCEDURE ReopenPurchaseOrder@39(VAR PurchaseHeader@1000 : Record 38;VAR PurchaseLine@1001 : Record 39);
+    BEGIN
+      LibraryPurchase.ReopenPurchaseDocument(PurchaseHeader);
+      SelectPurchaseLine(PurchaseLine,PurchaseHeader."No.",PurchaseLine."Document Type"::Order);
+    END;
+
+    LOCAL PROCEDURE UpdateVendorInvoiceNo@35(VAR PurchaseHeader@1000 : Record 38);
+    BEGIN
+      PurchaseHeader.VALIDATE(
+        "Vendor Invoice No.",LibraryUtility.GenerateRandomCode(PurchaseHeader.FIELDNO("Vendor Invoice No."),DATABASE::"Purchase Header"));
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseLine@19(VAR PurchaseLine@1000 : Record 39;FieldNo@1001 : Integer;Value@1002 : Variant);
+    VAR
+      RecRef@1003 : RecordRef;
+      FieldRef@1004 : FieldRef;
+    BEGIN
+      // Update Purchase Line base on Field and its corresponding value.
+      RecRef.GETTABLE(PurchaseLine);
+      FieldRef := RecRef.FIELD(FieldNo);
+      FieldRef.VALIDATE(Value);
+      RecRef.SETTABLE(PurchaseLine);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateDirectUnitCostInvoiceQty@3(VAR PurchaseLine@1000 : Record 39);
+    BEGIN
+      // Random values not important.
+      REPEAT
+        UpdatePurchaseLine(
+          PurchaseLine,PurchaseLine.FIELDNO("Direct Unit Cost"),PurchaseLine."Direct Unit Cost" + LibraryRandom.RandInt(5));
+        IF PurchaseLine."Qty. to Invoice" = 0 THEN
+          EXIT;
+        UpdatePurchaseLine(PurchaseLine,PurchaseLine.FIELDNO("Qty. to Invoice"),PurchaseLine."Qty. to Invoice" - 1);
+      UNTIL PurchaseLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SelectItemConsumptionQuantity@38(ProductionOrderQuantity@1000 : Integer;No@1002 : Code[20]) : Decimal;
+    VAR
+      ProductionBOMLine@1001 : Record 99000772;
+    BEGIN
+      ProductionBOMLine.SETRANGE("No.",No);
+      ProductionBOMLine.FINDFIRST;
+      EXIT(ProductionOrderQuantity * ProductionBOMLine."Quantity per");
+    END;
+
+    LOCAL PROCEDURE SelectItemLedgerEntries@25(VAR ItemLedgerEntry@1000 : Record 32;DocumentNo@1001 : Code[20];EntryType@1002 : Option);
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      ItemLedgerEntry.SETRANGE("Entry Type",EntryType);
+      ItemLedgerEntry.FINDSET;
+    END;
+
+    LOCAL PROCEDURE SelectItemCost@40(ItemNo@1000 : Code[20];FieldNo@1001 : Integer) CurrentValue : Decimal;
+    VAR
+      Item@1004 : Record 27;
+      RecRef@1003 : RecordRef;
+      FieldRef@1002 : FieldRef;
+    BEGIN
+      Item.GET(ItemNo);
+      RecRef.GETTABLE(Item);
+      FieldRef := RecRef.FIELD(FieldNo);
+      CurrentValue := FieldRef.VALUE;
+    END;
+
+    LOCAL PROCEDURE AdjustCostItemEntries@9(VAR TempItem@1003 : TEMPORARY Record 27;ItemNo@1000 : Code[20]);
+    VAR
+      Counter@1001 : Integer;
+      ItemString@1002 : Text[250];
+    BEGIN
+      TempItem.FINDSET;
+      FOR Counter := 1 TO TempItem.COUNT DO BEGIN
+        ItemString := ItemString + TempItem."No." + '|';
+        TempItem.NEXT;
+      END;
+      ItemString := ItemString + ItemNo;
+      LibraryCosting.AdjustCostItemEntries(ItemString,'');
+    END;
+
+    LOCAL PROCEDURE VerifyConsumptionQuantity@5(DocumentNo@1000 : Code[20];Quantity@1002 : Integer;Quantity2@1003 : Integer);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      // Verify Consumption quantities from Item Ledger Entry.
+      SelectItemLedgerEntries(ItemLedgerEntry,DocumentNo,ItemLedgerEntry."Entry Type"::Consumption);
+      ItemLedgerEntry.TESTFIELD(Quantity,-Quantity);
+      ItemLedgerEntry.NEXT;
+      ItemLedgerEntry.TESTFIELD(Quantity,-Quantity2);
+    END;
+
+    LOCAL PROCEDURE VerifyProductionILECostAmount@8(DocumentNo@1000 : Code[20];EntryType@1001 : Option;ExpectedTotalCostAmount@1005 : Decimal);
+    VAR
+      GeneralLedgerSetup@1006 : Record 98;
+      ItemLedgerEntry@1002 : Record 32;
+      Assert@1004 : Codeunit 130000;
+      ActualCostAmountConsumption@1003 : Decimal;
+    BEGIN
+      // Verify Cost Amount(Actual) after Adjustment from Item Ledger Entry.
+      GeneralLedgerSetup.GET;
+      SelectItemLedgerEntries(ItemLedgerEntry,DocumentNo,EntryType);
+      REPEAT
+        ItemLedgerEntry.CALCFIELDS("Cost Amount (Actual)");
+        ActualCostAmountConsumption += ItemLedgerEntry."Cost Amount (Actual)";
+      UNTIL ItemLedgerEntry.NEXT = 0;
+      Assert.AreNearlyEqual(
+        ExpectedTotalCostAmount,ActualCostAmountConsumption,GeneralLedgerSetup."Inv. Rounding Precision (LCY)",ErrMsgAmounts);
+    END;
+
+    LOCAL PROCEDURE VerifyCapacityLedgerEntry@34(DocumentNo@1001 : Code[20];ScrapQuantity@1002 : Integer);
+    VAR
+      CapacityLedgerEntry@1000 : Record 5832;
+    BEGIN
+      CapacityLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CapacityLedgerEntry.FINDFIRST;
+      CapacityLedgerEntry.TESTFIELD("Scrap Quantity",ScrapQuantity);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ProdJournalConsumpPageHandler@60(VAR ProductionJournal@1001 : Page 5510;VAR Response@1000 : Action);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.SETRANGE("Entry Type",ItemJournalLine."Entry Type"::Consumption);
+      ItemJournalLine.FINDFIRST;
+      ItemJournalLine.VALIDATE(Quantity,ItemJournalLine.Quantity + RandomConsumptionQty);  // Random values not important.
+      ItemJournalLine.MODIFY(TRUE);
+      ItemJournalLine.RESET;
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.FINDSET;
+
+      // Post Production Journal lines with modified Consumption Quantity.
+      REPEAT
+        CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post Batch",ItemJournalLine);
+      UNTIL ItemJournalLine.NEXT = 0;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ProdJournalScrapPageHandler@29(VAR ProductionJournal@1001 : Page 5510;VAR Response@1000 : Action);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.SETRANGE("Entry Type",ItemJournalLine."Entry Type"::Output);
+      ItemJournalLine.FINDFIRST;
+      ItemJournalLine.VALIDATE("Scrap Quantity",RandomScrapQty);  // Random values not important.
+      ItemJournalLine.MODIFY(TRUE);
+      ItemJournalLine.RESET;
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.FINDSET;
+
+      // Post Production Journal lines with modified Consumption Quantity.
+      REPEAT
+        CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post Batch",ItemJournalLine);
+      UNTIL ItemJournalLine.NEXT = 0;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ProdJournalPostPageHandler@20(VAR ProductionJournal@1001 : Page 5510;VAR Response@1000 : Action);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      ItemJournalLine.SETRANGE("Order Type",ItemJournalLine."Order Type"::Production);
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.FINDSET;
+
+      // Post Production Journal lines.
+      REPEAT
+        CODEUNIT.RUN(CODEUNIT::"Item Jnl.-Post Batch",ItemJournalLine);
+      UNTIL ItemJournalLine.NEXT = 0;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Consumption] [SCM]
+      Test for Inventory Adjustment:
+        1. Create Released Production Order with Item (Costing Method:FIFO). Post Production Journal with updated consumption.
+           Verify Consumption Quantity in Item Ledger Entry.
+        2. Create Released Production Order with Item (Costing Method:FIFO). Post Production Journal with updated consumption.
+           Finish Production Order. Verify Consumption Quantity and Cost Amount (Actual) in Item Ledger Entry.
+        3. Create Released Production Order with Item (Costing Method:FIFO). Post Production Journal with updated consumption.
+           Finish Production Order. Update Direct Unit Cost and Post Purchase Order.
+           Verify Consumption Quantity and Cost Amount (Actual) in Item Ledger Entry.
+        4. Create Released Production Order with Items (Costing Method:Standard,Costing Method:FIFO). Post Production Journal.
+           Verify Consumption Quantities in Item Ledger Entry.
+        5. Create Released Production Order with Items (Costing Method:Standard,Costing Method:FIFO). Post Production Journal.
+           Finish Production Order. Verify Consumption Quantity and Cost Amount (Actual) in Item Ledger Entry.
+        6. Create Released Production Order with Items (Costing Method:Standard,Costing Method:FIFO). Post Production Journal.
+           Finish Production Order. Update Direct Unit Cost And Qty to Invoice and Post Purchase Order.
+           Verify Consumption Quantity and Cost Amount (Actual) in Item Ledger Entry.
+        7. Create Released Production Order with Items (Costing Method:LIFO) and partially invoiced Purchase Order.
+           Post Production Journal. Verify Consumption Quantity in Item Ledger Entry.
+        8. Create Released Production Order with Items (Costing Method:LIFO) and partially invoiced Purchase Order.
+           Post Production Journal. Finish Production Order.
+           Verify Consumption Quantity and Cost Amount (Actual) in Item Ledger Entry.
+        9. Create Released Production Order with Items (Costing Method:LIFO) and partially invoiced Purchase Order.
+           Post Production Journal. Finish Production Order. Update Direct Unit Cost And partial Qty to Invoice and Adjust Cost.
+           Reopen Purchase Order and Update Remaining Qty to Invoice.Post Purchase Order.
+           Verify Consumption Quantity and Cost Amount (Actual) in Item Ledger Entry.
+        10.Create Released Production Order with Item (Costing Method:Standard).Post Production Journal with updated Scrap Qty.
+           Verify Scrap Qty in Capacity Ledger Entry. Verify Consumption Quantity in Item Ledger Entry.
+        11.Create Released Production Order with Item (Costing Method:Standard).Post Production Journal with updated Scrap Qty.
+           Finish Production Order. Verify Scrap Qty in Capacity Ledger Entry.
+           Verify Consumption Quantity and Cost Amount (Actual) in Item Ledger Entry.
+        12.Create Released Production Order with Item (Costing Method:Standard).Post Production Journal with updated Scrap Qty.
+           Finish Production Order. Update Direct Unit Cost and Post Purchase Order.Verify Scrap Qty in Capacity Ledger Entry.
+           Verify Consumption Quantity and Cost Amount (Actual) in Item Ledger Entry.
+
+        Covers Test cases:
+      ------------------------------------------------------------------------------------------------------------------------
+       Test Function Name                 TFS ID
+      ------------------------------------------------------------------------------------------------------------------------
+       ProdOrderPostProdJnlFIFO           135859
+       FinishProdOrderFIFO                135859
+       FinishProdOrderInvoiceFIFO         135859
+       ProdOrderPostProdJnlStandard       135859
+       FinishProdOrderStandard            135859
+       FinishProdOrderInvoiceStandard     135859
+       ProdOrderPostProdJnlLIFO           135859
+       FinishProdOrderLIFO                135859
+       FinishProdOrderFullInvoiceLIFO     135859
+       PostProdJnlWithScrapStandard       135859
+       FinishProdWithScrapStandard        135859
+       FinishProdWithScrapInvoiceStd      135859
+    }
+    END.
+  }
+}
+

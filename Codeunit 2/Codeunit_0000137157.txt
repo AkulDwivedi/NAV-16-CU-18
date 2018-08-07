@@ -1,0 +1,1421 @@
+OBJECT Codeunit 137157 SCM Order Promising II
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ItemJournalTemplate@1006 : Record 82;
+      ItemJournalBatch@1002 : Record 233;
+      LocationBlue@1008 : Record 14;
+      LocationIntransit@1009 : Record 14;
+      LocationRed@1007 : Record 14;
+      Assert@1015 : Codeunit 130000;
+      LibraryERM@1013 : Codeunit 131300;
+      LibraryInventory@1005 : Codeunit 132201;
+      LibraryPurchase@1011 : Codeunit 130512;
+      LibrarySales@1010 : Codeunit 130509;
+      LibraryService@1012 : Codeunit 131902;
+      LibraryUtility@1003 : Codeunit 131000;
+      LibraryVariableStorage@1014 : Codeunit 131004;
+      LibraryWarehouse@1004 : Codeunit 132204;
+      LibraryRandom@1000 : Codeunit 130440;
+      isInitialized@1001 : Boolean;
+      ReservedQuantityMustBeZeroOnSalesLine@1017 : TextConst '@@@="%1 = Field Caption, %2 = Table Caption";ENU=%1 must be equal to ''0''  in %2';
+      PlannedDeliveryDateErr@1018 : TextConst 'ENU=Incorrect Planned Delivery Date on Order Promising Line.';
+      OriginalShipmentDateErr@1019 : TextConst 'ENU=Incorrect Original Shipment Date on Order Promising Line.';
+      EarliestShipmentDateErr@1021 : TextConst 'ENU=Incorrect Earliest Shipment Date on Order Promising Line.';
+      QuantityErr@1020 : TextConst 'ENU=Incorrect Quantity on Order Promising Line.';
+
+    [Test]
+    PROCEDURE ReceiptDateOnTransferOrderWithInboundWarehouseHandlingTime@24();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithAvailableToPromiseUsingTransferOrder(FALSE);  // Use AvailableToPromise as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE AvailableToPromiseOnSalesOrderWithTransferOrderUsingBothWarehouseHandlingTime@34();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithAvailableToPromiseUsingTransferOrder(TRUE);  // Use AvailableToPromise as True.
+    END;
+
+    LOCAL PROCEDURE SalesOrderWithAvailableToPromiseUsingTransferOrder@14(AvailableToPromise@1007 : Boolean);
+    VAR
+      Item@1006 : Record 27;
+      SalesHeader@1005 : Record 36;
+      SalesLine@1004 : Record 37;
+      TransferHeader@1003 : Record 5740;
+      TransferLine@1002 : Record 5741;
+      OrderPromising@1001 : 'CapableToPromise,AvailableToPromise';
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Update both Warehouse Handling Times on Location. Create and post Item Journal Line.
+      LibraryInventory.CreateItem(Item);
+      UpdateInboundAndOutboundWarehouseHandlingTimeOnLocation(LocationRed);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndPostItemJournalLine(Item."No.",LocationBlue.Code,Quantity);
+
+      // Exercise.
+      CreateAndReleaseTransferOrder(TransferHeader,TransferLine,LocationBlue.Code,LocationRed.Code,Item."No.",Quantity);
+
+      // Verify.
+      TransferLine.TESTFIELD("Receipt Date",CALCDATE(LocationRed."Inbound Whse. Handling Time",WORKDATE));
+
+      IF AvailableToPromise THEN BEGIN
+        // Exercise.
+        LibraryWarehouse.PostTransferOrder(TransferHeader,TRUE,FALSE);  // Post as Ship.
+        CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,TransferLine."Receipt Date",Item."No.",LocationRed.Code,Quantity);
+        RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::AvailableToPromise,TRUE);  // Use True for Accept.
+
+        // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+        VerifySalesLine(
+          SalesLine,
+          CALCDATE('<+' + FORMAT(LocationRed."Outbound Whse. Handling Time") + '>',TransferLine."Receipt Date"),
+          CALCDATE('<+' + FORMAT(LocationRed."Outbound Whse. Handling Time") + '>',TransferLine."Receipt Date"),
+          TransferLine."Receipt Date");  // Value required for test.
+      END;
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler,ConfirmHandler)]
+    PROCEDURE ErrorOnChangingCurrencyCodeOnSalesOrderAfterCapableToPromise@3();
+    VAR
+      Currency@1005 : Record 4;
+      Item@1000 : Record 27;
+      SalesHeader@1001 : Record 36;
+      SalesLine@1002 : Record 37;
+      OrderPromising@1004 : 'CapableToPromise,AvailableToPromise';
+    BEGIN
+      // Setup: Create Sales Order. Run Capable To Promise from Sales Order. Find Currency.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,0D,Item."No.",LocationBlue.Code,LibraryRandom.RandDec(100,2));  // Use 0D for Requested Delivery Date.
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::CapableToPromise,TRUE);  // Use True for Accept.
+      LibraryERM.FindCurrency(Currency);
+
+      // Exercise.
+      ASSERTERROR SalesHeader.VALIDATE("Currency Code",Currency.Code);
+
+      // Verify: Verify error message.
+      Assert.IsTrue(
+        STRPOS(
+          GETLASTERRORTEXT,
+          STRSUBSTNO(ReservedQuantityMustBeZeroOnSalesLine,SalesLine.FIELDCAPTION("Reserved Qty. (Base)"),SalesLine.TABLECAPTION)) >
+        0,GETLASTERRORTEXT);
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE CapableToPromiseOnSalesOrderWithLeadTimeCalculation@27();
+    VAR
+      Item@1003 : Record 27;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1005 : Record 37;
+      CalculatedDate@1006 : Date;
+      OrderPromising@1000 : 'CapableToPromise,AvailableToPromise';
+    BEGIN
+      // Setup: Create Item with Lead Time Calculation. Create Sales Order.
+      Initialize;
+      CreateItemWithLeadTimeCalculation(Item);
+      CalculatedDate := GetEarliestDeliveryDate(Item,'',FALSE);
+      CreateSalesOrder(
+        SalesHeader,SalesLine,CalculatedDate,CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',CalculatedDate),
+        Item."No.",'',LibraryRandom.RandDec(100,2));  // Value required for test.
+
+      // Exercise.
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::CapableToPromise,TRUE);  // Use True for Accept.
+
+      // Verify.
+      VerifyOrderPromisingLine(GetEarliestDeliveryDate(Item,'',FALSE),WORKDATE,SalesLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE CapableToPromiseOnSalesOrderWithOutboundWarehouseHandlingTimeAndLeadTimeCalculation@96();
+    VAR
+      Item@1003 : Record 27;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1005 : Record 37;
+      CalculatedDate@1006 : Date;
+      OrderPromising@1011 : 'CapableToPromise,AvailableToPromise';
+    BEGIN
+      // Setup: Create Item with Lead Time Calculation. Update Outbound Warehouse Handling Time on Location. Create Sales Order.
+      Initialize;
+      CreateItemWithLeadTimeCalculation(Item);
+      UpdateOutboundWarehouseHandlingTimeOnLocation(LocationRed);
+      CalculatedDate := GetEarliestDeliveryDate(Item,LocationRed.Code,FALSE);
+      CreateSalesOrder(
+        SalesHeader,SalesLine,CalculatedDate,CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',CalculatedDate),
+        Item."No.",LocationRed.Code,LibraryRandom.RandDec(100,2));  // Value required for test.
+
+      // Exercise.
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::CapableToPromise,TRUE);  // Use True for Accept.
+
+      // Verify.
+      VerifyOrderPromisingLine(
+        SalesHeader."Requested Delivery Date",
+        CALCDATE('<-' + FORMAT(LocationRed."Outbound Whse. Handling Time") + '>',SalesHeader."Requested Delivery Date"),
+        SalesLine.Quantity);  // Value required for test.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE AvailableToPromiseOnSalesOrderWithRequestedDeliveryDate@30();
+    VAR
+      Item@1004 : Record 27;
+      PurchaseHeader@1002 : Record 38;
+      SalesHeader@1005 : Record 36;
+      SalesLine@1006 : Record 37;
+      OrderPromising@1007 : 'CapableToPromise,AvailableToPromise';
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Setup: Update Outbound Warehouse Handling Time on Location. Create Purchase and Sales Order.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      UpdateOutboundWarehouseHandlingTimeOnLocation(LocationRed);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreatePurchaseOrder(
+        PurchaseHeader,
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+        Item."No.",LocationRed.Code,Quantity);  // Value required for test.
+      CreateSalesOrder(
+        SalesHeader,SalesLine,WORKDATE,
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",PurchaseHeader."Expected Receipt Date"),
+        Item."No.",LocationRed.Code,Quantity);  // Value required for test.
+
+      // Exercise.
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::AvailableToPromise,TRUE);  // Use True for Accept.
+
+      // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+      VerifySalesLine(
+        SalesLine,
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",PurchaseHeader."Expected Receipt Date"),
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",PurchaseHeader."Expected Receipt Date"),
+        PurchaseHeader."Expected Receipt Date");  // Value required for test.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderBeforeFullyAvailableToPromiseQuantity@2();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithFullyAvailableToPromiseQuantity(FALSE);  // Use AvailableToPromise as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE SalesOrderAfterFullyAvailableToPromiseQuantity@83();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithFullyAvailableToPromiseQuantity(TRUE);  // Use AvailableToPromise as True.
+    END;
+
+    LOCAL PROCEDURE SalesOrderWithFullyAvailableToPromiseQuantity@74(AvailableToPromise@1006 : Boolean);
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1002 : Record 37;
+      OrderPromising@1001 : 'CapableToPromise,AvailableToPromise';
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Create and post Purchase Order as Receive after update both Warehouse Handling Times on Location.
+      LibraryInventory.CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndPostPurchaseOrderAsReceiveAfterUpdateBothWarehouseHandlingTimeOnLocation(LocationRed,Item."No.",Quantity);
+
+      // Exercise.
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,0D,Item."No.",LocationRed.Code,Quantity);  // Use 0D for Requested Delivery Date.
+
+      // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+      VerifySalesLine(
+        SalesLine,
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+        WORKDATE);  // Value required for test.
+
+      IF AvailableToPromise THEN BEGIN
+        // Exercise.
+        RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::AvailableToPromise,TRUE);  // Use True for Accept.
+
+        // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+        VerifySalesLine(
+          SalesLine,
+          CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+          CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+          WORKDATE);  // Value required for test.
+      END;
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderBeforePartialAvailableToPromiseQuantity@95();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithPartialAvailableToPromiseQuantity(FALSE);  // Use AvailableToPromise as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE SalesOrderAfterPartialAvailableToPromiseQuantity@93();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithPartialAvailableToPromiseQuantity(TRUE);  // Use AvailableToPromise as True.
+    END;
+
+    LOCAL PROCEDURE SalesOrderWithPartialAvailableToPromiseQuantity@92(AvailableToPromise@1006 : Boolean);
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1002 : Record 37;
+      OrderPromising@1001 : 'CapableToPromise,AvailableToPromise';
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Create and post Purchase Order as Receive after update both Warehouse Handling Times on Location.
+      LibraryInventory.CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndPostPurchaseOrderAsReceiveAfterUpdateBothWarehouseHandlingTimeOnLocation(LocationRed,Item."No.",Quantity);
+
+      // Exercise.
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,0D,Item."No.",LocationRed.Code,Quantity + LibraryRandom.RandDec(100,2));  // Quantity must be greater than Available Quantity. Use 0D for Requested Delivery Date.
+
+      // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+      VerifySalesLine(
+        SalesLine,
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+        WORKDATE);  // Value required for test.
+
+      IF AvailableToPromise THEN BEGIN
+        // Exercise.
+        RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::AvailableToPromise,TRUE);  // Use True for Accept.
+
+        // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+        VerifySalesLine(
+          SalesLine,
+          CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+          CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+          WORKDATE);  // Value required for test.
+      END;
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderBeforeFullyCapableToPromiseQuantity@112();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithFullyCapableToPromiseQuantity(FALSE);  // Use CapableToPromise as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE SalesOrderAfterFullyCapableToPromiseQuantity@111();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithFullyCapableToPromiseQuantity(TRUE);  // Use CapableToPromise as True.
+    END;
+
+    LOCAL PROCEDURE SalesOrderWithFullyCapableToPromiseQuantity@110(CapableToPromise@1006 : Boolean);
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1002 : Record 37;
+      OrderPromising@1001 : 'CapableToPromise,AvailableToPromise';
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Create and post Purchase Order as Receive after update both Warehouse Handling Times on Location.
+      LibraryInventory.CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndPostPurchaseOrderAsReceiveAfterUpdateBothWarehouseHandlingTimeOnLocation(LocationRed,Item."No.",Quantity);
+
+      // Exercise.
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,0D,Item."No.",LocationRed.Code,Quantity);  // Use 0D for Requested Delivery Date.
+
+      // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+      VerifySalesLine(
+        SalesLine,
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+        WORKDATE);  // Value required for test.
+
+      IF CapableToPromise THEN BEGIN
+        // Exercise.
+        RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::CapableToPromise,TRUE);  // Use True for Accept.
+
+        // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+        VerifySalesLine(
+          SalesLine,
+          CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+          CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+          WORKDATE);  // Value required for test.
+      END;
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderBeforePartialCapableToPromiseQuantity@117();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithPartialCapableToPromiseQuantity(FALSE);  // Use CapableToPromise as False.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE SalesOrderAfterPartialCapableToPromiseQuantity@116();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithPartialCapableToPromiseQuantity(TRUE);  // Use CapableToPromise as True.
+    END;
+
+    LOCAL PROCEDURE SalesOrderWithPartialCapableToPromiseQuantity@115(CapableToPromise@1006 : Boolean);
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1002 : Record 37;
+      OrderPromising@1001 : 'CapableToPromise,AvailableToPromise';
+      Quantity@1000 : Decimal;
+      ShipmentDate@1004 : Date;
+    BEGIN
+      // Create and post Purchase Order as Receive after update both Warehouse Handling Times on Location.
+      LibraryInventory.CreateItem(Item);
+      Quantity := LibraryRandom.RandDec(100,2);
+      CreateAndPostPurchaseOrderAsReceiveAfterUpdateBothWarehouseHandlingTimeOnLocation(LocationRed,Item."No.",Quantity);
+
+      // Exercise.
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,0D,Item."No.",LocationRed.Code,Quantity + LibraryRandom.RandDec(100,2));  // Quantity must be greater than Available Quantity. Use 0D for Requested Delivery Date.
+
+      // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+      VerifySalesLine(
+        SalesLine,
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+        CALCDATE(LocationRed."Outbound Whse. Handling Time",WORKDATE),
+        WORKDATE);  // Value required for test.
+
+      IF CapableToPromise THEN BEGIN
+        // Exercise.
+        RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::CapableToPromise,TRUE);  // Use True for Accept.
+
+        // Verify: Verify Planned Delivery Date, Planned Shipment Date and Shipment Date on Sales Line.
+        ShipmentDate :=
+          CALCDATE(
+            '<' + GetDefaultSafetyLeadTime + '>',
+            CALCDATE(
+              '<' + GetOffsetTime + '>',
+              CALCDATE(LocationRed."Inbound Whse. Handling Time",WORKDATE)));
+
+        VerifySalesLine(
+          SalesLine,
+          CALCDATE(LocationRed."Outbound Whse. Handling Time",ShipmentDate),
+          CALCDATE(LocationRed."Outbound Whse. Handling Time",ShipmentDate),
+          ShipmentDate);
+
+        // Requisition Line must be created for Remaining Quantity with Due Date value required for test.
+        VerifyRequisitionLine(
+          Item."No.",LocationRed.Code,SalesLine.Quantity - Quantity,
+          CALCDATE(
+            '<' + GetDefaultSafetyLeadTime + '>',
+            CALCDATE('<' + GetOffsetTime + '>',CALCDATE(LocationRed."Inbound Whse. Handling Time",WORKDATE))));
+      END;
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithShippingTimeUsingShippingAgentAndBaseCalendar@11();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderUsingShippingAgentAndBaseCalendar(WORKDATE,0,LibraryRandom.RandInt(5),'');  // Use 0 for Warehouse Outbound Handling Time and blank for Location.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithOutboundWarehouseHandlingTimeUsingShippingAgentAndBaseCalendar@25();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderUsingShippingAgentAndBaseCalendar(WORKDATE,LibraryRandom.RandInt(5),0,'');  // Use 0 for Shipping Time and blank for Location.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithOutboundWarehouseHandlingTimeAndShipmentDateAsNonWorkingDateUsingShippingAgentAndBaseCalendar@44();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderUsingShippingAgentAndBaseCalendar(GetNonWorkingDateUsingBaseCalendar,LibraryRandom.RandInt(5),0,'');  // Use 0 for Shipping Time and blank for Location.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithOutboundWarehouseHandlingTimeAndShippingTimeUsingShippingAgentAndBaseCalendar@5();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderUsingShippingAgentAndBaseCalendar(WORKDATE,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5),'');  // Use blank for Location.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithLocationUsingShippingAgentAndBaseCalendar@22();
+    BEGIN
+      // Setup.
+      Initialize;
+      UpdateBaseCalendarOnLocation(LocationBlue);
+      SalesOrderUsingShippingAgentAndBaseCalendar(
+        WORKDATE,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5),LocationBlue.Code);
+    END;
+
+    LOCAL PROCEDURE SalesOrderUsingShippingAgentAndBaseCalendar@13(ShipmentDate@1010 : Date;OutboundWarehouseHandlingTime@1008 : Integer;ShippingTime@1009 : Integer;LocationCode@1011 : Code[10]);
+    VAR
+      Item@1007 : Record 27;
+      BaseCalendar@1006 : Record 7600;
+      Customer@1005 : Record 18;
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+      ShippingAgentServices@1002 : Record 5790;
+      PlannedShipmentDate@1001 : Date;
+      PlannedDeliveryDate@1000 : Date;
+    BEGIN
+      // Create Item and Customer with Shipping Agent and Base Calendar.
+      LibraryInventory.CreateItem(Item);
+      CreateBaseCalendarWithBaseCalendarChange(BaseCalendar);
+      CreateShippingAgentWithShippingAgentService(ShippingAgentServices,BaseCalendar.Code);
+      CreateCustomerWithShippingAgentAndBaseCalendar(Customer,ShippingAgentServices,BaseCalendar.Code);
+
+      // Exercise.
+      CreateSalesOrderWithShipmentDate(
+        SalesHeader,SalesLine,ShipmentDate,OutboundWarehouseHandlingTime,ShippingTime,Customer."No.",Item."No.",LocationCode);
+
+      // Verify: Planned Shipment Date, Planned Delivery Date and Shipment Date on Sales Line.
+      PlannedShipmentDate :=
+        CalculateDateWithNonWorkingDaysUsingBaseCalendar(
+          SalesHeader."Shipment Date",CALCDATE(SalesHeader."Outbound Whse. Handling Time",SalesHeader."Shipment Date"),1);  // Use 1 for Forward Planning.
+      PlannedDeliveryDate :=
+        CalculateDateWithNonWorkingDaysUsingBaseCalendar(
+          PlannedShipmentDate,CALCDATE(SalesHeader."Shipping Time",PlannedShipmentDate),1);  // Use 1 for Forward Planning.
+      VerifySalesLine(SalesLine,PlannedDeliveryDate,PlannedShipmentDate,SalesHeader."Shipment Date");
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE OrderPromisingWithoutCompanyBaseCalendar@9();
+    BEGIN
+      // Setup.
+      Initialize;
+      OrderPromisingBySalesOrderWithCompanyBaseCalendar(FALSE);  // Use False for Company Base Calendar.
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE OrderPromisingWithCompanyBaseCalendar@72();
+    BEGIN
+      // Setup.
+      Initialize;
+      OrderPromisingBySalesOrderWithCompanyBaseCalendar(TRUE);  // Use True for Company Base Calendar.
+    END;
+
+    LOCAL PROCEDURE OrderPromisingBySalesOrderWithCompanyBaseCalendar@64(CompanyBaseCalendar@1006 : Boolean);
+    VAR
+      BaseCalendar@1005 : Record 7600;
+      Item@1004 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1002 : Record 37;
+      OrderPromising@1001 : 'CapableToPromise,AvailableToPromise';
+      OldBaseCalendarCode@1000 : Code[10];
+    BEGIN
+      // Create Item with Lead Time Calculation. Create Sales Order.
+      CreateItemWithLeadTimeCalculation(Item);
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,0D,Item."No.",'',LibraryRandom.RandDec(100,2));  // Use 0D for Requested Delivery Date and Blank for Location.
+
+      // Exercise.
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::CapableToPromise,FALSE);  // Use False for Accept.
+
+      // Verify.
+      VerifyOrderPromisingLine(GetEarliestDeliveryDate(Item,'',FALSE),WORKDATE,SalesLine.Quantity);
+
+      IF CompanyBaseCalendar THEN BEGIN
+        // Exercise.
+        CreateBaseCalendarWithBaseCalendarChange(BaseCalendar);
+        OldBaseCalendarCode := UpdateBaseCalendarOnCompanyInformation(BaseCalendar.Code);
+        RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::CapableToPromise,FALSE);  // Use False for Accept.
+
+        // Verify.
+        VerifyOrderPromisingLine(GetEarliestDeliveryDate(Item,'',TRUE),WORKDATE,SalesLine.Quantity);
+      END;
+
+      // Tear down.
+      UpdateBaseCalendarOnCompanyInformation(OldBaseCalendarCode);
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithoutShippingTime@18();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithShippingTimeAndRequestedDeliveryDate(0,FALSE);  // Use 0 for Shipping Time and False for Update Requested DeliveryDate.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderRequestedDeliveryDateWithoutShippingTime@77();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithShippingTimeAndRequestedDeliveryDate(0,TRUE);  // Use 0 for Shipping Time and True for Update Requested Delivery Date.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithShippingTime@78();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithShippingTimeAndRequestedDeliveryDate(LibraryRandom.RandInt(5),FALSE);  // Use False for Update Requested Delivery Date.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderRequestedDeliveryDateWithShippingTime@80();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithShippingTimeAndRequestedDeliveryDate(LibraryRandom.RandInt(5),TRUE);  // Use True for Update Requested Delivery Date.
+    END;
+
+    LOCAL PROCEDURE SalesOrderWithShippingTimeAndRequestedDeliveryDate@62(ShippingTime@1000 : Integer;UpdateRequestedDeliveryDate@1008 : Boolean);
+    VAR
+      Customer@1007 : Record 18;
+      Item@1006 : Record 27;
+      SalesHeader@1005 : Record 36;
+      SalesLine@1004 : Record 37;
+    BEGIN
+      // Create Item and Customer.
+      LibraryInventory.CreateItem(Item);
+      LibrarySales.CreateCustomer(Customer);
+
+      // Exercise.
+      CreateSalesOrderWithShipmentDate(SalesHeader,SalesLine,WORKDATE,0,ShippingTime,Customer."No.",Item."No.",'');  // Use 0 for Outbound Warehouse Handling Time and Blank for Location.
+
+      // Verify.
+      VerifySalesLine(SalesLine,CALCDATE(SalesHeader."Shipping Time",WORKDATE),WORKDATE,WORKDATE);
+
+      IF UpdateRequestedDeliveryDate THEN BEGIN
+        // Exercise.
+        UpdateRequestedDeliveryDateOnSalesOrder(
+          SalesHeader,CALCDATE('<' + GetDefaultSafetyLeadTime + '>',CALCDATE(SalesHeader."Shipping Time",WORKDATE)));
+
+        // Verify.
+        VerifySalesLine(
+          SalesLine,SalesHeader."Requested Delivery Date",CALCDATE('<-' + FORMAT(SalesHeader."Shipping Time") + '>',
+            SalesHeader."Requested Delivery Date"),
+          CALCDATE('<-' + FORMAT(SalesHeader."Shipping Time") + '>',SalesHeader."Requested Delivery Date"));
+      END;
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithShippingTimeAndBaseCalendar@86();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithBaseCalendarAndShippingTime(FALSE);  // Use False for without Requested Delivery Date.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderRequestedDeliveryDateWithBaseCalendar@49();
+    BEGIN
+      // Setup.
+      Initialize;
+      SalesOrderWithBaseCalendarAndShippingTime(TRUE);  // Use True for with Requested Delivery Date.
+    END;
+
+    LOCAL PROCEDURE SalesOrderWithBaseCalendarAndShippingTime@38(UpdateRequestedDeliveryDate@1007 : Boolean);
+    VAR
+      BaseCalendar@1006 : Record 7600;
+      Customer@1005 : Record 18;
+      Item@1004 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1002 : Record 37;
+      ShippingAgentServices@1001 : Record 5790;
+      PlannedDate@1000 : Date;
+      PlannedShipmentDate@1008 : Date;
+    BEGIN
+      // Create Base Calendar with Base Calendar Change. Create Customer with Shipping Agent and Base Calendar.
+      LibraryInventory.CreateItem(Item);
+      CreateBaseCalendarWithBaseCalendarChange(BaseCalendar);
+      CreateShippingAgentWithShippingAgentService(ShippingAgentServices,BaseCalendar.Code);
+      CreateCustomerWithShippingAgentAndBaseCalendar(Customer,ShippingAgentServices,BaseCalendar.Code);
+
+      // Exercise.
+      CreateSalesOrderWithShipmentDate(SalesHeader,SalesLine,WORKDATE,0,LibraryRandom.RandInt(5),Customer."No.",Item."No.",'');  // Use 0 for Outbound Warehouse Handling Time and Blank for Location.
+
+      // Verify.
+      PlannedShipmentDate := CalculateDateWithNonWorkingDaysUsingBaseCalendar(WORKDATE,WORKDATE,1);
+      PlannedDate :=
+        CalculateDateWithNonWorkingDaysUsingBaseCalendar(
+          PlannedShipmentDate,CALCDATE(SalesHeader."Shipping Time",PlannedShipmentDate),1);  // Use 1 for Forward Planning.
+      VerifySalesLine(SalesLine,PlannedDate,PlannedShipmentDate,WORKDATE);
+
+      IF UpdateRequestedDeliveryDate THEN BEGIN
+        // Exercise.
+        UpdateRequestedDeliveryDateOnSalesOrder(SalesHeader,CALCDATE('<' + GetDefaultSafetyLeadTime + '>',PlannedDate));
+
+        // Verify.
+        PlannedDate :=
+          CalculateDateWithNonWorkingDaysUsingBaseCalendar(
+            CALCDATE('<-' + FORMAT(SalesHeader."Shipping Time") + '>',SalesHeader."Requested Delivery Date"),
+            SalesHeader."Requested Delivery Date",-1);  // Use -1 for Backward Planning.
+        VerifySalesLine(SalesLine,SalesHeader."Requested Delivery Date",PlannedDate,PlannedDate);
+      END;
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE SalesOrderSameItemWithAscendingShipmentDatesNoReservation@19();
+    VAR
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+      SalesOrder@1005 : TestPage 42;
+      OrderPromising@1000 : 'CapableToPromise,AvailableToPromise';
+      ItemNo@1001 : Code[20];
+      ShipmentDate@1006 : ARRAY [2] OF Date;
+      Quantity@1004 : Decimal;
+    BEGIN
+      // [SCENARIO 358897.1] Item availability on two Sales Lines with ascending Shipment Date
+
+      // [GIVEN] Purchase Item = X of Quantity = Y
+      // [GIVEN] Create Sales Order with two lines both with same Item = X and Quantity = Y
+      // [GIVEN] Set Shipment Dates in ascending order
+      ShipmentDate[1] := WORKDATE;
+      ShipmentDate[2] := CALCDATE('<1M>',WORKDATE);
+      CreateSalesOrderWithTwoShipmentDates(SalesHeader,ItemNo,Quantity,ShipmentDate);
+
+      // [WHEN] Calculate Available-To-Promise on the earlier line (don't Accept)
+      FindSalesLineByShipmentDate(SalesLine,SalesHeader,ShipmentDate[1]);
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::AvailableToPromise,FALSE);
+
+      // [THEN] Verify 'Earliest Shipment Date' in the first line is equal to 'Shipment Date'
+      VerifyEarliestShipmentDate(ShipmentDate[1]);
+
+      // [THEN] Verify availability and available inventory in Sales Line Fact Box on the first line
+      VerifySalesLineDetails(SalesOrder,SalesHeader."No.",ItemNo,ShipmentDate[1],0,Quantity);
+      // [THEN] Verify availability and available inventory in Sales Line Fact Box on the second line
+      VerifySalesLineDetails(SalesOrder,SalesHeader."No.",ItemNo,ShipmentDate[2],-Quantity,Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE SalesOrderSameItemWithDescendingShipmentDatesNoReservation@53();
+    VAR
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+      SalesOrder@1005 : TestPage 42;
+      OrderPromising@1000 : 'CapableToPromise,AvailableToPromise';
+      ItemNo@1001 : Code[20];
+      ShipmentDate@1006 : ARRAY [2] OF Date;
+      Quantity@1004 : Decimal;
+    BEGIN
+      // [SCENARIO 359702] Item availability on two Sales Lines with descending Shipment Date
+
+      // [GIVEN] Purchase Item = X of Quantity = Y
+      // [GIVEN] Create Sales Order with two lines both with same Item = X and Quantity = Y
+      // [GIVEN] Set Shipment Dates in descending order
+      ShipmentDate[1] := CALCDATE('<1M>',WORKDATE);
+      ShipmentDate[2] := WORKDATE;
+      CreateSalesOrderWithTwoShipmentDates(SalesHeader,ItemNo,Quantity,ShipmentDate);
+
+      // [WHEN] Calculate Available-To-Promise on the earlier line (don't Accept)
+      FindSalesLineByShipmentDate(SalesLine,SalesHeader,ShipmentDate[2]);
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::AvailableToPromise,FALSE);
+
+      // [THEN] Verify 'Earliest Shipment Date' in the first line is equal to 'Shipment Date'
+      VerifyEarliestShipmentDate(ShipmentDate[2]);
+
+      // [THEN] Verify availability and available inventory in Sales Line Fact Box on the first line
+      VerifySalesLineDetails(SalesOrder,SalesHeader."No.",ItemNo,ShipmentDate[1],-Quantity,Quantity);
+      // [THEN] Verify availability and available inventory in Sales Line Fact Box on the second line
+      VerifySalesLineDetails(SalesOrder,SalesHeader."No.",ItemNo,ShipmentDate[2],0,Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE SalesOrderSameItemWithDifferentShipmentDatesWithAheadReservation@26();
+    VAR
+      SalesHeader@1013 : Record 36;
+      SalesLine@1002 : Record 37;
+      SalesOrder@1011 : TestPage 42;
+      OrderPromising@1001 : 'CapableToPromise,AvailableToPromise';
+      ItemNo@1000 : Code[20];
+      ShipmentDate@1010 : ARRAY [2] OF Date;
+      Quantity@1008 : Decimal;
+    BEGIN
+      // [SCENARIO 358897.2] Item availability on two Sales Lines with ascending Shipment Date and reservation
+
+      // [GIVEN] Purchase Item = X of Quantity = Y
+      // [GIVEN] Create Sales Order with two lines both with same Item = X and Quantity = Y
+      // [GIVEN] Set Shipment Dates in ascending order
+      ShipmentDate[1] := WORKDATE;
+      ShipmentDate[2] := CALCDATE('<1M>',WORKDATE);
+      CreateSalesOrderWithTwoShipmentDates(SalesHeader,ItemNo,Quantity,ShipmentDate);
+      // [GIVEN] Make reservation on the later line
+      FindSalesLineByShipmentDate(SalesLine,SalesHeader,ShipmentDate[2]);
+      LibrarySales.AutoReserveSalesLine(SalesLine);
+
+      // [WHEN] Calculate Available-To-Promise on the earlier line (don't Accept)
+      FindSalesLineByShipmentDate(SalesLine,SalesHeader,ShipmentDate[1]);
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::AvailableToPromise,FALSE);
+
+      // [THEN] Verify 'Earliest Shipment Date' is empty
+      VerifyEarliestShipmentDate(0D);
+
+      // [THEN] Verify availability and available inventory in Sales Line Fact Box on the first line
+      VerifySalesLineDetails(SalesOrder,SalesHeader."No.",ItemNo,ShipmentDate[1],-Quantity,0);
+      // [THEN] Verify availability and available inventory in Sales Line Fact Box on the second line
+      VerifySalesLineDetails(SalesOrder,SalesHeader."No.",ItemNo,ShipmentDate[2],-Quantity,0);
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE SalesOrderItemWithSKUAndInterLocationTransfer@48();
+    VAR
+      Item@1000 : Record 27;
+      SKURed@1001 : Record 5700;
+      SKUBlue@1002 : Record 5700;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1004 : Record 37;
+      TransferRoute@1006 : Record 5742;
+      OrderPromising@1005 : 'CapableToPromise,AvailableToPromise';
+    BEGIN
+      // Verify Planned Delivery Date when Item with SKUs by locations and inter-location transfer
+      Initialize;
+      LocationBlue.FIND;
+      LocationRed.FIND;
+
+      // Create Critical Item, SKU by Location: RED, BLUE
+      CreateItemCritical(Item);
+      LibraryInventory.CreateStockkeepingUnitForLocationAndVariant(SKUBlue,LocationBlue.Code,Item."No.",'');
+      LibraryInventory.CreateStockkeepingUnitForLocationAndVariant(SKURed,LocationRed.Code,Item."No.",'');
+
+      // Create Route Transfer from BLUE to RED
+      LibraryWarehouse.CreateAndUpdateTransferRoute(TransferRoute,LocationBlue.Code,LocationRed.Code,LocationIntransit.Code,'','');
+      UpdateInboundAndOutboundWarehouseHandlingTimeOnLocation(LocationBlue);
+      UpdateSKUReplenishmentSystemWithTransfer(SKURed,LocationBlue.Code);
+
+      // Create Sales Order on RED
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,0D,Item."No.",LocationRed.Code,LibraryRandom.RandDec(100,2));
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::CapableToPromise,FALSE);
+
+      // Verify that Planned Delivery Date considering BLUE outbound time transfer
+      VerifyOrderPromisingLine(GetEarliestDeliveryDate(Item,LocationBlue.Code,FALSE),WORKDATE,SalesLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(OrderPromisingLinesPageHandler)]
+    PROCEDURE OrderPromisingInvokedFromSalesLineBasedOnTemporaryTable@54();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      OrderPromisingLine@1003 : Record 99000880;
+      OrderPromising@1004 : 'CapableToPromise,AvailableToPromise';
+    BEGIN
+      // [SCENARIO 381557] Order Promising page should have a temporary table as its source, no record should be saved to the database.
+      Initialize;
+
+      // [GIVEN] Sales Order.
+      CreateSalesOrder(SalesHeader,SalesLine,WORKDATE,WORKDATE,LibraryInventory.CreateItemNo,'',10);
+
+      // [WHEN] Run "Order Promising" from the Sales Line.
+      RunOrderPromisingFromSalesLine(SalesLine,OrderPromising::CapableToPromise,TRUE);
+
+      // [THEN] Order Promising table remains empty.
+      OrderPromisingLine.INIT;
+      OrderPromisingLine.SETRANGE("Item No.",SalesLine."No.");
+      Assert.RecordIsEmpty(OrderPromisingLine);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      ResetLocationSetup(LocationBlue.Code);
+      ResetLocationSetup(LocationRed.Code);
+
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      NoSeriesSetup;
+      LocationSetup;
+      ItemJournalSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE ItemJournalSetup@75();
+    BEGIN
+      ItemJournalTemplate.SETRANGE(Recurring,FALSE);
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalTemplate.MODIFY(TRUE);
+
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      ItemJournalBatch.VALIDATE("No. Series",'');
+      ItemJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE LocationSetup@21();
+    BEGIN
+      CreateAndUpdateLocation(LocationBlue);
+      CreateAndUpdateLocation(LocationRed);
+      LibraryWarehouse.CreateInTransitLocation(LocationIntransit);
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@31();
+    VAR
+      PurchasesPayablesSetup@1003 : Record 312;
+      SalesSetup@1001 : Record 311;
+    BEGIN
+      SalesSetup.GET;
+      SalesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesSetup.MODIFY(TRUE);
+
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CalculateDateWithNonWorkingDaysUsingBaseCalendar@7(FromDate@1002 : Date;ToDate@1001 : Date;SignFactor@1000 : Integer) DateWithNonWorkingDays : Date;
+    VAR
+      BaseCalendarChange@1004 : Record 7601;
+      Date@1003 : Record 2000000007;
+    BEGIN
+      IF SignFactor > 0 THEN BEGIN
+        DateWithNonWorkingDays := ToDate;
+        Date.SETRANGE("Period Start",CALCDATE('<1D>',FromDate),ToDate);  // Value required for Forward Planning.
+      END ELSE BEGIN
+        DateWithNonWorkingDays := FromDate;
+        Date.SETRANGE("Period Start",FromDate,ToDate);
+      END;
+      Date.SETRANGE("Period Name",FORMAT(BaseCalendarChange.Day::Sunday));
+      DateWithNonWorkingDays := CALCDATE('<' + FORMAT(SignFactor * Date.COUNT) + 'D>',DateWithNonWorkingDays);  // Add or Substract Non-working days to date.
+
+      // Use 7 for Sunday required for test.
+      IF DATE2DWY(DateWithNonWorkingDays,1) = 7 THEN
+        DateWithNonWorkingDays := CALCDATE('<' + FORMAT(SignFactor) + 'D>',DateWithNonWorkingDays);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLine@94(ItemNo@1003 : Code[20];LocationCode@1001 : Code[10];Quantity@1005 : Decimal);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrderAsReceiveAfterUpdateBothWarehouseHandlingTimeOnLocation@89(VAR Location@1001 : Record 14;ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      PurchaseHeader@1000 : Record 38;
+    BEGIN
+      UpdateInboundAndOutboundWarehouseHandlingTimeOnLocation(Location);
+      CreatePurchaseOrder(PurchaseHeader,0D,ItemNo,Location.Code,Quantity);  // Use 0D for Expected Receipt Date.
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);  // Post as Receive.
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseTransferOrder@10(VAR TransferHeader@1000 : Record 5740;VAR TransferLine@1003 : Record 5741;FromLocationCode@1001 : Code[10];ToLocationCode@1002 : Code[10];ItemNo@1004 : Code[20];Quantity@1005 : Decimal);
+    BEGIN
+      LibraryWarehouse.CreateTransferHeader(TransferHeader,FromLocationCode,ToLocationCode,LocationIntransit.Code);
+      LibraryWarehouse.CreateTransferLine(TransferHeader,TransferLine,ItemNo,Quantity);
+      LibraryWarehouse.ReleaseTransferOrder(TransferHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateLocation@29(VAR Location@1000 : Record 14);
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+    END;
+
+    LOCAL PROCEDURE CreateBaseCalendarWithBaseCalendarChange@39(VAR BaseCalendar@1001 : Record 7600);
+    VAR
+      BaseCalendarChange@1000 : Record 7601;
+    BEGIN
+      LibraryService.CreateBaseCalendar(BaseCalendar);
+      LibraryInventory.CreateBaseCalendarChange(
+        BaseCalendarChange,BaseCalendar.Code,BaseCalendarChange."Recurring System"::"Weekly Recurring",0D,
+        BaseCalendarChange.Day::Sunday);  // Use 0D for Date.
+    END;
+
+    LOCAL PROCEDURE CreateCustomerWithShippingAgentAndBaseCalendar@139(VAR Customer@1000 : Record 18;ShippingAgentServices@1001 : Record 5790;BaseCalendarCode@1002 : Code[10]);
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Shipping Agent Code",ShippingAgentServices."Shipping Agent Code");
+      Customer.VALIDATE("Shipping Agent Service Code",ShippingAgentServices.Code);
+      Customer.VALIDATE("Base Calendar Code",BaseCalendarCode);
+      Customer.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithLeadTimeCalculation@15(VAR Item@1000 : Record 27);
+    VAR
+      LeadTimeCalculation@1001 : DateFormula;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      EVALUATE(LeadTimeCalculation,'<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>');
+      Item.VALIDATE("Lead Time Calculation",LeadTimeCalculation);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseHeader@20(VAR PurchaseHeader@1000 : Record 38;ExpectedReceiptDate@1002 : Date);
+    VAR
+      Vendor@1001 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      PurchaseHeader.VALIDATE("Expected Receipt Date",ExpectedReceiptDate);
+      PurchaseHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@33(VAR PurchaseHeader@1001 : Record 38;ItemNo@1002 : Code[20];LocationCode@1004 : Code[10];Quantity@1003 : Decimal);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@40(VAR PurchaseHeader@1000 : Record 38;ExpectedReceiptDate@1001 : Date;ItemNo@1002 : Code[20];LocationCode@1003 : Code[10];Quantity@1004 : Decimal);
+    BEGIN
+      CreatePurchaseHeader(PurchaseHeader,ExpectedReceiptDate);
+      CreatePurchaseLine(PurchaseHeader,ItemNo,LocationCode,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateSalesHeader@42(VAR SalesHeader@1000 : Record 36;PostingDate@1001 : Date;RequestedDeliveryDate@1002 : Date);
+    VAR
+      Customer@1003 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      SalesHeader.VALIDATE("Posting Date",PostingDate);
+      SalesHeader.VALIDATE("Order Date",PostingDate);  // Use Order Date as Posting Date.
+      UpdateRequestedDeliveryDateOnSalesOrder(SalesHeader,RequestedDeliveryDate);
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@59(VAR SalesHeader@1001 : Record 36;VAR SalesLine@1000 : Record 37;ItemNo@1002 : Code[20];LocationCode@1004 : Code[10];Quantity@1003 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      IF LocationCode <> '' THEN
+        SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@79(VAR SalesHeader@1000 : Record 36;VAR SalesLine@1003 : Record 37;PostingDate@1001 : Date;RequestedDeliveryDate@1002 : Date;ItemNo@1004 : Code[20];LocationCode@1005 : Code[10];Quantity@1006 : Decimal);
+    BEGIN
+      CreateSalesHeader(SalesHeader,PostingDate,RequestedDeliveryDate);
+      CreateSalesLine(SalesHeader,SalesLine,ItemNo,LocationCode,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithShipmentDate@28(VAR SalesHeader@1002 : Record 36;VAR SalesLine@1004 : Record 37;ShipmentDate@1008 : Date;OutboundWarehouseHandlingTime@1006 : Integer;ShippingTime@1007 : Integer;CustomerNo@1003 : Code[20];ItemNo@1005 : Code[20];LocationCode@1009 : Code[10]);
+    VAR
+      OutboundWarehouseHandlingTimeFormula@1000 : DateFormula;
+      ShippingTimeFormula@1001 : DateFormula;
+    BEGIN
+      EVALUATE(OutboundWarehouseHandlingTimeFormula,'<' + FORMAT(OutboundWarehouseHandlingTime) + 'D>');
+      EVALUATE(ShippingTimeFormula,'<' + FORMAT(ShippingTime) + 'D>');
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CustomerNo);
+      SalesHeader.VALIDATE("Shipment Date",ShipmentDate);
+      SalesHeader.VALIDATE("Location Code",LocationCode);
+      SalesHeader.VALIDATE("Outbound Whse. Handling Time",OutboundWarehouseHandlingTimeFormula);
+      SalesHeader.VALIDATE("Shipping Time",ShippingTimeFormula);
+      SalesHeader.MODIFY(TRUE);
+      CreateSalesLine(SalesHeader,SalesLine,ItemNo,'',LibraryRandom.RandDec(100,2));  // Use blank for Location.
+    END;
+
+    LOCAL PROCEDURE CreateShippingAgentWithShippingAgentService@133(VAR ShippingAgentServices@1001 : Record 5790;BaseCalendarCode@1003 : Code[10]);
+    VAR
+      ShippingAgent@1000 : Record 291;
+      ShippingTime@1002 : DateFormula;
+    BEGIN
+      LibraryInventory.CreateShippingAgent(ShippingAgent);
+      EVALUATE(ShippingTime,'<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>');
+      LibraryInventory.CreateShippingAgentService(ShippingAgentServices,ShippingAgent.Code,ShippingTime);
+      ShippingAgentServices.VALIDATE("Base Calendar Code",BaseCalendarCode);
+      ShippingAgentServices.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithTwoShipmentDates@46(VAR SalesHeader@1000 : Record 36;VAR ItemNo@1001 : Code[20];VAR Quantity@1008 : Decimal;ShipmentDate@1003 : ARRAY [2] OF Date);
+    VAR
+      Item@1004 : Record 27;
+      Customer@1010 : Record 18;
+      SalesLine@1007 : Record 37;
+      i@1005 : Integer;
+    BEGIN
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      ItemNo := Item."No.";
+      Quantity := LibraryRandom.RandDec(100,2);
+      LibrarySales.CreateCustomer(Customer);
+
+      // Purchase item to inventory with Blank location code
+      CreateAndPostItemJournalLine(Item."No.",'',Quantity);
+
+      // Create Sales Order with two lines for same item and quantity but different shipment dates
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,Customer."No.");
+      FOR i := 1 TO ARRAYLEN(ShipmentDate) DO
+        LibrarySales.CreateSalesLineWithShipmentDate(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",ShipmentDate[i],Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateItemCritical@51(VAR Item@1000 : Record 27);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE(Critical,TRUE);
+      Item.MODIFY;
+    END;
+
+    LOCAL PROCEDURE FindSalesLineByShipmentDate@90(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36;ShipmentDate@1002 : Date);
+    BEGIN
+      SalesLine.RESET;
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE("Shipment Date",ShipmentDate);
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE GetDefaultSafetyLeadTime@23() DefaultSafetyLeadTime : Code[10];
+    VAR
+      ManufacturingSetup@1000 : Record 99000765;
+    BEGIN
+      ManufacturingSetup.GET;
+      DefaultSafetyLeadTime := FORMAT(ManufacturingSetup."Default Safety Lead Time");
+    END;
+
+    LOCAL PROCEDURE GetOffsetTime@6() OffsetTime : Code[10];
+    VAR
+      OrderPromisingSetup@1000 : Record 99000875;
+    BEGIN
+      OrderPromisingSetup.GET;
+      OffsetTime := FORMAT(OrderPromisingSetup."Offset (Time)");
+    END;
+
+    LOCAL PROCEDURE GetEarliestDeliveryDate@45(Item@1000 : Record 27;LocationCode@1001 : Code[10];UseBaseCalendar@1003 : Boolean) Result : Date;
+    VAR
+      Location@1002 : Record 14;
+    BEGIN
+      Result := CALCDATE('<' + FORMAT(Item."Lead Time Calculation") + '>',WORKDATE);
+      Result := CALCDATE('<' + FORMAT(GetDefaultSafetyLeadTime) + '>',Result);
+      Result := CALCDATE('<' + FORMAT(GetOffsetTime) + '>',Result);
+
+      IF LocationCode <> '' THEN BEGIN
+        Location.GET(LocationCode);
+        Result := CALCDATE('<' + FORMAT(Location."Inbound Whse. Handling Time") + '>',Result);
+        Result := CALCDATE('<' + FORMAT(Location."Outbound Whse. Handling Time") + '>',Result);
+      END;
+
+      IF UseBaseCalendar AND
+         (NOT CheckNonWorkingDateUsingBaseCalendar(Result))
+      THEN
+        Result := CALCDATE('<1D>',Result);
+    END;
+
+    LOCAL PROCEDURE GetNonWorkingDateUsingBaseCalendar@35() : Date;
+    VAR
+      BaseCalendarChange@1001 : Record 7601;
+      Date@1000 : Record 2000000007;
+    BEGIN
+      Date.SETFILTER("Period Start",'>=%1',WORKDATE);
+      Date.SETRANGE("Period Name",FORMAT(BaseCalendarChange.Day::Sunday));
+      Date.FINDFIRST;
+      EXIT(Date."Period Start");
+    END;
+
+    LOCAL PROCEDURE CheckNonWorkingDateUsingBaseCalendar@47(CheckDate@1000 : Date) : Boolean;
+    VAR
+      BaseCalendarChange@1002 : Record 7601;
+      Date@1001 : Record 2000000007;
+    BEGIN
+      Date.SETRANGE("Period Start",CheckDate);
+      Date.SETRANGE("Period Name",FORMAT(BaseCalendarChange.Day::Sunday));
+      EXIT(Date.ISEMPTY);
+    END;
+
+    LOCAL PROCEDURE VerifySalesLineDetails@41(VAR SalesOrder@1000 : TestPage 42;DocumentNo@1004 : Code[20];ItemNo@1001 : Code[20];ShipmentDate@1003 : Date;ItemAvailability@1002 : Decimal;AvailableInventory@1005 : Decimal);
+    BEGIN
+      SalesOrder.OPENVIEW;
+      SalesOrder.FILTER.SETFILTER("No.",DocumentNo);
+      SalesOrder.SalesLines.FILTER.SETFILTER("No.",ItemNo);
+      SalesOrder.SalesLines.FILTER.SETFILTER("Shipment Date",FORMAT(ShipmentDate));
+      VerifySalesLineFactBox(SalesOrder,ItemNo,ItemAvailability,AvailableInventory);
+    END;
+
+    LOCAL PROCEDURE RunOrderPromisingFromSalesLine@65(OrderSalesLine@1004 : Record 37;OrderPromising@1001 : Option;Accept@1003 : Boolean);
+    VAR
+      SalesOrder@1000 : TestPage 42;
+    BEGIN
+      LibraryVariableStorage.Enqueue(OrderPromising);  // Enqueue for OrderPromisingLinesPageHandler.
+      LibraryVariableStorage.Enqueue(Accept);  // Enqueue for OrderPromisingLinesPageHandler.
+      SalesOrder.OPENEDIT;
+      SalesOrder.FILTER.SETFILTER("No.",OrderSalesLine."Document No.");
+      SalesOrder.SalesLines.GOTORECORD(OrderSalesLine);
+      SalesOrder.SalesLines.OrderPromising.INVOKE;
+    END;
+
+    LOCAL PROCEDURE UpdateBaseCalendarOnLocation@17(VAR Location@1001 : Record 14);
+    VAR
+      BaseCalendar@1000 : Record 7600;
+    BEGIN
+      CreateBaseCalendarWithBaseCalendarChange(BaseCalendar);
+      Location.VALIDATE("Base Calendar Code",BaseCalendar.Code);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateBaseCalendarOnCompanyInformation@32(NewBaseCalendarCode@1001 : Code[10]) OldBaseCalendarCode : Code[10];
+    VAR
+      CompanyInformation@1000 : Record 79;
+    BEGIN
+      CompanyInformation.GET;
+      OldBaseCalendarCode := CompanyInformation."Base Calendar Code";
+      CompanyInformation.VALIDATE("Base Calendar Code",NewBaseCalendarCode);
+      CompanyInformation.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateInboundAndOutboundWarehouseHandlingTimeOnLocation@73(VAR Location@1000 : Record 14);
+    BEGIN
+      UpdateInboundWarehouseHandlingTimeOnLocation(Location);
+      UpdateOutboundWarehouseHandlingTimeOnLocation(Location);
+    END;
+
+    LOCAL PROCEDURE UpdateInboundWarehouseHandlingTimeOnLocation@1(VAR Location@1001 : Record 14);
+    VAR
+      InboundWarehouseHandlingTime@1000 : DateFormula;
+    BEGIN
+      EVALUATE(InboundWarehouseHandlingTime,'<' + FORMAT(LibraryRandom.RandInt(5) + 10) + 'D>');  // Value required for test.
+      Location.VALIDATE("Inbound Whse. Handling Time",InboundWarehouseHandlingTime);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateOutboundWarehouseHandlingTimeOnLocation@36(VAR Location@1001 : Record 14);
+    VAR
+      OutboundWarehouseHandlingTime@1000 : DateFormula;
+    BEGIN
+      EVALUATE(OutboundWarehouseHandlingTime,'<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>');
+      Location.VALIDATE("Outbound Whse. Handling Time",OutboundWarehouseHandlingTime);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateRequestedDeliveryDateOnSalesOrder@69(VAR SalesHeader@1000 : Record 36;RequestedDeliveryDate@1001 : Date);
+    BEGIN
+      SalesHeader.VALIDATE("Requested Delivery Date",RequestedDeliveryDate);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateSKUReplenishmentSystemWithTransfer@66(VAR SKU@1001 : Record 5700;TransferFromCode@1000 : Code[10]);
+    BEGIN
+      WITH SKU DO BEGIN
+        VALIDATE("Replenishment System","Replenishment System"::Transfer);
+        VALIDATE("Transfer-from Code",TransferFromCode);
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE ResetLocationSetup@50(LocationCode@1000 : Code[10]);
+    VAR
+      Location@1001 : Record 14;
+      WhseHandlingTime@1002 : DateFormula;
+    BEGIN
+      IF LocationCode = '' THEN
+        EXIT;
+      Location.GET(LocationCode);
+      EVALUATE(WhseHandlingTime,'');
+      Location.VALIDATE("Outbound Whse. Handling Time",WhseHandlingTime);
+      Location.VALIDATE("Inbound Whse. Handling Time",WhseHandlingTime);
+      Location.VALIDATE("Base Calendar Code",'');
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyOrderPromisingLine@76(PlannedDeliveryDate@1002 : Date;OriginalShipmentDate@1003 : Date;Quantity@1004 : Decimal);
+    BEGIN
+      Assert.AreEqual(PlannedDeliveryDate,LibraryVariableStorage.DequeueDate,PlannedDeliveryDateErr);
+      Assert.AreEqual(OriginalShipmentDate,LibraryVariableStorage.DequeueDate,OriginalShipmentDateErr);
+      LibraryVariableStorage.DequeueDate;
+      Assert.AreEqual(Quantity,LibraryVariableStorage.DequeueDecimal,QuantityErr);
+    END;
+
+    LOCAL PROCEDURE VerifyRequisitionLine@8(ItemNo@1001 : Code[20];LocationCode@1004 : Code[10];Quantity@1002 : Decimal;DueDate@1003 : Date);
+    VAR
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      RequisitionLine.SETRANGE("No.",ItemNo);
+      RequisitionLine.SETRANGE("Location Code",LocationCode);
+      RequisitionLine.FINDFIRST;
+      RequisitionLine.TESTFIELD(Quantity,Quantity);
+      RequisitionLine.TESTFIELD("Due Date",DueDate);
+    END;
+
+    LOCAL PROCEDURE VerifySalesLine@16(SalesLine@1000 : Record 37;PlannedDeliveryDate@1001 : Date;PlannedShipmentDate@1002 : Date;ShipmentDate@1003 : Date);
+    BEGIN
+      SalesLine.FIND;
+      SalesLine.TESTFIELD("Shipment Date",ShipmentDate);
+      SalesLine.TESTFIELD("Planned Shipment Date",PlannedShipmentDate);
+      SalesLine.TESTFIELD("Planned Delivery Date",PlannedDeliveryDate);
+    END;
+
+    LOCAL PROCEDURE VerifySalesLineFactBox@37(SalesOrder@1000 : TestPage 42;ItemNo@1001 : Code[20];Availability@1002 : Decimal;AvailableInventory@1006 : Decimal);
+    BEGIN
+      SalesOrder."Sales Line FactBox".ItemNo.ASSERTEQUALS(ItemNo);
+      SalesOrder."Sales Line FactBox"."Item Availability".ASSERTEQUALS(Availability);
+      SalesOrder."Sales Line FactBox"."Available Inventory".ASSERTEQUALS(AvailableInventory);
+      SalesOrder.CLOSE;
+    END;
+
+    LOCAL PROCEDURE VerifyEarliestShipmentDate@52(EarliestShipmentDate@1002 : Date);
+    BEGIN
+      LibraryVariableStorage.DequeueDate;
+      LibraryVariableStorage.DequeueDate;
+      Assert.AreEqual(EarliestShipmentDate,LibraryVariableStorage.DequeueDate,EarliestShipmentDateErr);
+      LibraryVariableStorage.DequeueDecimal;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE OrderPromisingLinesPageHandler@43(VAR OrderPromisingLines@1000 : TestPage 99000959);
+    VAR
+      OrderPromising@1003 : 'CapableToPromise,AvailableToPromise';
+      Accept@1002 : Boolean;
+    BEGIN
+      OrderPromising := LibraryVariableStorage.DequeueInteger;
+      CASE OrderPromising OF
+        OrderPromising::CapableToPromise:
+          OrderPromisingLines.CapableToPromise.INVOKE;
+        OrderPromising::AvailableToPromise:
+          OrderPromisingLines.AvailableToPromise.INVOKE;
+      END;
+      Accept := LibraryVariableStorage.DequeueBoolean;
+
+      OrderPromisingLines.FIRST;
+      LibraryVariableStorage.Enqueue(OrderPromisingLines."Planned Delivery Date".ASDATE);
+      LibraryVariableStorage.Enqueue(OrderPromisingLines."Original Shipment Date".ASDATE);
+      LibraryVariableStorage.Enqueue(OrderPromisingLines."Earliest Shipment Date".ASDATE);
+      LibraryVariableStorage.Enqueue(OrderPromisingLines.Quantity.ASDECIMAL);
+
+      IF Accept THEN
+        OrderPromisingLines.AcceptButton.INVOKE
+      ELSE
+        OrderPromisingLines.OK.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@12(ConfirmMessage@1000 : Text[1024];VAR Reply@1003 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Order] [Sales] [Order Promising] [SCM]
+      Test Cases for SCM Order Promising:
+       1. Test to verify Receipt Date on Transfer Order with Inbound Warehouse Handling Time.
+       2. Test to verify Available to Promise on Sales Order with Transfer Order using both Warehouse Handling Times.
+       3. Test to verify Error on changing Currency Code on Sales Order after Capable to Promise.
+       4. Test to verify Capable to Promise on Sales Order with Lead Time Calculation.
+       5. Test to verify Capable to Promise on Sales Order with Outbound Warehouse Handling Time and Lead Time Calculation.
+       6. Test to verify Available to Promise on Sales Order with Requested Delivery Date.
+       7. Test to verify Sales Order before fully Available to Promise Quantity.
+       8. Test to verify Sales Order after fully Available to Promise Quantity.
+       9. Test to verify Sales Order before partial Available to Promise Quantity.
+      10. Test to verify Sales Order after partial Available to Promise Quantity.
+      11. Test to verify Sales Order before fully Capable to Promise Quantity.
+      12. Test to verify Sales Order after fully Capable to Promise Quantity.
+      13. Test to verify Sales Order before partial Capable to Promise Quantity.
+      14. Test to verify Sales Order after partial Capable to Promise Quantity.
+      15. Test to verify Sales Order with Shipping Time using Shipping Agent and Base Calendar.
+      16. Test to verify Sales Order with Outbound Warehouse Handling Time using Shipping Agent and Base Calendar.
+      17. Test to verify Sales Order with Outbound Warehouse Handling Time and Shipment Date as Non-Working Date using Shipping Agent and Base Calendar.
+      18. Test to verify Sales Order with Outbound Warehouse Handling Time and Shipping Time using Shipping Agent and Base Calendar.
+      19. Test to verify Sales Order with Location using Shipping Agent and Base Calendar.
+      20. Test to verify Order Promising without Company Base Calendar.
+      21. Test to verify Order Promising with Company Base Calendar.
+      22. Test to verify Sales Order without Shipping Time.
+      23. Test to verify Sales Order with Requested Delivery Date and without Shipping Time.
+      24. Test to verify Sales Order with Shipping Time.
+      25. Test to verify Sales Order with Requested Delivery Date and Shipping Time.
+      26. Test to verify Sales Order with Shipping Time and Base Calendar.
+      27. Test to verify Sales Order with Requested Delivery Date and Base Calendar.
+      28. Test to verify Sales Order with two lines for same Item and different shipment dates.
+      29. Test Planned Delivery Date when Item with SKUs by locations and inter-location transfer
+
+      Covers Test Cases for WI - 303200
+      ---------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      ---------------------------------------------------------------------------------------------------------------
+      ReceiptDateOnTransferOrderWithInboundWarehouseHandlingTime                                       127673,135595
+      AvailableToPromiseOnSalesOrderWithTransferOrderUsingBothWarehouseHandlingTime                    127673,135595
+      ErrorOnChangingCurrencyCodeOnSalesOrderAfterCapableToPromise                                     127532,135439
+      CapableToPromiseOnSalesOrderWithLeadTimeCalculation                                              127593,135518
+
+      Covers Test Cases for WI - 303202
+      ---------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                               TFS ID
+      ---------------------------------------------------------------------------------------------------------------
+      CapableToPromiseOnSalesOrderWithOutboundWarehouseHandlingTimeAndLeadTimeCalculation              232405
+      AvailableToPromiseOnSalesOrderWithRequestedDeliveryDate                                          232828
+      SalesOrderBeforeFullyAvailableToPromiseQuantity                                                  128855
+      SalesOrderAfterFullyAvailableToPromiseQuantity                                                   128855
+      SalesOrderBeforePartialAvailableToPromiseQuantity                                                128855
+      SalesOrderAfterPartialAvailableToPromiseQuantity                                                 128855
+      SalesOrderBeforeFullyCapableToPromiseQuantity                                                    128855
+      SalesOrderAfterFullyCapableToPromiseQuantity                                                     128855
+      SalesOrderBeforePartialCapableToPromiseQuantity                                                  128855
+      SalesOrderAfterPartialCapableToPromiseQuantity                                                   128855
+
+      Covers Test Cases for WI - 303713
+      -----------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                              TFS ID
+      -----------------------------------------------------------------------------------------------------------------------
+      SalesOrderWithShippingTimeUsingShippingAgentAndBaseCalendar                                                     236842
+      SalesOrderWithOutboundWarehouseHandlingTimeUsingShippingAgentAndBaseCalendar                                    236843
+      SalesOrderWithOutboundWarehouseHandlingTimeAndShipmentDateAsNonWorkingDateUsingShippingAgentAndBaseCalendar     236844
+      SalesOrderWithOutboundWarehouseHandlingTimeAndShippingTimeUsingShippingAgentAndBaseCalendar                     236845
+      SalesOrderWithLocationUsingShippingAgentAndBaseCalendar                                                         236846
+
+      Covers Test Cases for WI - 316017
+      -----------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                              TFS ID
+      -----------------------------------------------------------------------------------------------------------------------
+      OrderPromisingWithoutCompanyBaseCalendar, OrderPromisingWithCompanyBaseCalendar                                 314795
+
+      Covers Test Cases for WI - 318113
+      -----------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                              TFS ID
+      -----------------------------------------------------------------------------------------------------------------------
+      SalesOrderWithoutShippingTime, SalesOrderRequestedDeliveryDateWithoutShippingTime                               265775
+      SalesOrderWithShippingTime, SalesOrderRequestedDeliveryDateWithShippingTime                                     265775
+      SalesOrderWithShippingTimeAndBaseCalendar, SalesOrderRequestedDeliveryDateWithBaseCalendar                      265775
+
+      Covers Test Cases for WI - 358897
+      -----------------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                              TFS ID
+      -----------------------------------------------------------------------------------------------------------------------
+      SalesOrderSameItemWithDifferentShipmentDatesNoReservation                                                       358897
+      SalesOrderSameItemWithDifferentShipmentDatesWithAheadReservation                                                358897
+
+      SalesOrderItemWithSKUAndInterLocationTransfer                                                                   103412
+    }
+    END.
+  }
+}
+

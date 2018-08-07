@@ -1,0 +1,555 @@
+OBJECT Codeunit 131904 Library - Time Sheet
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ResourcesSetup@1003 : Record 314;
+      Assert@1006 : Codeunit 130000;
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryERM@1001 : Codeunit 131300;
+      LibraryResource@1002 : Codeunit 130511;
+      LibrarySales@1007 : Codeunit 130509;
+      LibraryService@1008 : Codeunit 131902;
+      TimeSheetApprovalMgt@1010 : Codeunit 951;
+      Initialized@1000 : Boolean;
+      NoSeriesCode@1005 : TextConst 'ENU=TS';
+      TimeSheetFieldValueErr@1009 : TextConst 'ENU=Time Sheet field %1 value is incorrect.';
+
+    PROCEDURE Initialize@1();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      IF Initialized THEN
+        EXIT;
+
+      IF NOT ResourcesSetup.GET THEN BEGIN
+        ResourcesSetup.INIT;
+        ResourcesSetup.INSERT;
+      END;
+
+      IF ResourcesSetup."Time Sheet Nos." = '' THEN BEGIN
+        ResourcesSetup.VALIDATE("Time Sheet Nos.",GetTimeSheetNoSeries);
+        ResourcesSetup.MODIFY;
+      END;
+
+      Initialized := TRUE;
+      LibraryERMCountryData.CreateVATData;
+
+      COMMIT;
+    END;
+
+    PROCEDURE CheckAssemblyTimeSheetLine@62(TimeSheetHeader@1007 : Record 950;AssemblyHeaderNo@1005 : Code[20];AssemblyLineNo@1004 : Integer;AssemblyLineQuantity@1000 : Decimal);
+    VAR
+      TimeSheetLine@1006 : Record 951;
+    BEGIN
+      TimeSheetLine.SETRANGE("Time Sheet No.",TimeSheetHeader."No.");
+      TimeSheetLine.SETRANGE("Assembly Order No.",AssemblyHeaderNo);
+      TimeSheetLine.SETRANGE("Assembly Order Line No.",AssemblyLineNo);
+      TimeSheetLine.FINDLAST;
+      TimeSheetLine.CALCFIELDS("Total Quantity");
+
+      Assert.AreEqual(AssemblyLineQuantity,TimeSheetLine."Total Quantity",
+        STRSUBSTNO(TimeSheetFieldValueErr,TimeSheetLine.FIELDCAPTION("Total Quantity")));
+      Assert.IsTrue(TimeSheetLine.Chargeable,STRSUBSTNO(TimeSheetFieldValueErr,TimeSheetLine.FIELDCAPTION(Chargeable)));
+      Assert.AreEqual(TimeSheetLine.Status::Approved,TimeSheetLine.Status,
+        STRSUBSTNO(TimeSheetFieldValueErr,TimeSheetLine.FIELDCAPTION(Status)));
+      Assert.IsTrue(TimeSheetLine.Posted,STRSUBSTNO(TimeSheetFieldValueErr,TimeSheetLine.FIELDCAPTION(Posted)));
+    END;
+
+    PROCEDURE CheckServiceTimeSheetLine@63(TimeSheetHeader@1007 : Record 950;ServiceHeaderNo@1005 : Code[20];ServiceLineNo@1004 : Integer;ServiceLineQuantity@1000 : Decimal;Chargeable@1001 : Boolean);
+    VAR
+      TimeSheetLine@1006 : Record 951;
+    BEGIN
+      TimeSheetLine.SETRANGE("Time Sheet No.",TimeSheetHeader."No.");
+      TimeSheetLine.SETRANGE("Service Order No.",ServiceHeaderNo);
+      TimeSheetLine.SETRANGE("Service Order Line No.",ServiceLineNo);
+      TimeSheetLine.FINDLAST;
+      TimeSheetLine.CALCFIELDS("Total Quantity");
+
+      Assert.AreEqual(ServiceLineQuantity,TimeSheetLine."Total Quantity",
+        STRSUBSTNO(TimeSheetFieldValueErr,TimeSheetLine.FIELDCAPTION("Total Quantity")));
+      Assert.AreEqual(Chargeable,TimeSheetLine.Chargeable,
+        STRSUBSTNO(TimeSheetFieldValueErr,TimeSheetLine.FIELDCAPTION(Chargeable)));
+      Assert.AreEqual(TimeSheetLine.Status::Approved,TimeSheetLine.Status,
+        STRSUBSTNO(TimeSheetFieldValueErr,TimeSheetLine.FIELDCAPTION(Status)));
+      Assert.IsTrue(TimeSheetLine.Posted,STRSUBSTNO(TimeSheetFieldValueErr,TimeSheetLine.FIELDCAPTION(Posted)));
+    END;
+
+    PROCEDURE CreateJobJournalLine@8(VAR JobJournalLine@1000 : Record 210;JournalTemplateName@1002 : Code[10];JournalBatchName@1003 : Code[10]);
+    VAR
+      RecRef@1001 : RecordRef;
+    BEGIN
+      JobJournalLine.INIT;
+      JobJournalLine.VALIDATE("Journal Template Name",JournalTemplateName);
+      JobJournalLine.VALIDATE("Journal Batch Name",JournalBatchName);
+      RecRef.GETTABLE(JobJournalLine);
+      JobJournalLine.VALIDATE("Line No.",LibraryUtility.GetNewLineNo(RecRef,JobJournalLine.FIELDNO("Line No.")));
+      JobJournalLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateJobPlanningLine@12(VAR JobPlanningLine@1004 : Record 1003;JobNo@1000 : Code[20];JobTaskNo@1001 : Code[20];ResourceNo@1002 : Code[20];PlanningDate@1003 : Date);
+    VAR
+      LineNo@1005 : Integer;
+    BEGIN
+      JobPlanningLine.SETRANGE("Job No.",JobNo);
+      JobPlanningLine.SETRANGE("Job Task No.",JobTaskNo);
+      IF JobPlanningLine.FINDLAST THEN;
+      LineNo := JobPlanningLine."Line No." + 10000;
+
+      JobPlanningLine.INIT;
+      JobPlanningLine."Job No." := JobNo;
+      JobPlanningLine."Job Task No." := JobTaskNo;
+      JobPlanningLine."Line No." := LineNo;
+      JobPlanningLine.Type := JobPlanningLine.Type::Resource;
+      JobPlanningLine."No." := ResourceNo;
+      JobPlanningLine."Planning Date" := PlanningDate;
+      JobPlanningLine.INSERT;
+    END;
+
+    PROCEDURE CreateTimeSheet@4(VAR TimeSheetHeader@1005 : Record 950;UseCurrentUserID@1004 : Boolean);
+    VAR
+      UserSetup@1006 : Record 91;
+      Resource@1000 : Record 156;
+      AccountingPeriod@1002 : Record 50;
+      Date@1003 : Record 2000000007;
+      CreateTimeSheets@1001 : Report 950;
+    BEGIN
+      // function creates user setup, time sheet resource and time sheet header
+
+      // create user setup
+      CreateUserSetup(UserSetup,UseCurrentUserID);
+
+      // resource - person
+      CreateTimeSheetResource(Resource);
+      Resource.VALIDATE("Time Sheet Owner User ID",UserSetup."User ID");
+      Resource.VALIDATE("Time Sheet Approver User ID",USERID);
+      Resource.MODIFY;
+
+      // find first open accounting period
+      GetAccountingPeriod(AccountingPeriod);
+
+      // find first DOW after accounting period starting date
+      Date.SETRANGE("Period Type",Date."Period Type"::Date);
+      Date.SETFILTER("Period Start",'%1..',AccountingPeriod."Starting Date");
+      Date.SETRANGE("Period No.",ResourcesSetup."Time Sheet First Weekday" + 1);
+      Date.FINDFIRST;
+
+      WORKDATE := Date."Period Start";
+
+      // create time sheet
+      CreateTimeSheets.InitParameters(Date."Period Start",1,Resource."No.",FALSE,TRUE);
+      CreateTimeSheets.USEREQUESTPAGE(FALSE);
+      CreateTimeSheets.RUN;
+
+      // find created time sheet
+      TimeSheetHeader.SETRANGE("Resource No.",Resource."No.");
+      TimeSheetHeader.FINDFIRST;
+    END;
+
+    PROCEDURE CreateTimeSheetLine@5(TimeSheetHeader@1000 : Record 950;VAR TimeSheetLine@1001 : Record 951;Type@1002 : ' ,Resource,Job,Service,Absence,Assembly Order';JobNo@1004 : Code[20];JobTaskNo@1005 : Code[20];ServiceOrderNo@1006 : Code[20];CauseOfAbsenceCode@1007 : Code[10]);
+    VAR
+      LineNo@1003 : Integer;
+    BEGIN
+      LineNo := TimeSheetHeader.GetLastLineNo + 10000;
+
+      TimeSheetLine.INIT;
+      TimeSheetLine."Time Sheet No." := TimeSheetHeader."No.";
+      TimeSheetLine."Line No." := LineNo;
+      TimeSheetLine.Type := Type;
+      CASE Type OF
+        Type::Job:
+          BEGIN
+            TimeSheetLine.VALIDATE("Job No.",JobNo);
+            TimeSheetLine.VALIDATE("Job Task No.",JobTaskNo);
+          END;
+        Type::Service:
+          TimeSheetLine.VALIDATE("Service Order No.",ServiceOrderNo);
+        Type::Absence:
+          TimeSheetLine.VALIDATE("Cause of Absence Code",CauseOfAbsenceCode);
+      END;
+      TimeSheetLine.INSERT(TRUE);
+    END;
+
+    PROCEDURE CreateTimeSheetDetail@6(TimeSheetLine@1001 : Record 951;Date@1002 : Date;Quantity@1004 : Decimal);
+    VAR
+      TimeSheetDetail@1000 : Record 952;
+    BEGIN
+      TimeSheetDetail.INIT;
+      TimeSheetDetail."Time Sheet No." := TimeSheetLine."Time Sheet No.";
+      TimeSheetDetail."Time Sheet Line No." := TimeSheetLine."Line No.";
+      TimeSheetDetail.Date := Date;
+      TimeSheetDetail.CopyFromTimeSheetLine(TimeSheetLine);
+      TimeSheetDetail.Quantity := Quantity;
+      TimeSheetDetail.INSERT;
+    END;
+
+    PROCEDURE CreateTimeSheetResource@3(VAR Resource@1001 : Record 156);
+    VAR
+      ResourceUnitOfMeasure@1004 : Record 205;
+      HumanResourceUnitOfMeasure@1000 : Record 5220;
+      VATPostingSetup@1002 : Record 325;
+    BEGIN
+      LibraryERM.FindVATPostingSetup(VATPostingSetup,VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+      LibraryResource.CreateResource(Resource,VATPostingSetup."VAT Bus. Posting Group");
+      // take base unit of measure from table 5220 to be allowed register employee absence
+      FindHRUnitOfMeasure(HumanResourceUnitOfMeasure);
+      IF NOT ResourceUnitOfMeasure.GET(Resource."No.",HumanResourceUnitOfMeasure.Code) THEN
+        LibraryResource.CreateResourceUnitOfMeasure(
+          ResourceUnitOfMeasure,Resource."No.",HumanResourceUnitOfMeasure.Code,1);
+      Resource.VALIDATE("Base Unit of Measure",HumanResourceUnitOfMeasure.Code);
+      Resource."Use Time Sheet" := TRUE;
+      Resource.MODIFY;
+    END;
+
+    PROCEDURE CreateServiceOrder@11(VAR ServiceHeader@1000 : Record 5900;PostingDate@1004 : Date);
+    VAR
+      Customer@1001 : Record 18;
+      ServiceItemLine@1003 : Record 5901;
+      ServiceItem@1002 : Record 5940;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      ServiceHeader.VALIDATE("Posting Date",PostingDate);
+      ServiceHeader.MODIFY;
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+    END;
+
+    PROCEDURE CreateUserSetup@2(VAR UserSetup@1000 : Record 91;CurrUserID@1001 : Boolean);
+    BEGIN
+      UserSetup.INIT;
+      IF CurrUserID THEN BEGIN
+        UserSetup."User ID" := USERID;
+        UserSetup."Time Sheet Admin." := TRUE;
+      END ELSE
+        UserSetup."User ID" :=
+          COPYSTR(
+            LibraryUtility.GenerateRandomCode(UserSetup.FIELDNO("User ID"),DATABASE::"User Setup"),1,MAXSTRLEN(UserSetup."User ID"));
+      IF UserSetup.INSERT THEN;
+    END;
+
+    PROCEDURE CreateWorkType@26(VAR WorkType@1000 : Record 200;ResourceBUOM@1001 : Code[10]);
+    BEGIN
+      WorkType.INIT;
+      WorkType.VALIDATE(Code,COPYSTR(FORMAT(CREATEGUID),1,MAXSTRLEN(WorkType.Code)));
+      WorkType.INSERT(TRUE);
+      WorkType.VALIDATE(Description,'test work type');
+      WorkType.VALIDATE("Unit of Measure Code",ResourceBUOM);
+      WorkType.MODIFY;
+    END;
+
+    PROCEDURE FindCauseOfAbsence@67(VAR CauseOfAbsence@1000 : Record 5206);
+    VAR
+      HumanResourceUnitOfMeasure@1001 : Record 5220;
+    BEGIN
+      WITH CauseOfAbsence DO BEGIN
+        FINDFIRST;
+        IF "Unit of Measure Code" = '' THEN BEGIN
+          HumanResourceUnitOfMeasure.FINDFIRST;
+          VALIDATE("Unit of Measure Code",HumanResourceUnitOfMeasure.Code);
+          MODIFY(TRUE);
+        END;
+      END;
+    END;
+
+    PROCEDURE FindHRUnitOfMeasure@9(VAR HumanResourceUnitOfMeasure@1000 : Record 5220);
+    BEGIN
+      HumanResourceUnitOfMeasure.FINDFIRST;
+    END;
+
+    PROCEDURE FindJobJournalBatch@78(VAR JobJournalBatch@1000 : Record 237;JournalTemplateName@1001 : Code[10]);
+    BEGIN
+      JobJournalBatch.SETRANGE("Journal Template Name",JournalTemplateName);
+      JobJournalBatch.FINDFIRST;
+    END;
+
+    PROCEDURE FindJobJournalTemplate@66(VAR JobJournalTemplate@1000 : Record 209);
+    BEGIN
+      JobJournalTemplate.FINDFIRST;
+    END;
+
+    PROCEDURE FindJob@128(VAR Job@1000 : Record 167);
+    BEGIN
+      Job.SETFILTER("Person Responsible",'<>''''');
+      Job.FINDFIRST;
+    END;
+
+    PROCEDURE FindJobTask@137(JobNo@1001 : Code[20];VAR JobTask@1000 : Record 1001);
+    BEGIN
+      JobTask.SETRANGE("Job No.",JobNo);
+      JobTask.SETRANGE("Job Task Type",JobTask."Job Task Type"::Posting);
+      JobTask.FINDFIRST;
+    END;
+
+    PROCEDURE GetAccountingPeriod@7(VAR AccountingPeriod@1000 : Record 50);
+    VAR
+      StartingDate@1001 : Date;
+    BEGIN
+      // find first open accounting period
+      AccountingPeriod.SETRANGE(Closed,FALSE);
+      IF NOT AccountingPeriod.FINDFIRST THEN BEGIN
+        // if accounting period is not found then create new one
+        AccountingPeriod.RESET;
+        IF AccountingPeriod.FINDLAST THEN
+          StartingDate := CALCDATE('<+1M>',AccountingPeriod."Starting Date")
+        ELSE
+          StartingDate := CALCDATE('<CM>',TODAY);
+        AccountingPeriod.INIT;
+        AccountingPeriod."Starting Date" := StartingDate;
+        AccountingPeriod.INSERT;
+      END;
+    END;
+
+    [Normal]
+    PROCEDURE GetRandomDecimal@83() : Decimal;
+    BEGIN
+      EXIT(RANDOM(9999) / 100);
+    END;
+
+    PROCEDURE GetTimeSheetNoSeries@49() : Code[10];
+    VAR
+      NoSeries@1001 : Record 308;
+      NoSeriesLine@1002 : Record 309;
+      LibraryUtility@1000 : Codeunit 131000;
+    BEGIN
+      IF NOT NoSeries.GET(NoSeriesCode) THEN BEGIN
+        LibraryUtility.CreateNoSeries(NoSeries,TRUE,FALSE,FALSE);
+        NoSeries.RENAME(NoSeriesCode);
+        LibraryUtility.CreateNoSeriesLine(NoSeriesLine,NoSeries.Code,'','')
+      END;
+
+      EXIT(NoSeries.Code)
+    END;
+
+    [HandlerFunctions(HndlMessage)]
+    PROCEDURE InitAssemblyBackwayScenario@65(VAR TimeSheetHeader@1016 : Record 950;VAR AssemblyHeader@1015 : Record 900;VAR AssemblyLine@1009 : Record 901;TimeSheetExists@1005 : Boolean);
+    VAR
+      Location@1010 : Record 14;
+      UserSetup@1011 : Record 91;
+      Resource@1008 : Record 156;
+      Item@1017 : ARRAY [2] OF Record 27;
+      BOMComponent@1013 : Record 90;
+      ItemJournalLine@1007 : Record 83;
+      ItemJournalTemplate@1002 : Record 82;
+      ItemJournalBatch@1001 : Record 233;
+      GeneralPostingSetup@1014 : Record 252;
+      LibraryInventory@1003 : Codeunit 132201;
+      LibraryWarehouse@1000 : Codeunit 132204;
+      LibraryManufacturing@1012 : Codeunit 132202;
+      LibraryAssembly@1018 : Codeunit 132207;
+      ItemCount@1004 : Integer;
+      Date@1006 : Date;
+    BEGIN
+      IF TimeSheetExists THEN BEGIN
+        // create time sheet
+        CreateTimeSheet(TimeSheetHeader,FALSE);
+        Resource.GET(TimeSheetHeader."Resource No.");
+        Date := TimeSheetHeader."Starting Date";
+      END ELSE BEGIN
+        // set up without tine sheet; create resource
+        Date := WORKDATE;
+        CreateUserSetup(UserSetup,FALSE);
+        CreateTimeSheetResource(Resource);
+        Resource.VALIDATE("Time Sheet Owner User ID",UserSetup."User ID");
+        Resource.VALIDATE("Time Sheet Approver User ID",USERID);
+      END;
+
+      LibraryERM.FindGeneralPostingSetupInvtFull(GeneralPostingSetup);
+      Resource.VALIDATE("Gen. Prod. Posting Group",GeneralPostingSetup."Gen. Prod. Posting Group");
+      Resource.MODIFY;
+
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+
+      // get items on the location (pos.adjmt.)
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+
+      FOR ItemCount := 1 TO 2 DO BEGIN
+        LibraryInventory.CreateItem(Item[ItemCount]);
+        LibraryInventory.CreateItemJournalLine(ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+          ItemJournalLine."Entry Type"::"Positive Adjmt.",Item[ItemCount]."No.",10);
+        ItemJournalLine.VALIDATE("Location Code",Location.Code);
+        ItemJournalLine.MODIFY;
+      END;
+
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+
+      // create complicated item
+      LibraryManufacturing.CreateBOMComponent(BOMComponent,Item[1]."No.",BOMComponent.Type::Item,Item[2]."No.",2,'');
+
+      // create assembly order with lines
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,CALCDATE('<+7D>',Date),Item[1]."No.",Location.Code,2,'');
+      AssemblyHeader.VALIDATE("Posting Date",CALCDATE('<+3D>',Date));
+      AssemblyHeader.MODIFY;
+      LibraryAssembly.CreateAssemblyLine(
+        AssemblyHeader,AssemblyLine,AssemblyLine.Type::Resource,Resource."No.",Resource."Base Unit of Measure",8,8,'Working resource');
+    END;
+
+    PROCEDURE InitBackwayScenario@52(VAR TimeSheetHeader@1008 : Record 950;VAR ServiceHeader@1006 : Record 5900;VAR ServiceLine@1001 : Record 5902);
+    VAR
+      LibraryService@1000 : Codeunit 131902;
+    BEGIN
+      // create time sheet
+      CreateTimeSheet(TimeSheetHeader,FALSE);
+
+      // create service order
+      CreateServiceOrder(ServiceHeader,CALCDATE('<+3D>',TimeSheetHeader."Starting Date"));
+      // create service line
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,TimeSheetHeader."Resource No.");
+      ServiceLine.VALIDATE("Service Item Line No.",10000);
+      ServiceLine.VALIDATE(Quantity,GetRandomDecimal);
+      ServiceLine.MODIFY;
+    END;
+
+    PROCEDURE InitJobScenario@68(VAR TimeSheetHeader@1008 : Record 950;VAR TimeSheetLine@1006 : Record 951);
+    VAR
+      Resource@1002 : Record 156;
+      Job@1000 : Record 167;
+      JobTask@1001 : Record 1001;
+      TimeSheetApprovalMgt@1013 : Codeunit 951;
+    BEGIN
+      // create time sheet
+      CreateTimeSheet(TimeSheetHeader,FALSE);
+
+      // create time sheet line with type Job
+      // find job and task
+      FindJob(Job);
+      FindJobTask(Job."No.",JobTask);
+      // job's responsible person (resource) must have Owner ID filled in
+      Resource.GET(Job."Person Responsible");
+      Resource."Time Sheet Owner User ID" := USERID;
+      Resource.MODIFY;
+      CreateTimeSheetLine(TimeSheetHeader,TimeSheetLine,TimeSheetLine.Type::Job,Job."No.",
+        JobTask."Job Task No.",'','');
+
+      // set quantity for line
+      CreateTimeSheetDetail(TimeSheetLine,TimeSheetHeader."Starting Date",GetRandomDecimal);
+      // submit and approve line
+      TimeSheetApprovalMgt.Submit(TimeSheetLine);
+      TimeSheetApprovalMgt.Approve(TimeSheetLine);
+    END;
+
+    PROCEDURE InitResourceScenario@69(VAR TimeSheetHeader@1008 : Record 950;VAR TimeSheetLine@1001 : Record 951;UseCurrentUserID@1000 : Boolean);
+    VAR
+      TimeSheetApprovalMgt@1013 : Codeunit 951;
+    BEGIN
+      // create time sheet
+      CreateTimeSheet(TimeSheetHeader,UseCurrentUserID);
+
+      // create time sheet lines with type Resource
+      CreateTimeSheetLine(TimeSheetHeader,TimeSheetLine,TimeSheetLine.Type::Resource,'','','','');
+      TimeSheetLine.Description := TimeSheetHeader."Resource No.";
+      TimeSheetLine.MODIFY;
+
+      // set quantity for line
+      CreateTimeSheetDetail(TimeSheetLine,TimeSheetHeader."Starting Date",GetRandomDecimal);
+      // submit and approve line
+      TimeSheetApprovalMgt.Submit(TimeSheetLine);
+      TimeSheetApprovalMgt.Approve(TimeSheetLine);
+    END;
+
+    PROCEDURE InitScenarioWTForJob@25(VAR TimeSheetHeader@1008 : Record 950);
+    VAR
+      TimeSheetLine@1007 : ARRAY [2] OF Record 951;
+      Resource@1006 : Record 156;
+      Job@1005 : Record 167;
+      JobTask@1004 : Record 1001;
+      WorkType@1003 : Record 200;
+      TimeSheetApprovalMgt@1002 : Codeunit 951;
+      RowCount@1000 : Integer;
+    BEGIN
+      // create time sheet
+      CreateTimeSheet(TimeSheetHeader,FALSE);
+
+      FOR RowCount := 1 TO 2 DO BEGIN
+        // create time sheet line with type Job
+        // find job and task
+        FindJob(Job);
+        FindJobTask(Job."No.",JobTask);
+        // job's responsible person (resource) must have Owner ID filled in
+        Resource.GET(Job."Person Responsible");
+        Resource."Time Sheet Owner User ID" := USERID;
+        Resource.MODIFY;
+        CreateTimeSheetLine(TimeSheetHeader,TimeSheetLine[RowCount],TimeSheetLine[RowCount].Type::Job,Job."No.",
+          JobTask."Job Task No.",'','');
+        // change work type
+        IF RowCount = 2 THEN BEGIN
+          // create work type
+          Resource.GET(TimeSheetHeader."Resource No.");
+          CreateWorkType(WorkType,Resource."Base Unit of Measure");
+          TimeSheetLine[RowCount].VALIDATE(Chargeable,FALSE);
+          TimeSheetLine[RowCount].VALIDATE("Work Type Code",WorkType.Code);
+        END;
+        TimeSheetLine[RowCount].MODIFY;
+        CreateTimeSheetDetail(TimeSheetLine[RowCount],TimeSheetHeader."Starting Date",GetRandomDecimal);
+        CreateTimeSheetDetail(TimeSheetLine[RowCount],TimeSheetHeader."Starting Date" + 1,GetRandomDecimal);
+        TimeSheetApprovalMgt.Submit(TimeSheetLine[RowCount]);
+      END;
+    END;
+
+    PROCEDURE InitScenarioWTForServiceOrder@27(VAR TimeSheetHeader@1008 : Record 950;VAR ServiceHeader@1006 : Record 5900);
+    VAR
+      TimeSheetLine@1009 : Record 951;
+      Resource@1005 : Record 156;
+      TimeSheetApprovalMgt@1001 : Codeunit 951;
+    BEGIN
+      // create time sheet
+      CreateTimeSheet(TimeSheetHeader,FALSE);
+
+      // create work type
+      Resource.GET(TimeSheetHeader."Resource No.");
+
+      CreateServiceOrder(ServiceHeader,CALCDATE('<+3D>',TimeSheetHeader."Starting Date"));
+
+      // create time sheets' lines with type Resource, some kind of Work Type and different chargeables
+      CreateTimeSheetLine(TimeSheetHeader,TimeSheetLine,TimeSheetLine.Type::Service,'','',ServiceHeader."No.",'');
+      TimeSheetLine.VALIDATE("Service Order No.",ServiceHeader."No.");
+      TimeSheetLine.MODIFY;
+      // set quantities for lines
+      CreateTimeSheetDetail(TimeSheetLine,TimeSheetHeader."Starting Date",GetRandomDecimal);
+      TimeSheetApprovalMgt.Submit(TimeSheetLine);
+    END;
+
+    PROCEDURE InitServiceScenario@10(VAR TimeSheetHeader@1008 : Record 950;VAR TimeSheetLine@1000 : Record 951;VAR ServiceHeader@1006 : Record 5900);
+    VAR
+      TimeSheetApprovalMgt@1013 : Codeunit 951;
+    BEGIN
+      // create time sheet
+      CreateTimeSheet(TimeSheetHeader,FALSE);
+
+      // create service order
+      IF ServiceHeader."No." = '' THEN
+        CreateServiceOrder(ServiceHeader,CALCDATE('<+3D>',TimeSheetHeader."Starting Date"));
+
+      // create time sheet line with type Service
+      CreateTimeSheetLine(TimeSheetHeader,TimeSheetLine,TimeSheetLine.Type::Service,'','',ServiceHeader."No.",'');
+      TimeSheetLine.VALIDATE("Service Order No.",ServiceHeader."No.");
+      CreateTimeSheetDetail(TimeSheetLine,TimeSheetHeader."Starting Date",GetRandomDecimal);
+      TimeSheetApprovalMgt.Submit(TimeSheetLine);
+      TimeSheetApprovalMgt.Approve(TimeSheetLine);
+    END;
+
+    PROCEDURE SubmitAndApproveTimeSheetLine@13(TimeSheetLine@1000 : Record 951);
+    BEGIN
+      TimeSheetApprovalMgt.Submit(TimeSheetLine);
+      TimeSheetApprovalMgt.Approve(TimeSheetLine);
+    END;
+
+    BEGIN
+    END.
+  }
+}
+

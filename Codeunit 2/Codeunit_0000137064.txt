@@ -1,0 +1,3320 @@
+OBJECT Codeunit 137064 SCM Warehouse Management
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Permissions=TableData 32=rimd,
+                TableData 7312=rimd;
+    Subtype=Test;
+    OnRun=BEGIN
+            Initialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      WarehouseJournalTemplate@1011 : Record 7309;
+      WarehouseJournalBatch@1012 : Record 7310;
+      ItemJournalTemplate@1009 : Record 82;
+      ItemJournalBatch@1007 : Record 233;
+      LocationSilver@1028 : Record 14;
+      LocationOrange@1029 : Record 14;
+      LocationGreen@1030 : Record 14;
+      LocationWhite@1031 : Record 14;
+      Assert@1008 : Codeunit 130000;
+      LibraryInventory@1002 : Codeunit 132201;
+      LibraryPurchase@1018 : Codeunit 130512;
+      LibrarySales@1035 : Codeunit 130509;
+      LibraryWarehouse@1000 : Codeunit 132204;
+      LibraryUtility@1006 : Codeunit 131000;
+      LibraryManufacturing@1023 : Codeunit 132202;
+      LibraryRandom@1016 : Codeunit 130440;
+      LibraryPatterns@1019 : Codeunit 132212;
+      LibraryVariableStorage@1034 : Codeunit 131004;
+      Initialized@1001 : Boolean;
+      WarehouseOperations@1015 : TextConst 'ENU=The entered information may be disregarded by warehouse operations.';
+      PutAwayActivitiesCreated@1010 : TextConst 'ENU=Number of Invt. Put-away activities created: 1 out of a total of 1.';
+      CountWarehouseLineError@1013 : TextConst 'ENU="Number of Warehouse Shipment Line must be same.  "';
+      CountWarehouseReceiptLineError@1020 : TextConst 'ENU="Number of Warehouse Receipt Line must be same.  "';
+      ShippingAdvice@1014 : TextConst 'ENU=Shipping Advice field is set to Complete';
+      WarehouseClassMsg@1024 : TextConst 'ENU="Warehouse Class Code must be "';
+      ReceiptSpecialWarehouse@1027 : TextConst 'ENU=One or more of the lines on this Warehouse Receipt Header require special warehouse handling. The Bin Code for such lines has been set to blank.';
+      ProductionSpecialWarehouse@1025 : TextConst 'ENU=One or more of the lines on this Production Order require special warehouse handling. The Bin Code for these lines has been set to blank.';
+      BinCodeBlankedError@1021 : TextConst 'ENU=Bin Code should be blanked for prod. line as it does not match class code.';
+      CountComponentsError@1022 : TextConst 'ENU=There should be 2 components.';
+      NothingToHandleMsg@1005 : TextConst 'ENU=There is nothing to handle.';
+      QtyAvailMustBeZeroErr@1036 : TextConst 'ENU=Quantity available to pick must be 0.';
+      BinErr@1032 : TextConst 'ENU=Incorrect Bin';
+      QtyErr@1033 : TextConst 'ENU=Incorrect Quantity';
+
+    [Test]
+    PROCEDURE RenameBinOnSales@24();
+    VAR
+      Bin@1007 : Record 7354;
+      Bin2@1002 : Record 7354;
+      Item@1006 : Record 27;
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+      BinCode@1008 : Code[20];
+    BEGIN
+      // Verify existing Sales line with new Bin Code after Bin Code is renamed.
+      // Setup.
+      Initialize;
+      BinCode :=
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(Bin.FIELDNO(Code),DATABASE::Bin),1,
+          LibraryUtility.GetFieldLength(DATABASE::Bin,Bin.FIELDNO(Code)));
+      LibraryInventory.CreateItem(Item);
+      CreateBinAndBinContent(Bin,LocationSilver.Code,Item."No.",Item."Base Unit of Measure",TRUE);
+
+      CreateSalesHeader(SalesHeader,'','',SalesHeader."Shipping Advice"::Partial);
+      CreateSalesLine(SalesHeader,SalesLine,Item."No.",LocationSilver.Code,LibraryRandom.RandInt(5));
+
+      // Exercise: Rename Bin Code.
+      Bin2.GET(LocationSilver.Code,Bin.Code);
+      Bin2.RENAME(LocationSilver.Code,BinCode);
+
+      // Verify: Verify Sales line with the new Bin Code.
+      SalesLine.GET(SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.");
+      SalesLine.TESTFIELD("Bin Code",BinCode);
+    END;
+
+    [Test]
+    PROCEDURE RenameBinOnPurchase@23();
+    VAR
+      Bin@1007 : Record 7354;
+      Bin2@1002 : Record 7354;
+      Item@1006 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+      BinCode@1008 : Code[20];
+    BEGIN
+      // Verify existing Purchase line with new Bin Code after Bin Code is renamed.
+      // Setup.
+      Initialize;
+      BinCode :=
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(Bin.FIELDNO(Code),DATABASE::Bin),1,
+          LibraryUtility.GetFieldLength(DATABASE::Bin,Bin.FIELDNO(Code)));
+      LibraryInventory.CreateItem(Item);
+      CreateBinAndBinContent(Bin,LocationSilver.Code,Item."No.",Item."Base Unit of Measure",TRUE);
+
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      CreatePurchaseLine(PurchaseHeader,PurchaseLine,Item."No.",LocationSilver.Code,LibraryRandom.RandInt(10));
+
+      // Exercise: Rename Bin Code.
+      Bin2.GET(LocationSilver.Code,Bin.Code);
+      Bin2.RENAME(LocationSilver.Code,BinCode);
+
+      // Verify: Verify Purchase line with the new Bin Code.
+      PurchaseLine.GET(PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.");
+      PurchaseLine.TESTFIELD("Bin Code",BinCode);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE WhseReceiptFixedBin@42();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Receipt from Purchase Order: Default Bin Selection - Fixed Bin.
+      // Setup.
+      Initialize;
+      WhseReceiptFromPurchaseOrder(Location."Default Bin Selection"::"Fixed Bin");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE WhseReceiptLastUsedBin@57();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Receipt from Purchase Order: Default Bin Selection - Last-Used Bin.
+      // Setup.
+      Initialize;
+      WhseReceiptFromPurchaseOrder(Location."Default Bin Selection"::"Last-Used Bin");
+    END;
+
+    LOCAL PROCEDURE WhseReceiptFromPurchaseOrder@75(DefaultBinSelection@1018 : Option);
+    VAR
+      Item@1002 : Record 27;
+      Item2@1003 : Record 27;
+      BinRecv@1007 : Record 7354;
+      PurchaseHeader@1011 : Record 38;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItem(Item2);
+      UpdateLocation(LocationOrange,DefaultBinSelection,TRUE);
+      LibraryWarehouse.CreateBin(
+        BinRecv,LocationOrange.Code,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(BinRecv.FIELDNO(Code),DATABASE::Bin),1,
+          LibraryUtility.GetFieldLength(DATABASE::Bin,BinRecv.FIELDNO(Code))),'','');
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item2."No.",LocationOrange.Code,BinRecv.Code,LibraryRandom.RandInt(10),
+        LibraryRandom.RandInt(10),Item."Base Unit of Measure");
+
+      // Exercise: Create Warehouse Receipt.
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+
+      // Verify: Verify Bin on Warehouse Receipt Header and Warehouse Receipt Lines.
+      VerifyWarehouseReceipt(LocationOrange);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE PostWhseReceiptFixedBin@58();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Receipt from Purchase Order and changed Bin Code on Warehouse Receipt Line: Default Bin Selection - Fixed Bin.
+      // Setup.
+      Initialize;
+      PostWhseReceipt(Location."Default Bin Selection"::"Fixed Bin");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE PostWhseReceiptLastUsedBin@59();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Receipt from Purchase Order and changed Bin Code on Warehouse Receipt Line: Default Bin Selection - Last-Used Bin.
+      // Setup.
+      Initialize;
+      PostWhseReceipt(Location."Default Bin Selection"::"Last-Used Bin");
+    END;
+
+    LOCAL PROCEDURE PostWhseReceipt@72(DefaultBinSelection@1018 : Option);
+    VAR
+      Item@1002 : Record 27;
+      Item2@1003 : Record 27;
+      BinRecv@1007 : Record 7354;
+      BinRecv2@1008 : Record 7354;
+      PurchaseHeader@1011 : Record 38;
+      PurchaseLine@1012 : Record 39;
+      WarehouseActivityHeader@1016 : Record 5766;
+      WarehouseActivityLine@1017 : Record 5767;
+      WarehouseReceiptHeader@1000 : Record 7316;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItem(Item2);
+      UpdateLocation(LocationOrange,DefaultBinSelection,TRUE);
+      LibraryWarehouse.FindBin(BinRecv,LocationOrange.Code,'',3);  // Find Bin based on Bin Index.
+      LibraryWarehouse.FindBin(BinRecv2,LocationOrange.Code,'',4);
+
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item2."No.",LocationOrange.Code,BinRecv2.Code,LibraryRandom.RandInt(10),
+        LibraryRandom.RandInt(10),Item."Base Unit of Measure");
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      ChangeBinCodeOnWarehouseReceiptLine(WarehouseReceiptHeader,BinRecv.Code,LocationOrange.Code);
+
+      // Exercise: Post Warehouse Receipt.
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+
+      // Verify: Verify that the new Bin Codes are updated on the Purchase Lines and Warehouse Activity Line.
+      FindPurchaseLine(PurchaseLine,PurchaseHeader."No.",Item."No.");
+      PurchaseLine.TESTFIELD("Bin Code",BinRecv.Code);
+      FindPurchaseLine(PurchaseLine,PurchaseHeader."No.",Item2."No.");
+      PurchaseLine.TESTFIELD("Bin Code",LocationOrange."Receipt Bin Code");
+
+      FindWarehouseActivityHeader(WarehouseActivityHeader,LocationOrange.Code,WarehouseActivityHeader.Type::"Put-away");
+      VerifyWarehouseActivityLine(WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Take,Item."No.",BinRecv.Code);
+      VerifyWarehouseActivityLine(
+        WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Take,Item2."No.",LocationOrange."Receipt Bin Code");
+      VerifyWarehouseActivityLine(WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Place,Item."No.",BinRecv2.Code);
+      VerifyWarehouseActivityLine(WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Place,Item2."No.",BinRecv.Code);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE SalesOrderFixedBin@60();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code on Sales Lines: Default Bin Selection - Fixed Bin.
+      // Setup.
+      Initialize;
+      SalesOrderWithBin(Location."Default Bin Selection"::"Fixed Bin");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE SalesOrderLastUsedBin@61();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code on Sales Lines: Default Bin Selection - Last-Used Bin.
+      // Setup.
+      Initialize;
+      SalesOrderWithBin(Location."Default Bin Selection"::"Last-Used Bin");
+    END;
+
+    LOCAL PROCEDURE SalesOrderWithBin@71(DefaultBinSelection@1018 : Option);
+    VAR
+      Item@1002 : Record 27;
+      Item2@1003 : Record 27;
+      Bin@1005 : Record 7354;
+      Bin2@1006 : Record 7354;
+      BinRecv@1007 : Record 7354;
+      BinRecv2@1008 : Record 7354;
+      PurchaseHeader@1011 : Record 38;
+      SalesHeader@1021 : Record 36;
+      SalesLine@1020 : Record 37;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItem(Item2);
+      UpdateLocation(LocationOrange,DefaultBinSelection,TRUE);
+      LibraryWarehouse.FindBin(Bin,LocationOrange.Code,'',3);  // Find Bin based on Bin Index.
+      LibraryWarehouse.FindBin(Bin2,LocationOrange.Code,'',4);
+      LibraryWarehouse.FindBin(BinRecv,LocationOrange.Code,'',5);
+      LibraryWarehouse.FindBin(BinRecv2,LocationOrange.Code,'',6);
+
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item2."No.",LocationOrange.Code,BinRecv2.Code,LibraryRandom.RandInt(10),
+        LibraryRandom.RandInt(10),Item."Base Unit of Measure");
+      CreateAndPostWhseReceipt(PurchaseHeader,BinRecv.Code,LocationOrange.Code);
+
+      // Change Bin Code in Warehouse Activity Lines and Register Warehouse Activity.
+      UpdateAndRegisterWarehouseActivityLine(LocationOrange.Code,Item."No.",Item2."No.",Bin.Code,Bin2.Code);
+
+      // Exercise: Create Sales Order.
+      CreateSalesOrder(
+        SalesHeader,Item."No.",Item2."No.",LocationOrange.Code,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5));
+
+      // Verify: Verify Sales line with the Bin Code.
+      FindSalesLine(SalesLine,SalesHeader."No.",Item."No.");
+      VerifyBinCodeOnSalesLine(SalesLine,BinRecv.Code,Bin.Code,DefaultBinSelection);
+      FindSalesLine(SalesLine,SalesHeader."No.",Item2."No.");
+      VerifyBinCodeOnSalesLine(SalesLine,LocationOrange."Receipt Bin Code",Bin2.Code,DefaultBinSelection);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE WhseShipmentFixedBin@62();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Shipment from Sales Order: Default Bin Selection - Fixed Bin.
+      // Setup.
+      Initialize;
+      WhseShipmentFromSalesOrder(Location."Default Bin Selection"::"Fixed Bin");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE WhseShipmentLastUsedBin@63();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Shipment from Sales Order: Default Bin Selection - Last-Used Bin.
+      // Setup.
+      Initialize;
+      WhseShipmentFromSalesOrder(Location."Default Bin Selection"::"Last-Used Bin");
+    END;
+
+    LOCAL PROCEDURE WhseShipmentFromSalesOrder@19(DefaultBinSelection@1018 : Option);
+    VAR
+      Item@1002 : Record 27;
+      Item2@1003 : Record 27;
+      Bin@1005 : Record 7354;
+      Bin2@1006 : Record 7354;
+      BinRecv@1007 : Record 7354;
+      BinRecv2@1008 : Record 7354;
+      PurchaseHeader@1011 : Record 38;
+      SalesHeader@1021 : Record 36;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItem(Item2);
+      UpdateLocation(LocationOrange,DefaultBinSelection,TRUE);
+      LibraryWarehouse.FindBin(Bin,LocationOrange.Code,'',3);  // Find Bin based on Bin Index.
+      LibraryWarehouse.FindBin(Bin2,LocationOrange.Code,'',4);
+      LibraryWarehouse.FindBin(BinRecv,LocationOrange.Code,'',5);
+      LibraryWarehouse.FindBin(BinRecv2,LocationOrange.Code,'',6);
+
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item2."No.",LocationOrange.Code,BinRecv2.Code,LibraryRandom.RandInt(10),
+        LibraryRandom.RandInt(10),Item."Base Unit of Measure");
+      CreateAndPostWhseReceipt(PurchaseHeader,BinRecv.Code,LocationOrange.Code);
+      UpdateAndRegisterWarehouseActivityLine(LocationOrange.Code,Item."No.",Item2."No.",Bin.Code,Bin2.Code);
+
+      CreateSalesOrder(
+        SalesHeader,Item."No.",Item2."No.",LocationOrange.Code,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5));
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+
+      // Exercise: Create Warehouse Shipment.
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+
+      // Verify: Verify Bin on Warehouse Shipment Header and Warehouse Shipment Lines.
+      VerifyWarehouseShipment(LocationOrange);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE PickFixedBin@64();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Shipment from Sales Order and changed Bin Code on Warehouse Shipment Line: Default Bin Selection - Fixed Bin.
+      // Setup.
+      Initialize;
+      PickFromShipment(Location."Default Bin Selection"::"Fixed Bin");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE PickLastUsedBin@65();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Shipment from Sales Order and changed Bin Code on Warehouse Shipment Line: Default Bin Selection - Last-Used Bin.
+      // Setup.
+      Initialize;
+      PickFromShipment(Location."Default Bin Selection"::"Last-Used Bin");
+    END;
+
+    LOCAL PROCEDURE PickFromShipment@70(DefaultBinSelection@1018 : Option);
+    VAR
+      Item@1002 : Record 27;
+      Item2@1003 : Record 27;
+      Bin@1005 : Record 7354;
+      Bin2@1006 : Record 7354;
+      BinRecv@1007 : Record 7354;
+      BinRecv2@1008 : Record 7354;
+      BinShip@1009 : Record 7354;
+      PurchaseHeader@1011 : Record 38;
+      WarehouseActivityHeader@1016 : Record 5766;
+      WarehouseActivityLine@1017 : Record 5767;
+      SalesHeader@1021 : Record 36;
+      WarehouseShipmentHeader@1023 : Record 7320;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItem(Item2);
+      UpdateLocation(LocationOrange,DefaultBinSelection,TRUE);
+      LibraryWarehouse.FindBin(Bin,LocationOrange.Code,'',3);  // Find Bin based on Bin Index.
+      LibraryWarehouse.FindBin(Bin2,LocationOrange.Code,'',4);
+      LibraryWarehouse.FindBin(BinRecv,LocationOrange.Code,'',5);
+      LibraryWarehouse.FindBin(BinRecv2,LocationOrange.Code,'',6);
+      LibraryWarehouse.FindBin(BinShip,LocationOrange.Code,'',7);
+
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item2."No.",LocationOrange.Code,BinRecv2.Code,LibraryRandom.RandInt(10),
+        LibraryRandom.RandInt(10),Item."Base Unit of Measure");
+      CreateAndPostWhseReceipt(PurchaseHeader,BinRecv.Code,LocationOrange.Code);
+      UpdateAndRegisterWarehouseActivityLine(LocationOrange.Code,Item."No.",Item2."No.",Bin.Code,Bin2.Code);
+
+      CreateSalesOrder(
+        SalesHeader,Item."No.",Item2."No.",LocationOrange.Code,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5));
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      ChangeBinCodeOnWarehouseShipmentLine(WarehouseShipmentHeader,BinShip.Code,LocationOrange.Code,Item."No.");
+
+      // Exercise: Create Pick from shipment.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+
+      // Verify: Verify that the new Bin Codes are updated on Warehouse Activity Line.
+      FindWarehouseActivityHeader(WarehouseActivityHeader,LocationOrange.Code,WarehouseActivityHeader.Type::Pick);
+      VerifyWarehouseActivityLine(WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Place,Item."No.",BinShip.Code);
+      VerifyWarehouseActivityLine(
+        WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Place,Item2."No.",LocationOrange."Shipment Bin Code");
+      VerifyWarehouseActivityLine(WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Take,Item."No.",Bin.Code);
+      VerifyWarehouseActivityLine(WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Take,Item2."No.",Bin2.Code);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE PostWhseShipmentFixedBin@66();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Shipment from Sales Order, changed Bin Code on Warehouse Shipment Line and Post: Default Bin Selection - Fixed Bin.
+      // Setup.
+      Initialize;
+      PostWhseShipment(Location."Default Bin Selection"::"Fixed Bin");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE PostWhseShipmentLastUsedBin@68();
+    VAR
+      Location@1000 : Record 14;
+    BEGIN
+      // Verify Bin Code after creating Warehouse Shipment from Sales Order, changed Bin Code on Warehouse Shipment Line and Post: Default Bin Selection - Last-Used Bin.
+      // Setup.
+      Initialize;
+      PostWhseShipment(Location."Default Bin Selection"::"Last-Used Bin");
+    END;
+
+    LOCAL PROCEDURE PostWhseShipment@69(DefaultBinSelection@1018 : Option);
+    VAR
+      Item@1002 : Record 27;
+      Item2@1003 : Record 27;
+      Bin@1005 : Record 7354;
+      Bin2@1006 : Record 7354;
+      BinRecv@1007 : Record 7354;
+      BinRecv2@1008 : Record 7354;
+      BinShip@1009 : Record 7354;
+      PurchaseHeader@1011 : Record 38;
+      WarehouseActivityHeader@1016 : Record 5766;
+      SalesHeader@1021 : Record 36;
+      WarehouseShipmentHeader@1023 : Record 7320;
+      PostedWhseShipmentLine@1000 : Record 7323;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItem(Item2);
+      UpdateLocation(LocationOrange,DefaultBinSelection,TRUE);
+      LibraryWarehouse.FindBin(Bin,LocationOrange.Code,'',3);  // Find Bin based on Bin Index.
+      LibraryWarehouse.FindBin(Bin2,LocationOrange.Code,'',4);
+      LibraryWarehouse.FindBin(BinRecv,LocationOrange.Code,'',5);
+      LibraryWarehouse.FindBin(BinRecv2,LocationOrange.Code,'',6);
+      LibraryWarehouse.FindBin(BinShip,LocationOrange.Code,'',7);
+
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item2."No.",LocationOrange.Code,BinRecv2.Code,LibraryRandom.RandInt(10),
+        LibraryRandom.RandInt(10),Item."Base Unit of Measure");
+      CreateAndPostWhseReceipt(PurchaseHeader,BinRecv.Code,LocationOrange.Code);
+      UpdateAndRegisterWarehouseActivityLine(LocationOrange.Code,Item."No.",Item2."No.",Bin.Code,Bin2.Code);
+
+      CreateSalesOrder(
+        SalesHeader,Item."No.",Item2."No.",LocationOrange.Code,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5));
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      ChangeBinCodeOnWarehouseShipmentLine(WarehouseShipmentHeader,BinShip.Code,LocationOrange.Code,Item."No.");
+
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      FindWarehouseActivityHeader(WarehouseActivityHeader,LocationOrange.Code,WarehouseActivityHeader.Type::Pick);
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+
+      // Exercise: Post Warehouse Shipment.
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // Verify: Verify that the new Bin Codes are updated on the Sales Lines.
+      PostedWhseShipmentLine.SETRANGE("Item No.",Item."No.");
+      PostedWhseShipmentLine.FINDFIRST;
+      PostedWhseShipmentLine.TESTFIELD("Bin Code",BinShip.Code);
+      PostedWhseShipmentLine.SETRANGE("Item No.",Item2."No.");
+      PostedWhseShipmentLine.FINDFIRST;
+      PostedWhseShipmentLine.TESTFIELD("Bin Code",LocationOrange."Shipment Bin Code");
+    END;
+
+    [Test]
+    [HandlerFunctions(PutAwayMessageHandler)]
+    PROCEDURE InventoryPutAwayWithSingleBinContent@21();
+    BEGIN
+      // Verify Bin Code in Warehouse Activity Line after creating Inventory put-away.
+      // Setup.
+      Initialize;
+      InventoryPutAwayMultipleUOM(FALSE);  // Boolean for Single Bin Content.
+    END;
+
+    [Test]
+    [HandlerFunctions(PutAwayMessageHandler)]
+    PROCEDURE InventoryPutAwayWithMultipleBinContent@18();
+    BEGIN
+      // Verify Bin Code in Warehouse Activity Line after creating Inventory put-away.
+      // Setup.
+      Initialize;
+      InventoryPutAwayMultipleUOM(TRUE);  // Boolean for Multiple Bin Content.
+    END;
+
+    LOCAL PROCEDURE InventoryPutAwayMultipleUOM@25(MultipleBinContent@1018 : Boolean);
+    VAR
+      Item@1010 : Record 27;
+      Bin@1011 : Record 7354;
+      BinContent@1013 : Record 7302;
+      WarehouseActivityHeader@1014 : Record 5766;
+      PurchaseHeader@1015 : Record 38;
+      WarehouseActivityLine@1016 : Record 5767;
+      UnitOfMeasure@1004 : Record 204;
+      Quantity@1006 : Decimal;
+    BEGIN
+      Quantity := LibraryRandom.RandDec(10,2);
+      LibraryInventory.CreateItem(Item);
+      UpdateItemWithUnitOfMeasure(UnitOfMeasure,Item."No.");
+
+      UpdateLocation(LocationOrange,LocationOrange."Default Bin Selection"::"Fixed Bin",FALSE);
+      CreateBinAndBinContent(Bin,LocationOrange.Code,Item."No.",Item."Base Unit of Measure",FALSE);
+
+      IF MultipleBinContent THEN
+        CreateBinContent(BinContent,LocationOrange.Code,Bin.Code,Item."No.",UnitOfMeasure.Code,FALSE);
+      CreateAndReleasePurchaseOrder(PurchaseHeader,Item."No.",Item."No.",LocationOrange.Code,'',Quantity,Quantity,UnitOfMeasure.Code);
+
+      // Exercise: Create Inventory Put and Pick.
+      LibraryWarehouse.CreateInvtPutPickMovement(
+        WarehouseActivityHeader."Source Document"::"Purchase Order",PurchaseHeader."No.",TRUE,TRUE,FALSE);
+
+      // Verify: Verify Warehouse Activity Line.
+      VerifyWarehouseActivityLineDetails(
+        PurchaseHeader."No.",WarehouseActivityLine."Activity Type"::"Invt. Put-away",Item."No.",UnitOfMeasure.Code,Quantity,'',
+        WarehouseActivityLine."Action Type"::Place);
+      VerifyWarehouseActivityLineDetails(
+        PurchaseHeader."No.",WarehouseActivityLine."Activity Type"::"Invt. Put-away",Item."No.",Item."Base Unit of Measure",Quantity,
+        '',WarehouseActivityLine."Action Type"::Place);
+    END;
+
+    [Test]
+    PROCEDURE PostWhseReceiptWithSingleBinContent@20();
+    BEGIN
+      // Verify Bin Code in Warehouse Activity Line after Posting Werehouse Receipt.
+      // Setup.
+      Initialize;
+      PostWhseReceiptMultipleUOM(FALSE);  // Boolean for Single Bin Content.
+    END;
+
+    [Test]
+    PROCEDURE PostWhseReceiptMultipleBinContent@13();
+    BEGIN
+      // Verify Bin Code in Warehouse Activity Line after Posting Werehouse Receipt.
+      // Setup.
+      Initialize;
+      PostWhseReceiptMultipleUOM(TRUE);  // Boolean for Multiple Bin Content.
+    END;
+
+    LOCAL PROCEDURE PostWhseReceiptMultipleUOM@26(MultipleBinContent@1018 : Boolean);
+    VAR
+      Item@1010 : Record 27;
+      Bin@1011 : Record 7354;
+      BinContent@1013 : Record 7302;
+      PurchaseHeader@1015 : Record 38;
+      WarehouseActivityLine@1016 : Record 5767;
+      WarehouseReceiptHeader@1008 : Record 7316;
+      UnitOfMeasure@1004 : Record 204;
+      Quantity@1006 : Decimal;
+    BEGIN
+      Quantity := LibraryRandom.RandDec(10,2);
+      LibraryInventory.CreateItem(Item);
+      UpdateItemWithUnitOfMeasure(UnitOfMeasure,Item."No.");
+
+      UpdateLocation(LocationOrange,LocationOrange."Default Bin Selection"::"Fixed Bin",TRUE);
+      CreateBinAndBinContent(Bin,LocationOrange.Code,Item."No.",Item."Base Unit of Measure",FALSE);
+
+      IF MultipleBinContent THEN
+        CreateBinContent(BinContent,LocationOrange.Code,Bin.Code,Item."No.",UnitOfMeasure.Code,FALSE);
+
+      CreateAndReleasePurchaseOrder(PurchaseHeader,Item."No.",Item."No.",LocationOrange.Code,'',Quantity,Quantity,UnitOfMeasure.Code);
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      UpdateWarehouseReceiptLine(PurchaseHeader."No.",Bin.Code);
+
+      // Exercise: Post Warehouse Receipt.
+      FindWarehouseReceiptHeader(WarehouseReceiptHeader,LocationOrange.Code);
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+
+      // Verify: Verify Warehouse Activity Lines.
+      VerifyWarehouseActivityLineDetails(
+        PurchaseHeader."No.",WarehouseActivityLine."Activity Type"::"Put-away",Item."No.",UnitOfMeasure.Code,Quantity,Bin.Code,
+        WarehouseActivityLine."Action Type"::Take);
+      VerifyWarehouseActivityLineDetails(
+        PurchaseHeader."No.",WarehouseActivityLine."Activity Type"::"Put-away",Item."No.",UnitOfMeasure.Code,Quantity,'',
+        WarehouseActivityLine."Action Type"::Place);
+      VerifyWarehouseActivityLineDetails(
+        PurchaseHeader."No.",WarehouseActivityLine."Activity Type"::"Put-away",Item."No.",Item."Base Unit of Measure",Quantity,
+        Bin.Code,WarehouseActivityLine."Action Type"::Take);
+      VerifyWarehouseActivityLineDetails(
+        PurchaseHeader."No.",WarehouseActivityLine."Activity Type"::"Put-away",Item."No.",Item."Base Unit of Measure",Quantity,'',
+        WarehouseActivityLine."Action Type"::Place);
+    END;
+
+    [Test]
+    PROCEDURE MultipleSalesOrderWithShippingAdvice@29();
+    VAR
+      Item@1009 : Record 27;
+      SalesHeader@1013 : Record 36;
+      SalesHeader2@1011 : Record 36;
+      WarehouseShipmentLine@1010 : Record 7321;
+      Customer@1014 : Record 18;
+      Quantity@1000 : Decimal;
+    BEGIN
+      // Verify Warehouse Shipment after creating multilple Sales Order With Shipping Advice as Complete.
+      // Setup.
+      Initialize;
+      Quantity := LibraryRandom.RandDec(10,2);
+      LibrarySales.CreateCustomer(Customer);
+      LibraryInventory.CreateItem(Item);
+      UpdateInventoryOnLocationWithWhseAdjustment(LocationWhite,Item,Quantity);
+
+      // Create Two Sales Orders for Quantity on Location.
+      CreateAndReleaseSalesOrderWithShippingAdvice(
+        SalesHeader,Customer."No.",LocationWhite.Code,Item."No.",Quantity,SalesHeader."Shipping Advice"::Complete);
+      CreateAndReleaseSalesOrderWithShippingAdvice(
+        SalesHeader2,Customer."No.",LocationWhite.Code,Item."No.",Quantity,SalesHeader."Shipping Advice"::Complete);
+
+      // Exercise: Create Warehouse Shipment for first Sales Order.
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+
+      // Verify: Verify Warehouse Shipment was created.
+      WarehouseShipmentLine.SETRANGE("Source Type",DATABASE::"Sales Line");
+      WarehouseShipmentLine.SETRANGE("Source Subtype",SalesHeader."Document Type");
+      WarehouseShipmentLine.SETRANGE("Source No.",SalesHeader."No.");
+      Assert.AreEqual(1,WarehouseShipmentLine.COUNT,CountWarehouseLineError);
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderWithoutInventoryOnLocation@27();
+    BEGIN
+      // Verify Error message on Creating Warehouse Shipment If Sales Order have Shipping Advice as Complete and blank Inventory on Location.
+      // Setup.
+      Initialize;
+      SalesOrderWhseShipment(FALSE);  // Update Inventory as False.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderInventoryOnBlankLocation@6();
+    BEGIN
+      // Verify Error message on Creating Warehouse Shipment If Sales Order have Shipping Advice as Complete and blank Inventory on Location.
+      // Setup.
+      Initialize;
+      SalesOrderWhseShipment(TRUE);  // Update Inventory as True.
+    END;
+
+    LOCAL PROCEDURE SalesOrderWhseShipment@41(UpdateInventory@1012 : Boolean);
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1001 : Record 36;
+      ItemJournalLine@1005 : Record 83;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      CreateAndReleaseSalesOrderWithShippingAdvice(
+        SalesHeader,'',LocationWhite.Code,Item."No.",LibraryRandom.RandDec(10,2),
+        SalesHeader."Shipping Advice"::Complete);
+
+      IF UpdateInventory THEN BEGIN
+        LibraryInventory.CreateItemJournalLine(
+          ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+          ItemJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",10 + LibraryRandom.RandDec(10,2));
+        LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      END;
+
+      // Exercise: Create Warehouse Shipment From Sales Order.
+      ASSERTERROR LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+
+      // Verify: Verify Error message.
+      Assert.IsTrue((STRPOS(GETLASTERRORTEXT,ShippingAdvice) > 0) AND (STRPOS(GETLASTERRORTEXT,Item."No.") > 0) ,GETLASTERRORTEXT);
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderInventoryOnLocation@4();
+    BEGIN
+      // Verify Error message on Creating Warehouse Shipment If Sales Order have Shipping Advice as Complete, multiple lines, Partial and blank Inventory on location.
+      // Setup.
+      Initialize;
+      SalesOrderWhseShipmentWithDiffSalesLines(FALSE);  // Update Inventory as False.
+    END;
+
+    [Test]
+    PROCEDURE SalesOrderPartialInventoryOnLocation@37();
+    BEGIN
+      // Verify Error message on Creating Warehouse Shipment If Sales Order have Shipping Advice as Complete, multiple lines, Partial and blank Inventory on location.
+      // Setup.
+      Initialize;
+      SalesOrderWhseShipmentWithDiffSalesLines(TRUE);  // Update Inventory as True.
+    END;
+
+    LOCAL PROCEDURE SalesOrderWhseShipmentWithDiffSalesLines@30(UpdateInventory@1012 : Boolean);
+    VAR
+      Item@1000 : Record 27;
+      Item2@1003 : Record 27;
+      Item3@1004 : Record 27;
+      Item4@1007 : Record 27;
+      SalesHeader@1001 : Record 36;
+      WarehouseJournalLine@1006 : Record 7311;
+      Quantity@1008 : Decimal;
+    BEGIN
+      Quantity := LibraryRandom.RandDec(10,2);
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItem(Item2);
+      LibraryInventory.CreateItem(Item3);
+
+      // Create Sales Order with Multiple lines on location.
+      CreateSalesHeader(SalesHeader,'',LocationWhite.Code,SalesHeader."Shipping Advice"::Complete);
+      CreateMultipleSalesLine(SalesHeader,Item."No.",Item2."No.",Item3."No.",Quantity);
+      CreateMultipleSalesLine(SalesHeader,Item."No.",Item2."No.",Item3."No.",Quantity);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+
+      // Add inventory for Item and Item2 in Location.
+      WarehouseJournalSetup(LocationWhite.Code);
+      LibraryWarehouse.CreateWhseJournalLine(
+        WarehouseJournalLine,WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,LocationWhite.Code,'',
+        LocationWhite."Cross-Dock Bin Code",WarehouseJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",50 + Quantity);
+      LibraryWarehouse.CreateWhseJournalLine(
+        WarehouseJournalLine,WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,LocationWhite.Code,'',
+        LocationWhite."Cross-Dock Bin Code",WarehouseJournalLine."Entry Type"::"Positive Adjmt.",Item2."No.",50 + Quantity);
+      Item4.SETRANGE("No.",Item."No.",Item2."No.");
+
+      LibraryWarehouse.RegisterWhseJournalLine(
+        WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,LocationWhite.Code,TRUE);
+      LibraryWarehouse.CalculateWhseAdjustment(Item4,ItemJournalBatch);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+
+      IF UpdateInventory THEN
+        UpdateInventoryOnLocationWithWhseAdjustment(LocationWhite,Item3,Quantity);
+
+      // Exercise: Create Warehouse Shipment From Sales Order.
+      ASSERTERROR LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+
+      // Verify: Verify Error message.
+      Assert.IsTrue((STRPOS(GETLASTERRORTEXT,ShippingAdvice) > 0) AND (STRPOS(GETLASTERRORTEXT,Item3."No.") > 0) ,GETLASTERRORTEXT);
+    END;
+
+    [Test]
+    PROCEDURE QuantityToHandleOnLocation@86();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      // Verify Warehouse Shipment Line after changing Quantity to Handle On Warehouse Activity Line on Location - Green.
+      // Setup: Create Item and update inventory on location.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      UpdateInventoryOnLocation(LocationGreen.Code,Item."No.",100 + LibraryRandom.RandDec(100,2));  // For large Quantity.
+      QuantityToHandleOnWhseActivityLine(LocationGreen,Item);
+    END;
+
+    [Test]
+    PROCEDURE QuantityToHandleOnFullWMSLocation@85();
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      // Verify Warehouse Shipment Line after changing Quantity to Handle On Warehouse Activity Line on Full WMS Location - White.
+      // Setup: Create Item and update inventory on location.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      UpdateInventoryOnLocationWithWhseAdjustment(LocationWhite,Item,100 + LibraryRandom.RandDec(100,2));  // For large Quantity.
+      QuantityToHandleOnWhseActivityLine(LocationWhite,Item);
+    END;
+
+    LOCAL PROCEDURE QuantityToHandleOnWhseActivityLine@82(Location@1001 : Record 14;Item@1000 : Record 27);
+    VAR
+      SalesHeader@1010 : Record 36;
+      WarehouseShipmentHeader@1008 : Record 7320;
+      WarehouseActivityHeader@1006 : Record 5766;
+      Quantity@1002 : Decimal;
+      Quantity2@1003 : Decimal;
+      QtyToHandle@1005 : Decimal;
+      QtyToHandle2@1009 : Decimal;
+    BEGIN
+      // Create Random Quantity, Create Sales Order, Create Warehouse Shipment form Sales Order, Create Pick and update Quantity to Handle on Warehouse Activity Line.
+      Quantity := 10 + LibraryRandom.RandDec(10,2);
+      Quantity2 := Quantity + LibraryRandom.RandDec(10,2);
+      QtyToHandle := LibraryRandom.RandDec(5,2);
+      QtyToHandle2 := QtyToHandle + LibraryRandom.RandDec(5,2);
+
+      CreateAndReleaseSalesOrder(SalesHeader,Item."No.",Item."No.",Location.Code,Quantity,Quantity2);
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      FindWarehouseShipmentHeader(WarehouseShipmentHeader,Location.Code);
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+
+      FindWarehouseActivityHeader(WarehouseActivityHeader,Location.Code,WarehouseActivityHeader.Type::Pick);
+      UpdateQuantityToHandleOnWhseActivityLine(WarehouseActivityHeader,Quantity,QtyToHandle);
+      UpdateQuantityToHandleOnWhseActivityLine(WarehouseActivityHeader,Quantity2,QtyToHandle2);
+
+      // Exercise.
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+
+      // Verify: Verify Warehouse Shipment Line for Quantities.
+      VerifyWarehouseShipmentLine(WarehouseShipmentHeader."No.",Item."No.",Quantity,Quantity,QtyToHandle,QtyToHandle,0);  // Value important for Test.
+      VerifyWarehouseShipmentLine(WarehouseShipmentHeader."No.",Item."No.",Quantity2,Quantity2,QtyToHandle2,QtyToHandle2,0);  // Value important for Test.
+    END;
+
+    [Test]
+    PROCEDURE WhseShipmentAutofillQtyToShipOnLocation@50();
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      // Verify Warehouse Shipment Line after changing Quantity to Handle On Warehouse Activity Line and Auto fill Qty to Ship on Location - Green.
+      // Setup: Create Item and update inventory on location.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      UpdateInventoryOnLocation(LocationGreen.Code,Item."No.",100 + LibraryRandom.RandDec(100,2));  // For large Quantity.
+      WhseShipmentAutofillQtyToShip(LocationGreen,Item);
+    END;
+
+    [Test]
+    PROCEDURE WhseShipmentAutofillQtyToShipOnFullWMSLocation@48();
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      // Verify Warehouse Shipment Line after changing Quantity to Handle On Warehouse Activity Line and Auto fill Qty to Ship on Full WMS Location - White.
+      // Setup: Create Item and update inventory on location.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      UpdateInventoryOnLocationWithWhseAdjustment(LocationWhite,Item,100 + LibraryRandom.RandDec(100,2));  // For large Quantity.
+      WhseShipmentAutofillQtyToShip(LocationWhite,Item);
+    END;
+
+    LOCAL PROCEDURE WhseShipmentAutofillQtyToShip@114(Location@1001 : Record 14;Item@1000 : Record 27);
+    VAR
+      SalesHeader@1010 : Record 36;
+      WarehouseShipmentHeader@1008 : Record 7320;
+      WarehouseActivityHeader@1006 : Record 5766;
+      Quantity@1009 : Decimal;
+      Quantity2@1005 : Decimal;
+      QtyToHandle@1003 : Decimal;
+      QtyToHandle2@1002 : Decimal;
+    BEGIN
+      // Create Random Quantity, Create Sales Order, Create Warehouse Shipment form Sales Order, Create Pick and update Quantity to Handle on Warehouse Activity Line and Auto fill Quantity To Ship Warehouse Shipment.
+      Quantity := 10 + LibraryRandom.RandDec(10,2);
+      Quantity2 := Quantity + LibraryRandom.RandDec(10,2);
+      QtyToHandle := LibraryRandom.RandDec(5,2);
+      QtyToHandle2 := QtyToHandle + LibraryRandom.RandDec(5,2);
+
+      CreateAndReleaseSalesOrder(SalesHeader,Item."No.",Item."No.",Location.Code,Quantity,Quantity2);
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      FindWarehouseShipmentHeader(WarehouseShipmentHeader,Location.Code);
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+
+      FindWarehouseActivityHeader(WarehouseActivityHeader,Location.Code,WarehouseActivityHeader.Type::Pick);
+      UpdateQuantityToHandleOnWhseActivityLine(WarehouseActivityHeader,Quantity,QtyToHandle);
+      UpdateQuantityToHandleOnWhseActivityLine(WarehouseActivityHeader,Quantity2,QtyToHandle2);
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+
+      // Exercise: Auto fill Qty To Ship on Warehouse Shipment.
+      LibraryWarehouse.AutofillQtyToShipWhseShipment(WarehouseShipmentHeader);
+
+      // Verify: Verify Warehouse Shipment Line for Quantities.
+      VerifyWarehouseShipmentLine(WarehouseShipmentHeader."No.",Item."No.",Quantity,Quantity,QtyToHandle,QtyToHandle,0);  // Value important for Test.
+      VerifyWarehouseShipmentLine(WarehouseShipmentHeader."No.",Item."No.",Quantity2,Quantity2,QtyToHandle2,QtyToHandle2,0);  // Value important for Test.
+    END;
+
+    [Test]
+    PROCEDURE QtyToShipOnWhseShipmentLineOnLocation@67();
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      // Verify Warehouse Shipment Line after changing Qty to Ship On Warehouse Shipment Line, Auto fill Qty to Ship and post Shipment on Location - Green.
+      // Setup: Create Item and update inventory on location.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      UpdateInventoryOnLocation(LocationGreen.Code,Item."No.",100 + LibraryRandom.RandDec(100,2));  // For large Quantity.;
+      QtyToShipOnWhseShipmentLine(LocationGreen,Item);
+    END;
+
+    [Test]
+    PROCEDURE QtyToShipOnWhseShipmentLineOnFullWMSLocation@52();
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      // Verify Warehouse Shipment Line after changing Qty to Ship On Warehouse Shipment Line, Auto fill Qty to Ship and post Shipment on Full WMS Location - White.
+      // Setup: Create Item and update inventory on location.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      UpdateInventoryOnLocationWithWhseAdjustment(LocationWhite,Item,100 + LibraryRandom.RandDec(100,2));  // For large Quantity.;
+      QtyToShipOnWhseShipmentLine(LocationWhite,Item);
+    END;
+
+    LOCAL PROCEDURE QtyToShipOnWhseShipmentLine@116(Location@1001 : Record 14;Item@1000 : Record 27);
+    VAR
+      SalesHeader@1010 : Record 36;
+      WarehouseShipmentHeader@1008 : Record 7320;
+      WarehouseShipmentLine@1007 : Record 7321;
+      WarehouseActivityHeader@1006 : Record 5766;
+      Quantity@1009 : Decimal;
+      Quantity2@1005 : Decimal;
+      QtyToHandle@1003 : Decimal;
+      QtyToHandle2@1002 : Decimal;
+      QtytoShip@1011 : Decimal;
+    BEGIN
+      // Create Random Quantity, Create Sales Order, Create Warehouse Shipment form Sales Order, Create Pick and Change Quantity To Ship On Warehouse Shipment Line, Auto fill Quantity To Ship Warehouse Shipment and Post.
+      Quantity := 20 + LibraryRandom.RandDec(10,2);
+      Quantity2 := Quantity + LibraryRandom.RandDec(10,2);
+      QtyToHandle := 5 + LibraryRandom.RandDec(5,2);
+      QtyToHandle2 := QtyToHandle + LibraryRandom.RandDec(5,2);
+      QtytoShip := LibraryRandom.RandDec(5,2);
+      CreateAndReleaseSalesOrder(SalesHeader,Item."No.",Item."No.",Location.Code,Quantity,Quantity2);
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      FindWarehouseShipmentHeader(WarehouseShipmentHeader,Location.Code);
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+
+      FindWarehouseActivityHeader(WarehouseActivityHeader,Location.Code,WarehouseActivityHeader.Type::Pick);
+      UpdateQuantityToHandleOnWhseActivityLine(WarehouseActivityHeader,Quantity,QtyToHandle);
+      UpdateQuantityToHandleOnWhseActivityLine(WarehouseActivityHeader,Quantity2,QtyToHandle2);
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+      LibraryWarehouse.AutofillQtyToShipWhseShipment(WarehouseShipmentHeader);
+
+      ChangeQtyToShipOnWhseShipmentLine(WarehouseShipmentLine,WarehouseShipmentHeader."No.",QtytoShip);  // Change Qty to Ship on Whse Shipment line.
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // Exercise: Auto fill Qty To Ship on Warehouse Shipment.
+      LibraryWarehouse.AutofillQtyToShipWhseShipment(WarehouseShipmentHeader);
+
+      // Verify: Verify Warehouse Shipment Line for Quantities.
+      VerifyWarehouseShipmentLine(
+        WarehouseShipmentHeader."No.",Item."No.",Quantity,Quantity - QtytoShip,QtyToHandle - QtytoShip,QtyToHandle,QtytoShip);
+      VerifyWarehouseShipmentLine(WarehouseShipmentHeader."No.",Item."No.",Quantity2,Quantity2,QtyToHandle2,QtyToHandle2,0);  // Value important for Test.
+    END;
+
+    [Test]
+    PROCEDURE WhseReceiptAutofillQtyToRecvOnLocation@56();
+    BEGIN
+      // Verify Warehouse Receipt Line after changing Qty to Receive On Warehouse Receipt Line on Location - Green.
+      // Setup.
+      Initialize;
+      WhseReceiptAutofillQtyToRecv(LocationGreen);
+    END;
+
+    [Test]
+    PROCEDURE WhseReceiptAutofillQtyToRecvOnFullWMSLocation@55();
+    BEGIN
+      // Verify Warehouse Receipt Line after changing Qty to Receive On Warehouse Receipt Line on Full WMS Location - White.
+      // Setup.
+      Initialize;
+      WhseReceiptAutofillQtyToRecv(LocationWhite);
+    END;
+
+    LOCAL PROCEDURE WhseReceiptAutofillQtyToRecv@81(Location@1003 : Record 14);
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      WarehouseReceiptHeader@1002 : Record 7316;
+      WarehouseReceiptLine@1001 : Record 7317;
+      Item@1005 : Record 27;
+      Quantity@1009 : Decimal;
+      Quantity2@1008 : Decimal;
+      QtyToReceive@1007 : Decimal;
+    BEGIN
+      // Create Random Quantity, Create Purchase Order, Create Warehouse Receipt form Purchase Order, Change Qty to Receive On Whse Receipt Line.
+      Quantity := 10 + LibraryRandom.RandDec(10,2);
+      Quantity2 := Quantity + LibraryRandom.RandDec(10,2);
+      QtyToReceive := LibraryRandom.RandDec(5,2);
+
+      LibraryInventory.CreateItem(Item);
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item."No.",Location.Code,'',Quantity,Quantity2,Item."Base Unit of Measure");
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+
+      FindWarehouseReceiptHeader(WarehouseReceiptHeader,Location.Code);
+      ChangeQtyToReceiveOnWhseReceiptLine(WarehouseReceiptLine,WarehouseReceiptHeader."No.",QtyToReceive);  // Change Qty to Receive on Whse Receipt line.
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+
+      // Exercise.
+      LibraryWarehouse.AutofillQtyToRecvWhseReceipt(WarehouseReceiptHeader);
+
+      // Verify: Verify Warehouse Receipt Line for Quantities.
+      VerifyWarehouseReceiptLine(WarehouseReceiptHeader."No.",Item."No.",Quantity,Quantity,Quantity,0);
+      VerifyWarehouseReceiptLine(
+        WarehouseReceiptHeader."No.",Item."No.",Quantity2,Quantity2 - QtyToReceive,Quantity2 - QtyToReceive,QtyToReceive)
+    END;
+
+    [Test]
+    [HandlerFunctions(ReceiptSpecialMessageHandler)]
+    PROCEDURE WhseReceiptWithWhseClass@129();
+    VAR
+      Item@1000 : Record 27;
+      Item2@1001 : Record 27;
+      ProductGroup@1004 : Record 5723;
+      ProductGroup2@1003 : Record 5723;
+      PurchaseHeader@1010 : Record 38;
+      Vendor@1012 : Record 23;
+      Bin@1007 : Record 7354;
+      WarehouseReceiptHeader@1013 : Record 7316;
+      WarehouseReceiptLine@1015 : Record 7317;
+      WarehouseSourceFilter@1033 : Record 5771;
+    BEGIN
+      // Verify Blank Bin Code on Warehouse Receipt line after Get Source Documents Receipt.
+      // Setup: Create two Item, Create Location, Create two Product Groups with different Warehouse Class Code, Create Purchase Order, Create Warehouse Receipt Header.
+      Initialize;
+      CreateMultipleItemWithProductGroup(Item,Item2,ProductGroup,ProductGroup2);
+
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item2."No.",LocationWhite.Code,'',LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(10,2),Item."Base Unit of Measure");
+      Vendor.GET(PurchaseHeader."Buy-from Vendor No.");
+      CreateBinWithWarehouseClass(Bin,LocationWhite.Code,FALSE,FALSE,TRUE,FALSE,'');
+      CreateWarehouseReceiptHeader(WarehouseReceiptHeader,LocationWhite.Code,Bin.Code);
+      CreateWarehouseSourceFilter(WarehouseSourceFilter,Vendor."No.");
+
+      // Exercise.
+      LibraryWarehouse.GetSourceDocumentsReceipt(WarehouseReceiptHeader,WarehouseSourceFilter,LocationWhite.Code);
+
+      // Verify: Verify Warehouse Receipt lines should be created but with blank Bin Code.
+      WarehouseReceiptLine.SETRANGE("No.",WarehouseReceiptHeader."No.");
+      WarehouseReceiptLine.SETRANGE("Bin Code",'');
+      Assert.AreEqual(2,WarehouseReceiptLine.COUNT,CountWarehouseReceiptLineError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReceiptSpecialMessageHandler)]
+    PROCEDURE PostWhseReceiptWithWhseClass@137();
+    VAR
+      Item@1000 : Record 27;
+      Item2@1001 : Record 27;
+      ProductGroup@1004 : Record 5723;
+      ProductGroup2@1003 : Record 5723;
+      PurchaseHeader@1010 : Record 38;
+      Vendor@1012 : Record 23;
+      Bin@1007 : Record 7354;
+      Bin2@1005 : Record 7354;
+      Bin3@1002 : Record 7354;
+      WarehouseReceiptHeader@1013 : Record 7316;
+      WarehouseSourceFilter@1033 : Record 5771;
+    BEGIN
+      // Verify Bin Code on Warehouse Receipt line after posting of Warehouse Receipt.
+      // Setup: Create two Item, Create Location,Create two Product Groups with different Warehouse Class Code, Create Purchase Order, Create Warehouse Receipt Header and change Bin on line.
+      Initialize;
+      CreateMultipleItemWithProductGroup(Item,Item2,ProductGroup,ProductGroup2);
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item2."No.",LocationWhite.Code,'',LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(10,2),Item."Base Unit of Measure");
+      Vendor.GET(PurchaseHeader."Buy-from Vendor No.");
+
+      CreateBinWithWarehouseClass(Bin,LocationWhite.Code,FALSE,FALSE,TRUE,FALSE,'');
+      CreateWarehouseReceiptHeader(WarehouseReceiptHeader,LocationWhite.Code,Bin.Code);
+      CreateWarehouseSourceFilter(WarehouseSourceFilter,Vendor."No.");
+      LibraryWarehouse.GetSourceDocumentsReceipt(WarehouseReceiptHeader,WarehouseSourceFilter,LocationWhite.Code);
+
+      // Create two Receipt bins, one for each of the Warehouse Class codes.
+      CreateAndUpdateBinCodeWarehouseReceiptLine(Bin2,LocationWhite.Code,Item."No.",ProductGroup."Warehouse Class Code");
+      CreateAndUpdateBinCodeWarehouseReceiptLine(Bin3,LocationWhite.Code,Item2."No.",ProductGroup2."Warehouse Class Code");
+      LibraryWarehouse.AutofillQtyToRecvWhseReceipt(WarehouseReceiptHeader);
+      UpdateLocationWhite(LocationWhite,TRUE);  // Always Create Put-away Line.
+
+      // Exercise.
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+
+      // Verify: Verify Bin Code on Warehouse Receipt line.
+      VerifyPostedWhseReceiptLine(WarehouseReceiptHeader."No.",Item."No.",Bin2.Code);
+      VerifyPostedWhseReceiptLine(WarehouseReceiptHeader."No.",Item2."No.",Bin3.Code);
+
+      // TearDown.
+      UpdateLocationWhite(LocationWhite,FALSE);  // Always Create Put-away Line.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReceiptSpecialMessageHandler)]
+    PROCEDURE RegisterWhseActivityWithWhseClass@138();
+    VAR
+      Item@1000 : Record 27;
+      Item2@1001 : Record 27;
+      ProductGroup@1004 : Record 5723;
+      ProductGroup2@1003 : Record 5723;
+      PurchaseHeader@1010 : Record 38;
+      Vendor@1012 : Record 23;
+      Bin@1007 : Record 7354;
+      Bin2@1017 : Record 7354;
+      Bin3@1034 : Record 7354;
+      WarehouseReceiptHeader@1013 : Record 7316;
+      WarehouseSourceFilter@1033 : Record 5771;
+    BEGIN
+      // Verify Bin Code on Registered Whse Activity Line after Register Warehouse Activity.
+      // Setup: Create two Item, Create Location, Create two Product Groups with different Warehouse Class Code, Create Purchase Order, Create Warehouse Receipt Header and change Bin on line and Post.
+      Initialize;
+      CreateMultipleItemWithProductGroup(Item,Item2,ProductGroup,ProductGroup2);
+
+      CreateAndReleasePurchaseOrder(
+        PurchaseHeader,Item."No.",Item2."No.",LocationWhite.Code,'',LibraryRandom.RandDec(10,2),
+        LibraryRandom.RandDec(10,2),Item."Base Unit of Measure");
+      Vendor.GET(PurchaseHeader."Buy-from Vendor No.");
+      CreateBinWithWarehouseClass(Bin,LocationWhite.Code,FALSE,FALSE,TRUE,FALSE,'');
+      CreateWarehouseReceiptHeader(WarehouseReceiptHeader,LocationWhite.Code,Bin.Code);
+      CreateWarehouseSourceFilter(WarehouseSourceFilter,Vendor."No.");
+      LibraryWarehouse.GetSourceDocumentsReceipt(WarehouseReceiptHeader,WarehouseSourceFilter,LocationWhite.Code);
+
+      CreateAndUpdateBinCodeWarehouseReceiptLine(Bin,LocationWhite.Code,Item."No.",ProductGroup."Warehouse Class Code");
+      CreateAndUpdateBinCodeWarehouseReceiptLine(Bin,LocationWhite.Code,Item2."No.",ProductGroup2."Warehouse Class Code");
+      LibraryWarehouse.AutofillQtyToRecvWhseReceipt(WarehouseReceiptHeader);
+      UpdateLocationWhite(LocationWhite,TRUE);  // Always Create Put-away Line.
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+
+      // Exercise: Create two put-pick bins to place the put-away created Change Bin Code in Warehouse Activity Lines and Register Warehouse Activity.
+      CreateBinWithWarehouseClass(Bin2,LocationWhite.Code,TRUE,TRUE,FALSE,FALSE,ProductGroup."Warehouse Class Code");
+      CreateBinWithWarehouseClass(Bin3,LocationWhite.Code,TRUE,TRUE,FALSE,FALSE,ProductGroup2."Warehouse Class Code");
+      UpdateAndRegisterWarehouseActivityLine(LocationWhite.Code,Item."No.",Item2."No.",Bin2.Code,Bin3.Code);
+
+      // Verify: Verify Bin Code on Registered Whse Activity Line.
+      VerifyRegisteredWhseActivityLine(LocationWhite.Code,PurchaseHeader."No.",Item."No.",Bin2.Code);
+      VerifyRegisteredWhseActivityLine(LocationWhite.Code,PurchaseHeader."No.",Item2."No.",Bin3.Code);
+
+      // TearDown.
+      UpdateLocationWhite(LocationWhite,FALSE);  // Always Create Put-away Line.
+    END;
+
+    [Test]
+    PROCEDURE WhseShipmentWithWhseClass@128();
+    VAR
+      Item@1000 : Record 27;
+      Item2@1001 : Record 27;
+      ProductGroup@1004 : Record 5723;
+      ProductGroup2@1003 : Record 5723;
+      SalesHeader@1020 : Record 36;
+      SalesLine@1021 : Record 37;
+      WarehouseShipmentLine@1023 : Record 7321;
+    BEGIN
+      // Verify Blank Bin Code on Warehouse Shipment Line after creating Warehouse Shipment from Sales Order.
+      // Setup: Create two Item, Create Location, Create the two Product Groups with different Warehouse Class Code and sales Order.
+      Initialize;
+      CreateMultipleItemWithProductGroup(Item,Item2,ProductGroup,ProductGroup2);
+      CreateAndReleaseSalesOrder(
+        SalesHeader,Item."No.",Item2."No.",LocationWhite.Code,LibraryRandom.RandDec(10,2),LibraryRandom.RandDec(10,2));
+
+      // Exercise.
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+
+      // Verify: Verify Bin Codes are blank on Warehouse Shipment Line.
+      WarehouseShipmentLine.SETRANGE("Source Type",DATABASE::"Sales Line");
+      WarehouseShipmentLine.SETRANGE("Source Subtype",SalesLine."Document Type"::Order);
+      WarehouseShipmentLine.SETRANGE("Source No.",SalesHeader."No.");
+      WarehouseShipmentLine.SETRANGE("Bin Code",'');
+      Assert.AreEqual(2,WarehouseShipmentLine.COUNT,CountWarehouseLineError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProductionSpecialMessageHandler)]
+    PROCEDURE ProdOrderWithWhseClass@127();
+    VAR
+      Item@1000 : Record 27;
+      Item2@1001 : Record 27;
+      ProductGroup@1004 : Record 5723;
+      ProductGroup2@1003 : Record 5723;
+      ProductionOrder@1024 : Record 5405;
+      ProdOrderLine@1027 : Record 5406;
+      ParentItem@1025 : Record 27;
+      ProdOrderComponent@1026 : Record 5407;
+      Bin@1028 : Record 7354;
+    BEGIN
+      // Verify Blank Bin Code on Production Order line after refresh Production Order.
+      // Setup: Create two Item, Create Location, Create the two Product Groups with different Warehouse Class Code and Production Order.
+      Initialize;
+      CreateMultipleItemWithProductGroup(Item,Item2,ProductGroup,ProductGroup2);
+
+      CreateBinWithWarehouseClass(Bin,LocationWhite.Code,FALSE,FALSE,FALSE,FALSE,'');
+      LibraryInventory.CreateItem(ParentItem);
+      CreateCertifiedProductionBOM(ParentItem,Item."No.",Item2."No.",ProductGroup.Code);
+      CreateProductionOrder(ProductionOrder,ParentItem."No.",LocationWhite.Code,Bin.Code);
+
+      // Exercise.
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+
+      // Verify: Verify Blank Bin code in Prod Order Line.
+      FindProdOrderLine(ProdOrderLine,ProductionOrder);
+      Assert.AreEqual('',ProdOrderLine."Bin Code",BinCodeBlankedError);
+      FindProdOrderComponent(ProdOrderComponent,ProdOrderLine,'');
+      Assert.AreEqual(2,ProdOrderComponent.COUNT,CountComponentsError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProductionSpecialMessageHandler)]
+    PROCEDURE BinCodeOnProdOrderComponentError@142();
+    VAR
+      Item@1000 : Record 27;
+      Item2@1001 : Record 27;
+      ProductGroup@1004 : Record 5723;
+      ProductGroup2@1003 : Record 5723;
+      ProductionOrder@1024 : Record 5405;
+      ProdOrderLine@1027 : Record 5406;
+      ParentItem@1025 : Record 27;
+      ProdOrderComponent@1026 : Record 5407;
+      Bin@1028 : Record 7354;
+    BEGIN
+      // Verify error msg after changing Bin code in Prod Order Component.
+      // Setup: Create two Item, Create Location, Create the two Product Groups with different Warehouse Class Code, Production Order change Bin Code on Prod Order Component.
+      Initialize;
+      CreateMultipleItemWithProductGroup(Item,Item2,ProductGroup,ProductGroup2);
+
+      CreateBinWithWarehouseClass(Bin,LocationWhite.Code,FALSE,FALSE,FALSE,FALSE,'');
+      LibraryInventory.CreateItem(ParentItem);
+      CreateCertifiedProductionBOM(ParentItem,Item."No.",Item2."No.",ProductGroup.Code);
+      CreateAndRefreshProductionOrder(ProductionOrder,ParentItem."No.",LocationWhite.Code,Bin.Code);
+      FindProdOrderLine(ProdOrderLine,ProductionOrder);
+      FindProdOrderComponent(ProdOrderComponent,ProdOrderLine,'');
+
+      // Exercise: Change Bin Code on Prod Order Component.
+      ASSERTERROR ProdOrderComponent.VALIDATE("Bin Code",LocationWhite."To-Production Bin Code");
+
+      // Verify: Verify Error Msg.
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,WarehouseClassMsg) > 0,GETLASTERRORTEXT);
+    END;
+
+    [Test]
+    [HandlerFunctions(ProductionSpecialMessageHandler)]
+    PROCEDURE BinCodeOnProdOrderComponentWithWhseClass@143();
+    VAR
+      Item@1000 : Record 27;
+      Item2@1001 : Record 27;
+      ProductGroup@1004 : Record 5723;
+      ProductGroup2@1003 : Record 5723;
+      ProductionOrder@1024 : Record 5405;
+      ProdOrderLine@1027 : Record 5406;
+      ParentItem@1025 : Record 27;
+      ProdOrderComponent@1026 : Record 5407;
+      Bin@1028 : Record 7354;
+      Bin2@1002 : Record 7354;
+    BEGIN
+      // Verify Bin Code on Prod Order Component after changing Bin code  with Warehouse Class Code in Prod Order Component.
+      // Setup: Create two Item, Create Location, Create two Product Groups with different Warehouse Class Code, Production Order change Bin Code on Prod Order Component with Warehouse Class Code.
+      Initialize;
+      CreateMultipleItemWithProductGroup(Item,Item2,ProductGroup,ProductGroup2);
+
+      CreateBinWithWarehouseClass(Bin,LocationWhite.Code,FALSE,FALSE,FALSE,FALSE,'');
+      LibraryInventory.CreateItem(ParentItem);
+      CreateCertifiedProductionBOM(ParentItem,Item."No.",Item2."No.",ProductGroup.Code);
+      CreateAndRefreshProductionOrder(ProductionOrder,ParentItem."No.",LocationWhite.Code,Bin.Code);
+      FindProdOrderLine(ProdOrderLine,ProductionOrder);
+
+      // Exercise: Change Bin Code on Prod Order Component with Warehouse Class Code.
+      UpdateBin(Bin,ProductGroup."Warehouse Class Code");
+      FindProdOrderComponent(ProdOrderComponent,ProdOrderLine,'');
+      ChangeBinCodeOnProdOrderComponent(ProdOrderComponent,Bin.Code);
+
+      CreateBinWithWarehouseClass(Bin2,LocationWhite.Code,FALSE,FALSE,FALSE,FALSE,ProductGroup2."Warehouse Class Code");
+      ProdOrderComponent.FINDLAST;
+      ChangeBinCodeOnProdOrderComponent(ProdOrderComponent,Bin2.Code);
+
+      // Verify: Verify Bin Code on Prod Order Component.
+      FindProdOrderComponent(ProdOrderComponent,ProdOrderLine,Bin.Code);
+      ProdOrderComponent.TESTFIELD("Bin Code",Bin.Code);
+      FindProdOrderComponent(ProdOrderComponent,ProdOrderLine,Bin2.Code);
+      ProdOrderComponent.TESTFIELD("Bin Code",Bin2.Code);
+    END;
+
+    [Test]
+    PROCEDURE BlockedBinContentAffectsAvailability_WMS_NoLots@9();
+    BEGIN
+      WMS_Scenario(0); // No lots
+    END;
+
+    [Test]
+    PROCEDURE BlockedBinContentAffectsAvailability_WMS_SameLot@131();
+    BEGIN
+      WMS_Scenario(1); // Same lot
+    END;
+
+    [Test]
+    PROCEDURE BlockedBinContentAffectsAvailability_WMS_DiffLots@132();
+    BEGIN
+      WMS_Scenario(2); // Different lots
+    END;
+
+    LOCAL PROCEDURE WMS_Scenario@113(LotType@1010 : Option);
+    VAR
+      Location@1009 : Record 14;
+      Item@1008 : Record 27;
+      BinContentBlocked@1007 : Record 7302;
+      BinContentUnblocked@1006 : Record 7302;
+      CreatePick@1003 : Codeunit 7312;
+      LotBlocked@1002 : Code[10];
+      LotUnblocked@1011 : Code[10];
+      BlockedQty@1001 : Decimal;
+      UnblockedQty@1000 : Decimal;
+    BEGIN
+      // SETUP: Create two bin contents - one of which is blocked - to hold lot tracked item.
+      Initialize;
+
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryInventory.CreateItem(Item);
+      Item."Item Tracking Code" := VSTF323171_CreateItemTrackingCode(LotType,FALSE);
+      Item.MODIFY;
+
+      CreateItemTrackingNos(LotBlocked,LotUnblocked,LotType);
+      BlockedQty := LibraryRandom.RandDecInDecimalRange(1,10,1);
+      VSTF323171_CreateBinContent(TRUE,BinContentBlocked,Location.Code,Item."No.",LotBlocked,'',BlockedQty,TRUE);
+      UnblockedQty := LibraryRandom.RandDecInDecimalRange(BlockedQty + 1,100,1);
+      VSTF323171_CreateBinContent(TRUE,BinContentUnblocked,Location.Code,Item."No.",LotUnblocked,'',UnblockedQty,FALSE);
+
+      // EXERCISE & VERIFY: Get availability and verify that only the unblocked qty is available.
+      CASE LotType OF
+        0: // No lots
+          Assert.AreEqual(
+            UnblockedQty,
+            CreatePick.CalcTotalAvailQtyToPick(BinContentBlocked."Location Code",BinContentBlocked."Item No.",
+              BinContentBlocked."Variant Code",'','',0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+            '');
+        1: // Same lot
+          Assert.AreEqual(
+            UnblockedQty,
+            CreatePick.CalcTotalAvailQtyToPick(BinContentBlocked."Location Code",BinContentBlocked."Item No.",
+              BinContentBlocked."Variant Code",LotBlocked,'',0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+            '');
+        2: // Different lots
+          Assert.AreEqual(
+            0,
+            CreatePick.CalcTotalAvailQtyToPick(BinContentBlocked."Location Code",BinContentBlocked."Item No.",
+              BinContentBlocked."Variant Code",LotBlocked,'',0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+            '');
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingNos@40(VAR LotBlocked@1001 : Code[10];VAR LotUnblocked@1002 : Code[10];LotType@1003 : Option);
+    VAR
+      WhseEntry@1000 : Record 7312;
+    BEGIN
+      CASE LotType OF
+        0: // No lots
+          BEGIN
+            LotBlocked := '';
+            LotUnblocked := '';
+          END;
+        1: // Same lot
+          BEGIN
+            LotBlocked := LibraryUtility.GenerateRandomCode(WhseEntry.FIELDNO("Lot No."),DATABASE::"Warehouse Entry");
+            LotUnblocked := LotBlocked;
+          END;
+        2: // Different lots
+          BEGIN
+            LotBlocked := LibraryUtility.GenerateRandomCode(WhseEntry.FIELDNO("Lot No."),DATABASE::"Warehouse Entry");
+            LotUnblocked := LibraryUtility.GenerateRandomCode(WhseEntry.FIELDNO("Lot No."),DATABASE::"Warehouse Entry");
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateLotNosWithBlocking@145(VAR LotBlocked@1001 : Code[10];VAR LotUnblocked@1002 : Code[10];LotType@1003 : Option;ItemNo@1004 : Code[20];VariantCode@1005 : Code[10]);
+    VAR
+      LotNoInformation@1000 : Record 6505;
+    BEGIN
+      CreateItemTrackingNos(LotBlocked,LotUnblocked,LotType);
+      LotNoInformation.INIT;
+      LotNoInformation."Item No." := ItemNo;
+      LotNoInformation."Variant Code" := VariantCode;
+      LotNoInformation."Lot No." := LotBlocked;
+      LotNoInformation.Blocked := TRUE;
+      LotNoInformation.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreateSerialNosWithBlocking@96(VAR LotBlocked@1001 : Code[10];VAR LotUnblocked@1002 : Code[10];LotType@1003 : Option;ItemNo@1004 : Code[20];VariantCode@1005 : Code[10]);
+    VAR
+      SerialNoInformation@1000 : Record 6504;
+    BEGIN
+      CreateItemTrackingNos(LotBlocked,LotUnblocked,LotType);
+      SerialNoInformation.INIT;
+      SerialNoInformation."Item No." := ItemNo;
+      SerialNoInformation."Variant Code" := VariantCode;
+      SerialNoInformation."Serial No." := LotBlocked;
+      SerialNoInformation.Blocked := TRUE;
+      SerialNoInformation.INSERT;
+    END;
+
+    LOCAL PROCEDURE VSTF323171_CreateItemTrackingCode@78(LotType@1001 : Option;LotAndSerial@1002 : Boolean) : Code[10];
+    VAR
+      ItemTrackingCode@1000 : Record 6502;
+    BEGIN
+      IF LotType = 0 THEN // No lots
+        EXIT;
+      ItemTrackingCode.Code := LibraryUtility.GenerateRandomCode(ItemTrackingCode.FIELDNO(Code),DATABASE::"Item Tracking Code");
+      ItemTrackingCode."Lot Specific Tracking" := TRUE;
+      ItemTrackingCode."Lot Warehouse Tracking" := TRUE;
+      IF LotAndSerial THEN BEGIN
+        ItemTrackingCode."SN Specific Tracking" := TRUE;
+        ItemTrackingCode."SN Warehouse Tracking" := TRUE;
+      END;
+      ItemTrackingCode.INSERT;
+      EXIT(ItemTrackingCode.Code);
+    END;
+
+    LOCAL PROCEDURE VSTF323171_CreateBinContent@38(ForceCreateBinContent@1003 : Boolean;VAR BinContent@1000 : Record 7302;LocationCode@1009 : Code[10];ItemNo@1001 : Code[20];LotNo@1004 : Code[10];SerialNo@1007 : Code[10];Qty@1005 : Decimal;Blocked@1002 : Boolean);
+    VAR
+      WhseEntry@1006 : Record 7312;
+      WhseEntryCurrent@1008 : Record 7312;
+    BEGIN
+      IF ForceCreateBinContent THEN BEGIN
+        CLEAR(BinContent);
+        BinContent."Location Code" := LocationCode;
+        BinContent."Bin Code" := LibraryUtility.GenerateRandomCode(BinContent.FIELDNO("Bin Code"),DATABASE::"Bin Content");
+        BinContent."Item No." := ItemNo;
+        IF Blocked THEN
+          BinContent."Block Movement" := BinContent."Block Movement"::Outbound;
+        BinContent.INSERT;
+      END;
+
+      WhseEntry.INIT;
+      IF WhseEntryCurrent.FINDLAST THEN
+        WhseEntry."Entry No." := WhseEntryCurrent."Entry No." + 1
+      ELSE
+        WhseEntry."Entry No." := 1;
+      WhseEntry."Bin Code" := BinContent."Bin Code";
+      WhseEntry."Item No." := BinContent."Item No.";
+      WhseEntry."Location Code" := BinContent."Location Code";
+      WhseEntry."Lot No." := LotNo;
+      WhseEntry."Serial No." := SerialNo;
+      WhseEntry."Qty. (Base)" := Qty;
+      WhseEntry.INSERT;
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler)]
+    PROCEDURE BlockedBinContentAffectsAvailability_BW_NoLots@84();
+    BEGIN
+      BW_Scenario(0); // No lots
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler)]
+    PROCEDURE BlockedBinContentAffectsAvailability_BW_SameLot@89();
+    BEGIN
+      BW_Scenario(1); // Same lot
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler)]
+    PROCEDURE BlockedBinContentAffectsAvailability_BW_DiffLots@90();
+    BEGIN
+      BW_Scenario(2); // Different lots
+    END;
+
+    LOCAL PROCEDURE BW_Scenario@88(LotType@1010 : Option);
+    VAR
+      Location@1006 : Record 14;
+      Item@1008 : Record 27;
+      BinContentBlocked@1009 : Record 7302;
+      BinContentUnblocked@1011 : Record 7302;
+      SalesHeader@1005 : Record 36;
+      SalesLine@1007 : Record 37;
+      WhseActivityHeader@1000 : Record 5766;
+      WhseActivityLine@1001 : Record 5767;
+      WhseRequest@1004 : Record 5765;
+      LotBlocked@1013 : Code[10];
+      LotUnblocked@1012 : Code[10];
+      BlockedQty@1003 : Decimal;
+      UnblockedQty@1002 : Decimal;
+    BEGIN
+      // SETUP: Create two bin contents - one of which is blocked - to hold lot tracked item.
+      Initialize;
+
+      LibraryWarehouse.CreateLocationWMS(Location,TRUE,FALSE,FALSE,FALSE,FALSE);
+      LibraryInventory.CreateItem(Item);
+      Item."Item Tracking Code" := VSTF323171_CreateItemTrackingCode(LotType,FALSE);
+      Item.MODIFY;
+
+      CreateItemTrackingNos(LotBlocked,LotUnblocked,LotType);
+      BlockedQty := LibraryRandom.RandDecInDecimalRange(1,10,1);
+      VSTF323171_CreateBinContent(TRUE,BinContentBlocked,Location.Code,Item."No.",LotBlocked,'',BlockedQty,TRUE);
+      UnblockedQty := LibraryRandom.RandDecInDecimalRange(BlockedQty + 1,100,1);
+      VSTF323171_CreateBinContent(TRUE,BinContentUnblocked,Location.Code,Item."No.",LotUnblocked,'',UnblockedQty,FALSE);
+
+      CreateItemLedgEntry(Item."No.",Location.Code,BlockedQty,LotBlocked);
+      CreateItemLedgEntry(Item."No.",Location.Code,UnblockedQty,LotUnblocked);
+
+      SalesHeader."Document Type" := SalesHeader."Document Type"::Order;
+      SalesHeader."No." := LibraryUtility.GenerateRandomCode(WhseActivityHeader.FIELDNO("No."),
+          DATABASE::"Warehouse Activity Header");
+      SalesHeader.INSERT;
+      SalesLine."Document Type" := SalesHeader."Document Type";
+      SalesLine."Document No." := SalesHeader."No.";
+      SalesLine."Location Code" := Location.Code;
+      SalesLine.Type := SalesLine.Type::Item;
+      SalesLine."No." := Item."No.";
+      SalesLine."Qty. to Ship" := BlockedQty + UnblockedQty;
+      SalesLine."Qty. to Ship (Base)" := BlockedQty + UnblockedQty;
+      SalesLine.INSERT;
+
+      IF LotType IN [1,2] THEN BEGIN // Same lot or Different lots
+        CreateReservEntry(SalesLine,BlockedQty,LotBlocked,'');
+        CreateReservEntry(SalesLine,UnblockedQty,LotUnblocked,'');
+      END;
+
+      WhseRequest.Type := WhseRequest.Type::Outbound;
+      WhseRequest."Location Code" := Location.Code;
+      WhseRequest."Document Status" := WhseRequest."Document Status"::Released;
+      WhseRequest."Completely Handled" := FALSE;
+      WhseRequest."Source Document" := WhseRequest."Source Document"::"Sales Order";
+      WhseRequest."Source No." := SalesHeader."No.";
+      WhseRequest.INSERT;
+
+      WhseActivityHeader."No." := LibraryUtility.GenerateRandomCode(WhseActivityHeader.FIELDNO("No."),
+          DATABASE::"Warehouse Activity Header");
+      WhseActivityHeader."Location Code" := Location.Code;
+      WhseActivityHeader.INSERT;
+
+      // EXERCISE: Call the codeunit to create the inventory picks
+      CODEUNIT.RUN(CODEUNIT::"Create Inventory Pick/Movement",WhseActivityHeader);
+
+      // VERIFY: Verify that only the pick for the unblocked qty is created.
+      WhseActivityLine.SETRANGE("Activity Type",WhseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WhseActivityHeader."No.");
+      Assert.AreEqual(1,WhseActivityLine.COUNT,'');
+      CASE LotType OF
+        0: // No lots
+          BEGIN
+            Assert.IsTrue(WhseActivityLine.FINDFIRST,'');
+            Assert.AreEqual(UnblockedQty,WhseActivityLine.Quantity,'');
+            Assert.AreEqual(BinContentUnblocked."Bin Code",WhseActivityLine."Bin Code",'');
+          END;
+        1, // same lot
+        2: // Different lots
+          BEGIN
+            Assert.IsTrue(WhseActivityLine.FINDFIRST,'');
+            Assert.AreEqual(UnblockedQty,WhseActivityLine.Quantity,'');
+            Assert.AreEqual(BinContentUnblocked."Bin Code",WhseActivityLine."Bin Code",'');
+            Assert.AreEqual(LotUnblocked,WhseActivityLine."Lot No.",'');
+          END;
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SourceDocPageHandler@112(VAR SourceDocuments@1000 : Page 5793;VAR Response@1002 : Action);
+    VAR
+      WhseRequest@1001 : Record 5765;
+    BEGIN
+      WhseRequest.SETRANGE(Type,WhseRequest.Type::Outbound);
+      WhseRequest.SETRANGE("Source Type",0);
+      WhseRequest.SETRANGE("Source Subtype",0);
+      WhseRequest.FINDLAST;
+      SourceDocuments.SETRECORD(WhseRequest);
+      Response := ACTION::LookupOK;
+    END;
+
+    LOCAL PROCEDURE CreateItemLedgEntry@187(ItemNo@1002 : Code[20];LocationCode@1005 : Code[10];Qty@1003 : Decimal;LotNo@1004 : Code[10]);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+      ItemLedgerEntryCurrent@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.INIT;
+      IF ItemLedgerEntryCurrent.FINDLAST THEN
+        ItemLedgerEntry."Entry No." := ItemLedgerEntryCurrent."Entry No." + 1
+      ELSE
+        ItemLedgerEntry."Entry No." := 1;
+      ItemLedgerEntry."Item No." := ItemNo;
+      ItemLedgerEntry."Location Code" := LocationCode;
+      ItemLedgerEntry.Quantity := Qty;
+      ItemLedgerEntry."Lot No." := LotNo;
+      ItemLedgerEntry.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreateReservEntry@101(SalesLine@1000 : Record 37;Qty@1001 : Decimal;LotNo@1002 : Code[10];SerialNo@1005 : Code[10]);
+    VAR
+      ReservationEntry@1004 : Record 337;
+      ReservationEntryCurrent@1003 : Record 337;
+    BEGIN
+      ReservationEntry.INIT;
+      ReservationEntry."Reservation Status" := ReservationEntry."Reservation Status"::Surplus;
+      IF ReservationEntryCurrent.FINDLAST THEN
+        ReservationEntry."Entry No." := ReservationEntryCurrent."Entry No." + 1
+      ELSE
+        ReservationEntry."Entry No." := 1;
+      ReservationEntry."Source ID" := SalesLine."Document No.";
+      ReservationEntry."Source Ref. No." := SalesLine."Line No.";
+      ReservationEntry."Source Type" := DATABASE::"Sales Line";
+      ReservationEntry."Source Subtype" := SalesLine."Document Type";
+      ReservationEntry.Positive := FALSE;
+      ReservationEntry."Quantity (Base)" := -Qty;
+      ReservationEntry."Qty. to Handle (Base)" := ReservationEntry."Quantity (Base)";
+      ReservationEntry."Lot No." := LotNo;
+      ReservationEntry."Serial No." := SerialNo;
+      ReservationEntry.INSERT;
+    END;
+
+    [Test]
+    PROCEDURE BlockedLotAffectsAvailabilityForPick_WMS@28();
+    VAR
+      BinContent@1007 : Record 7302;
+      CreatePick@1008 : Codeunit 7312;
+      LotBlocked@1003 : Code[10];
+      LotUnblocked@1002 : Code[10];
+      SNBlocked@1009 : Code[10];
+      SNUnblocked@1010 : Code[10];
+      BlockedQty@1005 : Decimal;
+      UnblockedQty@1006 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_WMS(BinContent,LotBlocked,LotUnblocked,SNBlocked,
+        SNUnblocked,BlockedQty,UnblockedQty,FALSE);
+
+      // EXERCISE & VERIFY
+      Assert.AreEqual(
+        0,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",LotBlocked,'',0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get lot-specific availability and verify that the blocked lot is not available.');
+      Assert.AreEqual(
+        UnblockedQty,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",LotUnblocked,'',0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get lot-specific availability and verify that only the unblocked lot is available.');
+      Assert.AreEqual(
+        UnblockedQty,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",'','',0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get availability and verify that only the unblocked lot is available.');
+      Assert.AreEqual(
+        UnblockedQty,
+        BinContent.CalcQtyAvailToPick(0),
+        'Get bin content pick availability and verify that only the unblocked lot is available.');
+    END;
+
+    [Test]
+    PROCEDURE BlockedSerialLotAffectsAvailabilityForBinContent_WMS@97();
+    VAR
+      BinContent@1006 : Record 7302;
+      CreatePick@1005 : Codeunit 7312;
+      LotBlocked@1004 : Code[10];
+      LotUnblocked@1003 : Code[10];
+      SNBlocked@1010 : Code[10];
+      SNUnblocked@1009 : Code[10];
+      BlockedQty@1002 : Decimal;
+      UnblockedQty@1001 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_WMS(
+        BinContent,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,TRUE);
+
+      // EXERCISE & VERIFY
+      Assert.AreEqual(
+        0,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",LotBlocked,'',0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get lot-specific availability and verify that the blocked lot is not available.');
+      Assert.AreEqual(
+        0,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",'',SNBlocked,0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get lot-specific availability and verify that the blocked serial is not available.');
+      Assert.AreEqual(
+        0,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",LotBlocked,SNBlocked,0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get lot-specific availability and verify that the blocked lot & serial is not available.');
+      Assert.AreEqual(
+        UnblockedQty,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",LotUnblocked,'',0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get lot-specific availability and verify that only the unblocked lot is available.');
+      Assert.AreEqual(
+        UnblockedQty,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",'',SNUnblocked,0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get lot-specific availability and verify that only the unblocked serial is available.');
+      Assert.AreEqual(
+        UnblockedQty,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",LotUnblocked,SNUnblocked,0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get lot-specific availability and verify that only the unblocked lot & serial is available.');
+      Assert.AreEqual(
+        UnblockedQty,
+        CreatePick.CalcTotalAvailQtyToPick(BinContent."Location Code",BinContent."Item No.",
+          BinContent."Variant Code",'','',0,0,'',0,0,BlockedQty + UnblockedQty,FALSE),
+        'Get availability and verify that only the unblocked lot is available.');
+      Assert.AreEqual(
+        UnblockedQty,
+        BinContent.CalcQtyAvailToPick(0),
+        'Get bin content pick availability and verify that only the unblocked lot is available.');
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler)]
+    PROCEDURE BlockedLotAffectsAvailabilityForPick_BW_SalesWithNoLot@99();
+    VAR
+      BinContent@1007 : Record 7302;
+      WhseActivityHeader@1000 : Record 5766;
+      WhseActivityLine@1009 : Record 5767;
+      LotBlocked@1006 : Code[10];
+      LotUnblocked@1005 : Code[10];
+      SNBlocked@1004 : Code[10];
+      SNUnblocked@1003 : Code[10];
+      BlockedQty@1002 : Decimal;
+      UnblockedQty@1001 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_BW(
+        BinContent,WhseActivityHeader,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,FALSE,FALSE,FALSE);
+
+      // EXERCISE: Call the codeunit to create the inventory picks
+      CODEUNIT.RUN(CODEUNIT::"Create Inventory Pick/Movement",WhseActivityHeader);
+
+      // VERIFY
+      WhseActivityLine.SETRANGE("Activity Type",WhseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WhseActivityHeader."No.");
+      Assert.AreEqual(1,WhseActivityLine.COUNT,'');
+      Assert.IsTrue(WhseActivityLine.FINDFIRST,'');
+      Assert.AreEqual(UnblockedQty,WhseActivityLine.Quantity,'');
+      Assert.AreEqual('',WhseActivityLine."Lot No.",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler,NothingToHandleMessageHandler)]
+    PROCEDURE BlockedLotAffectsAvailabilityForPick_BW_SalesWithBlockedLot@160();
+    VAR
+      BinContent@1007 : Record 7302;
+      WhseActivityHeader@1000 : Record 5766;
+      WhseActivityLine@1009 : Record 5767;
+      LotBlocked@1006 : Code[10];
+      LotUnblocked@1005 : Code[10];
+      SNBlocked@1004 : Code[10];
+      SNUnblocked@1003 : Code[10];
+      BlockedQty@1002 : Decimal;
+      UnblockedQty@1001 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_BW(
+        BinContent,WhseActivityHeader,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,FALSE,TRUE,FALSE);
+
+      // EXERCISE: Call the codeunit to create the inventory picks
+      CODEUNIT.RUN(CODEUNIT::"Create Inventory Pick/Movement",WhseActivityHeader);
+
+      // VERIFY
+      WhseActivityLine.SETRANGE("Activity Type",WhseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WhseActivityHeader."No.");
+      Assert.IsTrue(WhseActivityLine.ISEMPTY,'');
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler)]
+    PROCEDURE BlockedLotAffectsAvailabilityForPick_BW_SalesWithUnblockedLot@161();
+    VAR
+      BinContent@1007 : Record 7302;
+      WhseActivityHeader@1000 : Record 5766;
+      WhseActivityLine@1009 : Record 5767;
+      LotBlocked@1006 : Code[10];
+      LotUnblocked@1005 : Code[10];
+      SNBlocked@1004 : Code[10];
+      SNUnblocked@1003 : Code[10];
+      BlockedQty@1002 : Decimal;
+      UnblockedQty@1001 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_BW(
+        BinContent,WhseActivityHeader,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,FALSE,FALSE,TRUE);
+
+      // EXERCISE: Call the codeunit to create the inventory picks
+      CODEUNIT.RUN(CODEUNIT::"Create Inventory Pick/Movement",WhseActivityHeader);
+
+      // VERIFY
+      WhseActivityLine.SETRANGE("Activity Type",WhseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WhseActivityHeader."No.");
+      Assert.AreEqual(1,WhseActivityLine.COUNT,'');
+      Assert.IsTrue(WhseActivityLine.FINDFIRST,'');
+      Assert.AreEqual(UnblockedQty,WhseActivityLine.Quantity,'');
+      Assert.AreEqual(LotUnblocked,WhseActivityLine."Lot No.",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler)]
+    PROCEDURE BlockedLotAffectsAvailabilityForPick_BW_SalesWithBlockedAndUnblockedLot@166();
+    VAR
+      BinContent@1007 : Record 7302;
+      WhseActivityHeader@1000 : Record 5766;
+      WhseActivityLine@1009 : Record 5767;
+      LotBlocked@1006 : Code[10];
+      LotUnblocked@1005 : Code[10];
+      SNBlocked@1004 : Code[10];
+      SNUnblocked@1003 : Code[10];
+      BlockedQty@1002 : Decimal;
+      UnblockedQty@1001 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_BW(
+        BinContent,WhseActivityHeader,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,FALSE,TRUE,TRUE);
+
+      // EXERCISE: Call the codeunit to create the inventory picks
+      CODEUNIT.RUN(CODEUNIT::"Create Inventory Pick/Movement",WhseActivityHeader);
+
+      // VERIFY
+      WhseActivityLine.SETRANGE("Activity Type",WhseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WhseActivityHeader."No.");
+      Assert.AreEqual(1,WhseActivityLine.COUNT,'');
+      Assert.IsTrue(WhseActivityLine.FINDFIRST,'');
+      Assert.AreEqual(UnblockedQty,WhseActivityLine.Quantity,'');
+      Assert.AreEqual(LotUnblocked,WhseActivityLine."Lot No.",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler)]
+    PROCEDURE BlockedSerialLotAffectsAvailabilityForPick_BW_SalesWithNoLot@107();
+    VAR
+      BinContent@1007 : Record 7302;
+      WhseActivityHeader@1006 : Record 5766;
+      WhseActivityLine@1009 : Record 5767;
+      LotBlocked@1005 : Code[10];
+      LotUnblocked@1004 : Code[10];
+      SNBlocked@1003 : Code[10];
+      SNUnblocked@1002 : Code[10];
+      BlockedQty@1001 : Decimal;
+      UnblockedQty@1000 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_BW(
+        BinContent,WhseActivityHeader,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,TRUE,FALSE,FALSE);
+
+      // EXERCISE: Call the codeunit to create the inventory picks
+      CODEUNIT.RUN(CODEUNIT::"Create Inventory Pick/Movement",WhseActivityHeader);
+
+      // VERIFY
+      WhseActivityLine.SETRANGE("Activity Type",WhseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WhseActivityHeader."No.");
+      Assert.AreEqual(1,WhseActivityLine.COUNT,'');
+      Assert.IsTrue(WhseActivityLine.FINDFIRST,'');
+      Assert.AreEqual(UnblockedQty,WhseActivityLine.Quantity,'');
+      Assert.AreEqual('',WhseActivityLine."Lot No.",'');
+      Assert.AreEqual('',WhseActivityLine."Serial No.",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler,NothingToHandleMessageHandler)]
+    PROCEDURE BlockedSerialLotAffectsAvailabilityForPick_BW_SalesWithBlockedLot@172();
+    VAR
+      BinContent@1007 : Record 7302;
+      WhseActivityHeader@1006 : Record 5766;
+      WhseActivityLine@1009 : Record 5767;
+      LotBlocked@1005 : Code[10];
+      LotUnblocked@1004 : Code[10];
+      SNBlocked@1003 : Code[10];
+      SNUnblocked@1002 : Code[10];
+      BlockedQty@1001 : Decimal;
+      UnblockedQty@1000 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_BW(
+        BinContent,WhseActivityHeader,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,TRUE,TRUE,FALSE);
+
+      // EXERCISE: Call the codeunit to create the inventory picks
+      CODEUNIT.RUN(CODEUNIT::"Create Inventory Pick/Movement",WhseActivityHeader);
+
+      // VERIFY
+      WhseActivityLine.SETRANGE("Activity Type",WhseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WhseActivityHeader."No.");
+      Assert.IsTrue(WhseActivityLine.ISEMPTY,'');
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler)]
+    PROCEDURE BlockedSerialLotAffectsAvailabilityForPick_BW_SalesWithUnblockedLot@174();
+    VAR
+      BinContent@1007 : Record 7302;
+      WhseActivityHeader@1006 : Record 5766;
+      WhseActivityLine@1009 : Record 5767;
+      LotBlocked@1005 : Code[10];
+      LotUnblocked@1004 : Code[10];
+      SNBlocked@1003 : Code[10];
+      SNUnblocked@1002 : Code[10];
+      BlockedQty@1001 : Decimal;
+      UnblockedQty@1000 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_BW(
+        BinContent,WhseActivityHeader,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,TRUE,FALSE,TRUE);
+
+      // EXERCISE: Call the codeunit to create the inventory picks
+      CODEUNIT.RUN(CODEUNIT::"Create Inventory Pick/Movement",WhseActivityHeader);
+
+      // VERIFY
+      WhseActivityLine.SETRANGE("Activity Type",WhseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WhseActivityHeader."No.");
+      Assert.AreEqual(1,WhseActivityLine.COUNT,'');
+      Assert.IsTrue(WhseActivityLine.FINDFIRST,'');
+      Assert.AreEqual(UnblockedQty,WhseActivityLine.Quantity,'');
+      Assert.AreEqual(LotUnblocked,WhseActivityLine."Lot No.",'');
+      Assert.AreEqual(SNUnblocked,WhseActivityLine."Serial No.",'');
+    END;
+
+    [Test]
+    [HandlerFunctions(SourceDocPageHandler)]
+    PROCEDURE BlockedSerialLotAffectsAvailabilityForPick_BW_SalesWithBlockedAndUnblockedLot@175();
+    VAR
+      BinContent@1007 : Record 7302;
+      WhseActivityHeader@1006 : Record 5766;
+      WhseActivityLine@1009 : Record 5767;
+      LotBlocked@1005 : Code[10];
+      LotUnblocked@1004 : Code[10];
+      SNBlocked@1003 : Code[10];
+      SNUnblocked@1002 : Code[10];
+      BlockedQty@1001 : Decimal;
+      UnblockedQty@1000 : Decimal;
+    BEGIN
+      // SETUP: Create a bin content with two lots - one of which is blocked and the other is not.
+      Initialize;
+
+      BlockedITAffectsAvailabilityForPick_BW(
+        BinContent,WhseActivityHeader,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,TRUE,TRUE,TRUE);
+
+      // EXERCISE: Call the codeunit to create the inventory picks
+      CODEUNIT.RUN(CODEUNIT::"Create Inventory Pick/Movement",WhseActivityHeader);
+
+      // VERIFY
+      WhseActivityLine.SETRANGE("Activity Type",WhseActivityHeader.Type);
+      WhseActivityLine.SETRANGE("No.",WhseActivityHeader."No.");
+      Assert.AreEqual(1,WhseActivityLine.COUNT,'');
+      Assert.IsTrue(WhseActivityLine.FINDFIRST,'');
+      Assert.AreEqual(UnblockedQty,WhseActivityLine.Quantity,'');
+      Assert.AreEqual(LotUnblocked,WhseActivityLine."Lot No.",'');
+      Assert.AreEqual(SNUnblocked,WhseActivityLine."Serial No.",'');
+    END;
+
+    LOCAL PROCEDURE BlockedITAffectsAvailabilityForPick_WMS@120(VAR BinContent@1010 : Record 7302;VAR LotBlocked@1007 : Code[10];VAR LotUnblocked@1006 : Code[10];VAR SNBlocked@1005 : Code[10];VAR SNUnblocked@1004 : Code[10];VAR BlockedQty@1003 : Decimal;VAR UnblockedQty@1002 : Decimal;LotAndSerial@1008 : Boolean);
+    VAR
+      Location@1000 : Record 14;
+      Item@1001 : Record 27;
+    BEGIN
+      BlockedITAffectsAvailabilityForPick(
+        BinContent,Location,Item,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,LotAndSerial);
+    END;
+
+    LOCAL PROCEDURE BlockedITAffectsAvailabilityForPick_BW@124(VAR BinContent@1009 : Record 7302;VAR WhseActivityHeader@1000 : Record 5766;VAR LotBlocked@1019 : Code[10];VAR LotUnblocked@1018 : Code[10];VAR SNBlocked@1017 : Code[10];VAR SNUnblocked@1016 : Code[10];VAR BlockedQty@1015 : Decimal;VAR UnblockedQty@1014 : Decimal;LotAndSerial@1010 : Boolean;SalesLineHasBlockedLot@1002 : Boolean;SalesLineHasUnblockedLot@1003 : Boolean);
+    VAR
+      Location@1012 : Record 14;
+      Item@1011 : Record 27;
+      SalesHeader@1008 : Record 36;
+      SalesLine@1001 : Record 37;
+      WhseRequest@1004 : Record 5765;
+      QtyToShip@1006 : Decimal;
+    BEGIN
+      BlockedITAffectsAvailabilityForPick(
+        BinContent,Location,Item,LotBlocked,LotUnblocked,SNBlocked,SNUnblocked,BlockedQty,UnblockedQty,LotAndSerial);
+      Location."Bin Mandatory" := TRUE;
+      Location.MODIFY;
+
+      CreateItemLedgEntry(Item."No.",Location.Code,BlockedQty,LotBlocked);
+      CreateItemLedgEntry(Item."No.",Location.Code,UnblockedQty,LotUnblocked);
+
+      SalesHeader."Document Type" := SalesHeader."Document Type"::Order;
+      SalesHeader."No." := LibraryUtility.GenerateRandomCode(WhseActivityHeader.FIELDNO("No."),
+          DATABASE::"Warehouse Activity Header");
+      SalesHeader.INSERT;
+      SalesLine."Document Type" := SalesHeader."Document Type";
+      SalesLine."Document No." := SalesHeader."No.";
+      SalesLine."Location Code" := Location.Code;
+      SalesLine.Type := SalesLine.Type::Item;
+      SalesLine."No." := Item."No.";
+      IF SalesLineHasBlockedLot THEN
+        QtyToShip += BlockedQty;
+      IF SalesLineHasUnblockedLot THEN
+        QtyToShip += UnblockedQty;
+      IF NOT SalesLineHasBlockedLot AND NOT SalesLineHasUnblockedLot THEN
+        QtyToShip := BlockedQty + UnblockedQty;
+      SalesLine."Qty. to Ship" := QtyToShip;
+      SalesLine."Qty. to Ship (Base)" := QtyToShip;
+      SalesLine."Bin Code" := BinContent."Bin Code";
+      SalesLine.INSERT;
+
+      IF SalesLineHasBlockedLot THEN
+        CreateReservEntry(SalesLine,BlockedQty,LotBlocked,SNBlocked);
+      IF SalesLineHasUnblockedLot THEN
+        CreateReservEntry(SalesLine,UnblockedQty,LotUnblocked,SNUnblocked);
+
+      WhseRequest.Type := WhseRequest.Type::Outbound;
+      WhseRequest."Location Code" := Location.Code;
+      WhseRequest."Document Status" := WhseRequest."Document Status"::Released;
+      WhseRequest."Completely Handled" := FALSE;
+      WhseRequest."Source Document" := WhseRequest."Source Document"::"Sales Order";
+      WhseRequest."Source No." := SalesHeader."No.";
+      WhseRequest.INSERT;
+
+      WhseActivityHeader."No." := LibraryUtility.GenerateRandomCode(WhseActivityHeader.FIELDNO("No."),
+          DATABASE::"Warehouse Activity Header");
+      WhseActivityHeader."Location Code" := Location.Code;
+      WhseActivityHeader.INSERT;
+
+      // EXERCISE & VERIFY: Check availability for pick
+      Assert.AreEqual(
+        UnblockedQty,
+        BinContent.CalcQtyAvailToPick(0),
+        'Get bin content pick availability and verify that only the unblocked lot is available.');
+    END;
+
+    LOCAL PROCEDURE BlockedITAffectsAvailabilityForPick@123(VAR BinContent@1007 : Record 7302;VAR Location@1010 : Record 14;VAR Item@1009 : Record 27;VAR LotBlocked@1006 : Code[10];VAR LotUnblocked@1005 : Code[10];VAR SNBlocked@1004 : Code[10];VAR SNUnblocked@1003 : Code[10];VAR BlockedQty@1002 : Decimal;VAR UnblockedQty@1001 : Decimal;LotAndSerial@1000 : Boolean);
+    VAR
+      LotTypeForDifferentLots@1008 : Integer;
+    BEGIN
+      LotTypeForDifferentLots := 2;
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryInventory.CreateItem(Item);
+      Item."Item Tracking Code" := VSTF323171_CreateItemTrackingCode(LotTypeForDifferentLots,LotAndSerial);
+      Item.MODIFY;
+
+      CreateLotNosWithBlocking(LotBlocked,LotUnblocked,LotTypeForDifferentLots,Item."No.",'');
+      IF LotAndSerial THEN
+        CreateSerialNosWithBlocking(SNBlocked,SNUnblocked,LotTypeForDifferentLots,Item."No.",'');
+      IF LotAndSerial THEN
+        BlockedQty := 1
+      ELSE
+        BlockedQty := LibraryRandom.RandDecInDecimalRange(1,10,1);
+      VSTF323171_CreateBinContent(TRUE,BinContent,Location.Code,Item."No.",LotBlocked,SNBlocked,BlockedQty,FALSE);
+      IF LotAndSerial THEN
+        UnblockedQty := 1
+      ELSE
+        UnblockedQty := LibraryRandom.RandDecInDecimalRange(BlockedQty + 1,100,1);
+      VSTF323171_CreateBinContent(FALSE,BinContent,Location.Code,Item."No.",LotUnblocked,SNUnblocked,UnblockedQty,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE CheckBinContentWithItemTracking@103();
+    VAR
+      Item@1000 : Record 27;
+      Location@1001 : Record 14;
+      Bin@1002 : Record 7354;
+      BinContent@1003 : Record 7302;
+      QtyNoLotNoSerial@1005 : Decimal;
+      QtyLotNoSerial@1006 : Decimal;
+      QtyNoLotSerial@1007 : Decimal;
+      QtyLotSerial@1008 : Decimal;
+      LotNo@1004 : Code[10];
+      SerialNo@1009 : Code[10];
+    BEGIN
+      // See changes in VSTF 323171 for details- This is a test to check if the Bin Content gives
+      // correct quantities with the filtering on item tracking
+      Initialize;
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryInventory.CreateItem(Item);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,'','','');
+      LibraryWarehouse.CreateBinContent(BinContent,Location.Code,'',Bin.Code,Item."No.",'','');
+
+      QtyNoLotNoSerial := LibraryRandom.RandDec(10,2);
+      QtyLotNoSerial := LibraryRandom.RandDec(100,2);
+      QtyNoLotSerial := LibraryRandom.RandDec(1000,2);
+      QtyLotSerial := LibraryRandom.RandDec(10000,2);
+      LotNo := LibraryUtility.GenerateGUID;
+      SerialNo := LibraryUtility.GenerateGUID;
+
+      CheckBinContentWithItemTrackingCreateWhseEntry(BinContent,'','',QtyNoLotNoSerial);
+      CheckBinContentWithItemTrackingCreateWhseEntry(BinContent,LotNo,'',QtyLotNoSerial);
+      CheckBinContentWithItemTrackingCreateWhseEntry(BinContent,'',SerialNo,QtyNoLotSerial);
+      CheckBinContentWithItemTrackingCreateWhseEntry(BinContent,LotNo,SerialNo,QtyLotSerial);
+
+      // EXERCISE & VERIFY : get bin content with various filtering on IT and compare to qty.
+      CheckBinContentWithItemTrackingFilterBinContent(BinContent,Item."No.",Location.Code,Bin.Code,'','');
+      Assert.AreEqual(QtyNoLotNoSerial + QtyLotNoSerial + QtyNoLotSerial + QtyLotSerial,BinContent."Quantity (Base)",'');
+      CheckBinContentWithItemTrackingFilterBinContent(BinContent,Item."No.",Location.Code,Bin.Code,LotNo,'');
+      Assert.AreEqual(QtyLotNoSerial + QtyLotSerial,BinContent."Quantity (Base)",'');
+      CheckBinContentWithItemTrackingFilterBinContent(BinContent,Item."No.",Location.Code,Bin.Code,'',SerialNo);
+      Assert.AreEqual(QtyNoLotSerial + QtyLotSerial,BinContent."Quantity (Base)",'');
+      CheckBinContentWithItemTrackingFilterBinContent(BinContent,Item."No.",Location.Code,Bin.Code,LotNo,SerialNo);
+      Assert.AreEqual(QtyLotSerial,BinContent."Quantity (Base)",'');
+    END;
+
+    LOCAL PROCEDURE CheckBinContentWithItemTrackingCreateWhseEntry@133(BinContent@1000 : Record 7302;LotNo@1001 : Code[10];SerialNo@1002 : Code[10];Qty@1003 : Decimal);
+    VAR
+      WhseEntry@1004 : Record 7312;
+      WhseEntry2@1005 : Record 7312;
+    BEGIN
+      WhseEntry.INIT;
+      IF WhseEntry2.FINDLAST THEN
+        WhseEntry."Entry No." := WhseEntry2."Entry No." + 1
+      ELSE
+        WhseEntry."Entry No." := 1;
+      WhseEntry."Location Code" := BinContent."Location Code";
+      WhseEntry."Bin Code" := BinContent."Bin Code";
+      WhseEntry."Item No." := BinContent."Item No.";
+      WhseEntry."Lot No." := LotNo;
+      WhseEntry."Serial No." := SerialNo;
+      WhseEntry."Qty. (Base)" := Qty;
+      WhseEntry.INSERT;
+    END;
+
+    LOCAL PROCEDURE CheckBinContentWithItemTrackingFilterBinContent@152(VAR BinContent@1000 : Record 7302;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];BinCode@1003 : Code[20];LotNo@1004 : Code[10];SerialNo@1005 : Code[10]);
+    BEGIN
+      CLEAR(BinContent);
+      BinContent.SETRANGE("Location Code",LocationCode);
+      BinContent.SETRANGE("Bin Code",BinCode);
+      BinContent.SETRANGE("Item No.",ItemNo);
+      IF LotNo <> '' THEN
+        BinContent.SETRANGE("Lot No. Filter",LotNo);
+      IF SerialNo <> '' THEN
+        BinContent.SETRANGE("Serial No. Filter",SerialNo);
+      BinContent.FINDLAST;
+      BinContent.CALCFIELDS("Quantity (Base)");
+    END;
+
+    [Test]
+    PROCEDURE BlockedQtyIsNotAvailableToPickFromPickWorksheet@190();
+    VAR
+      Item@1001 : Record 27;
+      Bin@1002 : Record 7354;
+      WhseWorksheetLine@1010 : Record 7326;
+      CreatePick@1008 : Codeunit 7312;
+      AvailQty@1009 : Decimal;
+    BEGIN
+      // [FEATURE] [Warehouse] [Pick Worksheet]
+      // [SCENARIO 362753] Blocked bin content is excluded from quantity available to pick when calculting available qty. from pick worksheet
+
+      Initialize;
+
+      // [GIVEN] "X" pieces of item "I" on a pick bin "B"
+      LibraryInventory.CreateItem(Item);
+      FindPickBin(Bin,LocationWhite.Code);
+      UpdateInventoryOnLocationWithWhseAdjustment(LocationWhite,Item,LibraryRandom.RandDec(100,2));
+      // [GIVEN] Bin "B" is blocked
+      BlockBinContent(LocationWhite.Code,Bin.Code,Item."No.");
+      CreateMockWarehouseWorksheetLine(WhseWorksheetLine,LocationWhite.Code,Item."No.",Bin."Zone Code");
+
+      // [WHEN] Calculate quantity available to pick from pick worksheet
+      CreatePick.SetWhseWkshLine(WhseWorksheetLine,0);
+      CreatePick.SetCalledFromPickWksh(TRUE);
+      AvailQty := CreatePick.CalcTotalAvailQtyToPick(LocationWhite.Code,Item."No.",'','','',0,0,'',0,0,0,FALSE);
+
+      // [THEN] Available quantity is 0
+      Assert.AreEqual(0,AvailQty,QtyAvailMustBeZeroErr);
+    END;
+
+    [Test]
+    PROCEDURE BlockedQtyIsNotAvailableToPickFromMoveWorksheet@191();
+    VAR
+      Item@1000 : Record 27;
+      WhseWorksheetLine@1002 : Record 7326;
+      Bin@1001 : Record 7354;
+      CreatePick@1003 : Codeunit 7312;
+      AvailQty@1004 : Decimal;
+    BEGIN
+      // [FEATURE] [Warehouse] [Move Worksheet]
+      // [SCENARIO 362753] Blocked bin content is excluded from quantity available to pick when calculting available qty. from move worksheet
+
+      Initialize;
+
+      // [GIVEN] "X" pieces of item "I" on a pick bin "B"
+      LibraryInventory.CreateItem(Item);
+      FindPickBin(Bin,LocationWhite.Code);
+      UpdateInventoryOnLocationWithWhseAdjustment(LocationWhite,Item,LibraryRandom.RandDec(100,2));
+      // [GIVEN] Bin "B" is blocked
+      BlockBinContent(LocationWhite.Code,Bin.Code,Item."No.");
+      CreateMockWarehouseWorksheetLine(WhseWorksheetLine,LocationWhite.Code,Item."No.",Bin."Zone Code");
+
+      // [WHEN] Calculate quantity available to pick from move worksheet
+      CreatePick.SetWhseWkshLine(WhseWorksheetLine,0);
+      CreatePick.SetCalledFromMoveWksh(TRUE);
+      AvailQty := CreatePick.CalcTotalAvailQtyToPick(LocationWhite.Code,Item."No.",'','','',0,0,'',0,0,0,FALSE);
+
+      // [THEN] Available quantity is 0
+      Assert.AreEqual(0,AvailQty,QtyAvailMustBeZeroErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(DummyMessageHandler,ChangeUOMRequestPageHandler,WhseSourceCreateDocumentPageHandler)]
+    PROCEDURE MovementPutPickIsNotExist@130();
+    VAR
+      ItemUnitOfMeasure@1000 : Record 5404;
+      Item@1001 : Record 27;
+      Bin@1002 : Record 7354;
+      BinContent@1005 : Record 7302;
+      WarehouseActivityHeader@1004 : Record 5766;
+      WarehouseActivityLine@1003 : Record 5767;
+      WhseWorksheetLine@1013 : Record 7326;
+      Delta@1015 : Integer;
+      QtyPerUOM@1014 : Integer;
+      MinusDelta@1010 : Integer;
+    BEGIN
+      // [FEATURE] [Bin Content] [Move Worksheet]
+      // [SCENARIO 211627] Unpacking of bin content should be reflected in Warehouse Movements after creating movement with multiple lines for bin with filled "Min. Qty." and "Max. Qty.".
+      Initialize;
+
+      Delta := LibraryRandom.RandInt(5);
+      QtyPerUOM := LibraryRandom.RandIntInRange(Delta,50);
+      MinusDelta := LibraryRandom.RandInt(QtyPerUOM - Delta);
+
+      // [GIVEN] Item Unit Of Measure with "Qty. Per Unit of Measure" = "X" and Item with this Item Unit Of Measure in "Put-away Unit of Measure Code" field.
+      CreateItemWithPutAwayUnitOfMeasure(Item,ItemUnitOfMeasure,QtyPerUOM);
+
+      // [GIVEN] Bin and Bin Content with "Min. Qty." = 2 * "X" and "Max. Qty." = 3 * "X".
+      CreateBinWithBinContent(Bin,BinContent,Item,LocationWhite.Code,2 * QtyPerUOM,3 * QtyPerUOM);
+
+      // [GIVEN] Purchase order with Quantity between 2 * "X" and 3 * "X".
+      // [GIVEN] Put-away from Warehouse Receipt Header.
+      CreatePutAwayLinesFromPurchase(WarehouseActivityHeader,LocationWhite.Code,Item."No.",3 * QtyPerUOM - MinusDelta);
+
+      // [GIVEN] Split and change Unit of Measure of Put-Away lines.
+      SplitAndChangeUnitofMeasureofPutAwayLines(
+        ItemUnitOfMeasure,
+        Item,Bin,WarehouseActivityHeader."No.",QtyPerUOM,Delta,3 * QtyPerUOM - MinusDelta,2 * QtyPerUOM - Delta - MinusDelta);
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+
+      // [GIVEN] Calculate Bin Replenishment from Movement Worksheet.
+      CalculateBinReplenishment(LocationWhite.Code);
+
+      // [WHEN] Movement Create from Worksheet.
+      COMMIT;
+      WhseWorksheetLine.MovementCreate(WhseWorksheetLine);
+
+      // [THEN] Two warehouse activity lines are created as a result of unpacking: "Take" action with Quantity = 1 and "Place" action with Quantity = "X"
+      VerifyWhseActivityLine(Item."No.",ItemUnitOfMeasure.Code,Bin.Code,WarehouseActivityLine."Action Type"::Take,1);
+      VerifyWhseActivityLine(Item."No.",Item."Base Unit of Measure",Bin.Code,WarehouseActivityLine."Action Type"::Place,QtyPerUOM)
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE VerifyShipmentDateOnSalesLine@125();
+    VAR
+      Item@1002 : Record 27;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      WarehouseActivityHeader@1006 : Record 5766;
+      WarehouseShipmentHeader@1003 : Record 7320;
+      Qty@1004 : Decimal;
+      DeltaDate@1007 : Integer;
+    BEGIN
+      // [FEATURE] [Sales Order] [Warehouse Shipment]
+      // [SCENARIO 374793] Shipment Date on Sales Line should be updated after Posting Warehouse Shipment with a different Shipment Date
+      Initialize;
+
+      // [GIVEN] Released Sales Order Line "L" with "Shipment Date" = "D1"
+      LibraryInventory.CreateItem(Item);
+      Qty := LibraryRandom.RandDec(10,2);
+      UpdateInventoryOnLocationWithWhseAdjustment(LocationWhite,Item,Qty);
+      CreateAndReleaseSalesOrder(SalesHeader,Item."No.",Item."No.",LocationWhite.Code,Qty,Qty);
+
+      // [GIVEN] Warehouse Shipment "WS" with "Shipment Date" = "D2"
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      FindWarehouseShipmentHeader(WarehouseShipmentHeader,LocationWhite.Code);
+      DeltaDate := LibraryRandom.RandInt(10);
+      WarehouseShipmentHeader.VALIDATE("Shipment Date",WORKDATE + DeltaDate);
+      WarehouseShipmentHeader.MODIFY;
+
+      // [GIVEN] Registered Pick for "WS"
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      FindWarehouseActivityHeader(WarehouseActivityHeader,LocationWhite.Code,WarehouseActivityHeader.Type::Pick);
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+
+      // [WHEN] Post "WS"
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // [THEN] "L" has Shipment Date = "D2"
+      WITH SalesLine DO BEGIN
+        SETRANGE("Document No.",SalesHeader."No.");
+        FINDFIRST;
+        TESTFIELD("Shipment Date",WORKDATE + DeltaDate);
+      END;
+    END;
+
+    [Test]
+    PROCEDURE CreatePickWithDefaultBinContent@126();
+    VAR
+      WarehouseShipmentHeader@1000 : Record 7320;
+      Item@1005 : Record 27;
+      Bin@1004 : ARRAY [2] OF Record 7354;
+      IsDefault@1001 : ARRAY [2] OF Boolean;
+      Quantity@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Warehouse Pick] [Bin Content]
+      // [SCENARIO 377947] Create Pick Job should fill "Take" Line with Bin Code taken from Default Bin Content of Item
+      Initialize;
+
+      // [GIVEN] Bin Mandatory Location with Require Pick and Shipment
+      // [GIVEN] Item of Quantity = "Q" on Bin Content "X" and "Q" on Default Bin Content "Y"
+      // [GIVEN] Sales Order for Item of Quantity "SQ" <= "Q"
+      // [GIVEN] Whse Shipment for Item
+      IsDefault[1] := FALSE;
+      IsDefault[2] := TRUE;
+      Quantity := LibraryRandom.RandInt(Quantity);
+      CreateWhseShipmentForItemWithTwoBinContents(Item,Bin,IsDefault,Quantity);
+
+      // [WHEN] Create Pick
+      FindWarehouseShipmentHeader(WarehouseShipmentHeader,LocationOrange.Code);
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+
+      // [THEN] Whse Pick is created where "Take" line has "Bin Code" = "Y" and Quantity = "SQ"
+      VerifyPickBinAndQuantity(Item."No.",Bin[2].Code,Quantity);
+    END;
+
+    [Test]
+    PROCEDURE CreatePickWithNoDefaultBinContent@226();
+    VAR
+      WarehouseShipmentHeader@1000 : Record 7320;
+      Item@1005 : Record 27;
+      Bin@1004 : ARRAY [2] OF Record 7354;
+      IsDefault@1001 : ARRAY [2] OF Boolean;
+      Quantity@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Warehouse Pick] [Bin Content]
+      // [SCENARIO 377947] Create Pick Job should fill "Take" Line with Bin Code taken from first Bin Content of Item if there is no Default
+      Initialize;
+
+      // [GIVEN] Bin Mandatory Location with Require Pick and Shipment
+      // [GIVEN] Item of Quantity = "Q" on Bin Content "X" and "Q" on Bin Content "Y"
+      // [GIVEN] Sales Order for Item of Quantity "SQ" <= "Q"
+      // [GIVEN] Whse Shipment for Item
+      IsDefault[1] := FALSE;
+      IsDefault[2] := FALSE;
+      Quantity := LibraryRandom.RandInt(Quantity);
+      CreateWhseShipmentForItemWithTwoBinContents(Item,Bin,IsDefault,Quantity);
+
+      // [WHEN] Create Pick
+      FindWarehouseShipmentHeader(WarehouseShipmentHeader,LocationOrange.Code);
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+
+      // [THEN] Whse Pick is created where "Take" line has "Bin Code" = "X" and Quantity = "SQ"
+      VerifyPickBinAndQuantity(Item."No.",Bin[1].Code,Quantity);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@3();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      ClearWarehouseEntry;
+      IF Initialized THEN
+        EXIT;
+
+      NoSeriesSetup;
+      ItemJournalSetup;
+      CreateLocationSetup;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      COMMIT;
+
+      Initialized := TRUE
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@74();
+    VAR
+      PurchasesPayablesSetup@1003 : Record 312;
+      SalesReceivablesSetup@1004 : Record 311;
+      WarehouseSetup@1001 : Record 5769;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesReceivablesSetup.MODIFY(TRUE);
+
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.MODIFY(TRUE);
+
+      LibraryWarehouse.NoSeriesSetup(WarehouseSetup);
+    END;
+
+    LOCAL PROCEDURE BlockBinContent@179(LocationCode@1001 : Code[10];BinCode@1002 : Code[20];ItemNo@1003 : Code[20]);
+    VAR
+      BinContent@1000 : Record 7302;
+    BEGIN
+      WITH BinContent DO BEGIN
+        SETRANGE("Location Code",LocationCode);
+        SETRANGE("Bin Code",BinCode);
+        SETRANGE("Item No.",ItemNo);
+        FINDFIRST;
+
+        VALIDATE("Block Movement","Block Movement"::All);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateLocationSetup@51();
+    VAR
+      Bin@1004 : Record 7354;
+      Bin2@1003 : Record 7354;
+      WarehouseEmployee@1006 : Record 7301;
+    BEGIN
+      // Location: Silver.
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(LocationSilver);
+      LocationSilver."Bin Mandatory" := TRUE;
+      LocationSilver.VALIDATE("Default Bin Selection",LocationSilver."Default Bin Selection"::"Fixed Bin");
+      LocationSilver.MODIFY(TRUE);
+
+      // Location: Orange.
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(LocationOrange);
+      LibraryWarehouse.CreateNumberOfBins(LocationOrange.Code,'','',7,FALSE);  // Total Bins created here = 7.
+      LibraryWarehouse.FindBin(Bin,LocationOrange.Code,'',1);  // Find Bin based on Bin Index.
+      LibraryWarehouse.FindBin(Bin2,LocationOrange.Code,'',2);
+      UpdateLocation(LocationOrange,LocationOrange."Default Bin Selection"::"Fixed Bin",TRUE);
+      LocationOrange."Bin Mandatory" := TRUE;
+      LocationOrange.VALIDATE("Shipment Bin Code",Bin.Code);
+      LocationOrange.VALIDATE("Receipt Bin Code",Bin2.Code);
+      LocationOrange.MODIFY(TRUE);
+
+      // Location: Green.
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(LocationGreen);
+      UpdateLocation(LocationGreen,LocationGreen."Default Bin Selection"::"Fixed Bin",TRUE);
+
+      // Location: White.
+      LibraryWarehouse.CreateFullWMSLocation(LocationWhite,2);  // Value for Number Of Bins.
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,LocationWhite.Code,FALSE);
+    END;
+
+    LOCAL PROCEDURE UpdateLocation@118(VAR Location@1000 : Record 14;DefaultBinSelection@1002 : Option;RequireReceive@1001 : Boolean);
+    BEGIN
+      Location.VALIDATE("Default Bin Selection",DefaultBinSelection);
+      Location.VALIDATE("Require Put-away",TRUE);
+      Location.VALIDATE("Require Receive",RequireReceive);
+      Location.VALIDATE("Require Pick",TRUE);
+      Location.VALIDATE("Require Shipment",TRUE);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ClearWarehouseEntry@32();
+    VAR
+      WarehouseActivityHeader@1001 : Record 5766;
+      WarehouseShipmentHeader@1003 : Record 7320;
+      WarehouseReceiptHeader@1005 : Record 7316;
+    BEGIN
+      WarehouseActivityHeader.DELETEALL;
+      WarehouseShipmentHeader.DELETEALL;
+      WarehouseReceiptHeader.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE ItemJournalSetup@12();
+    BEGIN
+      CLEAR(ItemJournalTemplate);
+      ItemJournalTemplate.INIT;
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalTemplate.MODIFY(TRUE);
+
+      CLEAR(ItemJournalBatch);
+      ItemJournalBatch.INIT;
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      ItemJournalBatch.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE WarehouseJournalSetup@31(LocationCode@1000 : Code[10]);
+    BEGIN
+      CLEAR(WarehouseJournalTemplate);
+      WarehouseJournalTemplate.INIT;
+      LibraryWarehouse.SelectWhseJournalTemplateName(WarehouseJournalTemplate,WarehouseJournalTemplate.Type::Item);
+      WarehouseJournalTemplate.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      WarehouseJournalTemplate.MODIFY(TRUE);
+
+      CLEAR(WarehouseJournalBatch);
+      WarehouseJournalBatch.INIT;
+      LibraryWarehouse.SelectWhseJournalBatchName(
+        WarehouseJournalBatch,WarehouseJournalTemplate.Type,WarehouseJournalTemplate.Name,LocationCode);
+      WarehouseJournalBatch.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      WarehouseJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CalculateBinReplenishment@176(LocationCode@1001 : Code[10]);
+    VAR
+      DummyBinContent@1004 : Record 7302;
+      WhseWorksheetTemplate@1003 : Record 7328;
+      WhseWorksheetName@1002 : Record 7327;
+    BEGIN
+      LibraryWarehouse.SelectWhseWorksheetTemplate(WhseWorksheetTemplate,WhseWorksheetTemplate.Type::Movement);
+      LibraryWarehouse.SelectWhseWorksheetName(WhseWorksheetName,WhseWorksheetTemplate.Name,LocationCode);
+      LibraryWarehouse.CalculateBinReplenishment(DummyBinContent,WhseWorksheetName,LocationCode,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateBinWithWarehouseClass@183(VAR Bin@1000 : Record 7354;LocationCode@1001 : Code[10];PutAway@1005 : Boolean;Pick@1004 : Boolean;Receive@1003 : Boolean;Ship@1002 : Boolean;WarehouseClassCode@1008 : Code[10]);
+    VAR
+      BinType@1006 : Record 7303;
+      Zone@1007 : Record 7300;
+    BEGIN
+      FindBinType(BinType,PutAway,Pick,Receive,Ship);
+      FindZone(Zone,LocationCode,BinType.Code);
+      LibraryWarehouse.CreateBin(
+        Bin,LocationCode,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(Bin.FIELDNO(Code),DATABASE::Bin),1,
+          LibraryUtility.GetFieldLength(DATABASE::Bin,Bin.FIELDNO(Code))),Zone.Code,BinType.Code);
+      UpdateBin(Bin,WarehouseClassCode);
+    END;
+
+    LOCAL PROCEDURE CreateBinAndBinContent@8(VAR Bin@1000 : Record 7354;LocationCode@1001 : Code[10];ItemNo@1002 : Code[20];UnitOfMeasure@1003 : Code[10];Default@1004 : Boolean);
+    VAR
+      BinContent@1005 : Record 7302;
+    BEGIN
+      LibraryWarehouse.CreateBin(
+        Bin,LocationCode,
+        COPYSTR(
+          LibraryUtility.GenerateRandomCode(Bin.FIELDNO(Code),DATABASE::Bin),1,
+          LibraryUtility.GetFieldLength(DATABASE::Bin,Bin.FIELDNO(Code))),'','');
+      CreateBinContent(BinContent,LocationCode,Bin.Code,ItemNo,UnitOfMeasure,Default);
+    END;
+
+    LOCAL PROCEDURE CreateBinWithBinContent@150(VAR Bin@1000 : Record 7354;VAR BinContent@1001 : Record 7302;Item@1006 : Record 27;LocationCode@1007 : Code[10];MinQty@1002 : Decimal;MaxQty@1003 : Decimal);
+    VAR
+      Zone@1005 : Record 7300;
+      BinTypeCode@1004 : Code[10];
+    BEGIN
+      BinTypeCode := LibraryWarehouse.SelectBinType(FALSE,FALSE,FALSE,TRUE);
+      LibraryWarehouse.CreateZone(Zone,LibraryUtility.GenerateGUID,LocationCode,BinTypeCode,'','',0,FALSE);
+      LibraryWarehouse.CreateBin(Bin,LocationCode,LibraryUtility.GenerateGUID,Zone.Code,BinTypeCode);
+      CreateBinContentWithMinAndMaxQty(BinContent,Item,LocationCode,Bin.Code,Zone.Code,BinTypeCode,MinQty,MaxQty,1000);
+    END;
+
+    LOCAL PROCEDURE CreateBinContent@34(VAR BinContent@1000 : Record 7302;LocationCode@1001 : Code[10];BinCode@1002 : Code[20];ItemNo@1003 : Code[20];BaseUnitOfMeasure@1004 : Code[10];Default@1005 : Boolean);
+    BEGIN
+      LibraryWarehouse.CreateBinContent(BinContent,LocationCode,'',BinCode,ItemNo,'',BaseUnitOfMeasure);
+      BinContent.VALIDATE(Fixed,TRUE);
+      BinContent.VALIDATE(Default,Default);
+      BinContent.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithPutAwayUnitOfMeasure@148(VAR Item@1000 : Record 27;VAR ItemUnitOfMeasure@1001 : Record 5404;QtyPerUOM@1002 : Decimal);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItemUnitOfMeasureCode(ItemUnitOfMeasure,Item."No.",QtyPerUOM);
+      Item.VALIDATE("Put-away Unit of Measure Code",ItemUnitOfMeasure.Code);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateMultipleItemWithProductGroup@109(VAR Item@1000 : Record 27;VAR Item2@1001 : Record 27;VAR ProductGroup@1002 : Record 5723;VAR ProductGroup2@1003 : Record 5723);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItem(Item2);
+      UpdateItemWithProductGroup(Item,ProductGroup);
+      UpdateItemWithProductGroup(Item2,ProductGroup2);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleasePurchaseOrder@16(VAR PurchaseHeader@1000 : Record 38;ItemNo@1002 : Code[20];ItemNo2@1004 : Code[20];LocationCode@1005 : Code[10];BinCode@1006 : Code[20];Quantity@1003 : Decimal;Quantity2@1008 : Decimal;UnitOfMeasureCode@1007 : Code[10]);
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      CreatePurchaseLine(PurchaseHeader,PurchaseLine,ItemNo,LocationCode,Quantity);
+      UpdatePurchaseLineWithUOM(PurchaseLine,UnitOfMeasureCode);
+      CreatePurchaseLine(PurchaseHeader,PurchaseLine,ItemNo2,LocationCode,Quantity2);
+      UpdatePurchaseLineWithBinCode(PurchaseLine,BinCode);
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@36(PurchaseHeader@1000 : Record 38;VAR PurchaseLine@1001 : Record 39;ItemNo@1002 : Code[20];LocationCode@1003 : Code[10];Quantity@1004 : Decimal);
+    BEGIN
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@33(VAR SalesHeader@1000 : Record 36;ItemNo@1003 : Code[20];ItemNo2@1004 : Code[20];LocationCode@1005 : Code[10];Quantity@1002 : Decimal;Quantity2@1006 : Decimal);
+    VAR
+      Customer@1012 : Record 18;
+      SalesLine@1001 : Record 37;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      CreateSalesHeader(SalesHeader,Customer."No.",'',SalesHeader."Shipping Advice"::Partial);
+      CreateSalesLine(SalesHeader,SalesLine,ItemNo,LocationCode,Quantity);
+      CreateSalesLine(SalesHeader,SalesLine,ItemNo2,LocationCode,Quantity2);
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@39(VAR SalesHeader@1003 : Record 36;VAR SalesLine@1002 : Record 37;ItemNo@1001 : Code[20];LocationCode@1000 : Code[10];Quantity@1004 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateMockWarehouseWorksheetLine@182(VAR WhseWorksheetLine@1000 : Record 7326;LocationCode@1001 : Code[10];ItemNo@1002 : Code[20];ZoneCode@1003 : Code[10]);
+    BEGIN
+      WITH WhseWorksheetLine DO BEGIN
+        INIT;
+        "Location Code" := LocationCode;
+        "Item No." := ItemNo;
+        "From Zone Code" := ZoneCode;
+        "To Zone Code" := ZoneCode;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateWhseShipmentForItemWithTwoBinContents@195(VAR Item@1007 : Record 27;VAR Bin@1003 : ARRAY [2] OF Record 7354;IsDefault@1020 : ARRAY [2] OF Boolean;Quantity@1000 : Decimal);
+    VAR
+      SalesHeader@1006 : Record 36;
+      SalesLine@1005 : Record 37;
+      StockQuantity@1001 : Decimal;
+    BEGIN
+      UpdateLocation(LocationOrange,LocationOrange."Default Bin Selection"::"Fixed Bin",TRUE);
+      LibraryInventory.CreateItem(Item);
+      CreateBinAndBinContent(Bin[1],LocationOrange.Code,Item."No.",Item."Base Unit of Measure",IsDefault[1]);
+      CreateBinAndBinContent(Bin[2],LocationOrange.Code,Item."No.",Item."Base Unit of Measure",IsDefault[2]);
+
+      StockQuantity := Quantity + LibraryRandom.RandInt(Quantity);
+      LibraryPatterns.POSTPositiveAdjustment(Item,LocationOrange.Code,'',Bin[1].Code,StockQuantity,WORKDATE,0);
+      LibraryPatterns.POSTPositiveAdjustment(Item,LocationOrange.Code,'',Bin[2].Code,StockQuantity,WORKDATE,0);
+
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      CreateSalesLine(SalesHeader,SalesLine,Item."No.",LocationOrange.Code,Quantity);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateMultipleSalesLine@122(VAR SalesHeader@1000 : Record 36;ItemNo@1002 : Code[20];ItemNo2@1003 : Code[20];ItemNo3@1004 : Code[20];Quantity@1005 : Decimal);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo2,Quantity);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo3,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrderWithShippingAdvice@117(VAR SalesHeader@1000 : Record 36;CustomerNo@1002 : Code[20];LocationCode@1001 : Code[10];ItemNo@1003 : Code[20];Quantity@1004 : Decimal;ShippingAdvice@1006 : Option);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      CreateSalesHeader(SalesHeader,CustomerNo,LocationCode,ShippingAdvice);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateSalesHeader@102(VAR SalesHeader@1000 : Record 36;CustomerNo@1001 : Code[20];LocationCode@1002 : Code[10];ShippingAdvice@1003 : Option);
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CustomerNo);
+      SalesHeader.VALIDATE("Shipping Advice",ShippingAdvice);
+      SalesHeader.VALIDATE("Location Code",LocationCode);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrder@83(VAR SalesHeader@1005 : Record 36;ItemNo@1004 : Code[20];ItemNo2@1003 : Code[20];LocationCode@1002 : Code[10];Quantity@1001 : Decimal;Quantity2@1000 : Decimal);
+    BEGIN
+      CreateSalesOrder(SalesHeader,ItemNo,ItemNo2,LocationCode,Quantity,Quantity2);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostWhseReceipt@2(PurchaseHeader@1000 : Record 38;BinCode@1001 : Code[20];LocationCode@1002 : Code[10]);
+    VAR
+      WarehouseReceiptHeader@1003 : Record 7316;
+    BEGIN
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      ChangeBinCodeOnWarehouseReceiptLine(WarehouseReceiptHeader,BinCode,LocationCode);
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+    END;
+
+    LOCAL PROCEDURE CreatePutAwayLinesFromPurchase@157(VAR WarehouseActivityHeader@1000 : Record 5766;LocationCode@1001 : Code[10];ItemNo@1003 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      PurchaseHeader@1004 : Record 38;
+      PurchaseLine@1005 : Record 39;
+      WarehouseReceiptHeader@1006 : Record 7316;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,LibraryPurchase.CreateVendorNo);
+      PurchaseHeader.VALIDATE("Location Code",LocationCode);
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      FindWarehouseReceiptHeader(WarehouseReceiptHeader,LocationCode);
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+      FindWarehouseActivityHeader(WarehouseActivityHeader,LocationCode,WarehouseActivityHeader.Type::"Put-away");
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseReceiptHeader@211(VAR WarehouseReceiptHeader@1000 : Record 7316;LocationCode@1001 : Code[10];BinCode@1002 : Code[20]);
+    BEGIN
+      LibraryWarehouse.CreateWarehouseReceiptHeader(WarehouseReceiptHeader);
+      WarehouseReceiptHeader.VALIDATE("Location Code",LocationCode);
+      WarehouseReceiptHeader.VALIDATE("Bin Code",BinCode);
+      WarehouseReceiptHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseSourceFilter@217(VAR WarehouseSourceFilter@1000 : Record 5771;BuyFromVendorNoFilter@1001 : Code[100]);
+    BEGIN
+      LibraryWarehouse.CreateWarehouseSourceFilter(WarehouseSourceFilter,WarehouseSourceFilter.Type::Inbound);
+      WarehouseSourceFilter.VALIDATE("Buy-from Vendor No. Filter",BuyFromVendorNoFilter);
+      WarehouseSourceFilter.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateBinContentWithMinAndMaxQty@159(BinContent@1000 : Record 7302;Item@1004 : Record 27;LocationCode@1001 : Code[10];BinCode@1002 : Code[20];ZoneCode@1008 : Code[10];BinTypeCode@1003 : Code[10];MinQty@1005 : Decimal;MaxQty@1006 : Decimal;BinRanking@1007 : Integer);
+    BEGIN
+      LibraryWarehouse.CreateBinContent(BinContent,LocationCode,ZoneCode,BinCode,Item."No.",'',Item."Base Unit of Measure");
+      WITH BinContent DO BEGIN
+        VALIDATE(Fixed,TRUE);
+        VALIDATE("Bin Type Code",BinTypeCode);
+        VALIDATE("Min. Qty.",MinQty);
+        VALIDATE("Max. Qty.",MaxQty);
+        VALIDATE("Bin Ranking",BinRanking);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE ChangeBinCodeOnWarehouseReceiptLine@93(VAR WarehouseReceiptHeader@1004 : Record 7316;BinCode@1002 : Code[20];LocationCode@1003 : Code[10]);
+    VAR
+      WarehouseReceiptLine@1001 : Record 7317;
+    BEGIN
+      FindWarehouseReceiptHeader(WarehouseReceiptHeader,LocationCode);
+      WarehouseReceiptLine.SETRANGE("No.",WarehouseReceiptHeader."No.");
+      WarehouseReceiptLine.FINDFIRST;
+      WarehouseReceiptLine.VALIDATE("Bin Code",BinCode);  // Change Bin Code.
+      WarehouseReceiptLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ChangeBinCodeOnWarehouseShipmentLine@77(VAR WarehouseShipmentHeader@1001 : Record 7320;BinCode@1002 : Code[20];LocationCode@1003 : Code[10];ItemNo@1004 : Code[20]);
+    VAR
+      WarehouseShipmentLine@1000 : Record 7321;
+    BEGIN
+      FindWarehouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      WarehouseShipmentLine.SETRANGE("No.",WarehouseShipmentHeader."No.");
+      WarehouseShipmentLine.SETRANGE("Item No.",ItemNo);
+      WarehouseShipmentLine.FINDFIRST;
+      WarehouseShipmentLine.VALIDATE("Bin Code",BinCode);  // Change Bin Code.
+      WarehouseShipmentLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ChangeBinCodeOnWarehouseActivityLine@35(VAR WarehouseActivityLine@1004 : Record 5767;WarehouseActivityHeader@1003 : Record 5766;ActionType@1002 : Option;ItemNo@1001 : Code[20];BinCode@1000 : Code[20]);
+    BEGIN
+      FindWarehouseActivityLine(WarehouseActivityLine,WarehouseActivityHeader,ActionType,ItemNo);
+      WarehouseActivityLine.VALIDATE("Bin Code",BinCode);  // Change Bin Code.
+      WarehouseActivityLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ChangeQtyToShipOnWhseShipmentLine@95(VAR WarehouseShipmentLine@1000 : Record 7321;No@1001 : Code[20];QtyToShip@1003 : Decimal);
+    BEGIN
+      WarehouseShipmentLine.SETRANGE("No.",No);
+      WarehouseShipmentLine.FINDSET;
+      WarehouseShipmentLine.VALIDATE("Qty. to Ship",QtyToShip);
+      WarehouseShipmentLine.MODIFY(TRUE);
+      WarehouseShipmentLine.NEXT;
+      WarehouseShipmentLine.VALIDATE("Qty. to Ship",0);  // Value important for Test.
+      WarehouseShipmentLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ChangeQtyToReceiveOnWhseReceiptLine@134(VAR WarehouseReceiptLine@1000 : Record 7317;No@1001 : Code[20];QtyToReceive@1003 : Decimal);
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("No.",No);
+      WarehouseReceiptLine.FINDSET;
+      WarehouseReceiptLine.VALIDATE("Qty. to Receive",0);  // Value important for Test.
+      WarehouseReceiptLine.MODIFY(TRUE);
+      WarehouseReceiptLine.NEXT;
+      WarehouseReceiptLine.VALIDATE("Qty. to Receive",QtyToReceive);
+      WarehouseReceiptLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ChangeBinCodeOnProdOrderComponent@100(VAR ProdOrderComponent@1000 : Record 5407;BinCode@1001 : Code[20]);
+    BEGIN
+      ProdOrderComponent.VALIDATE("Bin Code",BinCode);
+      ProdOrderComponent.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateCertifiedProductionBOM@121(VAR Item@1001 : Record 27;ItemNo@1003 : Code[20];ItemNo2@1004 : Code[20];ProductGroupCode@1005 : Code[10]);
+    VAR
+      ProductionBOMHeader@1000 : Record 99000771;
+      ProductionBOMLine@1002 : Record 99000772;
+    BEGIN
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,Item."Base Unit of Measure");
+      LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,ItemNo,1);
+      LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,ItemNo2,1);
+      ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::Certified);
+      ProductionBOMHeader.MODIFY(TRUE);
+      Item.VALIDATE("Production BOM No.",ProductionBOMHeader."No.");
+      Item.VALIDATE("Product Group Code",ProductGroupCode);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateProductionOrder@135(VAR ProductionOrder@1000 : Record 5405;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];BinCode@1003 : Code[20]);
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo,1);
+      ProductionOrder.VALIDATE("Location Code",LocationCode);
+      ProductionOrder.VALIDATE("Bin Code",BinCode);
+      ProductionOrder.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshProductionOrder@147(VAR ProductionOrder@1003 : Record 5405;ItemNo@1002 : Code[20];LocationCode@1001 : Code[10];BinCode@1000 : Code[20]);
+    BEGIN
+      CreateProductionOrder(ProductionOrder,ItemNo,LocationCode,BinCode);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateProductGroup@155(VAR ProductGroup@1000 : Record 5723);
+    VAR
+      WarehouseClass@1001 : Record 7304;
+    BEGIN
+      LibraryWarehouse.CreateWarehouseClass(WarehouseClass);
+      LibraryInventory.CreateProductGroup(ProductGroup,'');
+      ProductGroup.VALIDATE("Warehouse Class Code",WarehouseClass.Code);
+      ProductGroup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ClearWarehouseJournal@105();
+    VAR
+      WarehouseJournalLine@1000 : Record 7311;
+    BEGIN
+      WarehouseJournalLine.SETRANGE("Journal Template Name",WarehouseJournalBatch."Journal Template Name");
+      WarehouseJournalLine.SETRANGE("Journal Batch Name",WarehouseJournalBatch.Name);
+      WarehouseJournalLine.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE FindPurchaseLine@79(VAR PurchaseLine@1000 : Record 39;DocumentNo@1001 : Code[20];No@1002 : Code[20]);
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",DocumentNo);
+      PurchaseLine.SETRANGE("No.",No);
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindSalesLine@80(VAR SalesLine@1000 : Record 37;DocumentNo@1002 : Code[20];No@1001 : Code[20]);
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.SETRANGE("No.",No);
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseReceiptHeader@87(VAR WarehouseReceiptHeader@1000 : Record 7316;LocationCode@1001 : Code[10]);
+    BEGIN
+      WarehouseReceiptHeader.SETRANGE("Location Code",LocationCode);
+      WarehouseReceiptHeader.FINDLAST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseShipmentHeader@54(VAR WarehouseShipmentHeader@1000 : Record 7320;LocationCode@1001 : Code[10]);
+    BEGIN
+      WarehouseShipmentHeader.SETRANGE("Location Code",LocationCode);
+      WarehouseShipmentHeader.FINDLAST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseActivityHeader@14(VAR WarehouseActivityHeader@1000 : Record 5766;LocationCode@1001 : Code[10];Type@1002 : Option);
+    BEGIN
+      WarehouseActivityHeader.SETRANGE(Type,Type);
+      WarehouseActivityHeader.SETRANGE("Location Code",LocationCode);
+      WarehouseActivityHeader.FINDLAST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseActivityLine@15(VAR WarehouseActivityLine@1005 : Record 5767;WarehouseActivityHeader@1000 : Record 5766;ActionType@1002 : Option;ItemNo@1003 : Code[20]);
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Activity Type",WarehouseActivityHeader.Type);
+      WarehouseActivityLine.SETRANGE("No.",WarehouseActivityHeader."No.");
+      WarehouseActivityLine.SETRANGE("Action Type",ActionType);
+      WarehouseActivityLine.SETRANGE("Item No.",ItemNo);
+      WarehouseActivityLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindPlaceWhseActivityLine@146(VAR WarehouseActivityLine@1000 : Record 5767;WarehouseActivityHeaderNo@1003 : Code[20];QuantityFilter@1001 : Decimal);
+    BEGIN
+      WITH WarehouseActivityLine DO BEGIN
+        SETRANGE("Action Type","Action Type"::Place);
+        SETRANGE("No.",WarehouseActivityHeaderNo);
+        SETRANGE("Qty. (Base)",QuantityFilter);
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE FindBinType@149(VAR BinType@1000 : Record 7303;PutAway@1001 : Boolean;Pick@1002 : Boolean;Receive@1003 : Boolean;Ship@1004 : Boolean);
+    BEGIN
+      BinType.SETRANGE("Put Away",PutAway);
+      BinType.SETRANGE(Pick,Pick);
+      BinType.SETRANGE(Receive,Receive);
+      BinType.SETRANGE(Ship,Ship);
+      BinType.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindPickBin@178(VAR Bin@1003 : Record 7354;LocationCode@1000 : Code[10]);
+    VAR
+      BinType@1001 : Record 7303;
+    BEGIN
+      CLEAR(Bin);
+
+      Bin.SETRANGE("Location Code",LocationCode);
+      BinType.SETRANGE(Pick,TRUE);
+      IF BinType.FINDSET THEN
+        REPEAT
+          Bin.SETRANGE("Bin Type Code",BinType.Code);
+          IF Bin.FINDFIRST THEN
+            EXIT;
+        UNTIL BinType.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE FindZone@164(VAR Zone@1000 : Record 7300;LocationCode@5366 : Code[10];BinTypeCode@1001 : Code[10]);
+    BEGIN
+      Zone.SETRANGE("Location Code",LocationCode);
+      Zone.SETRANGE("Bin Type Code",BinTypeCode);
+      Zone.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindProdOrderComponent@11(VAR ProdOrderComponent@1000 : Record 5407;ProdOrderLine@1001 : Record 5406;BinCode@1002 : Code[20]);
+    BEGIN
+      ProdOrderComponent.SETRANGE(Status,ProdOrderLine.Status);
+      ProdOrderComponent.SETRANGE("Prod. Order No.",ProdOrderLine."Prod. Order No.");
+      ProdOrderComponent.SETRANGE("Prod. Order Line No.",ProdOrderLine."Line No.");
+      ProdOrderComponent.SETRANGE("Bin Code",BinCode);
+      ProdOrderComponent.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindProdOrderLine@108(VAR ProdOrderLine@1000 : Record 5406;ProductionOrder@1001 : Record 5405);
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SplitAndChangeUnitofMeasureofPutAwayLines@162(ItemUnitOfMeasure@1004 : Record 5404;Item@1008 : Record 27;Bin@1007 : Record 7354;WarehouseActivityHeaderNo@1000 : Code[20];QtyPerUOMForNotBOM@1001 : Integer;Delta@1006 : Integer;PutAwayQuantity@1002 : Integer;QuantityAfterTwoSplitting@1003 : Integer);
+    VAR
+      WarehouseActivityLine@1005 : ARRAY [2] OF Record 5767;
+    BEGIN
+      FindPlaceWhseActivityLine(WarehouseActivityLine[1],WarehouseActivityHeaderNo,PutAwayQuantity);
+      SplitWarehouseActivityLine(WarehouseActivityLine[1],QtyPerUOMForNotBOM / ItemUnitOfMeasure."Qty. per Unit of Measure");
+      FindPlaceWhseActivityLine(WarehouseActivityLine[2],WarehouseActivityHeaderNo,PutAwayQuantity - QtyPerUOMForNotBOM);
+      UpdateZoneCodeAndBinCode(WarehouseActivityLine[2],WarehouseActivityLine[1]."Zone Code",WarehouseActivityLine[1]."Bin Code");
+      LibraryVariableStorage.Enqueue(Item."Base Unit of Measure"); // Enqueue for ChangeUOMRequestPageHandler
+      LibraryWarehouse.ChangeUnitOfMeasure(WarehouseActivityLine[2]);
+      SplitWarehouseActivityLine(WarehouseActivityLine[2],Delta);
+      FindPlaceWhseActivityLine(WarehouseActivityLine[2],WarehouseActivityHeaderNo,QuantityAfterTwoSplitting);
+      UpdateZoneCodeAndBinCode(WarehouseActivityLine[2],Bin."Zone Code",Bin.Code);
+    END;
+
+    LOCAL PROCEDURE SplitWarehouseActivityLine@154(VAR WarehouseActivityLine@1000 : Record 5767;QuantityToSplit@1001 : Decimal);
+    BEGIN
+      WITH WarehouseActivityLine DO BEGIN
+        VALIDATE("Qty. to Handle",QuantityToSplit);
+        MODIFY(TRUE);
+        SplitLine(WarehouseActivityLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateAndRegisterWarehouseActivityLine@17(LocationCode@1001 : Code[10];ItemNo@1002 : Code[20];ItemNo2@1003 : Code[20];BinCode@1004 : Code[20];BinCode2@1005 : Code[20]);
+    VAR
+      WarehouseActivityHeader@1000 : Record 5766;
+      WarehouseActivityLine@1006 : Record 5767;
+    BEGIN
+      FindWarehouseActivityHeader(WarehouseActivityHeader,LocationCode,WarehouseActivityHeader.Type::"Put-away");
+      ChangeBinCodeOnWarehouseActivityLine(
+        WarehouseActivityLine,WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Place,ItemNo,BinCode);
+      ChangeBinCodeOnWarehouseActivityLine(
+        WarehouseActivityLine,WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Place,ItemNo2,BinCode2);
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseLineWithUOM@110(VAR PurchaseLine@1000 : Record 39;UnitOfMeasureCode@1001 : Code[10]);
+    BEGIN
+      PurchaseLine.VALIDATE("Unit of Measure Code",UnitOfMeasureCode); // Unit of Measure Code.
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchaseLineWithBinCode@111(VAR PurchaseLine@1000 : Record 39;BinCode@1001 : Code[20]);
+    BEGIN
+      PurchaseLine.VALIDATE("Bin Code",BinCode);  // Update Bin Code.
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItemWithUnitOfMeasure@91(VAR UnitOfMeasure@1000 : Record 204;ItemNo@1001 : Code[20]);
+    VAR
+      ItemUnitOfMeasure@1002 : Record 5404;
+    BEGIN
+      LibraryInventory.CreateUnitOfMeasureCode(UnitOfMeasure);
+      LibraryInventory.CreateItemUnitOfMeasure(ItemUnitOfMeasure,ItemNo,UnitOfMeasure.Code,LibraryRandom.RandDec(10,2));
+    END;
+
+    LOCAL PROCEDURE UpdateWarehouseReceiptLine@7(SourceNo@1002 : Code[20];BinCode@1003 : Code[20]);
+    VAR
+      WarehouseReceiptLine@1001 : Record 7317;
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("Source No.",SourceNo);
+      WarehouseReceiptLine.FINDSET;
+      REPEAT
+        WarehouseReceiptLine.VALIDATE("Bin Code",BinCode);
+        WarehouseReceiptLine.MODIFY(TRUE);
+      UNTIL WarehouseReceiptLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateInventoryOnLocationWithWhseAdjustment@94(Location@1000 : Record 14;Item@1002 : Record 27;Quantity@1003 : Decimal);
+    VAR
+      WarehouseJournalLine@1001 : Record 7311;
+    BEGIN
+      ClearWarehouseJournal;
+      WarehouseJournalSetup(Location.Code);
+      LibraryWarehouse.CreateWhseJournalLine(
+        WarehouseJournalLine,WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,Location.Code,'',
+        Location."Cross-Dock Bin Code",WarehouseJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",Quantity);
+      LibraryWarehouse.RegisterWhseJournalLine(
+        WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,Location.Code,TRUE);
+      LibraryWarehouse.CalculateWhseAdjustment(Item,ItemJournalBatch);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE UpdateInventoryOnLocation@115(LocationCode@1000 : Code[10];ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE UpdateQuantityToHandleOnWhseActivityLine@73(WarehouseActivityHeader@1000 : Record 5766;Quantity@1001 : Decimal;QtyToHandle@1002 : Decimal);
+    VAR
+      WarehouseActivityLine@1003 : Record 5767;
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Activity Type",WarehouseActivityHeader.Type);
+      WarehouseActivityLine.SETRANGE("No.",WarehouseActivityHeader."No.");
+      WarehouseActivityLine.SETRANGE(Quantity,Quantity);
+      WarehouseActivityLine.FINDSET;
+      REPEAT
+        WarehouseActivityLine.VALIDATE("Qty. to Handle",QtyToHandle);
+        WarehouseActivityLine.MODIFY(TRUE);
+      UNTIL WarehouseActivityLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE UpdateLocationWhite@136(VAR Location@1000 : Record 14;AlwaysCreatePutAwayLine@1001 : Boolean);
+    BEGIN
+      Location.VALIDATE("Always Create Put-away Line",AlwaysCreatePutAwayLine);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateBin@224(VAR Bin@1000 : Record 7354;WarehouseClassCode@1001 : Code[10]);
+    BEGIN
+      Bin.VALIDATE("Warehouse Class Code",WarehouseClassCode);
+      Bin.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateZoneCodeAndBinCode@151(VAR WarehouseActivityLine@1002 : Record 5767;ZoneCode@1000 : Code[10];BinCode@1001 : Code[20]);
+    BEGIN
+      WITH WarehouseActivityLine DO BEGIN
+        VALIDATE("Zone Code",ZoneCode);
+        VALIDATE("Bin Code",BinCode);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE UpdateItemWithProductGroup@98(VAR Item@1000 : Record 27;VAR ProductGroup@1001 : Record 5723);
+    BEGIN
+      CreateProductGroup(ProductGroup);
+      Item.VALIDATE("Product Group Code",ProductGroup.Code);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateBinWarehouseReceiptLine@92(ItemNo@1001 : Code[20];BinCode@1002 : Code[20]);
+    VAR
+      WarehouseReceiptLine@1000 : Record 7317;
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("Item No.",ItemNo);
+      WarehouseReceiptLine.FINDFIRST;
+      WarehouseReceiptLine.VALIDATE("Bin Code",BinCode);
+      WarehouseReceiptLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateBinCodeWarehouseReceiptLine@173(VAR Bin@1000 : Record 7354;LocationCode@1002 : Code[10];ItemNo@1003 : Code[20];WarehouseClassCode@1005 : Code[10]);
+    BEGIN
+      CreateBinWithWarehouseClass(Bin,LocationCode,FALSE,FALSE,TRUE,FALSE,WarehouseClassCode);
+      UpdateBinWarehouseReceiptLine(ItemNo,Bin.Code);
+    END;
+
+    LOCAL PROCEDURE VerifyBinCodeOnSalesLine@49(SalesLine@1000 : Record 37;BinCode@1001 : Code[20];BinCode2@1002 : Code[20];DefaultBinSelection@1003 : Option);
+    VAR
+      Location@1004 : Record 14;
+    BEGIN
+      CASE DefaultBinSelection OF
+        Location."Default Bin Selection"::"Fixed Bin":
+          SalesLine.TESTFIELD("Bin Code",BinCode);
+        Location."Default Bin Selection"::"Last-Used Bin":
+          SalesLine.TESTFIELD("Bin Code",BinCode2);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseReceipt@1(Location@1002 : Record 14);
+    VAR
+      WarehouseReceiptHeader@1001 : Record 7316;
+      WarehouseReceiptLine@1000 : Record 7317;
+    BEGIN
+      FindWarehouseReceiptHeader(WarehouseReceiptHeader,Location.Code);
+      WarehouseReceiptHeader.TESTFIELD("Bin Code",Location."Receipt Bin Code");
+      WarehouseReceiptLine.SETRANGE("No.",WarehouseReceiptHeader."No.");
+      WarehouseReceiptLine.FINDSET;
+      REPEAT
+        WarehouseReceiptLine.TESTFIELD("Bin Code",WarehouseReceiptHeader."Bin Code");
+      UNTIL WarehouseReceiptLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseShipment@53(Location@1002 : Record 14);
+    VAR
+      WarehouseShipmentHeader@1001 : Record 7320;
+      WarehouseShipmentLine@1000 : Record 7321;
+    BEGIN
+      FindWarehouseShipmentHeader(WarehouseShipmentHeader,Location.Code);
+      WarehouseShipmentHeader.TESTFIELD("Bin Code",Location."Shipment Bin Code");
+      WarehouseShipmentLine.SETRANGE("No.",WarehouseShipmentHeader."No.");
+      WarehouseShipmentLine.FINDSET;
+      REPEAT
+        WarehouseShipmentLine.TESTFIELD("Bin Code",WarehouseShipmentHeader."Bin Code");
+      UNTIL WarehouseShipmentLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseShipmentLine@47(No@1007 : Code[20];ItemNo@1001 : Code[20];Quantity@1002 : Decimal;QtyOutstanding@1003 : Decimal;QtyToShip@1005 : Decimal;QtyPicked@1004 : Decimal;QtyShipped@1006 : Decimal);
+    VAR
+      WarehouseShipmentLine@1000 : Record 7321;
+    BEGIN
+      WarehouseShipmentLine.SETRANGE("No.",No);
+      WarehouseShipmentLine.SETRANGE("Item No.",ItemNo);
+      WarehouseShipmentLine.SETRANGE(Quantity,Quantity);
+      WarehouseShipmentLine.FINDFIRST;
+      WarehouseShipmentLine.TESTFIELD("Qty. Outstanding",QtyOutstanding);
+      WarehouseShipmentLine.TESTFIELD("Qty. to Ship",QtyToShip);
+      WarehouseShipmentLine.TESTFIELD("Qty. Picked",QtyPicked);
+      WarehouseShipmentLine.TESTFIELD("Qty. Shipped",QtyShipped)
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseReceiptLine@46(No@1006 : Code[20];ItemNo@1001 : Code[20];Quantity@1002 : Decimal;QtyOutstanding@1003 : Decimal;QtyToReceive@1005 : Decimal;QtyReceived@1004 : Decimal);
+    VAR
+      WarehouseReceiptLine@1000 : Record 7317;
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("No.",No);
+      WarehouseReceiptLine.SETRANGE("Item No.",ItemNo);
+      WarehouseReceiptLine.SETRANGE(Quantity,Quantity);
+      WarehouseReceiptLine.FINDFIRST;
+      WarehouseReceiptLine.TESTFIELD("Qty. Outstanding",QtyOutstanding);
+      WarehouseReceiptLine.TESTFIELD("Qty. to Receive",QtyToReceive);
+      WarehouseReceiptLine.TESTFIELD("Qty. Received",QtyReceived)
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseActivityLine@22(WarehouseActivityHeader@1000 : Record 5766;ActionType@1002 : Option;ItemNo@1003 : Code[20];BinCode@1004 : Code[20]);
+    VAR
+      WarehouseActivityLine@1001 : Record 5767;
+    BEGIN
+      FindWarehouseActivityLine(WarehouseActivityLine,WarehouseActivityHeader,ActionType,ItemNo);
+      WarehouseActivityLine.TESTFIELD("Bin Code",BinCode);
+    END;
+
+    LOCAL PROCEDURE VerifyWhseActivityLine@180(ItemNo@1001 : Code[20];UnitOfMeasureCode@1002 : Code[10];BinCode@1003 : Code[20];ActionType@1006 : ',Take,Place';ExpectedQuantity@1004 : Integer);
+    VAR
+      WarehouseActivityLine@1000 : Record 5767;
+    BEGIN
+      WITH WarehouseActivityLine DO BEGIN
+        SETRANGE("Activity Type","Activity Type"::Movement);
+        SETRANGE("Item No.",ItemNo);
+        SETRANGE("Action Type",ActionType);
+        SETRANGE("Unit of Measure Code",UnitOfMeasureCode);
+        SETFILTER("Bin Code",'<>%1',BinCode);
+        FINDFIRST;
+        TESTFIELD(Quantity,ExpectedQuantity);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseActivityLineDetails@76(SourceNo@1007 : Code[20];ActivityType@1006 : Option;ItemNo@1005 : Code[20];UnitOfMeasureCode@1004 : Code[10];Quantity@1003 : Decimal;BinCode@1002 : Code[20];ActionType@1001 : Option);
+    VAR
+      WarehouseActivityLine@1000 : Record 5767;
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Source No.",SourceNo);
+      WarehouseActivityLine.SETRANGE("Action Type",ActionType);
+      WarehouseActivityLine.SETRANGE("Unit of Measure Code",UnitOfMeasureCode);
+      WarehouseActivityLine.FINDFIRST;
+
+      WarehouseActivityLine.TESTFIELD("Activity Type",ActivityType);
+      WarehouseActivityLine.TESTFIELD("Item No.",ItemNo);
+      WarehouseActivityLine.TESTFIELD(Quantity,Quantity);
+      WarehouseActivityLine.TESTFIELD("Bin Code",BinCode);
+    END;
+
+    LOCAL PROCEDURE VerifyPickBinAndQuantity@199(ItemNo@1002 : Code[20];BinCode@1003 : Code[20];Quantity@1004 : Decimal);
+    VAR
+      WarehouseActivityLine@1001 : Record 5767;
+      WarehouseActivityHeader@1000 : Record 5766;
+    BEGIN
+      FindWarehouseActivityHeader(WarehouseActivityHeader,LocationOrange.Code,WarehouseActivityHeader.Type::Pick);
+      FindWarehouseActivityLine(WarehouseActivityLine,WarehouseActivityHeader,WarehouseActivityLine."Action Type"::Take,ItemNo);
+      Assert.AreEqual(BinCode,WarehouseActivityLine."Bin Code",BinErr);
+      Assert.AreEqual(Quantity,WarehouseActivityLine.Quantity,QtyErr);
+    END;
+
+    LOCAL PROCEDURE VerifyPostedWhseReceiptLine@153(WhseReceiptNo@1001 : Code[20];ItemNo@1002 : Code[20];BinCode@1003 : Code[20]);
+    VAR
+      PostedWhseReceiptLine@1000 : Record 7319;
+    BEGIN
+      PostedWhseReceiptLine.SETRANGE("Whse. Receipt No.",WhseReceiptNo);
+      PostedWhseReceiptLine.SETRANGE("Source Document",PostedWhseReceiptLine."Source Document"::"Purchase Order");
+      PostedWhseReceiptLine.SETRANGE("Item No.",ItemNo);
+      PostedWhseReceiptLine.FINDFIRST;
+      PostedWhseReceiptLine.TESTFIELD("Bin Code",BinCode);
+    END;
+
+    LOCAL PROCEDURE VerifyRegisteredWhseActivityLine@104(LocationCode@1001 : Code[10];SourceNo@1002 : Code[20];ItemNo@1003 : Code[20];BinCode@1004 : Code[20]);
+    VAR
+      RegisteredWhseActivityLine@1000 : Record 5773;
+    BEGIN
+      RegisteredWhseActivityLine.SETRANGE("Action Type",RegisteredWhseActivityLine."Action Type"::Place);
+      RegisteredWhseActivityLine.SETRANGE("Location Code",LocationCode);
+      RegisteredWhseActivityLine.SETRANGE("Source Type",DATABASE::"Purchase Line");
+      RegisteredWhseActivityLine.SETRANGE("Source No.",SourceNo);
+      RegisteredWhseActivityLine.SETRANGE("Item No.",ItemNo);
+      RegisteredWhseActivityLine.FINDFIRST;
+      RegisteredWhseActivityLine.TESTFIELD("Bin Code",BinCode);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE ChangeUOMRequestPageHandler@144(VAR WhseChangeUnitOfMeasure@1000 : TestRequestPage 7314);
+    BEGIN
+      WhseChangeUnitOfMeasure.UnitOfMeasureCode.SETVALUE(LibraryVariableStorage.DequeueText);
+      WhseChangeUnitOfMeasure.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE WhseSourceCreateDocumentPageHandler@184(VAR WhseSourceCreateDocumentPageHandler@1000 : TestRequestPage 7305);
+    BEGIN
+      WhseSourceCreateDocumentPageHandler.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE DummyMessageHandler@156(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@43(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,WarehouseOperations) > 0,Message);
+    END;
+
+    [MessageHandler]
+    PROCEDURE PutAwayMessageHandler@5(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,PutAwayActivitiesCreated) > 0,Message);
+    END;
+
+    [MessageHandler]
+    PROCEDURE ReceiptSpecialMessageHandler@141(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,ReceiptSpecialWarehouse) > 0,Message);
+    END;
+
+    [MessageHandler]
+    PROCEDURE ProductionSpecialMessageHandler@139(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,ProductionSpecialWarehouse) > 0,Message);
+    END;
+
+    [MessageHandler]
+    PROCEDURE NothingToHandleMessageHandler@119(Message@1000 : Text);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,NothingToHandleMsg) > 0,'Wrong message.');
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerYes@165(Question@1000 : Text;VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Warehouse] [SCM]
+      Unsupported version tags:
+      DE: Unable to Execute
+      DK: Unable to Execute
+      ES: Unable to Execute
+
+      Tests for Warehouse Management unit tests:
+
+      Covers Test cases :
+      ------------------------------------------------------------------------
+       Test Function                                                   TFS ID
+      ------------------------------------------------------------------------
+      B41936_RenameBinOnSales                                          144835
+      B41936_RenameBinOnPurchase                                       144835
+      VSTF186007_WhseReceiptFixedBin                                   187949
+      VSTF186007_WhseReceiptLastUsedBin                                187949
+      VSTF186007_PostWhseReceiptFixedBin                               187949
+      VSTF186007_PostWhseReceiptLastUsedBin                            187949
+      VSTF186007_SalesOrderFixedBin                                    187949
+      VSTF186007_SalesOrderLastUsedBin                                 187949
+      VSTF186007_WhseShipmentFixedBin                                  187949
+      VSTF186007_WhseShipmentLastUsedBin                               187949
+      VSTF186007_PickFixedBin                                          187949
+      VSTF186007_PickLastUsedBin                                       187949
+      VSTF186007_PostWhseShipmentFixedBin                              187949
+      VSTF186007_PostWhseShipmentLastUsedBin                           187949
+      B38857_InventoryPutAwayWithSingleBinContent                      143039
+      B38857_InventoryPutAwayWithMultipleBinContent                    143039
+      B38857_PostWhseReceiptWithSingleBinContent                       143039
+      B38857_PostWhseReceiptMultipleBinContent                         143039
+      B45366_MultipleSalesOrderWithShippingAdvice                      144969
+      B45366_SalesOrderWithoutInventoryOnLocation                      144969
+      B45366_SalesOrderInventoryOnBlankLocation                        144969
+      B45366_SalesOrderInventoryOnLocation                             144969
+      B45366_SalesOrderPartialInventoryOnLocation                      144969
+      B40088_QuantityToHandleOnLocation                                143041
+      B40088_QuantityToHandleOnFullWMSLocation                         143041
+      B40088_WhseShipmentAutofillQtyToShipOnLocation                   143041
+      B40088_WhseShipmentAutofillQtyToShipOnFullWMSLocation            143041
+      B40088_QtyToShipOnWhseShipmentLineOnLocation                     143041
+      B40088_QtyToShipOnWhseShipmentLineOnFullWMSLocation              143041
+      B40088_WhseReceiptAutofillQtyToRecvOnLocation                    143041
+      B40088_WhseReceiptAutofillQtyToRecvOnFullWMSLocation             143041
+      B56408_WhseReceiptWithWhseClass                                  178549
+      B56408_PostWhseReceiptWithWhseClass                              178549
+      B56408_RegisterWhseActivityWithWhseClass                         178549
+      B56408_WhseShipmentWithWhseClass                                 178549
+      B56408_ProdOrderWithWhseClass                                    178549
+      B56408_BinCodeOnProdOrderComponentError                          178549
+      B56408_BinCodeOnProdOrderComponentWithWhseClass                  178549
+    }
+    END.
+  }
+}
+

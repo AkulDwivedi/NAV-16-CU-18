@@ -1,0 +1,796 @@
+OBJECT Codeunit 134924 ERM Cues
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1006 : Codeunit 130000;
+      LibraryTimeSheet@1002 : Codeunit 131904;
+      LibraryService@1003 : Codeunit 131902;
+      WrongValueErr@1001 : TextConst 'ENU=Wrong value of the field %1 in table %2.';
+      AverageDaysDelayedErr@1000 : TextConst 'ENU=Average Days Delayed is calculated incorrectly.';
+      LibraryUtility@1005 : Codeunit 131000;
+      LibraryRandom@1007 : Codeunit 130440;
+      ShipStatus@1008 : 'Full,Partial,Not Shipped';
+      WrongNumberOfDelayedOrdersErr@1009 : TextConst 'ENU=Wrong number of delayed Sales Orders.';
+      RedundantSalesOnListErr@1010 : TextConst 'ENU=List of delayed Sales Order contains redundant documents.';
+
+    [Test]
+    PROCEDURE SalesCueFlowFields@1();
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      // [FEATURE] [Sales Cue] [SB Owner Cue]
+      // [SCENARIO 347046] Cues in Sales Cue and SB Owner Cue display number of sales documents of corresponding type, status and ship state.
+      Initialize;
+
+      // [GIVEN] Several not shipped sales documents with different types and statuses, covering all activities shown in Sales Cue and SB Owner Cue.
+      // [GIVEN] Partially and fully shipped sales orders.
+      CreateResponsibilityCenterAndUserSetup;
+      WITH SalesHeader DO BEGIN
+        MockSalesHeader(SalesHeader,"Document Type"::Order,Status::Open);
+        MockSalesHeader(SalesHeader,"Document Type"::Quote,Status::Open);
+        MockSalesHeader(SalesHeader,"Document Type"::Order,Status::Released);
+        MockSalesHeader(SalesHeader,"Document Type"::"Credit Memo",Status::Open);
+        MockSalesHeader(SalesHeader,"Document Type"::"Return Order",Status::Open);
+        CreateShippedSalesOrder(SalesHeader,ShipStatus::Full);
+        CreateShippedSalesOrder(SalesHeader,ShipStatus::Partial);
+      END;
+
+      // [WHEN] Calculate flow fields in Sales Cue and SB Owner Cue.
+      // [THEN] All cues display correct number of corresponding sales documents.
+      VerifySalesCueFlowFields;
+      VerifySBOwnerCueNestedFlowField;
+    END;
+
+    [Test]
+    PROCEDURE PurchCueFlowFields@2();
+    VAR
+      PurchHeader@1002 : Record 38;
+    BEGIN
+      // [FEATURE] [Purchase Cue]
+      // [SCENARIO 347046] Cues in Purchase Cue display number of purchase documents of corresponding type, status and receive state.
+      Initialize;
+
+      // [GIVEN] Several purchase documents with different types and statutes, covering all activities shown in Purchase Cue.
+      CreateResponsibilityCenterAndUserSetup;
+      WITH PurchHeader DO BEGIN
+        CreatePurchDocument("Document Type"::Order,Status::Open,FALSE,FALSE,FALSE);
+        CreatePurchDocument("Document Type"::Order,Status::Released,FALSE,FALSE,FALSE);
+        CreatePurchDocument("Document Type"::Order,Status::Released,TRUE,FALSE,FALSE);
+        CreatePurchDocument("Document Type"::"Return Order",Status::Released,FALSE,FALSE,FALSE);
+        CreatePurchDocument("Document Type"::Order,Status::Released,FALSE,TRUE,FALSE);
+        CreatePurchDocument("Document Type"::Order,Status::Released,FALSE,TRUE,TRUE);
+      END;
+
+      // [WHEN] Calculate flow fields in Purchase Cue.
+      // [THEN] All cues display correct number of corresponding purchase documents.
+      VerifyPurchCueFlowFields;
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,SelectTemplateHandler)]
+    PROCEDURE ServCueFlowFields@3();
+    VAR
+      ServHeader@1001 : Record 5900;
+      ServContractHeader@1003 : Record 5965;
+    BEGIN
+      // [FEATURE] [Service Cue]
+      // [SCENARIO 347046] Cues in Service Cue display number of service documents and service contracts of corresponding type and status.
+      Initialize;
+
+      // [GIVEN] Several service documents and service contrancts with different types and statutes, covering all activities shown in Service Cue.
+      CreateResponsibilityCenterAndUserSetup;
+      WITH ServHeader DO BEGIN
+        CreateServDocument("Document Type"::Order,Status::"In Process");
+        CreateServDocument("Document Type"::Order,Status::Finished);
+        CreateServDocument("Document Type"::Order,Status::"On Hold");
+        CreateServDocument("Document Type"::Quote,Status::Pending);
+      END;
+      CreateServContract(ServContractHeader."Contract Type"::Quote);
+      CreateServContract(ServContractHeader."Contract Type"::Contract);
+
+      // [WHEN] Calculate flow fields in Service Cue.
+      // [THEN] All cues display correct number of corresponding service documents and service contracts.
+      VerifyServCueFlowFields;
+    END;
+
+    [Test]
+    PROCEDURE SalesCueInvoicedFlowFields@6();
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      // [FEATURE] [Sales Cue] [Partial Shipment]
+      // [SCENARIO 377251] Sales Cue "Partially Shipped" number corresponds to partially shipped orders, if one has been invoiced partially after shipment.
+      Initialize;
+
+      // [GIVEN] Create Sales Order, shipped partially, then invoice partially.
+      CreateResponsibilityCenterAndUserSetup;
+      CreateShippedSalesOrder(SalesHeader,ShipStatus::Partial);
+
+      // [WHEN] Calculate flow field "Partially Shipped" in Sales Cue.
+      // [THEN] Sales Cue "Partially Shipped" shows total number of 1.
+      VerifySalesCueFlowFieldsPartiallyShipped;
+    END;
+
+    [Test]
+    PROCEDURE UTSalesHeaderShippedNoLines@10();
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      // [FEATURE] [Sales Cue] [Partial Shipment] [UT]
+      // [SCENARIO 377251] Sales Order with no lines has Shipped = FALSE
+      Initialize;
+
+      WITH SalesHeader DO BEGIN
+        MockSalesHeader(SalesHeader,"Document Type"::Order,Status::Released);
+
+        CALCFIELDS(Shipped);
+
+        TESTFIELD(Shipped,FALSE);
+      END;
+    END;
+
+    [Test]
+    PROCEDURE UTSalesHeaderShippedOneLineNotShipped@11();
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      // [FEATURE] [Sales Cue] [Partial Shipment] [UT]
+      // [SCENARIO 377251] Sales Order with one line with "Qty. Shipped (Base)" = 0 has Shipped = FALSE
+      Initialize;
+
+      WITH SalesHeader DO BEGIN
+        CreateShippedSalesOrder(SalesHeader,ShipStatus::"Not Shipped");
+
+        CALCFIELDS(Shipped);
+
+        TESTFIELD(Shipped,FALSE);
+      END;
+    END;
+
+    [Test]
+    PROCEDURE UTSalesHeaderShippedOneLineShipped@12();
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      // [FEATURE] [Sales Cue] [Partial Shipment] [UT]
+      // [SCENARIO 377251] Sales Order with one line with "Qty. Shipped (Base)" > 0 has Shipped = TRUE
+      Initialize;
+
+      WITH SalesHeader DO BEGIN
+        CreateShippedSalesOrder(SalesHeader,ShipStatus::Full);
+
+        CALCFIELDS(Shipped);
+
+        TESTFIELD(Shipped,TRUE);
+      END;
+    END;
+
+    [Test]
+    PROCEDURE UTSalesHeaderShippedTwoLinesOneShipped@13();
+    VAR
+      SalesHeader@1001 : Record 36;
+      SalesLine@1000 : Record 37;
+      Qty@1002 : Integer;
+    BEGIN
+      // [FEATURE] [Sales Cue] [Partial Shipment] [UT]
+      // [SCENARIO 377251] Sales Order with two lines (line 1 partially shipped, line 2 not shipped) has Shipped = TRUE
+      Initialize;
+
+      Qty := LibraryRandom.RandInt(10);
+
+      WITH SalesHeader DO BEGIN
+        MockSalesHeader(SalesHeader,"Document Type"::Order,Status::Released);
+        MockSalesLine(SalesHeader,SalesLine,WORKDATE,Qty,0);
+        MockSalesLine(SalesHeader,SalesLine,WORKDATE,Qty,Qty);
+
+        CALCFIELDS(Shipped);
+
+        TESTFIELD(Shipped,TRUE);
+      END;
+    END;
+
+    [Test]
+    PROCEDURE UTSalesHeaderShippedTwoDocsOneShipped@14();
+    VAR
+      SalesHeader@1001 : ARRAY [2] OF Record 36;
+    BEGIN
+      // [FEATURE] [Sales Cue] [Partial Shipment] [UT]
+      // [SCENARIO 377251] Two Sales Orders - SO1 with not shipped line, SO2 with partially shipped line, SO1 Shipped = FALSE
+      Initialize;
+
+      CreateShippedSalesOrder(SalesHeader[1],ShipStatus::"Not Shipped");
+      CreateShippedSalesOrder(SalesHeader[2],ShipStatus::Partial);
+
+      SalesHeader[1].CALCFIELDS(Shipped);
+
+      SalesHeader[1].TESTFIELD(Shipped,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE NumberOfDelayedOrdersOnSalesCue@26();
+    VAR
+      SalesHeader@1000 : ARRAY [2] OF Record 36;
+      SalesCue@1003 : Record 9053;
+      Delays@1001 : ARRAY [2] OF Integer;
+      OldNumberOfDelayedOrders@1004 : Integer;
+      NewNumberOfDelayedOrders@1002 : Integer;
+    BEGIN
+      // [FEATURE] [Sales Cue]
+      // [SCENARIO 380585] Sales Order is considered delayed if there is an outstanding Sales Line with "Shipment Date" < WORKDATE.
+      Initialize;
+
+      // [GIVEN] Two Sales Orders "S1" and "S2".
+      // [GIVEN] "S1" has two partially shipped Sales Lines with "Shipment Date" < WORKDATE and one line with blank "Shipment Date".
+      // [GIVEN] "S2" has a fully shipped line and a line with "Shipment Date" in future.
+      CreateTwoSalesOrdersWithVariedDateAndShipLines(SalesHeader,Delays);
+
+      // [GIVEN] Number of delayed orders is counted and saved.
+      SalesCue.SETRANGE("Date Filter",0D,WORKDATE - 1);
+      OldNumberOfDelayedOrders := SalesCue.CountOrders(SalesCue.FIELDNO(Delayed));
+
+      // [GIVEN] Sales Order "S2" is deleted.
+      SalesHeader[2].DELETE;
+
+      // [WHEN] Count the number of delayed orders again.
+      NewNumberOfDelayedOrders := SalesCue.CountOrders(SalesCue.FIELDNO(Delayed));
+
+      // [THEN] The number of delayed sales orders does not change.
+      Assert.AreEqual(OldNumberOfDelayedOrders,NewNumberOfDelayedOrders,WrongNumberOfDelayedOrdersErr);
+
+      // [THEN] The number of delayed sales orders = 1.
+      Assert.AreEqual(1,NewNumberOfDelayedOrders,WrongNumberOfDelayedOrdersErr);
+    END;
+
+    [Test]
+    PROCEDURE ListOfDelayedOrdersOnSalesCue@27();
+    VAR
+      SalesHeader@1002 : ARRAY [2] OF Record 36;
+      SalesCue@1000 : Record 9053;
+      SalesOrderList@1001 : TestPage 9305;
+      Delays@1003 : ARRAY [2] OF Integer;
+    BEGIN
+      // [FEATURE] [Sales Cue]
+      // [SCENARIO 380585] List of delayed Sales Orders only contains documents that have lines with outstanding quantity and "Shipment Date" < WORKDATE.
+      Initialize;
+
+      // [GIVEN] Two Sales Orders "S1" and "S2".
+      // [GIVEN] "S1" has two partially shipped Sales Lines with "Shipment Date" < WORKDATE and one line with blank "Shipment Date".
+      // [GIVEN] "S2" has a fully shipped line and a line with "Shipment Date" in future.
+      CreateTwoSalesOrdersWithVariedDateAndShipLines(SalesHeader,Delays);
+
+      // [WHEN] Show the list of delayed orders.
+      SalesOrderList.TRAP;
+      SalesCue.SETRANGE("Date Filter",0D,WORKDATE - 1);
+      SalesCue.ShowOrders(SalesCue.FIELDNO(Delayed));
+
+      // [THEN] Sales Order "S1" is on the list.
+      SalesOrderList.FIRST;
+      SalesOrderList."No.".ASSERTEQUALS(SalesHeader[1]."No.");
+
+      // [THEN] No more Sales Orders are on the list.
+      Assert.IsFalse(SalesOrderList.NEXT,RedundantSalesOnListErr);
+    END;
+
+    [Test]
+    PROCEDURE AverageDaysDelayedOnSalesCue@25();
+    VAR
+      SalesHeader@1002 : ARRAY [2] OF Record 36;
+      SalesCue@1001 : Record 9053;
+      FirstDelays@1000 : ARRAY [2] OF Integer;
+      SecondDelays@1004 : ARRAY [2] OF Integer;
+      AverageDelayExpected@1005 : Decimal;
+      AverageDelayActual@1003 : Decimal;
+    BEGIN
+      // [FEATURE] [Sales Cue]
+      // [SCENARIO 380585] "Average Days Delayed" cue is calculated as an average delay among delayed Sales Orders. Delay of Sales Order is equal to a maximum delay among Sales Lines.
+      Initialize;
+
+      // [GIVEN] Two pairs of Sales Orders ("X1", "X2") and ("Y1", "Y2").
+      // [GIVEN] "X1" and "Y1" have two partially shipped Sales Lines with "Shipment Date" < WORKDATE
+      // [GIVEN] (I.e. "X1" has lines with 3 and 8 days of delay, "Y1" has lines with 10 and 20 days of delay).
+      // [GIVEN] "X2" and "Y2" have fully shipped lines and lines with "Shipment Date" in future.
+      CreateTwoSalesOrdersWithVariedDateAndShipLines(SalesHeader,FirstDelays);
+      CreateTwoSalesOrdersWithVariedDateAndShipLines(SalesHeader,SecondDelays);
+
+      // [WHEN] Calculate "Average Days Delayed".
+      SalesCue.SETRANGE("Date Filter",0D,WORKDATE - 1);
+      AverageDelayActual := SalesCue.CalculateAverageDaysDelayed;
+
+      // [THEN] "Average Days Delayed" is equal to average delay of "X1" and "Y1"
+      // [THEN] (In the example, average delay of "X1" = Max(3, 8) = 8, "X2" = Max(10, 20) = 20. "Average Days Delayed" = (8 + 20) / 2 = 14 days).
+      AverageDelayExpected := (Maximum(FirstDelays[1],FirstDelays[2]) + Maximum(SecondDelays[1],SecondDelays[2])) / 2;
+      Assert.AreEqual(AverageDelayExpected,AverageDelayActual,AverageDaysDelayedErr);
+    END;
+
+    [Test]
+    PROCEDURE AverageDaysDelayedOnSalesCueIsZeroForShippedOrder@24();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      SalesCue@1003 : Record 9053;
+      AverageDaysDelayed@1004 : Decimal;
+      Qty@1002 : Integer;
+    BEGIN
+      // [FEATURE] [Sales Cue]
+      // [SCENARIO 380585] "Average Days Delayed" cue reads 0 when a Sales Line is fully shipped.
+      Initialize;
+
+      // [GIVEN] Released Sales Order with fully shipped Sales Line and "Shipment Date" < WORKDATE.
+      Qty := LibraryRandom.RandInt(10);
+      MockSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,SalesHeader.Status::Released);
+      MockSalesLine(SalesHeader,SalesLine,WORKDATE - LibraryRandom.RandInt(10),Qty,Qty);
+
+      // [WHEN] Calculate "Average Days Delayed".
+      SalesCue.SETRANGE("Date Filter",0D,WORKDATE - 1);
+      AverageDaysDelayed := SalesCue.CalculateAverageDaysDelayed;
+
+      // [THEN] "Average Days Delayed" = 0.
+      Assert.AreEqual(0,AverageDaysDelayed,AverageDaysDelayedErr);
+    END;
+
+    [Test]
+    PROCEDURE AverageDaysDelayedOnSalesCueIsZeroForBlankShipmentDate@4();
+    VAR
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+      SalesCue@1002 : Record 9053;
+      AverageDaysDelayed@1001 : Decimal;
+    BEGIN
+      // [FEATURE] [Sales Cue]
+      // [SCENARIO 380585] "Average Days Delayed" cue reads 0 when a Sales Line has blank "Shipment Date".
+      Initialize;
+
+      // [GIVEN] Released Sales Order with partially shipped Sales Line and blank "Shipment Date".
+      MockSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,SalesHeader.Status::Released);
+      MockSalesLine(
+        SalesHeader,SalesLine,0D,LibraryRandom.RandIntInRange(11,20),LibraryRandom.RandInt(10));
+
+      // [WHEN] Calculate "Average Days Delayed".
+      SalesCue.SETRANGE("Date Filter",0D,WORKDATE - 1);
+      AverageDaysDelayed := SalesCue.CalculateAverageDaysDelayed;
+
+      // [THEN] "Average Days Delayed" = 0.
+      Assert.AreEqual(0,AverageDaysDelayed,AverageDaysDelayedErr);
+    END;
+
+    [Test]
+    PROCEDURE WarehouseWMSCueFlowFields@18();
+    BEGIN
+      // [FEATURE] [Warehouse WMS Cue] [UT]
+      // [SCENARIO 380096] "Posted Shipments - Today" cue in Warehouse WMS Cue shows number of Posted Whse. Shipments within period "Date Filter2".
+      Initialize;
+
+      // [GIVEN] Posted Whse. Shipment. Posting Date = WORKDATE.
+      MockPostedWhseShipmentHeader;
+
+      // [WHEN] Calculate flow field "Posted Shipments - Today" in Warehouse WMS Cue.
+      // [THEN] There is one Posted Whse. Shipment within the period "Date Filter2" and no Posted Whse. Shipments within the period "Date Filter".
+      VerifyWarehouseWMSCueFlowFields;
+    END;
+
+    [Test]
+    PROCEDURE PurchaseInvoicesDueTodayIsFoundOnSBOwnerCue@15();
+    VAR
+      SmallBusinessOwnerAct@1000 : TestPage 9073;
+    BEGIN
+      // [FEATURE] [SB Owner Cue]
+      // [SCENARIO 380096] "Purchase Invoices Due Today" on SB Owner Cue shows number of Vendor Ledger Entries with "Due Date" <= WORKDATE
+      Initialize;
+
+      // [GIVEN] Vendor Ledger Entry with Due Date <= WORKDATE.
+      MockVendorLedgerEntry(WORKDATE - LibraryRandom.RandIntInRange(0,10));
+
+      // [WHEN] Small Business Owner Act page is shown.
+      SmallBusinessOwnerAct.OPENVIEW;
+
+      // [THEN] "Purchase Invoices Due Today" = 1.
+      SmallBusinessOwnerAct."Purchase Invoices Due Today".ASSERTEQUALS(1);
+    END;
+
+    [Test]
+    PROCEDURE PurchaseInvoicesDueTodayIsNotFoundOnSBOwnerCue@17();
+    VAR
+      SmallBusinessOwnerAct@1000 : TestPage 9073;
+    BEGIN
+      // [FEATURE] [SB Owner Cue]
+      // [SCENARIO 380096] "Purchase Invoices Due Today" on SB Owner Cue shows 0 if no Vendor Ledger Entries are within the period 0D..WORKDATE.
+      Initialize;
+
+      // [GIVEN] Vendor Ledger Entry with Due Date > WORKDATE.
+      MockVendorLedgerEntry(WORKDATE + LibraryRandom.RandInt(10));
+
+      // [WHEN] Small Business Owner Act page is shown.
+      SmallBusinessOwnerAct.OPENVIEW;
+
+      // [THEN] "Purchase Invoices Due Today" = 0.
+      SmallBusinessOwnerAct."Purchase Invoices Due Today".ASSERTEQUALS(0);
+    END;
+
+    LOCAL PROCEDURE Initialize@16();
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      PurchaseHeader@1002 : Record 38;
+      PurchaseLine@1003 : Record 39;
+      ServiceHeader@1004 : Record 5900;
+      ServiceLine@1005 : Record 5902;
+      ServiceContractHeader@1006 : Record 5965;
+      ServiceContractLine@1007 : Record 5964;
+      PostedWhseShipmentHeader@1008 : Record 7322;
+      VendorLedgerEntry@1009 : Record 25;
+    BEGIN
+      SalesHeader.DELETEALL;
+      SalesLine.DELETEALL;
+      PurchaseHeader.DELETEALL;
+      PurchaseLine.DELETEALL;
+      ServiceHeader.DELETEALL;
+      ServiceLine.DELETEALL;
+      ServiceContractHeader.DELETEALL;
+      ServiceContractLine.DELETEALL;
+      PostedWhseShipmentHeader.DELETEALL;
+      VendorLedgerEntry.DELETEALL;
+    END;
+
+    LOCAL PROCEDURE CreateResponsibilityCenterAndUserSetup@8() : Code[10];
+    VAR
+      UserSetup@1001 : Record 91;
+      ResponsibilityCenter@1002 : Record 5714;
+    BEGIN
+      LibraryTimeSheet.CreateUserSetup(UserSetup,TRUE);
+      LibraryService.CreateResponsibilityCenter(ResponsibilityCenter);
+      UserSetup.VALIDATE("Sales Resp. Ctr. Filter",ResponsibilityCenter.Code);
+      UserSetup.VALIDATE("Purchase Resp. Ctr. Filter",ResponsibilityCenter.Code);
+      UserSetup.VALIDATE("Service Resp. Ctr. Filter",ResponsibilityCenter.Code);
+      UserSetup.MODIFY(TRUE);
+      EXIT(ResponsibilityCenter.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchDocument@81(DocType@1000 : Option;PassedStatus@1001 : Option;PassedReceive@1002 : Boolean;CompletelyReceived@1003 : Boolean;PassedInvoice@1004 : Boolean);
+    VAR
+      PurchHeader@1005 : Record 38;
+      PurchLine@1006 : Record 39;
+    BEGIN
+      WITH PurchHeader DO BEGIN
+        INIT;
+        "Document Type" := DocType;
+        INSERT(TRUE);
+        Status := PassedStatus;
+        Receive := PassedReceive;
+        Invoice := PassedInvoice;
+        MODIFY;
+      END;
+
+      WITH PurchLine DO BEGIN
+        "Document Type" := PurchHeader."Document Type";
+        "Document No." := PurchHeader."No.";
+        Type := Type::Item;
+        "Completely Received" := CompletelyReceived;
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServDocument@106(DocType@1000 : Option;PassedStatus@1002 : Option);
+    VAR
+      ServHeader@1001 : Record 5900;
+    BEGIN
+      WITH ServHeader DO BEGIN
+        INIT;
+        "Document Type" := DocType;
+        INSERT(TRUE);
+        Status := PassedStatus;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServContract@112(ContractType@1001 : Option);
+    VAR
+      ServContractHeader@1000 : Record 5965;
+      UserSetup@1002 : Record 91;
+    BEGIN
+      UserSetup.GET(USERID);
+      WITH ServContractHeader DO BEGIN
+        INIT;
+        "Contract Type" := ContractType;
+        "Responsibility Center" := UserSetup."Service Resp. Ctr. Filter";
+        INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateShippedSalesOrder@9(VAR SalesHeader@1005 : Record 36;OrderShipStatus@1002 : 'Full,Partial,Not Shipped');
+    VAR
+      SalesLine@1001 : Record 37;
+      ShipmentDate@1000 : Date;
+      Qty@1003 : Integer;
+      ShippedQty@1004 : Integer;
+    BEGIN
+      Qty := LibraryRandom.RandIntInRange(10,20);
+      ShipmentDate := CALCDATE('<-4D>',WORKDATE);
+
+      CASE OrderShipStatus OF
+        OrderShipStatus::Full:
+          ShippedQty := Qty;
+        OrderShipStatus::Partial:
+          ShippedQty := Qty - LibraryRandom.RandInt(5);
+        OrderShipStatus::"Not Shipped":
+          ShippedQty := 0;
+      END;
+
+      WITH SalesHeader DO BEGIN
+        MockSalesHeader(SalesHeader,"Document Type"::Order,Status::Open);
+        MockSalesLine(SalesHeader,SalesLine,ShipmentDate,Qty,ShippedQty);
+        "Shipment Date" := ShipmentDate;
+        Ship := OrderShipStatus <> OrderShipStatus::Full;
+        Status := Status::Released;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateTwoSalesOrdersWithVariedDateAndShipLines@32(VAR SalesHeader@1002 : ARRAY [2] OF Record 36;VAR Delays@1003 : ARRAY [2] OF Integer);
+    VAR
+      SalesLine@1001 : Record 37;
+      Qty@1000 : Integer;
+    BEGIN
+      Qty := LibraryRandom.RandIntInRange(10,20);
+      Delays[1] := LibraryRandom.RandInt(10);
+      Delays[2] := LibraryRandom.RandInt(10);
+
+      MockSalesHeader(SalesHeader[1],SalesHeader[1]."Document Type"::Order,SalesHeader[1].Status::Released);
+      MockSalesLine(SalesHeader[1],SalesLine,WORKDATE - Delays[1],Qty,Qty - LibraryRandom.RandInt(5));
+      MockSalesLine(SalesHeader[1],SalesLine,WORKDATE - Delays[2],Qty,Qty - LibraryRandom.RandInt(5));
+      MockSalesLine(SalesHeader[1],SalesLine,0D,Qty,Qty - LibraryRandom.RandInt(5));
+
+      MockSalesHeader(SalesHeader[2],SalesHeader[2]."Document Type"::Order,SalesHeader[2].Status::Released);
+      MockSalesLine(SalesHeader[2],SalesLine,WORKDATE - LibraryRandom.RandInt(10),Qty,Qty);
+      MockSalesLine(SalesHeader[2],SalesLine,WORKDATE + LibraryRandom.RandInt(10),Qty,Qty - LibraryRandom.RandInt(5));
+    END;
+
+    LOCAL PROCEDURE MockSalesHeader@21(VAR SalesHeader@1000 : Record 36;DocumentType@1002 : Option;NewStatus@1001 : Option);
+    BEGIN
+      WITH SalesHeader DO BEGIN
+        INIT;
+        "Document Type" := DocumentType;
+        "No." := '';
+        INSERT(TRUE);
+        Status := NewStatus;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE MockSalesLine@22(SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37;ShipmentDate@1004 : Date;Qty@1002 : Decimal;QtyShipped@1003 : Decimal);
+    BEGIN
+      WITH SalesLine DO BEGIN
+        SETRANGE("Document Type",SalesHeader."Document Type");
+        SETRANGE("Document No.",SalesHeader."No.");
+        IF FINDLAST THEN;
+
+        INIT;
+        "Document Type" := SalesHeader."Document Type";
+        "Document No." := SalesHeader."No.";
+        "Line No." += 10000;
+        "Sell-to Customer No." := SalesHeader."Sell-to Customer No.";
+        Type := Type::Item;
+        "Shipment Date" := ShipmentDate;
+
+        "Quantity (Base)" := Qty;
+        "Qty. Shipped (Base)" := QtyShipped;
+        "Outstanding Quantity" := "Quantity (Base)" - "Qty. Shipped (Base)";
+        "Completely Shipped" := ("Quantity (Base)" <> 0) AND ("Outstanding Quantity" = 0);
+        "Qty. Shipped Not Invoiced" := "Qty. Shipped (Base)" - "Qty. Invoiced (Base)";
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE MockPostedWhseShipmentHeader@19();
+    VAR
+      PostedWhseShipmentHeader@1000 : Record 7322;
+    BEGIN
+      WITH PostedWhseShipmentHeader DO BEGIN
+        INIT;
+        "No." := '';
+        INSERT;
+        "Posting Date" := WORKDATE;
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE MockVendorLedgerEntry@23(DueDate@1001 : Date);
+    VAR
+      VendorLedgerEntry@1000 : Record 25;
+    BEGIN
+      WITH VendorLedgerEntry DO BEGIN
+        "Entry No." := LibraryUtility.GetNewRecNo(VendorLedgerEntry,FIELDNO("Entry No."));
+        "Document Type" := "Document Type"::Invoice;
+        "Due Date" := DueDate;
+        Open := TRUE;
+        INSERT;
+      END;
+    END;
+
+    LOCAL PROCEDURE Maximum@5(a@1000 : Decimal;b@1001 : Decimal) : Decimal;
+    BEGIN
+      IF a >= b THEN
+        EXIT(a);
+      EXIT(b);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@121(Question@1000 : Text;VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE SelectTemplateHandler@125(VAR ServiceContractTemplateList@1000 : Page 6056;VAR Response@1001 : Action);
+    BEGIN
+      Response := ACTION::OK;
+    END;
+
+    LOCAL PROCEDURE VerifySalesCueFlowFields@39();
+    VAR
+      SalesCue@1001 : Record 9053;
+    BEGIN
+      WITH SalesCue DO BEGIN
+        SetRespCenterFilter;
+        CALCFIELDS(
+          "Sales Quotes - Open","Sales Orders - Open","Ready to Ship",
+          Delayed,"Sales Return Orders - Open","Sales Credit Memos - Open","Partially Shipped");
+        "Average Days Delayed" := CalculateAverageDaysDelayed;
+
+        Assert.AreEqual(
+          1,"Sales Quotes - Open",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Sales Quotes - Open"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Sales Orders - Open",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Sales Orders - Open"),TABLECAPTION));
+        Assert.AreEqual(
+          2,"Ready to Ship",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Ready to Ship"),TABLECAPTION));
+        Assert.AreEqual(
+          1,Delayed,STRSUBSTNO(WrongValueErr,FIELDCAPTION(Delayed),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Sales Return Orders - Open",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Sales Return Orders - Open"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Sales Credit Memos - Open",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Sales Credit Memos - Open"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Partially Shipped",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Partially Shipped"),TABLECAPTION));
+        Assert.AreEqual(
+          4,"Average Days Delayed",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Average Days Delayed"),TABLECAPTION));
+
+        // Verify replacement for nested FlowFields
+        Assert.AreEqual(
+          "Ready to Ship",CountOrders(FIELDNO("Ready to Ship")),STRSUBSTNO(WrongValueErr,'CountReadyToShip',TABLECAPTION));
+        Assert.AreEqual(
+          Delayed,CountOrders(FIELDNO(Delayed)),STRSUBSTNO(WrongValueErr,'CountDelayed',TABLECAPTION));
+        Assert.AreEqual(
+          "Partially Shipped",CountOrders(FIELDNO("Partially Shipped")),STRSUBSTNO(WrongValueErr,'CountPartiallyShipped',TABLECAPTION));
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifySalesCueFlowFieldsPartiallyShipped@28();
+    VAR
+      SalesCue@1001 : Record 9053;
+    BEGIN
+      WITH SalesCue DO BEGIN
+        SetRespCenterFilter;
+        CALCFIELDS("Partially Shipped");
+        Assert.AreEqual(
+          1,"Partially Shipped",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Partially Shipped"),TABLECAPTION));
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifySBOwnerCueNestedFlowField@30();
+    VAR
+      SBOwnerCue@1000 : Record 9060;
+    BEGIN
+      WITH SBOwnerCue DO BEGIN
+        CALCFIELDS("SOs Shipped Not Invoiced");
+        Assert.AreEqual(
+          1,"SOs Shipped Not Invoiced",STRSUBSTNO(WrongValueErr,FIELDCAPTION("SOs Shipped Not Invoiced"),TABLECAPTION));
+        // Verify replacement for nested FlowField
+        Assert.AreEqual(
+          "SOs Shipped Not Invoiced",CountSalesOrdersShippedNotInvoiced,
+          STRSUBSTNO(WrongValueErr,'CountSOShippedNotInvoiced',TABLECAPTION));
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyPurchCueFlowFields@77();
+    VAR
+      PurchCue@1001 : Record 9055;
+    BEGIN
+      WITH PurchCue DO BEGIN
+        SetRespCenterFilter;
+        CALCFIELDS(
+          "To Send or Confirm","Upcoming Orders","Outstanding Purchase Orders","Purchase Return Orders - All",
+          "Not Invoiced","Partially Invoiced");
+        Assert.AreEqual(
+          1,"To Send or Confirm",STRSUBSTNO(WrongValueErr,FIELDCAPTION("To Send or Confirm"),TABLECAPTION));
+        Assert.AreEqual(
+          4,"Upcoming Orders",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Upcoming Orders"),TABLECAPTION));
+        Assert.AreEqual(
+          2,"Outstanding Purchase Orders",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Outstanding Purchase Orders"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Purchase Return Orders - All",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Purchase Return Orders - All"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Not Invoiced",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Not Invoiced"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Partially Invoiced",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Partially Invoiced"),TABLECAPTION));
+
+        // Verify replacement for nested FlowFields
+        Assert.AreEqual(
+          "Outstanding Purchase Orders",CountOrders(FIELDNO("Outstanding Purchase Orders")),
+          STRSUBSTNO(WrongValueErr,'CountOutstandingOrders',TABLECAPTION));
+        Assert.AreEqual(
+          "Not Invoiced",CountOrders(FIELDNO("Not Invoiced")),STRSUBSTNO(WrongValueErr,'CountNotInvoicedOrders',TABLECAPTION));
+        Assert.AreEqual(
+          "Partially Invoiced",CountOrders(FIELDNO("Partially Invoiced")),
+          STRSUBSTNO(WrongValueErr,'CountPartiallyInvoicedOrders',TABLECAPTION));
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyServCueFlowFields@117();
+    VAR
+      ServCue@1000 : Record 9052;
+    BEGIN
+      WITH ServCue DO BEGIN
+        SetRespCenterFilter;
+        CALCFIELDS(
+          "Service Orders - in Process","Service Orders - Finished","Service Orders - Inactive",
+          "Open Service Quotes","Open Service Contract Quotes","Service Contracts to Expire",
+          "Service Orders - Today","Service Orders - to Follow-up");
+        Assert.AreEqual(
+          1,"Service Orders - in Process",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Service Orders - in Process"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Service Orders - Finished",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Service Orders - Finished"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Service Orders - Inactive",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Service Orders - Inactive"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Open Service Quotes",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Open Service Quotes"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Open Service Contract Quotes",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Open Service Contract Quotes"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Service Contracts to Expire",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Service Contracts to Expire"),TABLECAPTION));
+        Assert.AreEqual(
+          3,"Service Orders - Today",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Service Orders - Today"),TABLECAPTION));
+        Assert.AreEqual(
+          1,"Service Orders - to Follow-up",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Service Orders - to Follow-up"),TABLECAPTION));
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseWMSCueFlowFields@20();
+    VAR
+      WarehouseWMSCue@1000 : Record 9051;
+    BEGIN
+      WITH WarehouseWMSCue DO BEGIN
+        SETFILTER("Date Filter",'<%1',WORKDATE);
+        SETFILTER("Date Filter2",'>=%1',WORKDATE);
+        CALCFIELDS("Posted Shipments - Today");
+        Assert.AreEqual(
+          1,"Posted Shipments - Today",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Posted Shipments - Today"),TABLECAPTION));
+
+        SETFILTER("Date Filter",'>=%1',WORKDATE);
+        SETFILTER("Date Filter2",'<%1',WORKDATE);
+        CALCFIELDS("Posted Shipments - Today");
+        Assert.AreEqual(
+          0,"Posted Shipments - Today",STRSUBSTNO(WrongValueErr,FIELDCAPTION("Posted Shipments - Today"),TABLECAPTION));
+      END;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Cue]
+    }
+    END.
+  }
+}
+

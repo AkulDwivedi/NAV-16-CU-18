@@ -1,0 +1,3270 @@
+OBJECT Codeunit 137073 SCM Supply Planning -III
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ItemJournalTemplate@1010 : Record 82;
+      ItemJournalBatch@1009 : Record 233;
+      OutputItemJournalTemplate@1026 : Record 82;
+      OutputItemJournalBatch@1027 : Record 233;
+      LocationBlue@1022 : Record 14;
+      LocationYellow@1016 : Record 14;
+      LocationRed@1017 : Record 14;
+      LocationInTransit@1019 : Record 14;
+      LibraryPurchase@1012 : Codeunit 130512;
+      LibrarySales@1030 : Codeunit 130509;
+      LibraryInventory@1000 : Codeunit 132201;
+      LibraryItemTracking@1031 : Codeunit 130502;
+      LibrarySetupStorage@1032 : Codeunit 131009;
+      LibraryPlanning@1005 : Codeunit 132203;
+      LibraryUtility@1007 : Codeunit 131000;
+      LibraryManufacturing@1011 : Codeunit 132202;
+      LibraryWarehouse@1018 : Codeunit 132204;
+      LibraryService@1033 : Codeunit 131902;
+      LibraryVariableStorage@1003 : Codeunit 131004;
+      LibraryRandom@1001 : Codeunit 130440;
+      Assert@1002 : Codeunit 130000;
+      isInitialized@1006 : Boolean;
+      RequisitionLineMustNotExistErr@1008 : TextConst '@@@=%1 - Item No;ENU=Requisition Line must not exist for Item %1.';
+      ItemNotPlannedMsg@1004 : TextConst 'ENU=Not all items were planned. A total of 1 items were not planned.';
+      ItemFilterTxt@1013 : TextConst '@@@=Item No1 | Item No2;ENU=%1|%2';
+      SuggestedQtyErrMsg@1014 : TextConst 'ENU=Suggested Quantity on planning lines must not be less than Maximum Inventory.';
+      AvailabilityWarningConfirmationMsg@1015 : TextConst 'ENU=There are availability warnings on one or more lines.';
+      OrderDateChangeMsg@1020 : TextConst 'ENU=You have changed Order Date on the sales header';
+      SameDateErrMsg@1021 : TextConst 'ENU=The dates must not be same.';
+      ReservationEntryMustNotExistErr@1023 : TextConst '@@@=%1 - Item No;ENU=Reservation Entry must not exist for Item %1.';
+      DeleteProductionForecastConfirmMessageQst@1025 : TextConst '@@@=%1 - Forcast No;ENU=The Production Forecast %1 has entries. Do you want to delete it anyway?';
+      ItemTrackingMode@1024 : ' ,Assign Lot No.,Select Entries';
+      QuantityNotCorrectErr@1028 : TextConst 'ENU=Quantity is not correct in Planning Worksheet';
+      Direction@1029 : 'Outbound,Inbound';
+      MustSetLocationErr@1034 : TextConst 'ENU=You must set a location filter.';
+
+    [Test]
+    [HandlerFunctions(MessageHandler,PlanningErrorLogPageHandler)]
+    PROCEDURE CalcRegenPlanForBlockedLFLItem@144();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      // Setup.
+      Initialize;
+      PlanForBlockedItem(Item."Replenishment System"::Purchase);
+    END;
+
+    [Test]
+    PROCEDURE CalcNetChangePlanForBlockedLFLItem@14();
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      // Setup.
+      Initialize;
+      PlanForBlockedItem(Item."Replenishment System"::"Prod. Order");
+    END;
+
+    LOCAL PROCEDURE PlanForBlockedItem@24(ItemReplenishmentSystem@1000 : Option);
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      // Create Lot for Lot Item with required Replenishment system.
+      CreateLotForLotItem(Item,ItemReplenishmentSystem,LibraryRandom.RandInt(10));
+      UpdateItemBlocked(Item);
+
+      // Exercise: Calculate Regenerative Plan for Planning Worksheet without any demand.
+      IF ItemReplenishmentSystem = Item."Replenishment System"::Purchase THEN BEGIN
+        LibraryVariableStorage.Enqueue(ItemNotPlannedMsg);  // Required inside MessageHandler.
+        CalcRegenPlanForPlanWksh(Item."No.");
+      END ELSE
+        CalcNetChangePlanForPlanWksh(Item."No.");
+
+      // Verify: Verify that no Requisition line is created for Requisition Worksheet, when item is blocked.
+      VerifyEmptyRequisitionLine(Item."No.");
+    END;
+
+    [Test]
+    PROCEDURE CalcRegenPlanWithOutputJournalForFRQItem@160();
+    VAR
+      Item@1000 : Record 27;
+      ChildItem@1002 : Record 27;
+      ProductionOrder@1001 : Record 5405;
+      RequisitionLine@1004 : Record 246;
+      DocNoIsProdOrderNo@1003 : Boolean;
+    BEGIN
+      // Setup: Update Manufacturing Setup. Create Parent and Child Item hierarchy with Reorder policy - Fixed Reorder Qty. Create And Certify Production BOM.
+      Initialize;
+      DocNoIsProdOrderNo := UpdateManufacturingSetup(FALSE);
+      CreateFRQItemSetup(ChildItem,Item);
+
+      // Create and Refresh Released Production Order.
+      CreateAndRefreshReleasedProductionOrder(ProductionOrder,Item."No.",LibraryRandom.RandDec(10,2));  // Random Quantity not important.
+
+      // Create and Post Output Journal.
+      CreateAndPostOutputJournal(ProductionOrder."No.");
+
+      // Exercise: Calculate Regenerative Plan for parent item.
+      CalcRegenPlanForPlanWksh(Item."No.");
+
+      // Verify: Verify Planning Worksheet quantity and Ref. Order Type. New Production Order quantity is equal to Reorder Qty.
+      VerifyRequisitionLineQty(Item."No.",Item."Reorder Quantity",RequisitionLine."Ref. Order Type"::"Prod. Order");
+
+      // Teardown.
+      UpdateManufacturingSetup(DocNoIsProdOrderNo);
+    END;
+
+    [Test]
+    PROCEDURE PlanningWorksheetLinesNotAffectedWhenDeletePurchaseAndCalcRegenPlanTwice@48();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      // Setup.
+      Initialize;
+      RegenPlanNotAffectedByDeleteAndRecalculate(Item."Replenishment System"::Purchase);
+    END;
+
+    [Test]
+    PROCEDURE PlanningWorksheetLinesNotAffectedWhenDeleteProductionAndCalcRegenPlanTwice@49();
+    VAR
+      Item@1002 : Record 27;
+    BEGIN
+      // Setup.
+      Initialize;
+      RegenPlanNotAffectedByDeleteAndRecalculate(Item."Replenishment System"::"Prod. Order");
+    END;
+
+    LOCAL PROCEDURE RegenPlanNotAffectedByDeleteAndRecalculate@11(ItemReplenishmentSystem@1003 : Option);
+    VAR
+      Item@1002 : Record 27;
+      SalesHeader@1001 : Record 36;
+      TempRequisitionLine@1000 : TEMPORARY Record 246;
+    BEGIN
+      // Create Lot for Lot Item. Replenishment - Purchase  or Production Order with Sales Setup. Calculate Regenerative Plan and Carry Out Action message.
+      CreateLotForLotItem(Item,ItemReplenishmentSystem,LibraryRandom.RandInt(10));
+      CreateSalesOrder(SalesHeader,Item."No.",LibraryRandom.RandDec(10,2));
+      CalcRegenPlanAndCarryOutActionMessage(TempRequisitionLine,Item."No.");  // Temporary Requisition line record used later in verification.
+
+      // Delete newly created Purchase Order Or Production Order.
+      IF ItemReplenishmentSystem = Item."Replenishment System"::Purchase THEN
+        DeleteNewPurchaseOrder(Item."No.")
+      ELSE
+        DeleteNewProductionOrder(Item."No.");
+
+      // Exercise: Re-run Regenerative Plan to get the Planning lines again on Planning worksheet.
+      CalcRegenPlanForPlanWksh(Item."No.");
+
+      // Verify: Verify the Planning lines created next time are also the same.
+      VerifyNewRequisitionLine(TempRequisitionLine,Item."No.");
+    END;
+
+    [Test]
+    PROCEDURE CalcRegenPlanForItemWithNegativeRoundingPrecision@3();
+    BEGIN
+      // Setup.
+      Initialize;
+      CalcRegenPlanForItemWithRoundingPrecision(-LibraryRandom.RandInt(10));  // Negative Rounding Precision Value.
+    END;
+
+    [Test]
+    PROCEDURE CalcRegenPlanForItemWithZeroRoundingPrecision@46();
+    BEGIN
+      // Setup.
+      Initialize;
+      CalcRegenPlanForItemWithRoundingPrecision(0);  // Zero Rounding Precision Value.
+    END;
+
+    LOCAL PROCEDURE CalcRegenPlanForItemWithRoundingPrecision@47(RoundingPrecision@1003 : Decimal);
+    VAR
+      Item@1000 : Record 27;
+      RequisitionLine@1002 : Record 246;
+    BEGIN
+      // Create Lot For Lot Item with Rounding Precision.
+      CreateLotForLotItem(Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10));
+      Item."Rounding Precision" := RoundingPrecision;  // Direct Assignment for Rounding Precision, Avoid validate Trigger because On Validate Trigger Rounding Precision must be Greater than Zero.
+      Item.MODIFY(TRUE);
+
+      // Exercise: Calculate Regenerative Plan.
+      CalcRegenPlanForPlanWksh(Item."No.");
+
+      // Verify: Verify the Planning lines created without error.
+      SelectRequisitionLine(RequisitionLine,Item."No.");
+      VerifyRequisitionLine(RequisitionLine,Item."Safety Stock Quantity",0,RequisitionLine."Ref. Order Type"::Purchase);
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshPositiveAdjFRQItem@26();
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      // Setup. Post Positive Adjustment for FRQ item and Calculate Plan for Requisition Worksheet. Verify Requisition Worksheet Lines.
+      Initialize;
+      CalculatePlanReqWorksheetForAdjustment(ItemJournalLine."Entry Type"::"Positive Adjmt.");
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshNegativeAdjFRQItem@29();
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      // Setup. Post Negative Adjustment for FRQ item and Calculate Plan for Requisition Worksheet. Verify Requisition Worksheet Lines.
+      Initialize;
+      CalculatePlanReqWorksheetForAdjustment(ItemJournalLine."Entry Type"::"Negative Adjmt.");
+    END;
+
+    LOCAL PROCEDURE CalculatePlanReqWorksheetForAdjustment@6(EntryType@1000 : Option);
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalLine@1002 : Record 83;
+      RequisitionLine@1004 : Record 246;
+      AdjustmentQuantity@1001 : Decimal;
+    BEGIN
+      // Create Fixed Reorder Quantity Item with planning parameters - Reorder Qty, Reorder Point and Safety Stock.
+      CreateFRQItem(
+        Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10) + 100,LibraryRandom.RandInt(10) + 10,
+        LibraryRandom.RandInt(10));  // Quantity proportion required for test.
+
+      // Post Positive or Negative Adjustment as required.
+      AdjustmentQuantity := CreateAndPostItemJournalLine(Item."No.",EntryType);
+
+      // Exercise: Calculate Plan from Requisition Worksheet.
+      CalculatePlanForRequisitionWorksheet(Item);
+
+      // Verify: Verify Requisition Worksheet lines depending on the adjustment type.
+      IF EntryType = ItemJournalLine."Entry Type"::"Positive Adjmt." THEN BEGIN
+        SelectRequisitionLine(RequisitionLine,Item."No.");
+        VerifyRequisitionLine(RequisitionLine,Item."Reorder Quantity",0,RequisitionLine."Ref. Order Type"::Purchase);
+      END ELSE BEGIN
+        VerifyRequisitionLineWithDueDate(Item."No.",AdjustmentQuantity,SelectDateWithSafetyLeadTime(WORKDATE,-1));
+        VerifyRequisitionLineWithDueDate(Item."No.",Item."Safety Stock Quantity",WORKDATE);
+        VerifyRequisitionLineWithDueDate(Item."No.",Item."Reorder Quantity",SelectDateWithSafetyLeadTime(WORKDATE,1));
+      END;
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshForSalesFRQItem@30();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1001 : Record 36;
+      SalesQty@1002 : Decimal;
+    BEGIN
+      // Setup: Create Fixed Reorder Quantity Item with planning parameters - Reorder Qty, Reorder Point and Safety Stock.
+      Initialize;
+      SalesQty := LibraryRandom.RandDec(10,2);
+      CreateFRQItem(Item,Item."Replenishment System"::Purchase,SalesQty + 100,SalesQty + 10,SalesQty);  // Quantity proportion required for test.
+
+      // Create Sales Order with required quantity.
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+
+      // Exercise: Calculate Plan from Requisition Worksheet.
+      CalculatePlanForRequisitionWorksheet(Item);
+
+      // Verify: Verify Requisition Worksheet lines.
+      VerifyRequisitionLineWithDueDate(Item."No.",Item."Reorder Quantity",SelectDateWithSafetyLeadTime(WORKDATE,1));
+      VerifyRequisitionLineWithDueDate(Item."No.",SalesQty + Item."Safety Stock Quantity",WORKDATE);
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshForPurchaseFRQItem@33();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseQty@1002 : Decimal;
+    BEGIN
+      // Setup: Create Fixed Reorder Quantity Item with planning parameters - Reorder Qty, Reorder Point and Safety Stock.
+      Initialize;
+      PurchaseQty := LibraryRandom.RandDec(10,2);
+      CreateFRQItem(Item,Item."Replenishment System"::Purchase,PurchaseQty + 100,PurchaseQty + 10,PurchaseQty);  // Quantity proportion required for test.
+
+      // Create Purchase Order with required quantity.
+      CreatePurchaseOrder(Item."No.",PurchaseQty);
+
+      // Exercise: Calculate Plan from Requisition Worksheet.
+      CalculatePlanForRequisitionWorksheet(Item);
+
+      // Verify: Verify Requisition Worksheet lines.
+      VerifyRequisitionLineWithDueDate(Item."No.",Item."Safety Stock Quantity",WORKDATE);
+      VerifyRequisitionLineWithDueDate(Item."No.",Item."Reorder Quantity",SelectDateWithSafetyLeadTime(WORKDATE,1));
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshPositiveAdjMQItem@52();
+    VAR
+      Item@1000 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      // Setup: Create Maximum Quantity Item with planning parameters - Max. Inventory. Post Positive Adjustment for Item.
+      Initialize;
+      CreateMQItem(Item,LibraryRandom.RandDec(5,2) + 100,0,0);  // Reorder Point and Order Multiple not required.
+      CreateAndPostItemJournalLine(Item."No.",ItemJournalLine."Entry Type"::"Positive Adjmt.");
+
+      // Exercise: Calculate Plan from Requisition Worksheet.
+      CalculatePlanForRequisitionWorksheet(Item);
+
+      // Verify: Verify Requisition Worksheet line does not exist.
+      VerifyEmptyRequisitionLine(Item."No.");
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshForSalesMQItem@53();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1001 : Record 36;
+      SalesQty@1002 : Decimal;
+    BEGIN
+      // Setup: Create Maximum Quantity Item with planning parameters - Max. Inventory. Create Sales Order.
+      Initialize;
+      CreateMQItem(Item,LibraryRandom.RandDec(5,2) + 100,0,0);  // Reorder Point and Order Multiple not required.
+      SalesQty := LibraryRandom.RandDec(10,2);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+
+      // Exercise: Calculate Plan from Requisition Worksheet.
+      CalculatePlanForRequisitionWorksheet(Item);
+
+      // Verify: Verify Requisition Worksheet lines.
+      VerifyRequisitionLineWithDueDate(Item."No.",SalesQty,WORKDATE);
+      VerifyRequisitionLineWithDueDate(Item."No.",Item."Maximum Inventory",SelectDateWithSafetyLeadTime(WORKDATE,1));
+    END;
+
+    [Test]
+    PROCEDURE SpecialSalesOrderOnReqWksheetFRQItem@55();
+    VAR
+      Item@1000 : Record 27;
+      RequisitionLine@1003 : Record 246;
+      SalesQty@1001 : Decimal;
+    BEGIN
+      // Setup: Create Fixed Reorder Quantity Item with planning parameters - Reorder Qty, Reorder Point and Safety Stock.
+      Initialize;
+      SalesQty := LibraryRandom.RandDec(10,2);
+      CreateFRQItem(Item,Item."Replenishment System"::Purchase,SalesQty + 100,SalesQty + 10,SalesQty);  // Quantity proportion required for test.
+
+      // Create and Release Sales Order with Purchasing Code as Special Order.
+      CreateAndReleaseSalesOrderAsSpecialOrder(Item."No.",SalesQty);
+
+      // Exercise: Get Sales Order as Special Order from Requisition Worksheet.
+      CreateRequisitionLineFromSpecialOrder(Item."No.");
+
+      // Verify: Verify Requisition Worksheet line values.
+      SelectRequisitionLine(RequisitionLine,Item."No.");
+      VerifyRequisitionLine(RequisitionLine,SalesQty,0,RequisitionLine."Ref. Order Type"::Purchase);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculatePlanPlanWkshRequestPageHandler)]
+    PROCEDURE CalcPlanPlanWkshWithDerivedDemandsUsingForecastOrderItem@7();
+    VAR
+      ChildItem@1000 : Record 27;
+      Item@1001 : Record 27;
+      ProductionForecastName@1002 : Record 99000851;
+      OldCombinedMPSMRPCalculation@1005 : Boolean;
+      ForecastQty@1006 : Integer;
+      ProdBOMQtyPer@1007 : Integer;
+      NewPurchOrderDate@1008 : Date;
+    BEGIN
+      // Setup: Update Manufacturing Setup. Create Order Items setup.
+      Initialize;
+      OldCombinedMPSMRPCalculation := UpdateManufacturingSetupCombinedMPSAndMRP(TRUE);  // Combined MPS,MRP Calculation of Manufacturing Setup - TRUE.
+      ProdBOMQtyPer := CreateOrderItemSetup(ChildItem,Item);
+
+      // Create two Production forecast entries with different dates for same parent item.
+      ForecastQty := CreateProductionForecastSetup(Item."No.",TRUE,ProductionForecastName); // True for multiple entries.
+
+      // Exercise: Calculate regenerative Plan from Planning Worksheet using page. Page Handler - CalculatePlanPlanWkshRequestPageHandler.
+      CalcRegenPlanForPlanWkshPage(Item."No.",ChildItem."No.");
+
+      // Verify: Verify Requisition Worksheet lines generated separately - for different forecasts and derived component demands.
+      VerifyRequisitionLineWithDueDate(Item."No.",ForecastQty,WORKDATE);
+      NewPurchOrderDate := SelectDateWithSafetyLeadTime(WORKDATE,1);
+      VerifyRequisitionLineWithDueDate(Item."No.",ForecastQty,CALCDATE('<1D>',NewPurchOrderDate));
+      VerifyRequisitionLineWithDueDate(ChildItem."No.",ProdBOMQtyPer * ForecastQty,SelectDateWithSafetyLeadTime(WORKDATE,-1));
+      VerifyRequisitionLineWithDueDate(ChildItem."No.",ProdBOMQtyPer * ForecastQty,SelectDateWithSafetyLeadTime(WORKDATE,1));
+
+      // Teardown.
+      UpdateManufacturingSetup(OldCombinedMPSMRPCalculation);
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanPlanWkshWithDerivedDemandsUsingSalesOrderItem@12();
+    VAR
+      ChildItem@1001 : Record 27;
+      Item@1000 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesHeader2@1004 : Record 36;
+      SalesQty@1002 : Decimal;
+      EndDate@1005 : Date;
+      OldCombinedMPSMRPCalculation@1006 : Boolean;
+      ProdBOMQtyPer@1007 : Integer;
+      NewPurchOrderDate@1008 : Date;
+    BEGIN
+      // Setup: Update Manufacturing Setup. Create Order Items setup.
+      Initialize;
+      OldCombinedMPSMRPCalculation := UpdateManufacturingSetupCombinedMPSAndMRP(TRUE);  // Combined MPS,MRP Calculation of Manufacturing Setup - TRUE.
+      ProdBOMQtyPer := CreateOrderItemSetup(ChildItem,Item);
+
+      // Create two Sales Order with different shipment dates for same parent item.
+      SalesQty := LibraryRandom.RandInt(10);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+      CreateSalesOrder(SalesHeader2,Item."No.",SalesQty);
+      UpdateShipmentDateOnSalesLine(SalesHeader2."No.",GetRequiredDate(1,1,WORKDATE));  // Second Sales Order Shipment date close to WORKDATE.
+
+      // Exercise: Calculate regenerative Plan from Planning Worksheet for both parent and child items.
+      Item.SETFILTER("No.",ItemFilterTxt,Item."No.",ChildItem."No.");  // Filter Required for two Items.
+      EndDate := GetRequiredDate(10,30,WORKDATE);  // End Date relative to Workdate.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,EndDate);
+
+      // Verify: Verify Requisition Worksheet lines generated separately - for different Sales orders and derived component demands.
+      VerifyRequisitionLineWithDueDate(Item."No.",SalesQty,WORKDATE);
+      NewPurchOrderDate := SelectDateWithSafetyLeadTime(WORKDATE,1);
+      VerifyRequisitionLineWithDueDate(Item."No.",SalesQty,CALCDATE('<1D>',NewPurchOrderDate));
+      VerifyRequisitionLineWithDueDate(ChildItem."No.",ProdBOMQtyPer * SalesQty,SelectDateWithSafetyLeadTime(WORKDATE,-1));
+      VerifyRequisitionLineWithDueDate(ChildItem."No.",ProdBOMQtyPer * SalesQty,SelectDateWithSafetyLeadTime(WORKDATE,1));
+
+      // Teardown.
+      UpdateManufacturingSetup(OldCombinedMPSMRPCalculation);
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanPlanWkshWithMultiLineSalesExceedMaxInventoryMQItem@15();
+    VAR
+      Item@1002 : Record 27;
+      SalesHeader@1001 : Record 36;
+      SalesLine@1003 : Record 37;
+      SalesQty@1000 : Decimal;
+      NewShipmentDate@1004 : Date;
+      NewPurchOrderDate@1005 : Date;
+    BEGIN
+      // Setup: Create Maximum Quantity Item with planning parameters - Max. Inventory.
+      Initialize;
+      CreateMQItem(Item,LibraryRandom.RandDec(5,2) + 100,0,0);  // Reorder Point and Order Multiple not required.
+
+      // Create Sales Order with two lines. Create second Sales Line with same Sales Qty but with Different Shipment date.
+      SalesQty := LibraryRandom.RandDec(10,2) + 100;
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+      NewShipmentDate := GetRequiredDate(1,1,WORKDATE);  // Shipment Date relative to Work Date.
+      LibrarySales.CreateSalesLineWithShipmentDate(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",NewShipmentDate,SalesQty);
+
+      // Exercise: Calculate Regenerative Plan for the item.
+      CalcRegenPlanForPlanWksh(Item."No.");
+
+      // Verify: Verify Requisition Worksheet lines suggests required planning lines which respect Maximum inventory value with respect to dates.
+      VerifyRequisitionLineWithDueDate(Item."No.",Item."Maximum Inventory",SelectDateWithSafetyLeadTime(WORKDATE,1));
+      VerifyRequisitionLineWithDueDate(Item."No.",SalesQty,WORKDATE);
+      NewPurchOrderDate := SelectDateWithSafetyLeadTime(WORKDATE,1);
+      VerifyRequisitionLineWithDueDate(Item."No.",SalesQty - Item."Maximum Inventory",CALCDATE('<1D>',NewPurchOrderDate));
+      NewPurchOrderDate := SelectDateWithSafetyLeadTime(NewPurchOrderDate,1);
+      VerifyRequisitionLineWithDueDate(
+        Item."No.",Item."Maximum Inventory",CALCDATE('<1D>',SelectDateWithSafetyLeadTime(NewPurchOrderDate,1)));
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshForPurchaseAndOrderMultipleMQItem@34();
+    VAR
+      RequisitionLine@1001 : Record 246;
+      Item@1002 : Record 27;
+      PurchaseQty@1000 : Decimal;
+    BEGIN
+      // Setup: Create Maximum Quantity Item with planning parameters.
+      Initialize;
+      PurchaseQty := LibraryRandom.RandDec(5,2);
+      CreateMQItem(Item,PurchaseQty + 100,PurchaseQty,PurchaseQty + 10);  // Maximum Inventory, Reorder Point and Order Multiple.
+
+      // Create Purchase Order with required quantity.
+      CreatePurchaseOrder(Item."No.",PurchaseQty);
+
+      // Exercise: Calculate Plan from Requisition Worksheet.
+      CalculatePlanForRequisitionWorksheet(Item);
+
+      // Verify: Verify Requisition Worksheet lines - Due to Order Multiple not an exact multiple of Maximum Inventory, the suggested qty exceeds Maximum Inventory.
+      SelectRequisitionLineForActionMessage(RequisitionLine,Item."No.",RequisitionLine."Action Message"::New);
+      Assert.IsTrue(RequisitionLine.Quantity > Item."Maximum Inventory",SuggestedQtyErrMsg);
+      SelectRequisitionLineForActionMessage(RequisitionLine,Item."No.",RequisitionLine."Action Message"::Cancel);  // Verify the Purchase Order has been cancelled.
+      VerifyRequisitionLine(RequisitionLine,0,PurchaseQty,RequisitionLine."Ref. Order Type"::Purchase);  // Suggested Quantity - Zero.
+    END;
+
+    [Test]
+    [HandlerFunctions(AssignSerialTrackingAndCheckTrackingQtyPageHandler,QuantityToCreatePageHandler,ConfirmHandlerTRUE)]
+    PROCEDURE CalcPlanPlanWkshForSalesWithSerialTrackingLFLItem@19();
+    VAR
+      Item@1000 : Record 27;
+      ItemTrackingCodeSNSpecific@1001 : Record 6502;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1004 : Record 37;
+    BEGIN
+      // Setup: Create Lot for Lot Item. Update SN specific Tracking and Serial No on Item.
+      Initialize;
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCodeSNSpecific,TRUE,FALSE);  // SN Specific Tracking - TRUE.
+      CreateLotForLotItem(Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10));
+      UpdateItemSerialNoTracking(Item,ItemTrackingCodeSNSpecific.Code);
+
+      // Create Sales Order. Assign SN specific Tracking to Sales Line. Page Handler - AssignSerialTrackingAndCheckTrackingQtyPageHandler.
+      CreateSalesOrder(SalesHeader,Item."No.",1);  // Qty value required for single Serial Tracking line.
+      AssignTrackingOnSalesLine(SalesLine,SalesHeader."No.");
+
+      // Exercise: Calculate Regenerative Plan from Planning Worksheet.
+      CalcRegenPlanForPlanWksh(Item."No.");
+
+      // Verify: Verify Quantity and Tracking assigned on Requisition Line. Verified in AssignSerialTrackingAndCheckTrackingQtyPageHandler.
+      VerifyTrackingOnRequisitionLine(Item."No.",SalesLine.Quantity);
+      VerifyRequisitionLineWithDueDate(Item."No.",SalesLine.Quantity,SalesLine."Shipment Date");
+    END;
+
+    [Test]
+    [HandlerFunctions(AssignLotTrackingAndCheckTrackingQtyPageHandler,CalculatePlanPlanWkshRequestPageHandler,ConfirmHandlerTRUE)]
+    PROCEDURE CalcPlanPlanWkshForForecastAndSalesWithLotTrackingOrderItem@140();
+    VAR
+      Item@1000 : Record 27;
+      ItemTrackingCodeLotSpecific@1001 : Record 6502;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1004 : Record 37;
+      ProductionForecastName@1002 : Record 99000851;
+      ShipmentDate@1009 : Date;
+      ForecastQty@1005 : Decimal;
+    BEGIN
+      // Setup: Create Order Item. Update Lot specific Tracking and Lot No on Item.
+      Initialize;
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCodeLotSpecific,FALSE,TRUE);  // SN Specific Tracking - FALSE.
+      CreateItem(Item,Item."Reordering Policy"::Order,Item."Replenishment System"::Purchase);
+      UpdateItemLotNoTracking(Item,ItemTrackingCodeLotSpecific.Code);
+
+      // Create Production Forecast.
+      ForecastQty := CreateProductionForecastSetup(Item."No.",FALSE,ProductionForecastName); // Boolean - FALSE for single Forecast Entry.
+
+      // Create Sales Order. Update Shipment date on Sales Line. Assign Lot Specific Tracking on Sales Line.Page Handler - AssignLotTrackingAndCheckTrackingQtyPageHandler.
+      CreateSalesOrder(SalesHeader,Item."No.",LibraryRandom.RandDec(10,2));
+      ShipmentDate := GetRequiredDate(10,30,WORKDATE);
+      UpdateShipmentDateOnSalesLine(SalesHeader."No.",ShipmentDate);
+      AssignTrackingOnSalesLine(SalesLine,SalesHeader."No.");
+
+      // Exercise: Calculate Regenerative Plan from Planning Worksheet. Using Page Handler - CalculatePlanPlanWkshRequestPageHandler.
+      CalcRegenPlanForPlanWkshPage(Item."No.",Item."No.");
+
+      // Verify: Verify Quantity and Tracking assigned on Requisition Line. Verified in AssignLotTrackingAndCheckTrackingQtyPageHandler.
+      VerifyTrackingOnRequisitionLine(Item."No.",SalesLine.Quantity);
+      VerifyRequisitionLineWithDueDate(Item."No.",SalesLine.Quantity,SalesLine."Shipment Date");
+      VerifyRequisitionLineWithDueDate(Item."No.",ForecastQty - SalesLine.Quantity,WORKDATE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssignLotTrackingAndCheckTrackingQtyPageHandler,CalculatePlanPlanWkshRequestPageHandler,ConfirmHandlerTRUE)]
+    PROCEDURE CalcPlanPlanWkshForForecastAndSalesWithLotTrackingMQItem@141();
+    VAR
+      Item@1000 : Record 27;
+      ItemTrackingCodeLotSpecific@1001 : Record 6502;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1004 : Record 37;
+      ProductionForecastName@1002 : Record 99000851;
+      ShipmentDate@1006 : Date;
+      ForecastQty@1011 : Decimal;
+    BEGIN
+      // Setup: Create Maximum Quantity Item. Update Lot specific Tracking and Lot No on Item.
+      Initialize;
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCodeLotSpecific,FALSE,TRUE);  // SN Specific Tracking - FALSE.
+      CreateMQItem(Item,LibraryRandom.RandDec(50,2) + 50,0,0);  // Large Random quantity for Maximum Inventory.
+      UpdateItemLotNoTracking(Item,ItemTrackingCodeLotSpecific.Code);
+
+      // Create Production Forecast.
+      ForecastQty := CreateProductionForecastSetup(Item."No.",FALSE,ProductionForecastName); // Boolean - FALSE for single Forecast Entry.
+
+      // Create Sales Order. Update Shipment date on Sales Line. Assign Lot Specific Tracking on Sales Line.Page Handler -  AssignLotTrackingAndCheckTrackingQtyPageHandler.
+      CreateSalesOrder(SalesHeader,Item."No.",LibraryRandom.RandDec(10,2));
+      ShipmentDate := GetRequiredDate(10,30,WORKDATE);
+      UpdateShipmentDateOnSalesLine(SalesHeader."No.",ShipmentDate);
+      AssignTrackingOnSalesLine(SalesLine,SalesHeader."No.");
+
+      // Exercise: Calculate Regenerative Plan from Planning Worksheet. Using Page Handler - CalculatePlanPlanWkshRequestPageHandler.
+      CalcRegenPlanForPlanWkshPage(Item."No.",Item."No.");
+
+      // Verify: Verify Quantity and Tracking assigned on Requisition Line. Verified in AssignLotTrackingAndCheckTrackingQtyPageHandler.
+      VerifyTrackingOnRequisitionLine(Item."No.",0);
+      VerifyRequisitionLineWithDueDate(Item."No.",ForecastQty,WORKDATE);
+      VerifyRequisitionLineWithDueDate(Item."No.",Item."Maximum Inventory",SelectDateWithSafetyLeadTime(WORKDATE,1));
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanPlanWkshTransferForFRQItem@124();
+    VAR
+      Item@1012 : Record 27;
+      TransferLine@1005 : Record 5741;
+      RequisitionLine@1003 : Record 246;
+      TransferQty@1002 : Integer;
+      EndDate@1000 : Date;
+    BEGIN
+      // Setup: Create FRQ Item. Create Transfer Order.
+      Initialize;
+      TransferQty := LibraryRandom.RandInt(10) + 10;  // Random Quantity.
+      CreateFRQItem(Item,Item."Replenishment System"::Purchase,TransferQty + 100,TransferQty + 10,TransferQty);  // Quantity proportion required for test.
+
+      // Create Transfer Order.
+      CreateTransferOrderWithTransferRoute(TransferLine,Item."No.",LocationYellow.Code,LocationRed.Code,TransferQty);
+
+      // Exercise: Calculate regenerative Plan for Planning Worksheet.
+      EndDate := GetRequiredDate(10,20,WORKDATE);  // End Date relative to Workdate.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,EndDate);
+
+      // Verify: Verify lines in Planning Worksheet.
+      WITH RequisitionLine DO BEGIN
+        VerifyRequisitionLineWithLocationActionAndRefOrderType(
+          Item."No.","Ref. Order Type"::Transfer,LocationRed.Code,"Action Message"::Cancel,0,TransferQty,WORKDATE);
+        VerifyRequisitionLineWithLocationActionAndRefOrderType(
+          Item."No.","Ref. Order Type"::Purchase,'',"Action Message"::New,Item."Reorder Quantity",0,
+          SelectDateWithSafetyLeadTime(WORKDATE,1));
+        VerifyRequisitionLineWithLocationActionAndRefOrderType(
+          Item."No.","Ref. Order Type"::Purchase,'',"Action Message"::New,Item."Safety Stock Quantity",0,WORKDATE);
+      END;
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanPlanWkshTransferForMQItem@61();
+    VAR
+      Item@1012 : Record 27;
+      TransferLine@1005 : Record 5741;
+      RequisitionLine@1001 : Record 246;
+      TransferQty@1002 : Integer;
+      EndDate@1000 : Date;
+    BEGIN
+      // Setup: Create Maximum Quantity Item.
+      Initialize;
+      CreateMQItem(Item,LibraryRandom.RandDec(5,2) + 100,0,0);  // Reorder Point and Order Multiple not required.
+      TransferQty := LibraryRandom.RandInt(10) + 10;  // Random Quantity.
+
+      // Create Transfer Order.
+      CreateTransferOrderWithTransferRoute(TransferLine,Item."No.",LocationYellow.Code,LocationRed.Code,TransferQty);
+
+      // Exercise: Calculate regenerative Plan for Planning Worksheet.
+      EndDate := GetRequiredDate(10,20,WORKDATE);  // End Date relative to Workdate.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,EndDate);
+
+      // Verify: Verify lines in Planning Worksheet.
+      WITH RequisitionLine DO BEGIN
+        VerifyRequisitionLineWithLocationActionAndRefOrderType(
+          Item."No.","Ref. Order Type"::Transfer,LocationRed.Code,"Action Message"::Cancel,0,TransferQty,WORKDATE);
+        VerifyRequisitionLineWithLocationActionAndRefOrderType(
+          Item."No.","Ref. Order Type"::Purchase,'',"Action Message"::New,Item."Maximum Inventory",0,
+          SelectDateWithSafetyLeadTime(WORKDATE,1));
+      END;
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanPlanWkshTransferForItemWithNoReorderingPolicy@58();
+    VAR
+      Item@1012 : Record 27;
+      TransferLine@1005 : Record 5741;
+      EndDate@1000 : Date;
+    BEGIN
+      // Setup: Create Item without Reordering policy.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+
+      // Create Transfer Order for required locations.
+      CreateTransferOrderWithTransferRoute(
+        TransferLine,Item."No.",LocationYellow.Code,LocationRed.Code,LibraryRandom.RandInt(10));
+
+      // Exercise: Calculate regenerative Plan for Planning Worksheet.
+      EndDate := GetRequiredDate(10,20,WORKDATE);  // End Date relative to Workdate.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,EndDate);
+
+      // Verify: Verify no requisition Line created in Planning Worksheet after running regenerative plan.
+      VerifyEmptyRequisitionLine(Item."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CalcPlanPlanWkshForSalesWithNewOrderDateLFLItem@69();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1001 : Record 36;
+      RequisitionLine@1003 : Record 246;
+      EndDate@1002 : Date;
+    BEGIN
+      // Setup: Create Lot for Lot Item with Replenishment - Purchase.
+      Initialize;
+      CreateLotForLotItem(Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10));
+
+      // Create Sales Order with new Order Date.
+      CreateSalesOrder(SalesHeader,Item."No.",LibraryRandom.RandDec(10,2));
+      LibraryVariableStorage.Enqueue(OrderDateChangeMsg);  // Required inside MessageHandler.
+      UpdateSalesHeaderOrderDate(SalesHeader);
+
+      // Exercise: Calculate regenerative Plan from Planning Worksheet.
+      EndDate := GetRequiredDate(10,20,WORKDATE);  // End Date relative to Workdate.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,EndDate);
+
+      // Verify: Verify Requisition line Due date is not the same as Order date from Sales Line.
+      SelectRequisitionLine(RequisitionLine,Item."No.");
+      Assert.AreNotEqual(RequisitionLine."Due Date",SalesHeader."Order Date",SameDateErrMsg);
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshWithSalesAndPositiveAdjOrderItem@84();
+    VAR
+      Item@1000 : Record 27;
+      ItemJournalLine@1002 : Record 83;
+      SalesHeader@1003 : Record 36;
+      AdjustmentQuantity@1001 : Decimal;
+    BEGIN
+      // Setup: Create Order Item with Replenishment - Purchase and Post positive adjustment. Create Sales Order.
+      Initialize;
+      CreateItem(Item,Item."Reordering Policy"::Order,Item."Replenishment System"::Purchase);
+      AdjustmentQuantity := CreateAndPostItemJournalLine(Item."No.",ItemJournalLine."Entry Type"::"Positive Adjmt.");
+      CreateSalesOrder(SalesHeader,Item."No.",AdjustmentQuantity);
+
+      // Exercise: Calculate Plan from Requisition Worksheet.
+      CalculatePlanForRequisitionWorksheet(Item);
+
+      // Verify: Verify Requisition Worksheet lines.
+      VerifyRequisitionLineWithDueDate(Item."No.",AdjustmentQuantity,WORKDATE);
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanPlanWkshWithSKUAndSalesOnLocationMQItem@82();
+    BEGIN
+      // Setup: Calculate Plan from Planning Worksheet and verify no lines generated at Location.
+      Initialize;
+      CalcPlanWithSKUAndSalesOnLocationMQItem(TRUE);  // Boolean - TRUE for Calculate Regenerative Plan.
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshWithSKUAndSalesOnLocationMQItem@81();
+    BEGIN
+      // Setup: Calculate Plan from Requisition Worksheet and verify no lines generated at Location.
+      Initialize;
+      CalcPlanWithSKUAndSalesOnLocationMQItem(FALSE);  // Boolean - FALSE for Calculate Plan from Requisition Worksheet.
+    END;
+
+    LOCAL PROCEDURE CalcPlanWithSKUAndSalesOnLocationMQItem@80(CalcPlanPlanWksh@1000 : Boolean);
+    VAR
+      Item@1002 : Record 27;
+      StockkeepingUnit@1003 : Record 5700;
+      SalesQty@1001 : Decimal;
+    BEGIN
+      // Create MQ Item. Create SKU on Location.
+      SalesQty := LibraryRandom.RandDec(5,2);
+      CreateMQItem(Item,SalesQty + 100,SalesQty,SalesQty + 10);  // Maximum Inventory, Reorder Point and Order Multiple.
+      LibraryInventory.CreateStockkeepingUnitForLocationAndVariant(StockkeepingUnit,LocationBlue.Code,Item."No.",'');
+      UpdateItemInventoryOnLocation(Item."No.",LocationBlue.Code);
+
+      // Create Sales Order on Location.
+      CreateSalesOrderWithLocation(Item."No.",SalesQty,LocationBlue.Code);
+
+      // Exercise: Calculate Plan from Planning Worksheet or Requisition Worksheet.
+      CalcPlanForPlanAndReqWksh(Item,CalcPlanPlanWksh);
+
+      // Verify : Verify no requisition line exists for the given proportion of quantities at the required Location.
+      VerifyEmptyRequisitionLine(Item."No.");
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanPlanWkshWithSKUAndSalesOnLocationOrderItem@79();
+    BEGIN
+      // Setup: Calculate Plan from Planning Worksheet and verify worksheet lines generated at required Location.
+      Initialize;
+      CalcPlanWithSKUAndSalesOnLocationOrderItem(TRUE);  // Boolean - TRUE for Calculate Regenerative Plan.
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanReqWkshWithSKUAndSalesOnLocationOrderItem@78();
+    BEGIN
+      // Setup: Calculate Plan from Requisition Worksheet and verify worksheet lines generated at required Location.
+      Initialize;
+      CalcPlanWithSKUAndSalesOnLocationOrderItem(FALSE);  // Boolean - FALSE for Calculate Plan from Requisition Worksheet.
+    END;
+
+    LOCAL PROCEDURE CalcPlanWithSKUAndSalesOnLocationOrderItem@77(CalcPlanPlanWksh@1005 : Boolean);
+    VAR
+      Item@1003 : Record 27;
+      StockkeepingUnit@1002 : Record 5700;
+      SalesQty@1001 : Decimal;
+    BEGIN
+      // Create Order Item. Create SKU on Location.
+      SalesQty := LibraryRandom.RandDec(5,2);
+      CreateItem(Item,Item."Reordering Policy"::Order,Item."Replenishment System"::Purchase);
+      LibraryInventory.CreateStockkeepingUnitForLocationAndVariant(StockkeepingUnit,LocationBlue.Code,Item."No.",'');
+      UpdateItemInventoryOnLocation(Item."No.",LocationBlue.Code);
+
+      // Create Sales Order on Location.
+      CreateSalesOrderWithLocation(Item."No.",SalesQty,LocationBlue.Code);
+
+      // Exercise: Calculate Plan from Planning Worksheet or Requisition Worksheet.
+      CalcPlanForPlanAndReqWksh(Item,CalcPlanPlanWksh);
+
+      // Verify: Verify Requisition Worksheet lines at the required Location.
+      VerifyRequisitionLineWithDueDate(Item."No.",SalesQty,WORKDATE);
+      VerifyLocationOnRequisitionLine(Item."No.",LocationBlue.Code);
+    END;
+
+    [Test]
+    [HandlerFunctions(LotItemTrackingPageHandler)]
+    PROCEDURE ReservationEntryForItemJournalLotTrackingSKUAndLFLItem@87();
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+      ReservationEntry@1005 : Record 337;
+    BEGIN
+      // Setup: Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot No.
+      Initialize;
+      CreateLotForLotItem(Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10));
+      UpdateItemLotTrackingAndSKU(Item,LocationYellow.Code);
+
+      // Create Item Journal With Location.
+      CreateItemJournalWithLocation(ItemJournalLine,Item."No.",LocationYellow.Code);
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::"Assign Lot No.");  // Enqueue for Page Handler - LotItemTrackingPageHandler.
+
+      // Exercise: Assign Lot No on Item Journal Line.
+      ItemJournalLine.OpenItemTrackingLines(FALSE);
+
+      // Verify: Verify quantity on Reservation Entry for location.
+      VerifyReservationEntry(ReservationEntry,Item."No.",LocationYellow.Code,ItemJournalLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(LotItemTrackingPageHandler)]
+    PROCEDURE ItemLedgerEntryForPostedItemJournalLotTrackingSKUAndLFLItem@102();
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      // Setup: Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot No.
+      Initialize;
+      CreateLotForLotItem(Item,Item."Replenishment System"::"Prod. Order",LibraryRandom.RandInt(10));
+      UpdateItemLotTrackingAndSKU(Item,LocationYellow.Code);
+
+      // Create Item Journal With Location. Assign Lot No on Item Journal Line.
+      CreateItemJournalWithLocation(ItemJournalLine,Item."No.",LocationYellow.Code);
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::"Assign Lot No.");  // Enqueue for Page Handler - LotItemTrackingPageHandler.
+      ItemJournalLine.OpenItemTrackingLines(FALSE);
+
+      // Exercise: Post Item Journal Line.
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+
+      // Verify: Verify Item Ledger Entry values for location.
+      VerifyItemLedgerEntry(
+        Item."No.",LocationYellow.Code,ItemJournalLine."Entry Type"::Purchase,ItemJournalLine.Quantity,ItemJournalLine.Quantity);
+    END;
+
+    [Test]
+    PROCEDURE ReservationEntryForReleasedProdOrderWithSKUAndLFLItem@101();
+    VAR
+      ProductionOrder@1006 : Record 5405;
+    BEGIN
+      // Setup: Create Production Item setup with Lot Tracking and SKU and Verify no reservation takes place for Released Production Order.
+      Initialize;
+      ProdOrderWithSKUOnReservationEntryLFLItem(ProductionOrder.Status::Released);
+    END;
+
+    [Test]
+    PROCEDURE ReservationEntryForFirmPlannedProdOrderWithSKUAndLFLItem@100();
+    VAR
+      ProductionOrder@1006 : Record 5405;
+    BEGIN
+      // Setup: Create Production Item setup with Lot Tracking and SKU and Verify no reservation takes place for Firm Planned Production Order.
+      Initialize;
+      ProdOrderWithSKUOnReservationEntryLFLItem(ProductionOrder.Status::"Firm Planned");
+    END;
+
+    LOCAL PROCEDURE ProdOrderWithSKUOnReservationEntryLFLItem@97(Status@1007 : Option);
+    VAR
+      Item@1003 : Record 27;
+    BEGIN
+      // Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot No.
+      CreateLotForLotItem(Item,Item."Replenishment System"::"Prod. Order",LibraryRandom.RandInt(10));
+      UpdateItemLotTrackingAndSKU(Item,LocationYellow.Code);
+
+      // Exercise: Create and Refresh Released or Firm Planned Production Order as required on Location.
+      CreateAndRefreshProductionOrderWithLocation(Item."No.",LocationYellow.Code,Status);
+
+      // Verify: Verify no reservation entry created for Item because tracking is not assigned on Production Order.
+      VerifyEmptyReservationEntry(Item."No.",LocationYellow.Code);
+    END;
+
+    [Test]
+    [HandlerFunctions(LotItemTrackingPageHandler,ConfirmHandlerTRUE)]
+    PROCEDURE ReservationEntryForTransferOrderWithLotTrackingSKUAndLFLItem@92();
+    VAR
+      Item@1003 : Record 27;
+      ReservationEntry@1005 : Record 337;
+      TransferLine@1007 : Record 5741;
+    BEGIN
+      // Setup: Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot No. Create Transfer Order.
+      Initialize;
+      CreateLotForLotItem(Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10));
+      UpdateItemLotTrackingAndSKU(Item,LocationYellow.Code);
+      CreateTransferOrderWithTransferRoute(
+        TransferLine,Item."No.",LocationYellow.Code,LocationRed.Code,LibraryRandom.RandDec(5,2));
+
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::"Assign Lot No.");  // Enqueue for Page Handler - LotItemTrackingPageHandler.
+      LibraryVariableStorage.Enqueue(AvailabilityWarningConfirmationMsg);  // Required inside ConfirmHandler.
+
+      // Exercise: Assign Lot No on Item Tracking Line of Transfer Line.
+      TransferLine.OpenItemTrackingLines(Direction::Outbound);  // Assign Tracking on Page Handler ItemTrackingPageHandler.
+
+      // Verify: Verify quantity and Source ID on Reservation Entry for required locations.
+      VerifyReservationEntry(ReservationEntry,Item."No.",LocationYellow.Code,-TransferLine.Quantity);
+      ReservationEntry.TESTFIELD("Source ID",TransferLine."Document No.");
+      VerifyReservationEntry(ReservationEntry,Item."No.",LocationRed.Code,TransferLine.Quantity);
+      ReservationEntry.TESTFIELD("Source ID",TransferLine."Document No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(LotItemTrackingPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ItemLedgerEntryForPostedTransferOrderAsShipWithLotTrackingSKUAndLFLItem@89();
+    BEGIN
+      // Setup: Create Item setup with Lot Tracking, SKU and Transfer Order setup with tracking. Verify Item Ledger Entry after posting as Ship.
+      Initialize;
+      ItemLedgerEntryForPostedTransferOrderWithLotTrackingSKUAndLFLItem(FALSE);  // Receive - FALSE.
+    END;
+
+    [Test]
+    [HandlerFunctions(LotItemTrackingPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE ItemLedgerEntryForPostedTransferOrderAsReceiveWithLotTrackingSKUAndLFLItem@93();
+    BEGIN
+      // Setup: Create Item setup with Lot Tracking, SKU and Transfer Order setup with tracking. Verify Item Ledger Entry after posting as Receive.
+      Initialize;
+      ItemLedgerEntryForPostedTransferOrderWithLotTrackingSKUAndLFLItem(TRUE);  // Receive - TRUE.
+    END;
+
+    LOCAL PROCEDURE ItemLedgerEntryForPostedTransferOrderWithLotTrackingSKUAndLFLItem@121(Receive@1000 : Boolean);
+    VAR
+      Item@1003 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+      TransferLine@1007 : Record 5741;
+      TransferHeader@1009 : Record 5740;
+    BEGIN
+      // Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot No.
+      CreateLotForLotItem(Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10));
+      UpdateItemLotTrackingAndSKU(Item,LocationYellow.Code);
+
+      // Update Inventory for Item with Lot Tracking.
+      CreateItemJournalWithLocation(ItemJournalLine,Item."No.",LocationYellow.Code);
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::"Assign Lot No.");  // Enqueue for Page Handler - LotItemTrackingPageHandler.
+      ItemJournalLine.OpenItemTrackingLines(FALSE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+
+      // Create Transfer Order With Lot specific tracking.
+      Item.CALCFIELDS(Inventory);
+      CreateTransferOrderWithTransferRoute(
+        TransferLine,Item."No.",LocationYellow.Code,LocationRed.Code,Item.Inventory - LibraryRandom.RandDec(5,2));  // Quantity less than inventory.
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::"Select Entries");  // Enqueue for Page Handler - LotItemTrackingPageHandler.
+      TransferLine.OpenItemTrackingLines(Direction::Outbound);
+
+      // Exercise: Post Transfer As Ship or As Receive.
+      TransferHeader.GET(TransferLine."Document No.");
+      LibraryWarehouse.PostTransferOrder(TransferHeader,TRUE,Receive);
+
+      // Verify: Verify Item Ledger Entry for posted Transfer Order.
+      VerifyItemLedgerEntry(Item."No.",LocationYellow.Code,ItemJournalLine."Entry Type"::Purchase,Item.Inventory,Item.Inventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(LotItemTrackingPageHandler)]
+    PROCEDURE ReservationEntryWithCalcRegenPlanAndLotTrackingLFLItem@103();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReservationEntryWithCalcRegenPlanAndLotTracking(TRUE);  // Boolean TRUE for LFL Item
+    END;
+
+    [Test]
+    [HandlerFunctions(LotItemTrackingPageHandler)]
+    PROCEDURE ReservationEntryWithCalcRegenPlanAndLotTrackingFRQItem@107();
+    BEGIN
+      // Setup.
+      Initialize;
+      ReservationEntryWithCalcRegenPlanAndLotTracking(FALSE);  // Boolean FALSE for FRQ Item.
+    END;
+
+    LOCAL PROCEDURE ReservationEntryWithCalcRegenPlanAndLotTracking@137(LotForLot@1001 : Boolean);
+    VAR
+      Item@1000 : Record 27;
+      ReservationEntry@1005 : Record 337;
+      RequisitionLine@1010 : Record 246;
+    BEGIN
+      // Create Lot for Lot Item or FRQ Item as required with Stockkeeping Unit. Update Lot specific Tracking and Lot No.
+      IF LotForLot THEN
+        CreateLotForLotItem(Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10))
+      ELSE
+        CreateFRQItem(
+          Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10) + 100,LibraryRandom.RandInt(10) + 10,
+          LibraryRandom.RandInt(10));  // Quantity proportion required for test.
+      UpdateItemLotTrackingAndSKU(Item,LocationYellow.Code);
+
+      // Calculate Regenerative Plan on Planning Worksheet.
+      CalcRegenPlanForPlanWksh(Item."No.");
+
+      // Exercise: Assign Lot No Tracking on Requisition Line.
+      SelectRequisitionLine(RequisitionLine,Item."No.");
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::"Assign Lot No.");  // Enqueue for Page Handler - LotItemTrackingPageHandler.
+      RequisitionLine.OpenItemTrackingLines;
+
+      // Verify: Verify quantity on Reservation Entry for location.
+      VerifyReservationEntry(ReservationEntry,Item."No.",LocationYellow.Code,Item."Safety Stock Quantity");
+    END;
+
+    [Test]
+    [HandlerFunctions(AssignSerialTrackingAndCheckTrackingQtyPageHandler,QuantityToCreatePageHandler,ConfirmHandlerTRUE,MessageHandlerWithoutValidate,CalculatePlanPlanWkshRequestPageHandler)]
+    PROCEDURE CalcRegenPlanForProductionOrderAfterChangedDueDate@94();
+    VAR
+      Item@1013 : Record 27;
+      ChildItem@1014 : Record 27;
+      SalesHeader@1016 : Record 36;
+      SalesLine@1001 : Record 37;
+      ProductionBOMHeader@1011 : Record 99000771;
+      ItemTrackingCodeSNSpecific@1018 : Record 6502;
+      RequisitionLine@1000 : Record 246;
+      ReservationEntry@1004 : Record 337;
+      ProductionOrder@1005 : Record 5405;
+      ProdOrderLine@1006 : Record 5406;
+      ProdOrderStatus@1010 : 'Quote,Planned,Firm Planned,Released';
+      OrderType@1009 : 'ItemOrder,ProjectOrder';
+      Quantity@1002 : Integer;
+      QuantityPer@1003 : Integer;
+    BEGIN
+      // Setup: Create Item,Item Tracking Code,ProductionBOM. Update Item Tracking Code and Production BOM NO.
+      Initialize;
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCodeSNSpecific,TRUE,FALSE);
+      CreateItem(Item,Item."Reordering Policy"::Order,Item."Replenishment System"::"Prod. Order");
+      CreateItem(ChildItem,Item."Reordering Policy"::Order,Item."Replenishment System"::Purchase);
+      UpdateItemSerialNoTracking(Item,ItemTrackingCodeSNSpecific.Code);
+      QuantityPer := LibraryRandom.RandIntInRange(2,5); // QantityPer should not be one.
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ChildItem."No.",QuantityPer);
+      Item.VALIDATE("Production BOM No.",ProductionBOMHeader."No.");
+      Item.MODIFY(TRUE);
+
+      // Create Sales Order with Item Tracking. Create Production Order from Sales Order.
+      Quantity := LibraryRandom.RandIntInRange(2,10); // Quantity should not be one
+      CreateSalesOrder(SalesHeader,Item."No.",Quantity);
+      AssignTrackingOnSalesLine(SalesLine,SalesHeader."No.");
+      LibraryManufacturing.CreateProductionOrderFromSalesOrder(SalesHeader,ProdOrderStatus::"Firm Planned",OrderType::ItemOrder);
+
+      SelectProdOrderLine(ProdOrderLine,Item."No.");
+      ProdOrderLine.VALIDATE("Due Date",CALCDATE('<-2D>',WORKDATE)); // Change Due Date on Firmed Prod Order Line.
+      ProdOrderLine.MODIFY(TRUE);
+
+      ProductionOrder.GET(ProductionOrder.Status::"Firm Planned",ProdOrderLine."Prod. Order No.");
+      ProductionOrder.VALIDATE("Due Date",CALCDATE('<-2D>',WORKDATE)); // Change Due Date on Firmed Prod Order Header.
+      ProductionOrder.MODIFY(TRUE);
+
+      // Exercise: Calculate Regenerative Plan from Planning Worksheet after changed Due Date on Production Order.
+      CalcRegenPlanForPlanWkshPage(Item."No.",ChildItem."No.");
+
+      // Verify: Verify Quantity on Planning Worksheet(Requisition Line) for Action Message with Reschedule & New.
+      FilterReservationEntry(ReservationEntry,Item."No.",'');
+      ReservationEntry.FINDFIRST;
+
+      SelectRequisitionLineForActionMessage(RequisitionLine,Item."No.",RequisitionLine."Action Message"::Reschedule);
+      VerifyRequisitionLine(RequisitionLine,ABS(ReservationEntry."Quantity (Base)"),0,
+        RequisitionLine."Ref. Order Type"::"Prod. Order");
+      SelectRequisitionLineForActionMessage(RequisitionLine,ChildItem."No.",RequisitionLine."Action Message"::New);
+      VerifyRequisitionLine(RequisitionLine,Quantity * QuantityPer,0,RequisitionLine."Ref. Order Type"::Purchase);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculatePlanPlanWkshRequestPageHandler)]
+    PROCEDURE GrossReqAndScheduledRecAfterSalesOrderAndPlanWkshRegenPlan@110();
+    VAR
+      ChildItem@1000 : Record 27;
+      Item@1001 : Record 27;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+      BOMBuffer@1004 : Record 5870;
+    BEGIN
+      // Check quantity of "Gross Requirement" and "Scheduled Receipts" in BOM Tree
+      // in case of Sales Order and Planning Worksheet's Regenerative Plan
+      Initialize;
+      CreateOrderItemSetup(ChildItem,Item);
+
+      CreateSalesOrder(SalesHeader,Item."No.",LibraryRandom.RandInt(10));
+      CalcRegenPlanForPlanWkshPage(Item."No.",ChildItem."No.");
+
+      SelectSalesOrderLine(SalesLine,SalesHeader."No.");
+      Item.SETFILTER("No.",'%1|%2',Item."No.",ChildItem."No.");
+      CreateBOMTree(BOMBuffer,Item);
+      VerifyGrossReqAndScheduledRecOnBOMTree(BOMBuffer,Item."No.",0,SalesLine.Quantity);
+      VerifyGrossReqAndScheduledRecOnBOMTree(BOMBuffer,ChildItem."No.",0,0);
+    END;
+
+    [Test]
+    PROCEDURE CalcRegenPlanWkshForMQItemWithSKU@129();
+    VAR
+      Item@1000 : Record 27;
+      RequisitionLine@1003 : Record 246;
+      OrderMultiple@1002 : Integer;
+    BEGIN
+      // [SCENARIO] Calculate Regenerative Plan for Maximum Qty of Item with SKU while "Location Mandatory" is false should create requisition line
+      // [GIVEN] Create Item with SKU and Maximum Qty. Reordering Policy.
+      Initialize;
+      OrderMultiple := RANDOM(10);
+      CreateMQItem(Item,RANDOM(10) * OrderMultiple,0,OrderMultiple); // Reorder Point must be 0 to repro the bug.
+
+      // [WHEN] Calculate Regenerative Plan on Planning Worksheet.
+      CreateSKUAndCalcRegenPlan(Item."No.",LocationBlue.Code);
+
+      // [THEN] ReqLine is created. Verify Location, Quantity and Action Message on Requisition Line.
+      VerifyReqLine(Item."No.",LocationBlue.Code,Item."Maximum Inventory",RequisitionLine."Action Message"::New);
+    END;
+
+    [Test]
+    PROCEDURE CalcRegenPlanWkshForFRQItemWithSKU@126();
+    VAR
+      Item@1000 : Record 27;
+      RequisitionLine@1003 : Record 246;
+    BEGIN
+      // Calculate Regenerative Plan for Fixed Reorder Qty Item with SKU. Verify requisition line will be generated.
+      // Setup: Create Item with Fixed Reorder Qty. Reordering Policy.
+      Initialize;
+      CreateFRQItem(Item,Item."Replenishment System"::Purchase,RANDOM(10),0,0); // Reorder Point and Safety Stock Quantity must be 0 to repro the bug.
+
+      // Exercise: Create SKU for Item and calculate Regenerative Plan on Planning Worksheet.
+      CreateSKUAndCalcRegenPlan(Item."No.",LocationBlue.Code);
+
+      // Verify: Verify Location, Quantity and Action Message on Requisition Line.
+      VerifyReqLine(Item."No.",LocationBlue.Code,Item."Reorder Quantity",RequisitionLine."Action Message"::New);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculatePlanPlanWkshRequestPageHandler,ConfirmHandlerTRUE)]
+    PROCEDURE CalcRegenPlanWkshForProductionForecastName@130();
+    VAR
+      Item@1000 : Record 27;
+      ProductionForecastName@1002 : Record 99000851;
+      RequisitionLine@1004 : Record 246;
+      ForecastQty@1003 : Decimal;
+    BEGIN
+      // Verify no Requisition Line generated when Forecast Entry was removed
+
+      // Setup: Create a new item and Producation Forecast.
+      Initialize;
+      CreateItem(Item,Item."Reordering Policy"::Order,Item."Replenishment System"::Purchase);
+      ForecastQty := CreateProductionForecastSetup(Item."No.",FALSE,ProductionForecastName); // FALSE for single Forecast Entry.
+
+      // Calculate regenerative planning for the item. Verify quantity of the item on Requisition Line
+      CalcRegenPlanForPlanWkshPage(Item."No.",Item."No.");
+      VerifyRequisitionLineQty(Item."No.",ForecastQty,RequisitionLine."Ref. Order Type"::Purchase);
+
+      // Exercise: Delete the created Producation Forecast and re-calculate regenerative planning for the item.
+      DeleteProductionForecast(ProductionForecastName);
+      CalcRegenPlanForPlanWkshPage(Item."No.",Item."No.");
+
+      // Verify: Verify no requistion line exists for the item.
+      VerifyEmptyRequisitionLine(Item."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(LotItemTrackingPageHandler,ItemTrackingSummaryPageHandler)]
+    PROCEDURE CalcRegenPlanForCancelExcessReplenishmentWithTracking@131();
+    VAR
+      Item@1003 : Record 27;
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      // Calculate Regenerative Plan for excess replenishment with item tracking. Verify Cancel requisition line will be generated.
+
+      // Setup: Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot No.
+      Initialize;
+      CreateLotForLotItem(Item,Item."Replenishment System"::Purchase,0);
+      UpdateItemLotTrackingAndSKU(Item,LocationYellow.Code);
+
+      // Update Inventory for Item with Lot Tracking.
+      CreateAndPostItemJournalWithLotTracking(Item."No.",LocationYellow.Code);
+      Item.CALCFIELDS(Inventory);
+
+      // Create Transfer Order With Lot specific tracking.
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::"Select Entries"); // Enqueue for Page Handler - LotItemTrackingPageHandler.
+      CreateTransferOrderWithTracking(Item."No.",LocationYellow.Code,LocationRed.Code,Item.Inventory);
+
+      // Create Purchase Order for Item
+      CreatePurchaseOrderWithLocation(Item."No.",Item.Inventory,LocationYellow.Code);
+
+      // Exercise: Calculate Regenerative Plan in Planning Worksheet
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<CY>',WORKDATE));
+
+      // Verify: A requisition line generated for cancel purchase replenishment
+      SelectRequisitionLineForActionMessage(RequisitionLine,Item."No.",RequisitionLine."Action Message"::Cancel);
+      Assert.AreEqual(Item.Inventory,RequisitionLine.Quantity,QuantityNotCorrectErr);
+    END;
+
+    [Test]
+    PROCEDURE CalcPlanWkshForMOQItemWithLowILEs@139();
+    VAR
+      Item@1012 : Record 27;
+      SalesHeader@1005 : Record 36;
+      MOQ@1001 : Decimal;
+      Delta@1003 : Decimal;
+    BEGIN
+      // [SCENARIO 109058] Calculate Regenerative Plan for Item with "Maximum Order Quantity" and two supply ILEs, each having Quantity greater than "Maximum Order Quantity".
+
+      // [GIVEN] Item With Lot-for-lot reordering policy, 'Maximum Order Quantity' = 'X'
+      Initialize;
+      Delta := LibraryRandom.RandDecInDecimalRange(1,10,2);
+      MOQ := LibraryRandom.RandDecInDecimalRange(20,100,2);
+      CreateMOQItem(Item,MOQ);
+      // [GIVEN] Add two Inventory entries, each with Quantity = 'I' > 'X'.
+      AddInventory(Item."No.",MOQ + Delta,'');
+      AddInventory(Item."No.",MOQ + Delta,'');
+
+      // [GIVEN] Sales Order with a line having Quantity = 2 * 'I'
+      CreateSalesOrder(SalesHeader,Item."No.",2 * (MOQ + Delta));
+
+      // [WHEN] Calculating Regenerative Plan
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,CALCDATE('<-CM>',WORKDATE),CALCDATE('<CY>',WORKDATE));
+
+      // [THEN] No Requisition Line is created
+      VerifyEmptyRequisitionLine(Item."No.");
+    END;
+
+    [Test]
+    PROCEDURE SetBlankLocationFilterOnProductionForecastPageForUnrevertedForecast@189();
+    VAR
+      Location@1002 : Record 14;
+      Item@1003 : Record 27;
+      ProductionForecastName@1004 : Record 99000851;
+      ProductionForecast@1000 : TestPage 99000919;
+      Qty@1005 : Integer;
+    BEGIN
+      // [FEATURE] [Production Forecast]
+      // [SCENARIO 201868] User must revert Production Forecast Entry with Location Code if he wants to use blank Location Code for forecast for the Item and the Date.
+      Initialize;
+
+      // [GIVEN] Item "I", Location "L", Production Forecast "F", Quantity "Q", Date "D".
+      LibraryInventory.CreateItem(Item);
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryManufacturing.CreateProductionForecastName(ProductionForecastName);
+      Qty := LibraryRandom.RandIntInRange(10,20);
+
+      ProductionForecast.OPENEDIT;
+      ProductionForecast.ProductionForecastName.SETVALUE(ProductionForecastName.Name);
+
+      // [GIVEN] On Production Forecast Page for Forecast "F" set Location Filter "L" and for Item "I" set Quantity "Q" for Date "D".
+      UpdateProductionForecastMatrixField(ProductionForecast,Item,Qty,Location.Code);
+
+      // [WHEN] For Forecast "F" set blank Location Filter and for Item "I" set Quantity "Q" for Date "D"
+      ASSERTERROR UpdateProductionForecastMatrixField(ProductionForecast,Item,Qty,'');
+
+      // [THEN] Error "You must set a location filter." occurs.
+      Assert.ExpectedError(MustSetLocationErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculatePlanPlanWkshRequestPageHandler)]
+    PROCEDURE SetBlankLocationFilterOnProductionForecastPageForRevertedForecastAndCalcRegenPlan@159();
+    VAR
+      Location@1005 : Record 14;
+      Item@1000 : Record 27;
+      ProductionForecastName@1002 : Record 99000851;
+      RequisitionLine@1004 : Record 246;
+      ProductionForecast@1007 : TestPage 99000919;
+      Qty@1006 : Decimal;
+    BEGIN
+      // [FEATURE] [Production Forecast]
+      // [SCENARIO 201868] Revert Production Forecast Entry with Location Code, set blank Location Code for forecast for the Item and the Date and calculate regenerative plan.
+      Initialize;
+
+      // [GIVEN] Item "I", Location "L", Production Forecast "F", Quantity "Q", Date "D".
+      CreateItem(Item,Item."Reordering Policy"::Order,Item."Replenishment System"::Purchase);
+
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryManufacturing.CreateProductionForecastName(ProductionForecastName);
+      Qty := LibraryRandom.RandIntInRange(10,20);
+
+      ProductionForecast.OPENEDIT;
+      ProductionForecast.ProductionForecastName.SETVALUE(ProductionForecastName.Name);
+
+      // [GIVEN] On Production Forecast Page for Forecast "F" set Location Filter "L" and for Item "I" set Quantity "Q" for Date "D".
+      UpdateProductionForecastMatrixField(ProductionForecast,Item,Qty,Location.Code);
+
+      // [GIVEN] Revert previously created entry - on Production Forecast Page for Forecast "F" set Location Filter "L" and for Item "I" set Quantity 0 for Date "D".
+      UpdateProductionForecastMatrixField(ProductionForecast,Item,0,Location.Code);
+
+      // [GIVEN] On Production Forecast Page for Forecast "F" set blank Location Filter and for Item "I" set Quantity "Q" for Date "D".
+      UpdateProductionForecastMatrixField(ProductionForecast,Item,Qty,'');
+
+      // [WHEN]  Calculate regenerative plan for the "I" using "F"
+      UpdateForecastOnManufacturingSetup(ProductionForecastName.Name);
+      CalcRegenPlanForPlanWkshPage(Item."No.",Item."No.");
+
+      // [THEN]  Single Requisition Line is created, quantity is "Q", planning Location Code is blank.
+      SelectRequisitionLine(RequisitionLine,Item."No.");
+      Assert.RecordCount(RequisitionLine,1);
+      RequisitionLine.FINDFIRST;
+      RequisitionLine.TESTFIELD("Location Code",'');
+      RequisitionLine.TESTFIELD(Quantity,Qty);
+    END;
+
+    [Test]
+    PROCEDURE PlanningWorksheetPlansBlanketSalesOrdersWithDiffShipmentDates@66();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1001 : Record 36;
+      SalesLine@1002 : Record 37;
+      Qty@1003 : Integer;
+    BEGIN
+      // [FEATURE] [Planning Worksheet] [Blanket Sales Order]
+      // [SCENARIO 374729] Planning Worksheet plans all lines in blankes sales orders when 2 blanket orders for the same item have different shipment dates
+
+      // [GIVEN] Item with "Purchase" replenishment system
+      Qty := LibraryRandom.RandInt(10);
+      CreateItem(Item,Item."Reordering Policy"::Order,Item."Replenishment System"::Purchase);
+      // [GIVEN] Blanket sales order with 2 lines: 1 - "Shipment Date" = WORKDATE, 2 - "Shipment Date" = WORKDATE + 1, Quantity = "X" in both lines
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Blanket Order",LibrarySales.CreateCustomerNo);
+      LibrarySales.CreateSalesLineWithShipmentDate(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",WORKDATE,Qty);
+      LibrarySales.CreateSalesLineWithShipmentDate(
+        SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",CALCDATE('<1D>',WORKDATE),Qty);
+
+      // [GIVEN] Second blanket sales order. 1 line: Quantity = "X", "Shipment Date" = WORKDATE
+      SalesHeader.INIT;
+      SalesHeader."No." := '';
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Blanket Order",SalesHeader."Sell-to Customer No.");
+      LibrarySales.CreateSalesLineWithShipmentDate(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",WORKDATE,Qty);
+
+      // [WHEN] Claculate regenerative plan from planning worksheet
+      CalcRegenPlanForPlanWksh(Item."No.");
+
+      // [THEN] 2 purchase orders are planned: 2 * "X" pcs are planned on WORKDATE, "X" pcs on WORKDATE + 1
+      VerifyRequisitionLineWithDueDate(Item."No.",Qty * 2,WORKDATE);
+      VerifyRequisitionLineWithDueDate(Item."No.",Qty,CALCDATE('<1D>',WORKDATE));
+    END;
+
+    [Test]
+    PROCEDURE CalculateRegenerativePlanWithComponentsAtLocationAndSKU@138();
+    VAR
+      Item@1001 : Record 27;
+      RequisitionLine@1002 : Record 246;
+      Qty@1003 : Decimal;
+    BEGIN
+      // [FEATURE] [Stockkeeping Unit]
+      // [SCENARIO 375977] Calculate Regenerative Plan should consider Components at Location if SKU exists for another Location
+      Initialize;
+
+      // [GIVEN] Manufacturing Setup with Components at Location "X"
+      UpdateManufacturingSetupComponentsAtLocation(LocationBlue.Code);
+      UpdateLocationMandatory(FALSE);
+
+      // [GIVEN] Item "I" with "Fixed Reorder Qty." and "Reorder Quantity" = "Q"
+      // [GIVEN] SKU for Item "I" at Location "Y"
+      Qty := LibraryRandom.RandDec(10,2);
+      CreateFRQItem(Item,Item."Replenishment System"::Purchase,Qty + 100,Qty + 10,Qty);
+
+      // [WHEN] Calculate Regenerative Plan
+      CreateSKUAndCalcRegenPlan(Item."No.",LocationYellow.Code);
+
+      // [THEN] Requisition Line for Item "I" is created with "Reorder Quantity" = "Q" at Location "X"
+      FilterOnRequisitionLine(RequisitionLine,Item."No.");
+      RequisitionLine.SETRANGE("Location Code",LocationBlue.Code);
+      RequisitionLine.FINDFIRST;
+      Assert.AreEqual(Qty + 100,RequisitionLine.Quantity,QuantityNotCorrectErr);
+    END;
+
+    [Test]
+    PROCEDURE CalculateRegenerativePlanWithLocationMandatoryAndNoSKU@145();
+    VAR
+      Item@1003 : Record 27;
+      RequisitionLine@1002 : Record 246;
+      Qty@1001 : Decimal;
+    BEGIN
+      // [FEATURE] [Stockkeeping Unit]
+      // [SCENARIO] Calculate Regenerative Plan should not create Requisituion line if SKU does not exist while "Location Mandatory" is true
+      Initialize;
+
+      // [GIVEN] Inventory Setup with Location Mandatory = TRUE
+      UpdateLocationMandatory(TRUE);
+      UpdateManufacturingSetupComponentsAtLocation('');
+
+      // [GIVEN] Item "I" with no SKU
+      Qty := LibraryRandom.RandDec(10,2);
+      CreateFRQItem(Item,Item."Replenishment System"::Purchase,Qty + 100,Qty + 10,Qty);
+
+      // [WHEN] Calculate Regenerative Plan
+      CalcRegenPlanForPlanWksh(Item."No.");
+
+      // [THEN] Requisition Line for Item "I" is not created
+      FilterOnRequisitionLine(RequisitionLine,Item."No.");
+      Assert.RecordIsEmpty(RequisitionLine);
+    END;
+
+    [Test]
+    PROCEDURE CalculateRegenerativePlanWithNoSKUAndLocationMandatoryFalse@142();
+    VAR
+      Item@1003 : Record 27;
+      RequisitionLine@1002 : Record 246;
+      Qty@1001 : Decimal;
+    BEGIN
+      // [FEATURE] [Stockkeeping Unit]
+      // [SCENARIO] Calculate Regenerative Plan should create Requisituion line if SKU does not exist while "Location Mandatory" is false
+      Initialize;
+
+      // [GIVEN] Inventory Setup with Location Mandatory = FALSE
+      UpdateLocationMandatory(FALSE);
+      UpdateManufacturingSetupComponentsAtLocation('');
+
+      // [GIVEN] Item "I" with no SKU
+      Qty := LibraryRandom.RandDec(10,2);
+      CreateFRQItem(Item,Item."Replenishment System"::Purchase,Qty + 100,Qty + 10,Qty);
+
+      // [WHEN] Calculate Regenerative Plan
+      CalcRegenPlanForPlanWksh(Item."No.");
+
+      // [THEN] Requisition Line for Item "I" is created with "Reorder Quantity" = "Q" at Location ""
+      FilterOnRequisitionLine(RequisitionLine,Item."No.");
+      RequisitionLine.SETRANGE("Location Code",'');
+      RequisitionLine.FINDFIRST;
+      Assert.AreEqual(Qty + 100,RequisitionLine.Quantity,QuantityNotCorrectErr);
+    END;
+
+    [Test]
+    PROCEDURE CalculateRegenerativePlanWithSKUOnComponentsLocation@167();
+    VAR
+      Item@1000 : Record 27;
+      Location@1001 : Record 14;
+      RequisitionLine@1002 : Record 246;
+      StockkeepingUnit@1004 : Record 5700;
+      Qty@1003 : Decimal;
+    BEGIN
+      // [FEATURE] [Stockkeeping Unit]
+      // [SCENARIO 377474] Requisition should be planned for an item that has stockkeeping unit defined on manufacturing components location
+
+      // [GIVEN] Item "I" with reordering policy = "Fixed Reorder Qty."
+      CreateItem(Item,Item."Reordering Policy"::"Fixed Reorder Qty.",Item."Replenishment System"::Purchase);
+
+      // [GIVEN] Stockkeeping unit for item "I", location "L", reordering policy = "Lot-for-Lot"
+      LibraryWarehouse.CreateLocation(Location);
+      CreateStockkeepingUnitWithReorderingPolicy(Location.Code,Item."No.",'',StockkeepingUnit."Reordering Policy"::"Lot-for-Lot");
+
+      // [GIVEN] Create sales order: Item = "I", location = "L", Quantity = "Q"
+      Qty := LibraryRandom.RandInt(100);
+      CreateSalesOrderWithLocation(Item."No.",Qty,Location.Code);
+
+      // [GIVEN] Set "Components at Location" = "L" in Manufacturing Setup
+      UpdateManufacturingSetupComponentsAtLocation(Location.Code);
+
+      // [WHEN] Calculate regenerative plan from planning worksheet
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,WORKDATE);
+
+      // [THEN] Requisition line is created: "Q" pcs of item "I"
+      SelectRequisitionLine(RequisitionLine,Item."No.");
+      RequisitionLine.TESTFIELD(Quantity,Qty);
+    END;
+
+    [Test]
+    PROCEDURE CalculateRegenerativePlanWithSKUOnComponentsLocationAndVariant@43();
+    VAR
+      Item@1000 : Record 27;
+      Location@1001 : Record 14;
+      ItemVariant@1007 : Record 5401;
+      RequisitionLine@1002 : Record 246;
+      StockkeepingUnit@1004 : Record 5700;
+      Qty@1003 : Decimal;
+    BEGIN
+      // [FEATURE] [Stockkeeping Unit]
+      // [SCENARIO 377474] Requisition should be planned for an item that has stockkeeping unit defined on manufacturing components location with variant
+
+      // [GIVEN] Item "I" with reordering policy = "Fixed Reorder Qty."
+      CreateItem(Item,Item."Reordering Policy"::"Fixed Reorder Qty.",Item."Replenishment System"::Purchase);
+
+      // [GIVEN] Stockkeeping unit for item "I", location "L", variant "V", reordering policy = "Lot-for-Lot"
+      LibraryWarehouse.CreateLocation(Location);
+      LibraryInventory.CreateVariant(ItemVariant,Item);
+
+      CreateStockkeepingUnitWithReorderingPolicy(
+        Location.Code,Item."No.",ItemVariant.Code,StockkeepingUnit."Reordering Policy"::"Lot-for-Lot");
+
+      // [GIVEN] Create sales order: Item = "I", location = "L", Variant = "V", Quantity = "Q"
+      Qty := LibraryRandom.RandInt(100);
+      CreateSalesOrderWithLocationAndVariant(Item."No.",Qty,Location.Code,ItemVariant.Code);
+
+      // [GIVEN] Set "Components at Location" = "L" in Manufacturing Setup
+      UpdateManufacturingSetupComponentsAtLocation(Location.Code);
+
+      // [WHEN] Calculate regenerative plan from planning worksheet
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,WORKDATE);
+
+      // [THEN] Requisition line is created: "Q" pcs of item "I"
+      SelectRequisitionLine(RequisitionLine,Item."No.");
+      RequisitionLine.TESTFIELD(Quantity,Qty);
+    END;
+
+    [Test]
+    [HandlerFunctions(CalculatePlanPlanWkshWithStartingDateRequestPageHandler)]
+    PROCEDURE CalcRegenPlanWkshForProductionForecastWithNonWorkingStartingDate@157();
+    VAR
+      Location@1001 : Record 14;
+      Item@1000 : Record 27;
+      StockkeepingUnit@1005 : Record 5700;
+      ProductionForecastName@1002 : Record 99000851;
+      CalendarCode@1008 : Code[10];
+      ForecastQty@1003 : Decimal;
+      StartingDate@1006 : Date;
+      NWDates@1007 : Integer;
+    BEGIN
+      // [FEATURE] [Production Forecast] [Calendar]
+      // [SCENARIO 382413] When "Forecast Date" is equal to "Starting Date" in regenerative plan calculating and this date is non working result "Requisition Line"."Due Date" is moved back to previous working date.
+
+      Initialize;
+
+      // [GIVEN] "Starting Date" "SD" for regenerative plan calculating.
+      StartingDate := CALCDATE('<CM + 1M +1D>',WORKDATE);
+      NWDates := LibraryRandom.RandInt(5);
+
+      // [GIVEN] Base Calendar "BC" with "ND" Nonworking Days in "BC" before "SD" including "SD".
+      CalendarCode := CreateBaseCalendarAndChanges(StartingDate,NWDates);
+
+      // [GIVEN] Location "L" with "Base Calendar Code" = "BC".
+      LibraryWarehouse.CreateLocation(Location);
+      Location.VALIDATE("Base Calendar Code",CalendarCode);
+      Location.MODIFY(TRUE);
+
+      // [GIVEN] Item "I" with reordering policy = "Lot-for-Lot" and Stockkeeping unit for "I" at "L".
+      CreateItem(Item,Item."Reordering Policy"::"Lot-for-Lot",Item."Replenishment System"::Purchase);
+      LibraryInventory.CreateStockkeepingUnitForLocationAndVariant(StockkeepingUnit,Location.Code,Item."No.",'');
+
+      // [GIVEN] Production Forecast for "I" with entry with "Forecast Date" = "SD" and Quantity "Q".
+      ForecastQty := CreateProductionForecastSetupAtDate(ProductionForecastName,Item."No.",StartingDate);
+
+      // [WHEN] Calculate regenerative plan from planning worksheet with "Starting Date" "SD"
+      CalcRegenPlanForPlanWkshPageWithStartingDate(Item."No.",Item."No.",StartingDate);
+
+      // [THEN] Requisition line is created: quantity "Q" of item "I" with "Due Date" = "SD" - "ND"
+      VerifyRequisitionLineWithDueDate(Item."No.",ForecastQty,StartingDate - NWDates);
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandlerWithoutValidate)]
+    PROCEDURE RescheduleCheckMultiLevelReservationMovingProductionOrderDueDateBackward@158();
+    VAR
+      TopLevelItem@1000 : Record 27;
+      Level1Item@1001 : Record 27;
+      Level2Item@1002 : Record 27;
+      SalesHeader@1004 : Record 36;
+      RequisitionLine@1005 : Record 246;
+    BEGIN
+      // [FEATURE] [Production Order] [Reservation] [Regenerative Plan]
+      // [SCENARIO 205633] Having Sales Order as demand and Production Order as Supply after moving Production Order Due Date backward and rescheduling the multi-level reservation of production order components must be saved
+
+      Initialize;
+
+      // [GIVEN] Production Item with 3-level structure: top-level, level-1, level-2 - corresponding Items: "I0", "I1", "I2";
+      // [GIVEN] "I0", "I1", "I2" have "Replenishment System" = "Prod. Order" and "Manufacturing Policy" = "Make-to-Order"
+      // [GIVEN] "I0" has "Reordering Policy" = "Lot-for-Lot" and "Lot Accumulation Period" "LAP" and "Rescheduling Period" "RP" sufficient for rescheduling;
+      // [GIVEN] "I1" and "I2" have "Reordering Policy" = Order;
+      // [GIVEN] "I1" has "I2" as the "Production BOM", "I0" has "I1" as the "Production BOM";
+      // [GIVEN] Sales Order "SO for "I0" at Location "L" with "Shipment Date" SD as a demand;
+      // [GIVEN] Calculate Regenerative Plan for "I0", "I1", "I2" at "L" and Carry Out Messages = new to create Production Order "PO" as a supply;
+      CreateSalesOrderAndFirmPlannedProductionOrderAsDemandAndSupply(
+        TopLevelItem,Level1Item,Level2Item,SalesHeader,LibraryRandom.RandDateFromInRange(WORKDATE,7,14),'<1Y>');
+
+      // [GIVEN] Update "PO" "Due Date" backward (inside "LAP" and "RP") and refresh "PO";
+      UpdateItemFirmPlannedProductionOrderDueDate(TopLevelItem."No.",-LibraryRandom.RandInt(5));
+
+      // [GIVEN] Calculate Regenerative Plan for "I0", "I1", "I2" at "L", result proposed messages = Reschedule;
+      // [WHEN] Carry Out Messages
+      PlanWrkShtCalcRegenPlanAndCarryOutActionMessage(
+        STRSUBSTNO('%1|%2|%3',TopLevelItem."No.",Level1Item."No.",Level2Item."No."),
+        CALCDATE('<-CY>',WORKDATE),CALCDATE('<CY>',SalesHeader."Shipment Date"),RequisitionLine."Action Message"::Reschedule);
+
+      // [THEN] "I1" and "I2" each have 2 "Reservation Entry" with "Reservation Status" = Reservation at "L", "Source Type" "Prod. Order Line" or "Prod. Order Component".
+      VerifyReservationEntryPairInsideProductionOrder(Level1Item."No.",Level2Item."No.",SalesHeader."Location Code");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandlerWithoutValidate)]
+    PROCEDURE RescheduleCheckMultiLevelReservationMovingProductionOrderDueDateForward@169();
+    VAR
+      TopLevelItem@1006 : Record 27;
+      Level1Item@1004 : Record 27;
+      Level2Item@1003 : Record 27;
+      SalesHeader@1002 : Record 36;
+      RequisitionLine@1007 : Record 246;
+      UpdatedDueDate@1005 : Date;
+    BEGIN
+      // [FEATURE] [Production Order] [Reservation] [Regenerative Plan]
+      // [SCENARIO 205633] Having Sales Order as demand and Production Order as Supply after moving Production Order Due Date forward and rescheduling the multi-level reservation of production order components must be saved
+
+      Initialize;
+
+      // [GIVEN] Production Item with 3-level structure: top-level, level-1, level-2 - corresponding Items: "I0", "I1", "I2";
+      // [GIVEN] "I0", "I1", "I2" have "Replenishment System" = "Prod. Order" and "Manufacturing Policy" = "Make-to-Order"
+      // [GIVEN] "I0" has "Reordering Policy" = "Lot-for-Lot" and "Lot Accumulation Period" "LAP" and "Rescheduling Period" "RP" sufficient for rescheduling;
+      // [GIVEN] "I1" and "I2" have "Reordering Policy" = Order;
+      // [GIVEN] "I1" has "I2" as the "Production BOM", "I0" has "I1" as the "Production BOM";
+      // [GIVEN] Sales Order "SO for "I0" at Location "L" with "Shipment Date" SD as a demand;
+      // [GIVEN] Calculate Regenerative Plan for "I0", "I1", "I2" at "L" and Carry Out Messages = new to create Production Order "PO" as a supply;
+      CreateSalesOrderAndFirmPlannedProductionOrderAsDemandAndSupply(
+        TopLevelItem,Level1Item,Level2Item,SalesHeader,LibraryRandom.RandDateFromInRange(WORKDATE,7,14),'<1Y>');
+
+      // [GIVEN] Update "PO" "Due Date" forward (inside "LAP" and "RP") and refresh "PO";
+      UpdatedDueDate := UpdateItemFirmPlannedProductionOrderDueDate(TopLevelItem."No.",LibraryRandom.RandInt(5));
+
+      // [GIVEN] Calculate Regenerative Plan for "I0", "I1", "I2" at "L", result proposed messages = Reschedule;
+      // [WHEN] Carry Out Messages
+      PlanWrkShtCalcRegenPlanAndCarryOutActionMessage(
+        STRSUBSTNO('%1|%2|%3',TopLevelItem."No.",Level1Item."No.",Level2Item."No."),
+        CALCDATE('<-CY>',WORKDATE),CALCDATE('<CY>',UpdatedDueDate),RequisitionLine."Action Message"::Reschedule);
+
+      // [THEN] "I1" and "I2" each have 2 "Reservation Entry" with "Reservation Status" = Reservation at "L", "Source Type" "Prod. Order Line" or "Prod. Order Component".
+      VerifyReservationEntryPairInsideProductionOrder(Level1Item."No.",Level2Item."No.",SalesHeader."Location Code");
+    END;
+
+    [Test]
+    PROCEDURE RescheduleCheckMultiLevelReservationMovingSalesOrderDueDateBackward@173();
+    VAR
+      TopLevelItem@1005 : Record 27;
+      Level1Item@1004 : Record 27;
+      Level2Item@1003 : Record 27;
+      SalesHeader@1002 : Record 36;
+      RequisitionLine@1006 : Record 246;
+      SavedShipmentDate@1009 : Date;
+    BEGIN
+      // [FEATURE] [Production Order] [Reservation] [Regenerative Plan]
+      // [SCENARIO 205633] Having Sales Order as demand and Production Order as Supply after moving Sales Order Shipment Date backward and rescheduling the multi-level reservation of production order components must be saved
+
+      Initialize;
+
+      // [GIVEN] Production Item with 3-level structure: top-level, level-1, level-2 - corresponding Items: "I0", "I1", "I2";
+      // [GIVEN] "I0", "I1", "I2" have "Replenishment System" = "Prod. Order" and "Manufacturing Policy" = "Make-to-Order"
+      // [GIVEN] "I0" has "Reordering Policy" = "Lot-for-Lot" and "Lot Accumulation Period" "LAP" and "Rescheduling Period" "RP" sufficient for rescheduling;
+      // [GIVEN] "I1" and "I2" have "Reordering Policy" = Order;
+      // [GIVEN] "I1" has "I2" as the "Production BOM", "I0" has "I1" as the "Production BOM";
+      // [GIVEN] Sales Order "SO" for "I0" at Location "L" with "Shipment Date" SD as a demand;
+      // [GIVEN] Calculate Regenerative Plan for "I0", "I1", "I2" at "L" and Carry Out Messages = new to create Production Order "PO" as a supply;
+      CreateSalesOrderAndFirmPlannedProductionOrderAsDemandAndSupply(
+        TopLevelItem,Level1Item,Level2Item,SalesHeader,LibraryRandom.RandDateFromInRange(WORKDATE,7,14),'<1Y>');
+
+      // [GIVEN] Update "SO" "Shipment Date" backward (inside "LAP" and "RP");
+      SavedShipmentDate := SalesHeader."Shipment Date";
+      UpdateSalesHeaderShipmentDate(SalesHeader,-LibraryRandom.RandInt(5));
+
+      // [GIVEN] Calculate Regenerative Plan for "I0", "I1", "I2" at "L", result proposed messages = Reschedule;
+      // [WHEN] Carry Out Messages
+      PlanWrkShtCalcRegenPlanAndCarryOutActionMessage(
+        STRSUBSTNO('%1|%2|%3',TopLevelItem."No.",Level1Item."No.",Level2Item."No."),
+        CALCDATE('<-CY>',WORKDATE),CALCDATE('<CY>',SavedShipmentDate),RequisitionLine."Action Message"::Reschedule);
+
+      // [THEN] "I1" and "I2" each have 2 "Reservation Entry" with "Reservation Status" = Reservation at "L", "Source Type" "Prod. Order Line" or "Prod. Order Component".
+      VerifyReservationEntryPairInsideProductionOrder(Level1Item."No.",Level2Item."No.",SalesHeader."Location Code");
+    END;
+
+    [Test]
+    PROCEDURE RescheduleCheckMultiLevelReservationMovingSalesOrderDueDateForward@172();
+    VAR
+      TopLevelItem@1005 : Record 27;
+      Level1Item@1004 : Record 27;
+      Level2Item@1003 : Record 27;
+      SalesHeader@1002 : Record 36;
+      RequisitionLine@1006 : Record 246;
+    BEGIN
+      // [FEATURE] [Production Order] [Reservation] [Regenerative Plan]
+      // [SCENARIO 205633] Having Sales Order as demand and Production Order as Supply after moving Sales Order Shipment Date forward and rescheduling the multi-level reservation of production order components must be saved
+
+      Initialize;
+
+      // [GIVEN] Production Item with 3-level structure: top-level, level-1, level-2 - corresponding Items: "I0", "I1", "I2";
+      // [GIVEN] "I0", "I1", "I2" have "Replenishment System" = "Prod. Order" and "Manufacturing Policy" = "Make-to-Order"
+      // [GIVEN] "I0" has "Reordering Policy" = "Lot-for-Lot" and "Lot Accumulation Period" "LAP" and "Rescheduling Period" "RP" sufficient for rescheduling;
+      // [GIVEN] "I1" and "I2" have "Reordering Policy" = Order;
+      // [GIVEN] "I1" has "I2" as the "Production BOM", "I0" has "I1" as the "Production BOM";
+      // [GIVEN] Sales Order "SO for "I0" at Location "L" with "Shipment Date" SD as a demand;
+      // [GIVEN] Calculate Regenerative Plan for "I0", "I1", "I2" at "L" and Carry Out Messages = new to create Production Order "PO" as a supply;
+      CreateSalesOrderAndFirmPlannedProductionOrderAsDemandAndSupply(
+        TopLevelItem,Level1Item,Level2Item,SalesHeader,LibraryRandom.RandDateFromInRange(WORKDATE,7,14),'<1Y>');
+
+      // [GIVEN] Update "SO" "Shipment Date" forward (inside "LAP" and "RP");
+      UpdateSalesHeaderShipmentDate(SalesHeader,LibraryRandom.RandInt(5));
+
+      // [GIVEN] Calculate Regenerative Plan for "I0", "I1", "I2" at "L", result proposed messages = Reschedule;
+      // [WHEN] Carry Out Messages
+      PlanWrkShtCalcRegenPlanAndCarryOutActionMessage(
+        STRSUBSTNO('%1|%2|%3',TopLevelItem."No.",Level1Item."No.",Level2Item."No."),
+        CALCDATE('<-CY>',WORKDATE),CALCDATE('<CY>',SalesHeader."Shipment Date"),RequisitionLine."Action Message"::Reschedule);
+
+      // [THEN] "I1" and "I2" each have 2 "Reservation Entry" with "Reservation Status" = Reservation at "L", "Source Type" "Prod. Order Line" or "Prod. Order Component".
+      VerifyReservationEntryPairInsideProductionOrder(Level1Item."No.",Level2Item."No.",SalesHeader."Location Code");
+    END;
+
+    [Test]
+    PROCEDURE LotAccumulationFourDatesWithMoreThanPeriod@218();
+    VAR
+      ParentItem@1006 : Record 27;
+      ChildItem@1005 : Record 27;
+      RequisitionLine@1004 : Record 246;
+      ShipmentDates@1002 : ARRAY [4] OF Date;
+      Quantities@1001 : ARRAY [4] OF Decimal;
+    BEGIN
+      // [FEATURE] [Lot Accumulation Period]
+      // [SCENARIO 208102] For component with "Lot Accumulation Period" no accumulation occurs when demand due dates intervals exceed period
+      Initialize;
+
+      // [GIVEN] Production Lot-for-Lot Item "PI" with Component "CI" which has Lot Accumulation Period equal to one month, "Quantity per" = 1;
+      CreateProdItemWithComponentWithMonthPlanningPeriods(ParentItem,ChildItem);
+
+      // [GIVEN] Sales Order "SO" as demand for "PI", "SO" contains four lines "SL" with shipment dates each more than previous more than month;
+      CreateFourDatesArrayWithMoreThanMonthInterval(ShipmentDates);
+      CreateSalesOrderWithFourLinesOfSingleItemWithSpecifiedShipmentDates(Quantities,ParentItem."No.",ShipmentDates);
+
+      // [WHEN] Calculate regenerative plan for "PI" and "CI"
+      CalcRegenPlanForItemsRespectPlanningParamsFromNowToDate(
+        STRSUBSTNO('%1|%2',ParentItem."No.",ChildItem."No."),CALCDATE('<CW>',ShipmentDates[ARRAYLEN(ShipmentDates)]));
+
+      // [THEN] Four requisition lines "RL" for "CI" are created: "RL"."Due Date"[i] = "SL"."Shipment Date"[i] - 1, "RL".Quantity[i] = "SL".Quantity[i].
+      FilterOnRequisitionLine(RequisitionLine,ChildItem."No.");
+      Assert.RecordCount(RequisitionLine,4);
+      VerifyRequisitionLineWithDueDateAndQuantity(ChildItem."No.",ShipmentDates[1] - 1,Quantities[1]);
+      VerifyRequisitionLineWithDueDateAndQuantity(ChildItem."No.",ShipmentDates[2] - 1,Quantities[2]);
+      VerifyRequisitionLineWithDueDateAndQuantity(ChildItem."No.",ShipmentDates[3] - 1,Quantities[3]);
+      VerifyRequisitionLineWithDueDateAndQuantity(ChildItem."No.",ShipmentDates[4] - 1,Quantities[4]);
+    END;
+
+    [Test]
+    PROCEDURE LotAccumulationFourDatesInsidePeriod@149();
+    VAR
+      ParentItem@1000 : Record 27;
+      ChildItem@1001 : Record 27;
+      ShipmentDates@1002 : ARRAY [4] OF Date;
+      Quantities@1009 : ARRAY [4] OF Decimal;
+    BEGIN
+      // [FEATURE] [Lot Accumulation Period]
+      // [SCENARIO 208102] For component with "Lot Accumulation Period" supply is totally accumulated in single order when all demand due dates belong to single accumulation period
+      Initialize;
+
+      // [GIVEN] Production Lot-for-Lot Item "PI" with Component "CI" which has Lot Accumulation Period equal to one month, "Quantity per" = 1;
+      CreateProdItemWithComponentWithMonthPlanningPeriods(ParentItem,ChildItem);
+
+      // [GIVEN] Sales Order "SO" as demand for "PI", "SO" contains four lines "SL1", "SL2", "SL3", "SL4" with shipment dates all inside single month;
+      CreateFourDatesArrayInsideMonthPeriod(ShipmentDates);
+      CreateSalesOrderWithFourLinesOfSingleItemWithSpecifiedShipmentDates(Quantities,ParentItem."No.",ShipmentDates);
+
+      // [WHEN] Calculate regenerative plan for "PI" and "CI"
+      CalcRegenPlanForItemsRespectPlanningParamsFromNowToDate(
+        STRSUBSTNO('%1|%2',ParentItem."No.",ChildItem."No."),CALCDATE('<CW>',ShipmentDates[ARRAYLEN(ShipmentDates)]));
+
+      // [THEN] Single requisition lines "RL" for "CI" is created: "RL"."Due Date"[i] = "SL1"."Shipment Date" - 1, "RL".Quantity = "SL1".Quantity + "SL2".Quantity + "SL3".Quantity + "SL4".Quantity.
+      VerifyRequisitionLineWithDueDateAndQuantity(
+        ChildItem."No.",ShipmentDates[1] - 1,Quantities[1] + Quantities[2] + Quantities[3] + Quantities[4]);
+    END;
+
+    [Test]
+    PROCEDURE LotAccumulationFourDatesAsTwoPairsEachInsidePeriod@223();
+    VAR
+      ParentItem@1000 : Record 27;
+      ChildItem@1001 : Record 27;
+      RequisitionLine@1005 : Record 246;
+      ShipmentDates@1002 : ARRAY [4] OF Date;
+      Quantities@1009 : ARRAY [4] OF Decimal;
+    BEGIN
+      // [FEATURE] [Lot Accumulation Period]
+      // [SCENARIO 208102] For component with "Lot Accumulation Period" two supplies are created when demand due dates belong to two different periods according to accumulation period
+      Initialize;
+
+      // [GIVEN] Production Lot-for-Lot Item "PI" with Component "CI" which has Lot Accumulation Period equal to one month, "Quantity per" = 1;
+      CreateProdItemWithComponentWithMonthPlanningPeriods(ParentItem,ChildItem);
+
+      // [GIVEN] Sales Order "SO" as demand for "PI", "SO" contains four lines "SL1", "SL2", "SL3", "SL4" with shipment dates as two pairs each inside month;
+      CreateFourDatesArrayInsideTwoMonthsPeriodAsTwoPairsInsideMonth(ShipmentDates);
+      CreateSalesOrderWithFourLinesOfSingleItemWithSpecifiedShipmentDates(Quantities,ParentItem."No.",ShipmentDates);
+
+      // [WHEN] Calculate regenerative plan for "PI" and "CI"
+      CalcRegenPlanForItemsRespectPlanningParamsFromNowToDate(
+        STRSUBSTNO('%1|%2',ParentItem."No.",ChildItem."No."),CALCDATE('<CW>',ShipmentDates[ARRAYLEN(ShipmentDates)]));
+
+      // [THEN] Two requisition lines "RL1" and "RL2" for "CI" are created: "RL1"."Due Date" = "SL1"."Shipment Date" - 1, "RL1".Quantity = "SL1".Quantity + "SL2".Quantity, "RL2"."Due Date" = "SL3"."Shipment Date" - 1, "RL3".Quantity = "SL4".Quantity + "S
+      FilterOnRequisitionLine(RequisitionLine,ChildItem."No.");
+      Assert.RecordCount(RequisitionLine,2);
+      VerifyRequisitionLineWithDueDateAndQuantity(ChildItem."No.",ShipmentDates[1] - 1,Quantities[1] + Quantities[2]);
+      VerifyRequisitionLineWithDueDateAndQuantity(ChildItem."No.",ShipmentDates[3] - 1,Quantities[3] + Quantities[4]);
+    END;
+
+    [Test]
+    PROCEDURE LotAccumulationFourDatesWhereSecondAndThirdAreInsidePeriodAndFirstAndFourthOutside@238();
+    VAR
+      ParentItem@1000 : Record 27;
+      ChildItem@1001 : Record 27;
+      RequisitionLine@1005 : Record 246;
+      ShipmentDates@1002 : ARRAY [4] OF Date;
+      Quantities@1009 : ARRAY [4] OF Decimal;
+    BEGIN
+      // [FEATURE] [Lot Accumulation Period]
+      // [SCENARIO 208102] For component with "Lot Accumulation Period" three supplies are created when demand due dates belong  to three different periods according to accumulation period
+      Initialize;
+
+      // [GIVEN] Production Lot-for-Lot Item "PI" with Component "CI" which has Lot Accumulation Period equal to one month, "Quantity per" = 1;
+      CreateProdItemWithComponentWithMonthPlanningPeriods(ParentItem,ChildItem);
+
+      // [GIVEN] Sales Order "SO" as demand for "PI", "SO" contains four lines "SL1", "SL2", "SL3", "SL4" with shipment dates where second and third are inside month and first and fourth outside;
+      CreateFourDatesArrayWhereSecondAndThirdAreInsideMonthAndFirstAndFourthOutside(ShipmentDates);
+      CreateSalesOrderWithFourLinesOfSingleItemWithSpecifiedShipmentDates(Quantities,ParentItem."No.",ShipmentDates);
+
+      // [WHEN] Calculate regenerative plan for "PI" and "CI"
+      CalcRegenPlanForItemsRespectPlanningParamsFromNowToDate(
+        STRSUBSTNO('%1|%2',ParentItem."No.",ChildItem."No."),CALCDATE('<CW>',ShipmentDates[ARRAYLEN(ShipmentDates)]));
+
+      // [THEN] Three requisition lines "RL1", "RL2" and "RL3" for "CI" are created: "RL1"."Due Date" = "SL1"."Shipment Date" - 1, "RL1".Quantity = "SL1".Quantity + "SL2".Quantity, "RL2"."Due Date" = "SL2"."Shipment Date" - 1, "RL2".Quantity = "SL2".Quan
+      FilterOnRequisitionLine(RequisitionLine,ChildItem."No.");
+      Assert.RecordCount(RequisitionLine,3);
+      VerifyRequisitionLineWithDueDateAndQuantity(ChildItem."No.",ShipmentDates[1] - 1,Quantities[1]);
+      VerifyRequisitionLineWithDueDateAndQuantity(ChildItem."No.",ShipmentDates[2] - 1,Quantities[2] + Quantities[3]);
+      VerifyRequisitionLineWithDueDateAndQuantity(ChildItem."No.",ShipmentDates[4] - 1,Quantities[4]);
+    END;
+
+    LOCAL PROCEDURE Initialize@5();
+    VAR
+      UntrackedPlanningElement@1001 : Record 99000855;
+      RequisitionLine@1002 : Record 246;
+      ReservationEntry@1003 : Record 337;
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      LibrarySetupStorage.Restore;
+      LibraryVariableStorage.Clear;
+      UntrackedPlanningElement.DELETEALL;
+      RequisitionLine.DELETEALL;
+      ReservationEntry.DELETEALL;
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      NoSeriesSetup;
+      ItemJournalSetup;
+      OutputJournalSetup;
+      CreateLocationSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+
+      LibrarySetupStorage.Save(DATABASE::"Inventory Setup");
+      LibrarySetupStorage.Save(DATABASE::"Manufacturing Setup");
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@31();
+    VAR
+      SalesReceivablesSetup@1001 : Record 311;
+      PurchasesPayablesSetup@1003 : Record 312;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesReceivablesSetup.MODIFY(TRUE);
+
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ItemJournalSetup@54();
+    BEGIN
+      ItemJournalTemplate.INIT;
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalTemplate.MODIFY(TRUE);
+
+      ItemJournalBatch.INIT;
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      ItemJournalBatch.VALIDATE("No. Series",'');  // Required to avoid Document No. mismatch.
+      ItemJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE OutputJournalSetup@154();
+    BEGIN
+      OutputItemJournalTemplate.INIT;
+      LibraryInventory.SelectItemJournalTemplateName(OutputItemJournalTemplate,OutputItemJournalTemplate.Type::Output);
+
+      OutputItemJournalBatch.INIT;
+      LibraryInventory.SelectItemJournalBatchName(
+        OutputItemJournalBatch,OutputItemJournalTemplate.Type,OutputItemJournalTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE CreateLocationSetup@57();
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(LocationYellow);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(LocationRed);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(LocationBlue);
+      LibraryWarehouse.CreateInTransitLocation(LocationInTransit);
+    END;
+
+    LOCAL PROCEDURE UpdateManufacturingSetup@125(DocNoIsProdOrderNo@1002 : Boolean) NewDocNoIsProdOrderNo : Boolean;
+    VAR
+      ManufacturingSetup@1001 : Record 99000765;
+    BEGIN
+      ManufacturingSetup.GET;
+      NewDocNoIsProdOrderNo := ManufacturingSetup."Doc. No. Is Prod. Order No.";
+      ManufacturingSetup.VALIDATE("Doc. No. Is Prod. Order No.",DocNoIsProdOrderNo);
+      ManufacturingSetup.MODIFY(TRUE);
+      EXIT(NewDocNoIsProdOrderNo);
+    END;
+
+    LOCAL PROCEDURE UpdateManufacturingSetupCombinedMPSAndMRP@112(NewCombinedMPSMRPCalculation@1002 : Boolean) OldCombinedMPSMRPCalculation : Boolean;
+    VAR
+      ManufacturingSetup@1000 : Record 99000765;
+    BEGIN
+      ManufacturingSetup.GET;
+      OldCombinedMPSMRPCalculation := ManufacturingSetup."Combined MPS/MRP Calculation";
+      ManufacturingSetup.VALIDATE("Combined MPS/MRP Calculation",NewCombinedMPSMRPCalculation);
+      ManufacturingSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderAndFirmPlannedProductionOrderAsDemandAndSupply@200(VAR TopLevelItem@1007 : Record 27;VAR Level1Item@1002 : Record 27;VAR Level2Item@1001 : Record 27;VAR SalesHeader@1000 : Record 36;ShipmentDate@1003 : Date;LotPeriod@1004 : Text);
+    VAR
+      Location@1005 : Record 14;
+      RequisitionLine@1006 : Record 246;
+    BEGIN
+      LibraryWarehouse.CreateLocation(Location);
+      CreateMakeToOrderCompoundItem(TopLevelItem,Level1Item,Level2Item,LotPeriod);
+      CreateSalesOrderWithLocationAndShipmentDate(SalesHeader,TopLevelItem."No.",Location.Code,ShipmentDate);
+
+      PlanWrkShtCalcRegenPlanAndCarryOutActionMessage(
+        STRSUBSTNO('%1|%2|%3',TopLevelItem."No.",Level1Item."No.",Level2Item."No."),
+        CALCDATE('<-CY>',WORKDATE),CALCDATE('<CY>',ShipmentDate),RequisitionLine."Action Message"::New);
+    END;
+
+    LOCAL PROCEDURE CreateItem@27(VAR Item@1000 : Record 27;ReorderingPolicy@1002 : Option;ReplenishmentSystem@1001 : Option);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Replenishment System",ReplenishmentSystem);
+      Item.VALIDATE("Reordering Policy",ReorderingPolicy);
+      Item.VALIDATE("Vendor No.",LibraryPurchase.CreateVendorNo);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateMakeToOrderItem@196(VAR Item@1000 : Record 27;ReorderingPolicy@1002 : Option;ProductionBOMNo@1001 : Code[20];LotAccumulationPeriod@1003 : Text;ReschedulingPeriod@1004 : Text);
+    VAR
+      LotAccumulationPeriodDF@1006 : DateFormula;
+      ReschedulingPeriodDF@1005 : DateFormula;
+    BEGIN
+      EVALUATE(LotAccumulationPeriodDF,LotAccumulationPeriod);
+      EVALUATE(ReschedulingPeriodDF,ReschedulingPeriod);
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Replenishment System",Item."Replenishment System"::"Prod. Order");
+      Item.VALIDATE("Manufacturing Policy",Item."Manufacturing Policy"::"Make-to-Order");
+      Item.VALIDATE("Reordering Policy",ReorderingPolicy);
+      Item.VALIDATE("Lot Accumulation Period",LotAccumulationPeriodDF);
+      Item.VALIDATE("Rescheduling Period",ReschedulingPeriodDF);
+      Item.VALIDATE("Production BOM No.",ProductionBOMNo);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateMakeToOrderCompoundItem@197(VAR TopLevelItem@1005 : Record 27;VAR Level1Item@1003 : Record 27;VAR Level2Item@1000 : Record 27;LotPeriod@1004 : Text);
+    VAR
+      ProductionBOMHeader@1002 : Record 99000771;
+    BEGIN
+      CreateMakeToOrderItem(Level2Item,Level2Item."Reordering Policy"::Order,ProductionBOMHeader."No.",'','');
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,Level2Item."No.",1);
+      CreateMakeToOrderItem(Level1Item,Level1Item."Reordering Policy"::Order,ProductionBOMHeader."No.",'','');
+      CLEAR(ProductionBOMHeader);
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,Level1Item."No.",1);
+      CreateMakeToOrderItem(
+        TopLevelItem,TopLevelItem."Reordering Policy"::"Lot-for-Lot",ProductionBOMHeader."No.",LotPeriod,LotPeriod);
+    END;
+
+    LOCAL PROCEDURE CreateLotForLotItem@35(VAR Item@1000 : Record 27;ItemReplenishmentSystem@1002 : Option;SafetyStockQuantity@1001 : Decimal);
+    BEGIN
+      // Create Lot-for-Lot Item.
+      CreateItem(Item,Item."Reordering Policy"::"Lot-for-Lot",ItemReplenishmentSystem);
+      Item.VALIDATE("Safety Stock Quantity",SafetyStockQuantity);
+      Item.VALIDATE("Include Inventory",TRUE);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateFRQItem@17(VAR Item@1006 : Record 27;ItemReplenishmentSystem@1005 : Option;ReorderQuantity@1000 : Decimal;ReorderPoint@1004 : Decimal;SafetyStockQty@1001 : Decimal);
+    BEGIN
+      // Create Fixed Reorder Qty. Item.
+      CreateItem(Item,Item."Reordering Policy"::"Fixed Reorder Qty.",ItemReplenishmentSystem);
+      Item.VALIDATE("Reorder Quantity",ReorderQuantity);
+      Item.VALIDATE("Reorder Point",ReorderPoint);
+      Item.VALIDATE("Safety Stock Quantity",SafetyStockQty);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateFRQItemSetup@16(VAR ChildItem@1000 : Record 27;VAR Item@1002 : Record 27);
+    VAR
+      ProductionBOMHeader@1001 : Record 99000771;
+    BEGIN
+      CreateFRQItem(
+        ChildItem,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(10) + 100,
+        LibraryRandom.RandInt(10) + 10,LibraryRandom.RandInt(10));  // Quantity proportion required for test.
+      CreateAndCertifyProductionBOM(ProductionBOMHeader,ChildItem."No.");
+      CreateFRQItem(
+        Item,Item."Replenishment System"::"Prod. Order",LibraryRandom.RandInt(10) + 100,
+        LibraryRandom.RandInt(10) + 10,LibraryRandom.RandInt(10));  // Quantity proportion required for test.
+      UpdateItemProductionBOMNo(Item,ProductionBOMHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateMQItem@257(VAR Item@1006 : Record 27;MaximumInventory@1000 : Decimal;ReorderPoint@1001 : Decimal;OrderMultiple@1002 : Decimal);
+    BEGIN
+      // Create Maximum Qty. Item.
+      CreateItem(Item,Item."Reordering Policy"::"Maximum Qty.",Item."Replenishment System"::Purchase);
+
+      // Maximum Qty. Planning parameters.
+      Item.VALIDATE("Maximum Inventory",MaximumInventory);
+      Item.VALIDATE("Reorder Point",ReorderPoint);
+      Item.VALIDATE("Order Multiple",OrderMultiple);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateMOQItem@146(VAR Item@1006 : Record 27;MaximumOrderQty@1000 : Decimal);
+    BEGIN
+      WITH Item DO BEGIN
+        CreateItem(Item,"Reordering Policy"::"Lot-for-Lot","Replenishment System"::Purchase);
+        VALIDATE("Maximum Order Quantity",MaximumOrderQty);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateOrderItemSetup@50(VAR ChildItem@1000 : Record 27;VAR Item@1002 : Record 27) QtyPer : Integer;
+    VAR
+      ProductionBOMHeader@1001 : Record 99000771;
+    BEGIN
+      // Create parent and child Order Items setup.
+      CreateItem(ChildItem,ChildItem."Reordering Policy"::Order,ChildItem."Replenishment System"::Purchase);
+      QtyPer := CreateAndCertifyProductionBOM(ProductionBOMHeader,ChildItem."No.");
+      CreateItem(Item,Item."Reordering Policy"::Order,Item."Replenishment System"::"Prod. Order");
+      UpdateItemProductionBOMNo(Item,ProductionBOMHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateProdItemWithComponentWithMonthPlanningPeriods@190(VAR ParentItem@1002 : Record 27;VAR ChildItem@1000 : Record 27);
+    VAR
+      ProductionBOMHeader@1001 : Record 99000771;
+      PlanningPeriodDateFormula@1003 : DateFormula;
+    BEGIN
+      EVALUATE(PlanningPeriodDateFormula,'<1M>');
+      CreateItem(ChildItem,ChildItem."Reordering Policy"::"Lot-for-Lot",ChildItem."Replenishment System"::"Prod. Order");
+      UpdateItemLotAccumulationPeriod(ChildItem,PlanningPeriodDateFormula);
+      CreateItem(ParentItem,ParentItem."Reordering Policy"::Order,ParentItem."Replenishment System"::"Prod. Order");
+      LibraryManufacturing.CreateCertifiedProductionBOM(ProductionBOMHeader,ChildItem."No.",1);
+      UpdateItemProductionBOMNo(ParentItem,ProductionBOMHeader."No.");
+    END;
+
+    LOCAL PROCEDURE UpdateItemFirmPlannedProductionOrderDueDate@163(ItemNo@1000 : Code[20];DateDelta@1001 : Integer) UpdatedDueDate : Date;
+    VAR
+      ProductionOrder@1002 : Record 5405;
+    BEGIN
+      FindFirmPlannedProductionOrderByItemNo(ProductionOrder,ItemNo);
+      UpdatedDueDate := ProductionOrder."Due Date" + DateDelta;
+      ProductionOrder.SetUpdateEndDate;
+      ProductionOrder.VALIDATE("Due Date",UpdatedDueDate);
+      ProductionOrder.MODIFY(TRUE);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE FindFirmPlannedProductionOrderByItemNo@244(VAR ProductionOrder@1001 : Record 5405;ItemNo@1000 : Code[20]);
+    BEGIN
+      ProductionOrder.SETRANGE(Status,ProductionOrder.Status::"Firm Planned");
+      ProductionOrder.SETRANGE("Source Type",ProductionOrder."Source Type"::Item);
+      ProductionOrder.SETRANGE("Source No.",ItemNo);
+      ProductionOrder.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderWithLocation@133(ItemNo@1002 : Code[20];Quantity@1005 : Decimal;LocationCode@1003 : Code[10]);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      CreatePurchaseOrder(ItemNo,Quantity);
+      SelectPurchaseOrderLine(PurchaseLine,ItemNo);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateTransferOrderWithTracking@148(ItemNo@1000 : Code[20];FromLocationCode@1001 : Code[10];ToLocationCode@1002 : Code[10];Quantity@1003 : Decimal);
+    VAR
+      TransferLine@1006 : Record 5741;
+    BEGIN
+      CreateTransferOrderWithTransferRoute(TransferLine,ItemNo,FromLocationCode,ToLocationCode,Quantity);
+      TransferLine.OpenItemTrackingLines(Direction::Outbound);
+    END;
+
+    LOCAL PROCEDURE CreateBaseCalendarAndChanges@183(EndDate@1000 : Date;NonWorkDays@1002 : Integer) : Code[10];
+    VAR
+      BaseCalendar@1001 : Record 7600;
+      BaseCalendarChange@1003 : Record 7601;
+      NWDate@1006 : Date;
+      i@1004 : Integer;
+    BEGIN
+      LibraryService.CreateBaseCalendar(BaseCalendar);
+      BaseCalendarChange.INIT;
+      BaseCalendarChange."Base Calendar Code" := BaseCalendar.Code;
+      NWDate := EndDate;
+      FOR i := 1 TO NonWorkDays DO BEGIN
+        LibraryInventory.CreateBaseCalendarChange(
+          BaseCalendarChange,BaseCalendar.Code,BaseCalendarChange."Recurring System"::"Annual Recurring",
+          NWDate,BaseCalendarChange.Day::" ");
+        NWDate -= 1;
+      END;
+      EXIT(BaseCalendar.Code);
+    END;
+
+    LOCAL PROCEDURE UpdateItemBlocked@59(VAR Item@1000 : Record 27);
+    BEGIN
+      // Block Item.
+      Item.VALIDATE(Blocked,TRUE);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItemProductionBOMNo@118(VAR Item@1000 : Record 27;ProductionBOMNo@1001 : Code[20]);
+    BEGIN
+      Item.VALIDATE("Production BOM No.",ProductionBOMNo);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@8(VAR SalesHeader@1000 : Record 36;ItemNo@1003 : Code[20];Quantity@1005 : Decimal);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity)
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithFourLinesOfSingleItemWithSpecifiedShipmentDates@182(VAR Quantities@1002 : ARRAY [4] OF Decimal;ItemNo@1003 : Code[20];ShipmentDates@1004 : ARRAY [4] OF Date);
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1001 : Record 37;
+      i@1005 : Integer;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      FOR i := 1 TO ARRAYLEN(ShipmentDates) DO BEGIN
+        Quantities[i] := LibraryRandom.RandIntInRange(100,200);
+        LibrarySales.CreateSalesLineWithShipmentDate(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,ShipmentDates[i],Quantities[i]);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateAndCertifyProductionBOM@98(VAR ProductionBOMHeader@1002 : Record 99000771;ItemNo@1001 : Code[20]) QtyPer : Integer;
+    VAR
+      ProductionBOMLine@1005 : Record 99000772;
+      Item@1000 : Record 27;
+    BEGIN
+      QtyPer := LibraryRandom.RandInt(5);
+      Item.GET(ItemNo);
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,Item."Base Unit of Measure");
+      LibraryManufacturing.CreateProductionBOMLine(
+        ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,Item."No.",QtyPer);
+      ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::Certified);
+      ProductionBOMHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE FilterOnRequisitionLine@132(VAR RequisitionLine@1000 : Record 246;No@1001 : Code[20]);
+    BEGIN
+      RequisitionLine.SETRANGE(Type,RequisitionLine.Type::Item);
+      RequisitionLine.SETRANGE("No.",No);
+    END;
+
+    LOCAL PROCEDURE SelectRequisitionLine@64(VAR RequisitionLine@1000 : Record 246;ItemNo@1001 : Code[20]);
+    BEGIN
+      FilterOnRequisitionLine(RequisitionLine,ItemNo);
+      RequisitionLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshReleasedProductionOrder@105(VAR ProductionOrder@1000 : Record 5405;ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo,Quantity);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CalcRegenPlanForPlanWksh@136(ItemNo@1001 : Code[20]);
+    VAR
+      Item@1000 : Record 27;
+      EndDate@1003 : Date;
+    BEGIN
+      Item.GET(ItemNo);
+      EndDate := GetRequiredDate(10,30,WORKDATE);  // End Date relative to Workdate.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,EndDate);
+    END;
+
+    LOCAL PROCEDURE CalcRegenPlanForItemsRespectPlanningParamsFromNowToDate@164(ItemFilter@1001 : Text;ToDate@1002 : Date);
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      Item.SETFILTER("No.",ItemFilter);
+      LibraryPlanning.CalcRegenPlanForPlanWkshPlanningParams(Item,WORKDATE,ToDate,TRUE);
+    END;
+
+    LOCAL PROCEDURE CalcNetChangePlanForPlanWksh@151(ItemNo@1001 : Code[20]);
+    VAR
+      Item@1000 : Record 27;
+      EndDate@1003 : Date;
+    BEGIN
+      Item.GET(ItemNo);
+      EndDate := GetRequiredDate(10,30,WORKDATE);  // End Date relative to Workdate.
+      LibraryPlanning.CalcNetChangePlanForPlanWksh(Item,WORKDATE,EndDate,FALSE);
+    END;
+
+    LOCAL PROCEDURE SelectItemJournalLine@211(VAR ItemJournalLine@1000 : Record 83;JournalTemplateName@1001 : Code[10];JournalBatchName@1002 : Code[10]);
+    BEGIN
+      ItemJournalLine.SETRANGE("Journal Template Name",JournalTemplateName);
+      ItemJournalLine.SETRANGE("Journal Batch Name",JournalBatchName);
+      ItemJournalLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SelectPurchaseOrderLine@40(VAR PurchaseLine@1000 : Record 39;No@1001 : Code[20]);
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("No.",No);
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SelectProdOrderLine@41(VAR ProdOrderLine@1000 : Record 5406;ItemNo@1001 : Code[20]);
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,ProdOrderLine.Status::"Firm Planned");
+      ProdOrderLine.SETRANGE("Item No.",ItemNo);
+      ProdOrderLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostOutputJournal@86(ProductionOrderNo@1001 : Code[20]);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      CreateOutputJournalWithExlpodeRouting(ProductionOrderNo);
+      SelectItemJournalLine(ItemJournalLine,OutputItemJournalBatch."Journal Template Name",OutputItemJournalBatch.Name);
+      LibraryInventory.PostItemJournalLine(OutputItemJournalBatch."Journal Template Name",OutputItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateOutputJournalWithExlpodeRouting@155(ProductionOrderNo@1002 : Code[20]);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      LibraryInventory.ClearItemJournal(OutputItemJournalTemplate,OutputItemJournalBatch);
+      LibraryManufacturing.CreateOutputJournal(ItemJournalLine,OutputItemJournalTemplate,OutputItemJournalBatch,'',ProductionOrderNo);
+      LibraryInventory.OutputJnlExplRoute(ItemJournalLine);
+    END;
+
+    LOCAL PROCEDURE CreateStockkeepingUnitWithReorderingPolicy@177(LocationCode@1001 : Code[10];ItemNo@1000 : Code[20];VariantCode@1003 : Code[10];ReorderingPolicy@1004 : Option);
+    VAR
+      StockkeepingUnit@1002 : Record 5700;
+    BEGIN
+      LibraryInventory.CreateStockkeepingUnitForLocationAndVariant(StockkeepingUnit,LocationCode,ItemNo,VariantCode);
+      StockkeepingUnit.VALIDATE("Reordering Policy",ReorderingPolicy);
+      StockkeepingUnit.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CalcRegenPlanAndCarryOutActionMessage@36(VAR TempRequisitionLine@1003 : TEMPORARY Record 246;ItemNo@1001 : Code[20]);
+    BEGIN
+      CalcRegenPlanForPlanWksh(ItemNo);
+      CopyRequisitionLineToTemp(TempRequisitionLine,ItemNo);  // Copy Lines to Temporary table so that it can be accessed later for verification.
+
+      // Accept and Carry Out Action message.
+      AcceptActionMessage(ItemNo);
+      CarryOutActionMessage(ItemNo);
+    END;
+
+    LOCAL PROCEDURE PlanWrkShtCalcRegenPlanAndCarryOutActionMessage@199(ItemFilter@1001 : Text;FromDate@1005 : Date;ToDate@1003 : Date;ActionMessage@1004 : Option);
+    VAR
+      Item@1002 : Record 27;
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      Item.SETFILTER("No.",ItemFilter);
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,FromDate,ToDate);
+      RequisitionLine.SETFILTER("No.",ItemFilter);
+      RequisitionLine.SETRANGE("Ref. Order Type",RequisitionLine."Ref. Order Type"::"Prod. Order");
+      RequisitionLine.SETRANGE("Action Message",ActionMessage);
+      RequisitionLine.MODIFYALL("Accept Action Message",TRUE,TRUE);
+      RequisitionLine.FINDFIRST;
+      LibraryPlanning.CarryOutActionMsgPlanWksh(RequisitionLine);
+    END;
+
+    LOCAL PROCEDURE CopyRequisitionLineToTemp@32(VAR TempRequisitionLine@1000 : TEMPORARY Record 246;ItemNo@1002 : Code[20]);
+    VAR
+      RequisitionLine@1001 : Record 246;
+    BEGIN
+      SelectRequisitionLine(RequisitionLine,ItemNo);
+      REPEAT
+        TempRequisitionLine := RequisitionLine;
+        TempRequisitionLine.INSERT;
+      UNTIL RequisitionLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AcceptActionMessage@1(ItemNo@1001 : Code[20]);
+    VAR
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      SelectRequisitionLine(RequisitionLine,ItemNo);
+      REPEAT
+        RequisitionLine.VALIDATE("Accept Action Message",TRUE);
+        RequisitionLine.MODIFY(TRUE);
+      UNTIL RequisitionLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CarryOutActionMessage@28(ItemNo@1001 : Code[20]);
+    VAR
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      SelectRequisitionLine(RequisitionLine,ItemNo);
+      LibraryPlanning.CarryOutActionMsgPlanWksh(RequisitionLine);
+    END;
+
+    LOCAL PROCEDURE DeleteNewPurchaseOrder@22(ItemNo@1000 : Code[20]);
+    VAR
+      PurchaseLine@1001 : Record 39;
+      PurchaseHeader@1002 : Record 38;
+    BEGIN
+      SelectPurchaseOrderLine(PurchaseLine,ItemNo);
+      PurchaseHeader.GET(PurchaseHeader."Document Type"::Order,PurchaseLine."Document No.");
+      PurchaseHeader.DELETE(TRUE);
+    END;
+
+    LOCAL PROCEDURE DeleteNewProductionOrder@25(ItemNo@1000 : Code[20]);
+    VAR
+      ProdOrderLine@1001 : Record 5406;
+      ProductionOrder@1002 : Record 5405;
+    BEGIN
+      SelectProdOrderLine(ProdOrderLine,ItemNo);
+      ProductionOrder.GET(ProductionOrder.Status::"Firm Planned",ProdOrderLine."Prod. Order No.");
+      ProductionOrder.DELETE(TRUE);
+    END;
+
+    LOCAL PROCEDURE DeleteProductionForecast@147(ProductionForecastName@1000 : Record 99000851);
+    BEGIN
+      LibraryVariableStorage.Enqueue(DeleteProductionForecastConfirmMessageQst);
+      ProductionForecastName.DELETE(TRUE);
+    END;
+
+    LOCAL PROCEDURE GetRequiredDate@9(Days@1000 : Integer;IncludeAdditionalPeriod@1003 : Integer;RelativeDate@1001 : Date) NewDate : Date;
+    BEGIN
+      // Calculating a New Date relative to WorkDate or Lot Accumulation period dates.
+      NewDate := CALCDATE('<' + FORMAT(LibraryRandom.RandInt(Days) + IncludeAdditionalPeriod) + 'D>',RelativeDate);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLine@44(ItemNo@1002 : Code[20];EntryType@1001 : Option) Quantity : Decimal;
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      Quantity := CreateItemJournalLine(ItemJournalLine,ItemNo,EntryType);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE UpdateItemInventoryOnLocation@74(ItemNo@1002 : Code[20];LocationCode@1001 : Code[10]);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      CreateItemJournalLine(ItemJournalLine,ItemNo,ItemJournalLine."Entry Type"::"Positive Adjmt.");
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalLine@73(VAR ItemJournalLine@1000 : Record 83;ItemNo@1001 : Code[20];EntryType@1002 : Option) Quantity : Decimal;
+    BEGIN
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      Quantity := LibraryRandom.RandDec(10,2);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,EntryType,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrderAsSpecialOrder@175(ItemNo@1004 : Code[20];Quantity@1001 : Decimal);
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      CreateSalesOrder(SalesHeader,ItemNo,Quantity);
+      UpdateSalesLinePurchasingCode(SalesHeader."No.");
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesLinePurchasingCode@62(DocumentNo@1000 : Code[20]);
+    VAR
+      SalesLine@1003 : Record 37;
+      Purchasing@1001 : Record 5721;
+    BEGIN
+      CreatePurchasingCodeWithSpecialOrder(Purchasing);
+      SelectSalesOrderLine(SalesLine,DocumentNo);
+      SalesLine.VALIDATE("Purchasing Code",Purchasing.Code);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchasingCodeWithSpecialOrder@4(VAR Purchasing@1001 : Record 5721);
+    BEGIN
+      LibraryPurchase.CreatePurchasingCode(Purchasing);
+      Purchasing.VALIDATE("Special Order",TRUE);
+      Purchasing.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateRequisitionLine@76(VAR RequisitionLine@1001 : Record 246;TemplateType@1000 : Option);
+    VAR
+      RequisitionWkshName@1002 : Record 245;
+    BEGIN
+      RequisitionWkshName.SETRANGE("Template Type",TemplateType);
+      RequisitionWkshName.FINDFIRST;
+      RequisitionLine.INIT;
+      RequisitionLine.VALIDATE("Worksheet Template Name",RequisitionWkshName."Worksheet Template Name");
+      RequisitionLine.VALIDATE("Journal Batch Name",RequisitionWkshName.Name);
+    END;
+
+    LOCAL PROCEDURE CreateRequisitionLineFromSpecialOrder@96(ItemNo@1001 : Code[20]);
+    VAR
+      RequisitionLine@1000 : Record 246;
+      RequisitionWkshName@1002 : Record 245;
+    BEGIN
+      CreateRequisitionLine(RequisitionLine,RequisitionWkshName."Template Type"::"Req.");
+      LibraryPlanning.GetSpecialOrder(RequisitionLine,ItemNo);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@83(ItemNo@1002 : Code[20];Quantity@1005 : Decimal);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CalculatePlanForRequisitionWorksheet@91(Item@1005 : Record 27);
+    VAR
+      RequisitionWkshName@1001 : Record 245;
+      ReqWkshTemplate@1002 : Record 244;
+      EndDate@1000 : Date;
+    BEGIN
+      SelectRequisitionTemplate(ReqWkshTemplate,ReqWkshTemplate.Type::"Req.");
+      LibraryPlanning.CreateRequisitionWkshName(RequisitionWkshName,ReqWkshTemplate.Name);
+      EndDate := GetRequiredDate(10,30,WORKDATE);  // End Date relative to Workdate.
+      LibraryPlanning.CalculatePlanForReqWksh(Item,ReqWkshTemplate.Name,RequisitionWkshName.Name,WORKDATE,EndDate);
+    END;
+
+    LOCAL PROCEDURE SelectDateWithSafetyLeadTime@176(DateValue@1000 : Date;SignFactor@1001 : Integer) : Date;
+    VAR
+      ManufacturingSetup@1002 : Record 99000765;
+    BEGIN
+      // Add Safety lead time to the required date and return the Date value.
+      ManufacturingSetup.GET;
+      IF SignFactor < 0 THEN
+        EXIT(CALCDATE('<-' + FORMAT(ManufacturingSetup."Default Safety Lead Time") + '>',DateValue));
+      EXIT(CALCDATE('<' + FORMAT(ManufacturingSetup."Default Safety Lead Time") + '>',DateValue));
+    END;
+
+    LOCAL PROCEDURE SelectSalesOrderLine@65(VAR SalesLine@1000 : Record 37;DocumentNo@1001 : Code[20]);
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreateProductionForecastSetup@120(ItemNo@1002 : Code[20];MultipleLines@1000 : Boolean;VAR ProductionForecastName@1001 : Record 99000851) ForecastQty : Integer;
+    BEGIN
+      // Create Two Production Forecast with same random quantities but different dates, based on WORKDATE.
+      LibraryManufacturing.CreateProductionForecastName(ProductionForecastName);
+      UpdateForecastOnManufacturingSetup(ProductionForecastName.Name);
+      ForecastQty := LibraryRandom.RandInt(10) + 100;   // Large Random Quantity Required.
+      CreateAndUpdateProductionForecast(ProductionForecastName.Name,WORKDATE,ItemNo,ForecastQty);
+      IF MultipleLines THEN
+        CreateAndUpdateProductionForecast(ProductionForecastName.Name,GetRequiredDate(1,1,WORKDATE),ItemNo,ForecastQty);
+    END;
+
+    LOCAL PROCEDURE CreateProductionForecastSetupAtDate@168(VAR ProductionForecastName@1001 : Record 99000851;ItemNo@1000 : Code[20];ForecastEntryDate@1003 : Date) ForecastQty : Integer;
+    BEGIN
+      LibraryManufacturing.CreateProductionForecastName(ProductionForecastName);
+      UpdateForecastOnManufacturingSetup(ProductionForecastName.Name);
+      ForecastQty := LibraryRandom.RandIntInRange(100,1000);
+      CreateAndUpdateProductionForecast(ProductionForecastName.Name,ForecastEntryDate,ItemNo,ForecastQty);
+    END;
+
+    LOCAL PROCEDURE UpdateForecastOnManufacturingSetup@116(CurrentProductionForecast@1001 : Code[10]);
+    VAR
+      ManufacturingSetup@1000 : Record 99000765;
+    BEGIN
+      ManufacturingSetup.GET;
+      ManufacturingSetup.VALIDATE("Current Production Forecast",CurrentProductionForecast);
+      ManufacturingSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateProductionForecast@119(Name@1003 : Code[10];Date@1001 : Date;ItemNo@1004 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      ProductionForecastEntry@1000 : Record 99000852;
+    BEGIN
+      LibraryManufacturing.CreateProductionForecastEntry(ProductionForecastEntry,Name,ItemNo,'',Date,FALSE);  // Component Forecast - FALSE.
+      ProductionForecastEntry.VALIDATE("Forecast Quantity (Base)",Quantity);
+      ProductionForecastEntry.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateRequisitionWorksheetName@37(VAR RequisitionWkshName@1001 : Record 245);
+    VAR
+      ReqWkshTemplate@1000 : Record 244;
+    BEGIN
+      SelectRequisitionTemplate(ReqWkshTemplate,ReqWkshTemplate.Type::Planning);
+      LibraryPlanning.CreateRequisitionWkshName(RequisitionWkshName,ReqWkshTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE SelectRequisitionTemplate@63(VAR ReqWkshTemplate@1000 : Record 244;Type@1001 : Option);
+    BEGIN
+      ReqWkshTemplate.SETRANGE(Type,Type);
+      ReqWkshTemplate.SETRANGE(Recurring,FALSE);
+      ReqWkshTemplate.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdateShipmentDateOnSalesLine@21(DocumentNo@1000 : Code[20];ShipmentDate@1001 : Date);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      SelectSalesOrderLine(SalesLine,DocumentNo);
+      SalesLine.VALIDATE("Shipment Date",ShipmentDate);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CalcRegenPlanForPlanWkshPage@99(ItemNo@1002 : Code[20];ItemNo2@1003 : Code[20]);
+    VAR
+      RequisitionWkshName@1001 : Record 245;
+      PlanningWorksheet@1000 : TestPage 99000852;
+    BEGIN
+      // Regenerative Planning using Page required where Forecast is used.
+      CreateRequisitionWorksheetName(RequisitionWkshName);
+      LibraryVariableStorage.Enqueue(ItemNo);  // Enqueue Item No to be used on page for filtering.
+      LibraryVariableStorage.Enqueue(ItemNo2);  // Enqueue Item No to be used on page for filtering.
+      COMMIT;  // Required for Test.
+      PlanningWorksheet.OPENEDIT;
+      PlanningWorksheet.CurrentWkshBatchName.SETVALUE(RequisitionWkshName.Name);
+      PlanningWorksheet.CalculateRegenerativePlan.INVOKE;  // Open Regenerative Planning report. Handler - CalculatePlanPlanWkshRequestPageHandler.
+      PlanningWorksheet.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE CalcRegenPlanForPlanWkshPageWithStartingDate@184(ItemNo@1002 : Code[20];ItemNo2@1003 : Code[20];StartingDate@1000 : Date);
+    BEGIN
+      LibraryVariableStorage.Enqueue(StartingDate);  // Enqueue Item No to be used on page for filtering. Other Handler - CalculatePlanPlanWkshWithStartingDateRequestPageHandler
+      CalcRegenPlanForPlanWkshPage(ItemNo,ItemNo2);
+    END;
+
+    LOCAL PROCEDURE SelectReferenceOrderType@153(ItemNo@1000 : Code[20]) RefOrderType : Integer;
+    VAR
+      Item@1002 : Record 27;
+      RequisitionLine@1001 : Record 246;
+    BEGIN
+      Item.GET(ItemNo);
+      IF Item."Replenishment System" = Item."Replenishment System"::Purchase THEN
+        RefOrderType := RequisitionLine."Ref. Order Type"::Purchase
+      ELSE
+        RefOrderType := RequisitionLine."Ref. Order Type"::"Prod. Order";
+    END;
+
+    LOCAL PROCEDURE SelectRequisitionLineForActionMessage@23(VAR RequisitionLine@1000 : Record 246;ItemNo@1002 : Code[20];ActionMessage@1001 : Option);
+    BEGIN
+      FilterOnRequisitionLine(RequisitionLine,ItemNo);
+      RequisitionLine.SETRANGE("Action Message",ActionMessage);
+      RequisitionLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdateItemSerialNoTracking@56(VAR Item@1000 : Record 27;ItemTrackingCode@1001 : Code[10]);
+    BEGIN
+      Item.VALIDATE("Item Tracking Code",ItemTrackingCode);  // Assign Tracking Code.
+      Item.VALIDATE("Serial Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItemLotNoTracking@143(VAR Item@1000 : Record 27;ItemTrackingCode@1001 : Code[10]);
+    BEGIN
+      Item.VALIDATE("Item Tracking Code",ItemTrackingCode);  // Assign Tracking Code.
+      Item.VALIDATE("Lot Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateItemLotAccumulationPeriod@185(VAR Item@1000 : Record 27;LotAccumulationPeriod@1001 : DateFormula);
+    BEGIN
+      Item.VALIDATE("Lot Accumulation Period",LotAccumulationPeriod);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectTransferRoute@95(TransferFrom@1001 : Code[10];TransferTo@1000 : Code[10]);
+    VAR
+      TransferRoute@1002 : Record 5742;
+    BEGIN
+      // If Transfer Not Found then Create it.
+      IF NOT TransferRoute.GET(TransferFrom,TransferTo) THEN
+        LibraryWarehouse.CreateTransferRoute(TransferRoute,TransferFrom,TransferTo);
+    END;
+
+    LOCAL PROCEDURE CreateTransferOrderWithTransferRoute@60(VAR TransferLine@1000 : Record 5741;ItemNo@1001 : Code[20];TransferFrom@1005 : Code[10];TransferTo@1006 : Code[10];Quantity@1002 : Decimal);
+    VAR
+      TransferHeader@1004 : Record 5740;
+    BEGIN
+      SelectTransferRoute(TransferFrom,TransferTo);
+      LibraryWarehouse.CreateTransferHeader(TransferHeader,TransferFrom,TransferTo,LocationInTransit.Code);
+      LibraryWarehouse.CreateTransferLine(TransferHeader,TransferLine,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesHeaderOrderDate@68(VAR SalesHeader@1003 : Record 36);
+    VAR
+      NewOrderDate@1000 : Date;
+    BEGIN
+      NewOrderDate := GetRequiredDate(10,10,WORKDATE);
+      SalesHeader.VALIDATE("Order Date",NewOrderDate);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesHeaderShipmentDate@192(VAR SalesHeader@1003 : Record 36;DeltaDays@1001 : Integer);
+    BEGIN
+      SalesHeader.VALIDATE("Shipment Date",SalesHeader."Shipment Date" + DeltaDays);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE AssignTrackingOnSalesLine@70(VAR SalesLine@1000 : Record 37;DocumentNo@1001 : Code[20]);
+    BEGIN
+      LibraryVariableStorage.Enqueue(TRUE);  // Boolean - TRUE used inside AssignSerialTrackingAndCheckTrackingQtyPageHandler or AssignLotTrackingAndCheckTrackingQtyPageHandler.
+      SelectSalesOrderLine(SalesLine,DocumentNo);
+      SalesLine.OpenItemTrackingLines;  // Assign Tracking on Sales Line using page - Item Tracking Lines.
+    END;
+
+    LOCAL PROCEDURE UpdateLocationOnSalesLine@72(DocumentNo@1000 : Code[20];LocationCode@1001 : Code[10]);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      SelectSalesOrderLine(SalesLine,DocumentNo);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateVariantOnSalesLine@170(DocumentNo@1001 : Code[20];VariantCode@1000 : Code[10]);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      SelectSalesOrderLine(SalesLine,DocumentNo);
+      SalesLine.VALIDATE("Variant Code",VariantCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithLocation@90(ItemNo@1001 : Code[20];Quantity@1002 : Decimal;LocationCode@1003 : Code[10]);
+    VAR
+      SalesHeader@1000 : Record 36;
+    BEGIN
+      CreateSalesOrder(SalesHeader,ItemNo,Quantity);
+      UpdateLocationOnSalesLine(SalesHeader."No.",LocationCode);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithLocationAndShipmentDate@201(VAR SalesHeader@1000 : Record 36;ItemNo@1001 : Code[20];LocationCode@1004 : Code[10];ShipmentDate@1002 : Date);
+    VAR
+      SalesLine@1003 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      SalesHeader.VALIDATE("Location Code",LocationCode);
+      SalesHeader.VALIDATE("Shipment Date",ShipmentDate);
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,LibraryRandom.RandInt(10));
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithLocationAndVariant@171(ItemNo@1002 : Code[20];Quantity@1001 : Decimal;LocationCode@1000 : Code[10];VariantCode@1003 : Code[10]);
+    VAR
+      SalesHeader@1004 : Record 36;
+    BEGIN
+      CreateSalesOrder(SalesHeader,ItemNo,Quantity);
+      UpdateLocationOnSalesLine(SalesHeader."No.",LocationCode);
+      UpdateVariantOnSalesLine(SalesHeader."No.",VariantCode);
+    END;
+
+    LOCAL PROCEDURE CalcPlanForPlanAndReqWksh@85(Item@1001 : Record 27;CalcPlanPlanWksh@1000 : Boolean);
+    BEGIN
+      IF CalcPlanPlanWksh THEN
+        CalcRegenPlanForPlanWksh(Item."No.")
+      ELSE
+        CalculatePlanForRequisitionWorksheet(Item);
+    END;
+
+    LOCAL PROCEDURE UpdateItemLotTrackingAndSKU@122(VAR Item@1000 : Record 27;LocationCode@1003 : Code[10]);
+    VAR
+      StockkeepingUnit@1001 : Record 5700;
+      ItemTrackingCodeLotSpecific@1002 : Record 6502;
+    BEGIN
+      LibraryInventory.CreateStockkeepingUnitForLocationAndVariant(StockkeepingUnit,LocationCode,Item."No.",'');
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCodeLotSpecific,FALSE,TRUE);  // SN Specific Tracking - FALSE.
+      UpdateItemLotNoTracking(Item,ItemTrackingCodeLotSpecific.Code);
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalWithLocation@156(VAR ItemJournalLine@1000 : Record 83;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10]);
+    BEGIN
+      CreateItemJournalLine(ItemJournalLine,ItemNo,ItemJournalLine."Entry Type"::Purchase);
+      ItemJournalLine.VALIDATE("Location Code",LocationCode);
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalWithLotTracking@135(ItemNo@1000 : Code[20];LocationCode@1001 : Code[10]);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      CreateItemJournalWithLocation(ItemJournalLine,ItemNo,LocationCode);
+      LibraryVariableStorage.Enqueue(ItemTrackingMode::"Assign Lot No."); // Enqueue for Page Handler - LotItemTrackingPageHandler.
+      ItemJournalLine.OpenItemTrackingLines(FALSE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshProductionOrderWithLocation@165(ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];Status@1003 : Option);
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,Status,ProductionOrder."Source Type"::Item,ItemNo,LibraryRandom.RandDec(10,2));
+      ProductionOrder.VALIDATE("Location Code",LocationCode);
+      ProductionOrder.MODIFY(TRUE);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateBOMTree@117(VAR BOMBuffer@1002 : Record 5870;VAR Item@1000 : Record 27);
+    VAR
+      CalculateBOMTree@1004 : Codeunit 5870;
+      TreeType@1001 : ' ,Availability,Cost';
+    BEGIN
+      Item.SETRANGE("Date Filter",0D,WORKDATE);
+      CalculateBOMTree.SetShowTotalAvailability(TRUE);
+      CalculateBOMTree.GenerateTreeForItems(Item,BOMBuffer,TreeType::Availability);
+      BOMBuffer.FIND;
+    END;
+
+    LOCAL PROCEDURE UpdateManufacturingSetupComponentsAtLocation@134(NewComponentsAtLocation@1000 : Code[10]);
+    VAR
+      ManufacturingSetup@1001 : Record 99000765;
+    BEGIN
+      ManufacturingSetup.GET;
+      ManufacturingSetup.VALIDATE("Components at Location",NewComponentsAtLocation);
+      ManufacturingSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateLocationMandatory@174(NewLocationMandatory@1000 : Boolean);
+    VAR
+      InvtSetup@1002 : Record 313;
+    BEGIN
+      InvtSetup.GET;
+      InvtSetup.VALIDATE("Location Mandatory",NewLocationMandatory);
+      InvtSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSKUAndCalcRegenPlan@128(ItemNo@1001 : Code[20];LocationCode@1002 : Code[10]);
+    VAR
+      StockkeepingUnit@1000 : Record 5700;
+    BEGIN
+      LibraryInventory.CreateStockkeepingUnitForLocationAndVariant(StockkeepingUnit,LocationCode,ItemNo,'');
+      CalcRegenPlanForPlanWksh(ItemNo);
+    END;
+
+    LOCAL PROCEDURE AddInventory@152(ItemNo@1002 : Code[20];AdjustmentQty@1003 : Decimal;LocationCode@1004 : Code[10]);
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      WITH ItemJournalBatch DO BEGIN
+        LibraryInventory.CreateItemJournalLine(
+          ItemJournalLine,"Journal Template Name",Name,ItemJournalLine."Entry Type"::"Positive Adjmt.",
+          ItemNo,AdjustmentQty);
+        ItemJournalLine.VALIDATE("Location Code",LocationCode);
+        ItemJournalLine.MODIFY(TRUE);
+        LibraryInventory.PostItemJournalLine("Journal Template Name",Name);
+      END;
+    END;
+
+    LOCAL PROCEDURE FilterReservationEntry@114(VAR ReservationEntry@1000 : Record 337;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10]);
+    BEGIN
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.SETRANGE("Location Code",LocationCode);
+    END;
+
+    LOCAL PROCEDURE FilterReservationEntryWithSourceType@269(VAR ReservationEntry@1000 : Record 337;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];SourceTypeFilter@1003 : Text);
+    BEGIN
+      FilterReservationEntry(ReservationEntry,ItemNo,LocationCode);
+      ReservationEntry.SETRANGE("Reservation Status",ReservationEntry."Reservation Status"::Reservation);
+      ReservationEntry.SETFILTER("Source Type",SourceTypeFilter);
+    END;
+
+    LOCAL PROCEDURE UpdateProductionForecastMatrixField@178(VAR ProductionForecast@1000 : TestPage 99000919;Item@1006 : Record 27;Qty@1003 : Integer;LocationCode@1001 : Code[10]);
+    BEGIN
+      ProductionForecast.LocationFilter.SETVALUE(LocationCode);
+      ProductionForecast.Matrix.GOTORECORD(Item);
+      ProductionForecast.Matrix.Field1.SETVALUE(Qty);
+    END;
+
+    LOCAL PROCEDURE VerifyReservationEntryPairInsideProductionOrder@219(Level1ItemNo@1002 : Code[20];Level2ItemNo@1007 : Code[20];LocationCode@1003 : Code[10]);
+    VAR
+      Level1ReservationEntry@1008 : Record 337;
+      Level2ReservationEntry@1000 : Record 337;
+    BEGIN
+      FilterReservationEntryWithSourceType(
+        Level1ReservationEntry,Level1ItemNo,LocationCode,
+        STRSUBSTNO('%1|%2',DATABASE::"Prod. Order Line",DATABASE::"Prod. Order Component"));
+      FilterReservationEntryWithSourceType(
+        Level2ReservationEntry,Level2ItemNo,LocationCode,
+        STRSUBSTNO('%1|%2',DATABASE::"Prod. Order Line",DATABASE::"Prod. Order Component"));
+
+      Assert.RecordCount(Level1ReservationEntry,2);
+      Assert.RecordCount(Level2ReservationEntry,2);
+    END;
+
+    LOCAL PROCEDURE CreateFourDatesArrayInsideMonthPeriod@187(VAR Dates@1001 : ARRAY [4] OF Date);
+    VAR
+      D@1000 : Date;
+      i@1002 : Integer;
+    BEGIN
+      D := WORKDATE;
+      FOR i := 1 TO ARRAYLEN(Dates) DO BEGIN
+        D += LibraryRandom.RandIntInRange(3,6);
+        Dates[i] := D;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateFourDatesArrayWithMoreThanMonthInterval@215(VAR Dates@1001 : ARRAY [4] OF Date);
+    VAR
+      D@1000 : Date;
+      i@1002 : Integer;
+    BEGIN
+      D := WORKDATE;
+      FOR i := 1 TO ARRAYLEN(Dates) DO BEGIN
+        D := CALCDATE('<1M>',D) + LibraryRandom.RandIntInRange(3,6);
+        Dates[i] := D;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateFourDatesArrayInsideTwoMonthsPeriodAsTwoPairsInsideMonth@221(VAR Dates@1001 : ARRAY [4] OF Date);
+    VAR
+      D@1000 : Date;
+      i@1002 : Integer;
+    BEGIN
+      D := WORKDATE;
+      FOR i := 1 TO 2 DO BEGIN
+        D += LibraryRandom.RandIntInRange(15,30);
+        Dates[i] := D;
+      END;
+      D := CALCDATE('<1M>',Dates[2]) + LibraryRandom.RandIntInRange(3,6);
+      FOR i := 3 TO 4 DO BEGIN
+        D += LibraryRandom.RandIntInRange(15,30);
+        Dates[i] := D;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateFourDatesArrayWhereSecondAndThirdAreInsideMonthAndFirstAndFourthOutside@237(VAR Dates@1001 : ARRAY [4] OF Date);
+    BEGIN
+      Dates[1] := WORKDATE + LibraryRandom.RandIntInRange(3,6);
+      Dates[2] := CALCDATE('<1M>',Dates[1]) + LibraryRandom.RandIntInRange(3,6);
+      Dates[3] := Dates[2] + LibraryRandom.RandIntInRange(15,30);
+      Dates[4] := CALCDATE('<1M>',Dates[3]) + LibraryRandom.RandIntInRange(3,6);
+    END;
+
+    LOCAL PROCEDURE VerifyEmptyRequisitionLine@10(ItemNo@1001 : Code[20]);
+    VAR
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      FilterOnRequisitionLine(RequisitionLine,ItemNo);
+      Assert.IsTrue(RequisitionLine.ISEMPTY,STRSUBSTNO(RequisitionLineMustNotExistErr,ItemNo));
+    END;
+
+    LOCAL PROCEDURE VerifyRequisitionLineQty@18(ItemNo@1002 : Code[20];Quantity@1003 : Decimal;RefOrderType@1001 : Option);
+    VAR
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      SelectRequisitionLine(RequisitionLine,ItemNo);
+      VerifyRequisitionLine(RequisitionLine,Quantity,0,RefOrderType);
+    END;
+
+    LOCAL PROCEDURE VerifyRequisitionLineWithDueDateAndQuantity@204(ItemNo@1002 : Code[20];DueDate@1001 : Date;Quantity@1003 : Decimal);
+    VAR
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      RequisitionLine.SETRANGE("No.",ItemNo);
+      RequisitionLine.SETRANGE("Due Date",DueDate);
+      Assert.RecordCount(RequisitionLine,1);
+      RequisitionLine.FINDFIRST;
+      RequisitionLine.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyReqLine@127(ItemNo@1002 : Code[20];LocationCode@1004 : Code[10];Quantity@1001 : Decimal;ActionMessage@1003 : Option);
+    VAR
+      RequisitionLine@1000 : Record 246;
+    BEGIN
+      SelectRequisitionLine(RequisitionLine,ItemNo);
+      RequisitionLine.TESTFIELD("Location Code",LocationCode);
+      RequisitionLine.TESTFIELD(Quantity,Quantity);
+      RequisitionLine.TESTFIELD("Action Message",ActionMessage);
+    END;
+
+    LOCAL PROCEDURE VerifyNewRequisitionLine@45(TempRequisitionLine@1000 : TEMPORARY Record 246;ItemNo@1002 : Code[20]);
+    VAR
+      RequisitionLine@1001 : Record 246;
+    BEGIN
+      SelectRequisitionLine(RequisitionLine,ItemNo);
+      VerifyRequisitionLine(
+        RequisitionLine,TempRequisitionLine.Quantity,TempRequisitionLine."Original Quantity",TempRequisitionLine."Ref. Order Type");
+    END;
+
+    LOCAL PROCEDURE VerifyRequisitionLine@51(RequisitionLine@1002 : Record 246;Quantity@1001 : Decimal;OriginalQuantity@1004 : Decimal;RefOrderType@1003 : Option);
+    BEGIN
+      RequisitionLine.TESTFIELD(Quantity,Quantity);
+      RequisitionLine.TESTFIELD("Original Quantity",OriginalQuantity);
+      RequisitionLine.TESTFIELD("Ref. Order Type",RefOrderType);
+    END;
+
+    LOCAL PROCEDURE VerifyRequisitionLineWithDueDate@39(ItemNo@1000 : Code[20];Quantity@1001 : Decimal;DueDate@1002 : Date);
+    VAR
+      RequisitionLine@1003 : Record 246;
+      RefOrderType@1004 : Option;
+    BEGIN
+      FilterOnRequisitionLine(RequisitionLine,ItemNo);
+      RefOrderType := SelectReferenceOrderType(ItemNo);
+      RequisitionLine.SETRANGE("Due Date",DueDate);
+      RequisitionLine.FINDFIRST;
+      VerifyRequisitionLine(RequisitionLine,Quantity,0,RefOrderType);  // Original Qty - Zero.
+    END;
+
+    LOCAL PROCEDURE VerifyRequisitionLineWithLocationActionAndRefOrderType@150(ItemNo@1000 : Code[20];RefOrderType@1006 : Option;LocationCode@1007 : Code[10];ActionMessage@1005 : Option;Quantity@1001 : Decimal;OriginalQuantity@1004 : Decimal;DueDate@1002 : Date);
+    VAR
+      RequisitionLine@1003 : Record 246;
+    BEGIN
+      FilterOnRequisitionLine(RequisitionLine,ItemNo);
+      WITH RequisitionLine DO BEGIN
+        SETRANGE("Location Code",LocationCode);
+        SETRANGE("Ref. Order Type",RefOrderType);
+        SETRANGE("Action Message",ActionMessage);
+        SETRANGE("Due Date",DueDate);
+        FINDFIRST;
+      END;
+      VerifyRequisitionLine(RequisitionLine,Quantity,OriginalQuantity,RefOrderType);  // Original Qty - Zero.
+    END;
+
+    LOCAL PROCEDURE VerifyItemTrackingLineQty@67(ItemTrackingLines@1000 : TestPage 6510);
+    VAR
+      TrackingQuantity@1001 : Variant;
+    BEGIN
+      ItemTrackingLines.FIRST;
+      LibraryVariableStorage.Dequeue(TrackingQuantity);
+      ItemTrackingLines."Quantity (Base)".ASSERTEQUALS(TrackingQuantity);
+    END;
+
+    LOCAL PROCEDURE VerifyTrackingOnRequisitionLine@75(ItemNo@1000 : Code[20];Quantity@1001 : Decimal);
+    VAR
+      RequisitionLine@1002 : Record 246;
+    BEGIN
+      LibraryVariableStorage.Enqueue(FALSE);  // Boolean - FALSE used inside AssignSerialTrackingAndCheckTrackingQtyPageHandler or AssignLotTrackingAndCheckTrackingQtyPageHandler.
+      LibraryVariableStorage.Enqueue(Quantity);  // Enqueue Quantity(Base) for Item Tracking Lines Page.
+      SelectRequisitionLine(RequisitionLine,ItemNo);
+      RequisitionLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE VerifyLocationOnRequisitionLine@71(ItemNo@1000 : Code[20];LocationCode@1002 : Code[10]);
+    VAR
+      RequisitionLine@1001 : Record 246;
+    BEGIN
+      FilterOnRequisitionLine(RequisitionLine,ItemNo);
+      RequisitionLine.FINDFIRST;
+      RequisitionLine.TESTFIELD("Location Code",LocationCode);
+    END;
+
+    LOCAL PROCEDURE VerifyReservationEntry@106(VAR ReservationEntry@1000 : Record 337;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];Quantity@1003 : Decimal);
+    BEGIN
+      FilterReservationEntry(ReservationEntry,ItemNo,LocationCode);
+      ReservationEntry.FINDFIRST;
+      ReservationEntry.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyEmptyReservationEntry@115(ItemNo@1001 : Code[20];LocationCode@1002 : Code[10]);
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      FilterReservationEntry(ReservationEntry,ItemNo,LocationCode);
+      Assert.IsTrue(ReservationEntry.ISEMPTY,STRSUBSTNO(ReservationEntryMustNotExistErr,ItemNo));
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntry@104(ItemNo@1002 : Code[20];LocationCode@1001 : Code[10];EntryType@1003 : Option;Quantity@1004 : Decimal;InvoicedQuantity@1005 : Decimal);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.TESTFIELD("Location Code",LocationCode);
+      ItemLedgerEntry.TESTFIELD("Entry Type",EntryType);
+      ItemLedgerEntry.TESTFIELD(Quantity,Quantity);
+      ItemLedgerEntry.TESTFIELD("Invoiced Quantity",InvoicedQuantity);
+    END;
+
+    LOCAL PROCEDURE VerifyGrossReqAndScheduledRecOnBOMTree@113(VAR BOMBuffer@1001 : Record 5870;ItemNo@1003 : Code[20];ScheduledReceiptsQty@1000 : Decimal;GrossRequirementQty@1002 : Decimal);
+    BEGIN
+      WITH BOMBuffer DO BEGIN
+        SETRANGE("No.",ItemNo);
+        FINDFIRST;
+        Assert.AreEqual(ScheduledReceiptsQty,"Scheduled Receipts",'');
+        Assert.AreEqual(GrossRequirementQty,"Gross Requirement",'');
+      END;
+    END;
+
+    LOCAL PROCEDURE AreSameMessages@20(Message@1001 : Text[1024];Message2@1000 : Text[1024]) : Boolean;
+    BEGIN
+      EXIT(STRPOS(Message,Message2) > 0);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CalculatePlanPlanWkshRequestPageHandler@38(VAR CalculatePlanPlanWksh@1000 : TestRequestPage 99001017);
+    VAR
+      ItemNo@1001 : Variant;
+      ItemNo2@1003 : Variant;
+      EndDate@1002 : Date;
+    BEGIN
+      // Calculate Regenerative Plan using page. Required where Forecast is used.
+      LibraryVariableStorage.Dequeue(ItemNo);
+      LibraryVariableStorage.Dequeue(ItemNo2);
+      EndDate := GetRequiredDate(10,30,WORKDATE);  // End Date relative to Workdate.
+      CalculatePlanPlanWksh.Item.SETFILTER("No.",STRSUBSTNO(ItemFilterTxt,ItemNo,ItemNo2));
+      CalculatePlanPlanWksh.StartingDate.SETVALUE(WORKDATE);
+      CalculatePlanPlanWksh.EndingDate.SETVALUE(EndDate);
+      CalculatePlanPlanWksh.OK.INVOKE;
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CalculatePlanPlanWkshWithStartingDateRequestPageHandler@180(VAR CalculatePlanPlanWksh@1000 : TestRequestPage 99001017);
+    VAR
+      ItemNo@1001 : Variant;
+      ItemNo2@1003 : Variant;
+      StartingDate@1002 : Date;
+    BEGIN
+      // Calculate Regenerative Plan using page. Required where Forecast is used.
+      StartingDate := LibraryVariableStorage.DequeueDate;
+      LibraryVariableStorage.Dequeue(ItemNo);
+      LibraryVariableStorage.Dequeue(ItemNo2);
+      CalculatePlanPlanWksh.Item.SETFILTER("No.",STRSUBSTNO(ItemFilterTxt,ItemNo,ItemNo2));
+      CalculatePlanPlanWksh.StartingDate.SETVALUE(StartingDate);
+      CalculatePlanPlanWksh.EndingDate.SETVALUE(CALCDATE('<CM>',StartingDate));
+      CalculatePlanPlanWksh.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE PlanningErrorLogPageHandler@13(VAR PlanningErrorLog@1000 : TestPage 5430);
+    BEGIN
+      PlanningErrorLog.OK.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@2(Message@1000 : Text[1024]);
+    VAR
+      QueuedMsg@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(QueuedMsg);
+      Assert.IsTrue(AreSameMessages(Message,QueuedMsg),Message);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandlerWithoutValidate@111(Message@1000 : Text[1024]);
+    BEGIN
+      // This Handler function is used for handling Messages.
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AssignLotTrackingAndCheckTrackingQtyPageHandler@162(VAR ItemTrackingLines@1000 : TestPage 6510);
+    VAR
+      AssignTracking@1003 : Variant;
+      AssignTracking2@1006 : Boolean;
+    BEGIN
+      LibraryVariableStorage.Dequeue(AssignTracking);
+      AssignTracking2 := AssignTracking;  // Required for variant to boolean.
+      IF AssignTracking2 THEN BEGIN
+        ItemTrackingLines."Assign Lot No.".INVOKE;  // Assign Lot No.
+        LibraryVariableStorage.Enqueue(AvailabilityWarningConfirmationMsg);  // Required inside ConfirmHandler.
+        ItemTrackingLines.OK.INVOKE;
+      END ELSE
+        VerifyItemTrackingLineQty(ItemTrackingLines);  // Verify Quantity(Base) on Tracking Line.
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AssignSerialTrackingAndCheckTrackingQtyPageHandler@123(VAR ItemTrackingLines@1000 : TestPage 6510);
+    VAR
+      AssignTracking@1003 : Variant;
+      AssignTracking2@1006 : Boolean;
+    BEGIN
+      LibraryVariableStorage.Dequeue(AssignTracking);
+      AssignTracking2 := AssignTracking;  // Required for variant to boolean.
+      IF AssignTracking2 THEN BEGIN
+        ItemTrackingLines."Assign Serial No.".INVOKE;  // Assign Lot No.
+        LibraryVariableStorage.Enqueue(AvailabilityWarningConfirmationMsg);  // Required inside ConfirmHandler.
+        ItemTrackingLines.OK.INVOKE;  // Calls up Enter Quantity to Create page handled by handler - QuantityToCreatePageHandler.
+      END ELSE
+        VerifyItemTrackingLineQty(ItemTrackingLines);  // Verify Quantity(Base) on Tracking Line.
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE QuantityToCreatePageHandler@42(VAR EnterQuantityToCreate@1000 : TestPage 6513);
+    BEGIN
+      EnterQuantityToCreate.OK.INVOKE;  // Assign Serial Tracking on Enter Quantity to Create page.
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE LotItemTrackingPageHandler@109(VAR ItemTrackingLines@1000 : TestPage 6510);
+    VAR
+      DequeueVariable@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(DequeueVariable);
+      ItemTrackingMode := DequeueVariable;
+      CASE ItemTrackingMode OF
+        ItemTrackingMode::"Assign Lot No.":
+          ItemTrackingLines."Assign Lot No.".INVOKE;
+        ItemTrackingMode::"Select Entries":
+          ItemTrackingLines."Select Entries".INVOKE;
+      END;
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingSummaryPageHandler@108(VAR ItemTrackingSummary@1000 : TestPage 6500);
+    BEGIN
+      ItemTrackingSummary.OK.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerTRUE@88(ConfirmMessage@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    VAR
+      ExpectedMessage@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ExpectedMessage);
+      Assert.IsTrue(AreSameMessages(ConfirmMessage,ExpectedMessage),ConfirmMessage);
+      Reply := TRUE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Planning] [Planning Worksheet] [SCM]
+      Test for Planning using Planning Worksheet:
+
+      1. Create Lot for Lot item with Safety Stock. Block the Item and Calculate Regenerative Plan. Verify regenerative planning does not run and gives a message.
+      2. Create Lot for Lot item with Safety Stock. Block the Item and Calculate Net Change Plan. Verify net change planning does not run and gives a message.
+      3. Create Fixed Reorder Qty parent and child items. Create Released Production Order and Post Output. Calculate Regenerative Plan. Verify Planning Worksheet.
+      4. Create Lot for Lot Item - Replenishment : Purchase with Sales Order. Calculate Regenerative Plan and Carry out. Delete created Purchase Order and replan. Check planning lines both times are same.
+      5. Create Lot for Lot Item - Replenishment : Production with Sales Order. Calculate Regenerative Plan and Carry out. Delete created Production Order and replan. Check planning lines both times are same.
+      6. Calculate Regenerative Plan For Item with Negative Rounding Precision.
+      7. Calculate Regenerative Plan For Item with Zero Rounding Precision.
+       8. Create Fixed Reorder Quantity item. Post positive adjustment. Calculate Plan for Requisition worksheet and verify worksheet lines.
+       9. Create Fixed Reorder Quantity item. Post negative adjustment. Calculate Plan for Requisition worksheet and verify worksheet lines.
+      10. Create Fixed Reorder Quantity item. Create Sales Order. Calculate Plan for Requisition worksheet and verify worksheet lines.
+      11. Create Fixed Reorder Quantity item. Create Purchase Order. Calculate Plan for Requisition worksheet and verify worksheet lines.
+      12. Create Maximum Quantity item with Max. Inventory. Post positive adjustment. Calculate Plan for Requisition worksheet and verify worksheet lines.
+      13. Create Maximum Quantity item with Max. Inventory. Create Sales Order. Calculate Plan for Requisition worksheet and verify worksheet lines.
+      14. Create Fixed Reorder Quantity item. Create Sales Order as Special Order. Special Order -> Get Sales Order on Requisition Worksheet, and verify Requisition Line.
+      15. Create Order item. Create Forecast Setup for Item with a Production BOM. Calculate Regenerative Plan and verify separate parent and child demands.
+      16. Create Order item. Create Sales Setup for Item with a Production BOM. Calculate Regenerative Plan and verify separate parent and child demands.
+      17. Create Maximum Qty Item with maximum inventory. Create a Sales Order with multiple lines, combined quantity of which exceeds Maximum inventory. Calculate Regenerative Plan and verify worksheet lines.
+      18. Create Maximum Qty Item with maximum inventory, order multiple and reorder point. Create a Purchase order. Calculate Plan for Requisition worksheet and verify lines suggested using Order multiple exceeds Maximum inventory.
+      19. Create Lot for Lot Item with SN specific Tracking and Serial No. Create Sales Order and assign SN Specific Tracking.
+          Calculate Regenerative Plan for Planning Worksheet. Verify Tracking on Requisition Line and Quantity with Action Message.
+      20. Create Order Item with Lot specific Tracking and Lot No. Create Production Forecast and Sales Order with new Shipment date and assign Lot specific Tracking.
+          Calculate Regenerative Plan. Verify Tracking on Requisition Line and Quantity with Action Message.
+      21. Create Order Item with Lot specific Tracking and Lot No. Create Production Forecast. Create Sales Order. Update Shipment date on Sales Line. Assign Lot Specific Tracking.
+          Calculate Regenerative Plan for Planning Worksheet. Verify Tracking on Requisition Line and Quantity with Action Message.
+      22. Create Fixed Reorder Qty Item. Create Transfer Order. Calculate regenerative plan and verify Planning worksheet lines.
+      23. Create Maximum Qty Item. Create Transfer Order. Calculate regenerative plan and verify Planning worksheet lines.
+      24. Create Item without reordering policy. Create Transfer Order. Calculate regenerative plan and verify no worksheet lines exist.
+      25. Create Lot for Lot Item. Create Sales Order with new Order date. Calculate regenerative plan and verify that planning worksheet line not affected by new Order date.
+      26. Create Order Item with positive adjustment and Sales Order. Calculate Plan for Requisition worksheet and verify requisition worksheet line.
+      27. Create Maximum Qty Item with SKU and Sales Order on Location. Calculate regenerative plan and verify that no planning worksheet line is generated.
+      28. Create Maximum Qty Item with SKU and Sales Order on Location. Calculate Plan for Requisition worksheet and verify that no requisition worksheet line is generated.
+      29. Create Order Item with SKU and Sales Order on Location. Calculate regenerative plan and verify planning worksheet line with location code.
+      30. Create Order Item with SKU and Sales Order on Location. Calculate Plan for Requisition worksheet and verify requisition worksheet line with location code.
+      31. Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot Nos Item. Create Item Journal With Location. Assign Lot No on Item Journal Line.
+          Verify values on Reservation Entry.
+      32. Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot Nos Item. Create Item Journal With Location. Assign Lot No on Item Journal Line. Post Item Journal Line. Verify Item Ledger Entry.
+      33. Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot Nos Item. Create and Refresh Firm Planned with Location.Verify no Reservation entry is created for Item
+          because tracking is not assigned on Firm Planned Production Order.
+      34. Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot Nos Item. Create and Refresh Released Production Order with Location.Verify no Reservation entry is created for Item
+          because tracking is not assigned on Released Production Order.
+      35. Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot Nos Item. Assign Lot No on Item Tracking Line of Transfer Line. Verify Reservation Entry.
+      36. Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot Nos Item. Create and Post Transfer Order With Lot specific tracking. Verify Item Ledger Entry.
+      37. Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot Nos Item. Create and Post Transfer Order With Receive Lot with specific tracking. Verify Item Ledger Entry.
+      38. Create Lot for Lot Item with Stockkeeping Unit. Update Lot specific Tracking and Lot Nos Item. Calculate Regenerative Plan on Planning Worksheet. Assign Lot No Tracking on Requisition Line.
+          Verify quantity on Reservation Entry for location.
+      39. Create Fixed Reorder Quantity with Stockkeeping Unit. Update Lot specific Tracking and Lot Nos Item. Calculate Regenerative Plan on Planning Worksheet. Assign Lot No Tracking on Requisition Line.
+          Verify quantity on Reservation Entry for location.
+      40. Create Production Order from Sales Order with Item Tracking Line. Verify Quantity on Planning Worksheet after changed Due Date on Production Order.
+      41. Check quantity of "Gross Requirement" and "Scheduled Receipts" in BOM Tree in case of Sales Order and Planning Worksheet's Regenerative Plan
+      42. Calculate Regenerative Plan for Maximum Qty Item with SKU. Verify requisition line will be generated.
+      43. Calculate Regenerative Plan for Fixed Reorder Qty Item with SKU. Verify requisition line will be generated.
+      44. Calculate Regenerative Plan when Production Forecast Name was removed, Verify the requisition line should be removed.
+      45. Calculate Regenerative Plan for excess replenishment with item tracking. Verify Cancel Requisition line will be generated.
+      46. Calculate Regenerative Plan for Item with "Maximum Order Quantity" and two supply ILEs, each having Quantity greater than "Maximum Order Quantity".
+
+        Covers Test cases:
+       -------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       -------------------------------------------------------------------------------------------------------------------
+        CalcRegenPlanForBlockedLFLItem                                                                             127612
+        CalcNetChangePlanForBlockedLFLItem                                                                         127612
+        CalcRegenPlanWithOutputJournalForFRQItem                                                                   127628
+        PlanningWorksheetLinesNotAffectedWhenDeletePurchaseAndCalcRegenPlanTwice                                   127653
+        PlanningWorksheetLinesNotAffectedWhenDeleteProductionAndCalcRegenPlanTwice                                 127653
+
+        Covers Test cases: 298984
+       -------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       -------------------------------------------------------------------------------------------------------------------
+        CalcRegenPlanForItemWithNegativeRoundingPrecision                                                         229551
+        CalcRegenPlanForItemWithZeroRoundingPrecision                                                             229551
+
+        Covers Test cases:
+       -------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       -------------------------------------------------------------------------------------------------------------------
+        CalcPlanReqWkshPositiveAdjFRQItem                                                                          143101
+        CalcPlanReqWkshNegativeAdjFRQItem                                                                          143101
+        CalcPlanReqWkshForSalesFRQItem                                                                             143101
+        CalcPlanReqWkshForPurchaseFRQItem                                                                          143101
+        CalcPlanReqWkshPositiveAdjMQItem                                                                           129006
+        CalcPlanReqWkshForSalesMQItem                                                                              129006
+        SpecialSalesOrderOnReqWksheetFRQItem                                                                       128994
+
+        Covers Test cases:
+       -------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       -------------------------------------------------------------------------------------------------------------------
+        CalcPlanPlanWkshWithDerivedDemandsUsingForecastOrderItem                                                   143099
+        CalcPlanPlanWkshWithDerivedDemandsUsingSalesOrderItem                                                      143099
+        CalcPlanPlanWkshWithMultiLineSalesExceedMaxInventoryMQItem                                                 143105
+        CalcPlanReqWkshForPurchaseAndOrderMultipleMQItem                                                           143104
+
+        Covers Test cases:
+       --------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       --------------------------------------------------------------------------------------------------------------------
+        CalcPlanPlanWkshForSalesWithSerialTrackingLFLItem                                                          127525
+        CalcPlanPlanWkshForForecastAndSalesWithLotTrackingOrderItem                                                127620
+        CalcPlanPlanWkshForForecastAndSalesWithLotTrackingMQItem                                                   127620
+        CalcPlanPlanWkshTransferForFRQItem                                                                         127536
+        CalcPlanPlanWkshTransferForMQItem                                                                          127536
+        CalcPlanPlanWkshTransferForItemWithNoReorderingPolicy                                                      127546
+        CalcPlanPlanWkshForSalesWithNewOrderDateLFLItem                                                            127552
+
+        Covers Test cases:
+       --------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       --------------------------------------------------------------------------------------------------------------------
+        CalcPlanReqWkshWithSalesAndPositiveAdjOrderItem                                                        127704,127522
+        CalcPlanPlanWkshWithSKUAndSalesOnLocationMQItem                                                        127704,127522
+        CalcPlanReqWkshWithSKUAndSalesOnLocationMQItem                                                         127704,127522
+        CalcPlanPlanWkshWithSKUAndSalesOnLocationOrderItem                                                     127704,127522
+        CalcPlanReqWkshWithSKUAndSalesOnLocationOrderItem                                                      127704,127522
+
+        Covers Test cases:
+       ----------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       ----------------------------------------------------------------------------------------------------------------------
+        ReservationEntryForItemJournalLotTrackingSKUAndLFLItem                                                    275705
+        ItemLedgerEntryForPostedItemJournalLotTrackingSKUAndLFLItem                                               275705
+        ReservationEntryForReleasedProdOrderWithSKUAndLFLItem                                                     275705
+        ReservationEntryForFirmPlannedProdOrderWithSKUAndLFLItem                                                  275705
+        ReservationEntryForTransferOrderWithLotTrackingSKUAndLFLItem                                              275705
+        ItemLedgerEntryForPostedTransferOrderAsShipWithLotTrackingSKUAndLFLItem                                   275705
+        ItemLedgerEntryForPostedTransferOrderAsReceiveWithLotTrackingSKUAndLFLItem                                275705
+        ReservationEntryWithCalcRegenPlanAndLotTrackingLFLItem                                                    275705
+        ReservationEntryWithCalcRegenPlanAndLotTrackingFRQItem                                                    275705
+
+        Covers Test cases:
+       ----------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       ----------------------------------------------------------------------------------------------------------------------
+        CalcRegenPlanForProductionOrderAfterChangedDueDate                                                        335722
+        GrossReqAndScheduledRecAfterSalesOrderAndPlanWkshRegenPlan                                                344157
+
+        Covers Test cases:
+       ----------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       ----------------------------------------------------------------------------------------------------------------------
+        CalcRegenPlanWkshForMQItemWithSKU                                                                         88604
+        CalcRegenPlanWkshForFRQItemWithSKU                                                                        88604
+
+        Covers Test cases:
+       ----------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       ----------------------------------------------------------------------------------------------------------------------
+        CalcPlanRegenWkshForProductionForecastName                                                                91916
+
+        Covers Test cases:
+       ----------------------------------------------------------------------------------------------------------------------
+        Test Function                                                                                             TFS ID
+       ----------------------------------------------------------------------------------------------------------------------
+        CalcRegenPlanForCancelExcessReplenishmentWithTracking                                                     101017
+    }
+    END.
+  }
+}
+

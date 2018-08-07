@@ -1,0 +1,4157 @@
+OBJECT Codeunit 136140 Service Order Release
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      NothingToReleaseError@1008 : TextConst 'ENU=There is nothing to release for Order %1.';
+      OpenServiceOrderWarehouseShipmentError@1011 : TextConst 'ENU="Release Status must be equal to ''%1''  in Service Header: Document Type=Order, No.=%2. Current value is ''%3''."';
+      WarehouseShipmentMessage@1013 : TextConst 'ENU=%1 Warehouse Shipment Header has been created.';
+      NoWarehouseShipmentsMessage@1015 : TextConst 'ENU=There are no Warehouse Shipment Lines created.';
+      WarehouseshipmentExistsError@1016 : TextConst 'ENU=The Service Line cannot be deleted when a related Warehouse Shipment Line exists.';
+      ServiceOrderInGrid@1018 : TextConst 'ENU=Service Order';
+      WarehouseJournalBatch@1023 : Record 7310;
+      WarehouseJournalTemplate@1022 : Record 7309;
+      ItemJournalTemplate@1021 : Record 82;
+      ItemJournalBatch@1020 : Record 233;
+      Assert@1019 : Codeunit 130000;
+      LibraryInventory@1017 : Codeunit 132201;
+      LibraryPurchase@1035 : Codeunit 130512;
+      LibrarySales@1014 : Codeunit 130509;
+      LibraryService@1012 : Codeunit 131902;
+      LibraryUtility@1009 : Codeunit 131000;
+      LibraryWarehouse@1007 : Codeunit 132204;
+      LibraryERM@1098 : Codeunit 131300;
+      LibraryRandom@1036 : Codeunit 130440;
+      IsInitialized@1005 : Boolean;
+      ShipmentConfirmationMessage@1003 : Text[1024];
+      WMSFullLocation@1002 : Code[10];
+      SourceDocumentNo@1001 : Code[20];
+      SourceDocumentType@1000 : Text[200];
+      BlockedItemErrorMessage@1024 : TextConst 'ENU="Blocked must be equal to ''No''  in Item: No.=%1. Current value is ''Yes''."';
+      ShippedNotInvoicedError@1025 : TextConst 'ENU="Qty. Shipped Not Invoiced must be equal to ''%1''  in Service Shipment Line: Document No.=%2, Line No.=%3. Current value is ''%4''."';
+      NoWarehouseRequestErrorMessage@1026 : TextConst 'ENU=No Warehouse Request was found. The warehouse shipment could not be created.';
+      YellowLocationCode@1027 : Code[10];
+      NothingToPostError@1028 : TextConst 'ENU=There is nothing to post.';
+      WarehousePartialShippingErrorTxt@1032 : TextConst 'ENU="Qty. (Base) must be equal to ''%1''  in Warehouse Shipment Line: No.=%2, Line No.=%3. Current value is ''%4''."';
+      BinMandatoryErrorTxt@1029 : TextConst 'ENU="Bin Code must have a value in Service Line: Document Type="';
+      QuantityInsufficientErrorTxt@1030 : TextConst 'ENU=Quantity (Base) is not sufficient to complete this action. The quantity in the bin is';
+      NonPickableBinErrorTxt@1031 : TextConst 'ENU="Pick must be equal to ''Yes''  in Bin Type: Code="';
+      ServiceOrderShipmentErr@1033 : TextConst 'ENU=This order must be a complete Shipment.';
+      DescriptionTxt@1034 : TextConst 'ENU=Test Description.';
+
+    LOCAL PROCEDURE ClearGlobals@69();
+    BEGIN
+      ShipmentConfirmationMessage := '';
+      SourceDocumentNo := '';
+      SourceDocumentType := '';
+    END;
+
+    [Test]
+    PROCEDURE ReReleaseServiceOrder@31();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Setup: Create a Released service order with service lines
+      CreateServiceOrderWithServiceLines(ServiceHeader);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // Execute: Release to Ship a service order released to hip
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // Verify: Status for relased orders are set properly.
+      VerifyServiceHeaderReleaseStatus(ServiceHeader,ServiceHeader."Release Status"::"Released to Ship",ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    PROCEDURE DeleteReleaseServiceOrder@2();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceHeaderNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup: Create a service order with service lines
+      CreateServiceOrderWithServiceLines(ServiceHeader);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      LibraryService.ReopenServiceDocument(ServiceHeader);
+
+      // Execute: Delete a Released Order
+      ServiceHeaderNo := ServiceHeader."No.";
+      ServiceHeader.DELETE;
+
+      // Verify: Delete has succeeded.
+      Assert.AreEqual(FALSE,ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeaderNo),'Unable to fetch record after delete');
+    END;
+
+    [Test]
+    PROCEDURE DeleteReopenedServiceOrder@13();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceHeaderNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup: Create a service order with service lines
+      CreateServiceOrderWithServiceLines(ServiceHeader);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // Execute: Delete a Released Order
+      ServiceHeaderNo := ServiceHeader."No.";
+      ServiceHeader.DELETE;
+
+      // Verify: Delete has succeeded.
+      Assert.AreEqual(FALSE,ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeaderNo),'Unable to fetch record after delete');
+    END;
+
+    [Test]
+    PROCEDURE ReleaseServiceOrderNoServiceLines@16();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Setup: Create a service order with service lines
+      CreateServiceOrder(ServiceHeader);
+
+      // Execute: Release service order to Ship
+      ASSERTERROR LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // Verify: Status for relased orders are set properly, error messages are set correctly
+      Assert.AreEqual(
+        STRSUBSTNO(NothingToReleaseError,ServiceHeader."No."),
+        GETLASTERRORTEXT,'Verify that error message is displayed when no service lines have been created');
+      VerifyServiceHeaderReleaseStatus(ServiceHeader,ServiceHeader."Release Status"::Open,ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    PROCEDURE ReleaseServiceOrderMixedServiceLines@10();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceItemLineNo@1000 : Integer;
+    BEGIN
+      Initialize;
+
+      // Setup: Create a service order with service lines of type, Item, Resource and G/L entry
+      ServiceItemLineNo := CreateServiceOrderWithServiceLines(ServiceHeader);
+      AddResourceGLServiceLinesToOrder(ServiceHeader,ServiceItemLineNo);
+
+      // Execute: Release service order to Ship
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // Verify: Status for relased orders are set properly, error messages are set correctly
+      VerifyServiceHeaderReleaseStatus(ServiceHeader,ServiceHeader."Release Status"::"Released to Ship",ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    PROCEDURE ReleaseServiceOrderNoItemServiceLines@15();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceItemLineNo@1000 : Integer;
+    BEGIN
+      Initialize;
+
+      // Setup: Create a service order with only service lines of type, Resource and G/L entry
+      ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+      AddResourceGLServiceLinesToOrder(ServiceHeader,ServiceItemLineNo);
+
+      // Execute: Release service order to Ship
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // Verify: Status for relased orders are set properly, error messages are set correctly
+      VerifyServiceHeaderReleaseStatus(ServiceHeader,ServiceHeader."Release Status"::"Released to Ship",ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    PROCEDURE ReleaseServiceOrderToShipZeroQuantity@21();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      Initialize;
+
+      // Setup: Create a service order with service lines with quantity set to 0
+      CreateServiceOrderWithServiceLines(ServiceHeader);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      ServiceLine.VALIDATE(Quantity,0);  // Use Random to select Random Quantity.
+      ServiceLine.MODIFY(TRUE);
+
+      // Execute: Release service order to Ship verify error message is thrown.
+      ASSERTERROR LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // Verify: Correct error message is thrown and Release Status are set properly.
+      Assert.AreEqual(
+        STRSUBSTNO(NothingToReleaseError,ServiceHeader."No."),GETLASTERRORTEXT,
+        'Verify that error message is displayed when no service lines have been created');
+      VerifyServiceHeaderReleaseStatus(ServiceHeader,ServiceHeader."Release Status"::Open,ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    PROCEDURE EditReopenedServiceOrder@24();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      Initialize;
+
+      // Setup: Create a Released service order with service lines
+      CreateServiceOrderWithServiceLines(ServiceHeader);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      LibraryService.ReopenServiceDocument(ServiceHeader);
+
+      // EXECUTE: Modify quantity on the service lines
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      ServiceLine.VALIDATE(Quantity,ServiceLine.Quantity - 1);  // Use Random to select Random Quantity.
+      ServiceLine.MODIFY(TRUE);
+
+      // Verify: Status for relased orders are set properly.
+      VerifyServiceHeaderReleaseStatus(ServiceHeader,ServiceHeader."Release Status"::Open,ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    PROCEDURE PostReleasedServiceOrder@27();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1000 : Record 5902;
+      QuantityPosted@1002 : Integer;
+    BEGIN
+      Initialize;
+
+      // Setup: Create a service order with service lines and partially post it
+      CreateServiceOrderWithServiceLines(ServiceHeader);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      ServiceLine.VALIDATE(Quantity,LibraryRandom.RandIntInRange(2,100));  // Use Random to select Random Quantity.
+
+      QuantityPosted := LibraryRandom.RandIntInRange(1,ServiceLine.Quantity - 1);
+      ServiceLine.VALIDATE("Qty. to Ship",QuantityPosted);
+      ServiceLine.VALIDATE("Qty. to Invoice",ServiceLine."Qty. to Ship");
+      ServiceLine.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2));
+      ServiceLine.MODIFY(TRUE);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // Execute: Release service order to Ship.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // Verify: Status for relased orders are set properly.
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      Assert.AreEqual(QuantityPosted,ServiceLine."Quantity Shipped",'Quantity shipped is not altered by release');
+      Assert.AreEqual(QuantityPosted,ServiceLine."Quantity Invoiced",'Quantity shipped is not altered by release');
+      VerifyServiceHeaderReleaseStatus(ServiceHeader,ServiceHeader."Release Status"::"Released to Ship",ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE CreateWarehouseShipment@29();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      WarehouseShipment@1000 : TestPage 7335;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),WMSFullLocation);
+
+      // EXECUTE: Create Warehouse shipment on this order
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      WarehouseShipment.TRAP;
+
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+
+      // Verify: All service lines are present in warehouse shipment and the quantities match
+      Assert.AreEqual(
+        STRSUBSTNO(WarehouseShipmentMessage,1),ShipmentConfirmationMessage,'Confirmation message displayed on whse shpmnt creation');
+      Assert.IsTrue(
+        WarehouseShipmentHeader.GET(WarehouseShipment."No."),'Displayed warehouse shipment can be located');
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE CreateWarehouseShipmentAllLineTypes@36();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      WarehouseShipment@1000 : TestPage 7335;
+      ServiceItemLineNo@1007 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location
+      LibraryInventory.CreateItem(Item);
+      ServiceItemLineNo := CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),WMSFullLocation);
+      AddResourceGLServiceLinesToOrder(ServiceHeader,ServiceItemLineNo);
+
+      // EXECUTE: Create Warehouse shipment on this order
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+
+      // Verify: All service lines are present in warehouse shipment and the quantities match
+      Assert.IsTrue(
+        WarehouseShipmentHeader.GET(WarehouseShipment."No."),'Displayed warehouse shipment can be located');
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    PROCEDURE CreateWarehouseShipmentOpenOrder@37();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+      // SETUP: Create Service order on WHITE Location
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),WMSFullLocation);
+
+      // EXECUTE: Create Warehouse shipment on this order
+      ASSERTERROR CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+
+      // VERIFY: Error is thrown when the order is not released
+      Assert.AreEqual(
+        STRSUBSTNO(
+          OpenServiceOrderWarehouseShipmentError,
+          ServiceHeader."Release Status"::"Released to Ship",ServiceHeader."No.",ServiceHeader."Release Status"::Open),
+        GETLASTERRORTEXT,'Verify that error message is displayed when service order has not been released');
+      VerifyServiceHeaderReleaseStatus(ServiceHeader,ServiceHeader."Release Status"::Open,ServiceHeader.Status::Pending);
+    END;
+
+    [Test]
+    PROCEDURE CreateWarehouseShipmentTwice@38();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location, release and Create warehouse shipment
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),WMSFullLocation);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      LibraryWarehouse.CreateWhseShipmentFromServiceOrder(ServiceHeader);
+
+      // EXECUTE: Create Warehouse shipment again on this order
+      ASSERTERROR CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+
+      // VERIFY: No new shipments are created if no lines have been added
+      Assert.AreEqual(FORMAT(NoWarehouseShipmentsMessage),GETLASTERRORTEXT,'Verify displayed error message');
+    END;
+
+    [Test]
+    PROCEDURE DeleteEditAndReCreateWarehouseShipment@40();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      WarehouseShipmentHeaderNo@1008 : Code[20];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location, release and Create warehouse shipment
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),WMSFullLocation);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      LibraryWarehouse.CreateWhseShipmentFromServiceOrder(ServiceHeader);
+      WarehouseShipmentHeaderNo :=
+        LibraryWarehouse.FindWhseShipmentNoBySourceDoc(
+          DATABASE::"Service Line",ServiceHeader."Document Type",ServiceHeader."No.");
+
+      // EXECUTE: Delete and re-create Warehouse shipment on this order
+      WarehouseShipmentHeader.GET(WarehouseShipmentHeaderNo);
+      WarehouseShipmentHeader.DELETE(TRUE);
+      CLEAR(WarehouseShipmentHeader);
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryWarehouse.CreateWhseShipmentFromServiceOrder(ServiceHeader);
+
+      // VERIFY: new Warehouse shipments have been created
+      WarehouseShipmentHeaderNo :=
+        LibraryWarehouse.FindWhseShipmentNoBySourceDoc(
+          DATABASE::"Service Line",ServiceHeader."Document Type",ServiceHeader."No.");
+      Assert.IsTrue(
+        WarehouseShipmentHeader.GET(WarehouseShipmentHeaderNo),'Displayed warehouse shipment can be located');
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    PROCEDURE DeleteServiceLineAfterCreateWarehouseShipment@43();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1006 : Record 5902;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and create a whse shipment
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),WMSFullLocation);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      LibraryWarehouse.CreateWhseShipmentFromServiceOrder(ServiceHeader);
+
+      // EXECUTE: Delete the Service Line and Service Header
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+
+      // VERIFY: Error message is thrown
+      ASSERTERROR ServiceLine.DELETE(TRUE);
+      Assert.AreEqual(
+        STRSUBSTNO(
+          OpenServiceOrderWarehouseShipmentError,ServiceHeader."Release Status"::Open,
+          ServiceHeader."No.",ServiceHeader."Release Status"::"Released to Ship"),
+        GETLASTERRORTEXT,'Verify that error message is displayed when service order has not been released');
+    END;
+
+    [Test]
+    PROCEDURE CreateWarehouseShipmentReopenDeleteServiceLine@25();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1006 : Record 5902;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and create a whse shipment
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),WMSFullLocation);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      LibraryWarehouse.CreateWhseShipmentFromServiceOrder(ServiceHeader);
+
+      // EXECUTE: Reopen the order and Delete the Service Line.
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      LibraryService.ReopenServiceDocument(ServiceHeader);
+      ASSERTERROR ServiceLine.DELETE(TRUE);
+
+      // VERIFY: Error message is thrown
+      Assert.AreEqual(FORMAT(WarehouseshipmentExistsError),
+        GETLASTERRORTEXT,'Verify that error message is displayed when service line is deleted');
+    END;
+
+    [Test]
+    PROCEDURE DeleteServiceHeaderAfterCreateWarehouseShipment@35();
+    VAR
+      Item@1001 : Record 27;
+      ServiceHeader@1000 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and create a whse shipment
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),WMSFullLocation);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      LibraryWarehouse.CreateWhseShipmentFromServiceOrder(ServiceHeader);
+
+      // EXECUTE: Delete the Service Line
+      ASSERTERROR ServiceHeader.DELETE(TRUE);
+
+      // VERIFY: Error message is thrown
+      Assert.AreEqual(
+        STRSUBSTNO(
+          OpenServiceOrderWarehouseShipmentError,ServiceHeader."Release Status"::Open,
+          ServiceHeader."No.",ServiceHeader."Release Status"::"Released to Ship"),
+        GETLASTERRORTEXT,'Verify that error message is displayed when service order has not been released');
+    END;
+
+    [Test]
+    PROCEDURE WarehouseSourceFilterForServiceLines@41();
+    VAR
+      Item@1002 : Record 27;
+      SalesHeader@1000 : Record 36;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1004 : Record 5902;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1003 : Record 7321;
+      WarehouseSourceFilter@1007 : Record 5771;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order and Sales order on WHITE Location
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),WMSFullLocation);
+      CreateAndReleaseSalesOrder(SalesHeader,Item."No.",WMSFullLocation,RANDOM(100),FALSE);
+
+      // EXECUTE: Create Warehouse shipment on this order
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,WMSFullLocation);
+      LibraryWarehouse.CreateWarehouseSourceFilter(WarehouseSourceFilter,WarehouseSourceFilter.Type::Outbound);
+      WarehouseSourceFilter.VALIDATE("Service Orders",TRUE);
+      WarehouseSourceFilter.VALIDATE("Sales Orders",FALSE);
+      WarehouseSourceFilter.VALIDATE("Source No. Filter",ServiceHeader."No." + '|' + SalesHeader."No.");
+      WarehouseSourceFilter.MODIFY(TRUE);
+      LibraryWarehouse.GetSourceDocumentsShipment(WarehouseShipmentHeader,WarehouseSourceFilter,WMSFullLocation);
+
+      // Verify: Whse shipments have been created and only service line has been pulled in
+      GetWarehouseShipmentLinesByShipmentHeader(WarehouseShipmentLine,WarehouseShipmentHeader);
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      Assert.AreEqual(1,WarehouseShipmentLine.COUNT,'Only one line has been pulled into the warehouse shipment');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE CreateWarehouseShipmentFromGetSourceDocument@8();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      LocationCode@1000 : Code[10];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order
+      LocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // EXECUTE: Create Warehouse shipment on this order using the get source document functionality.
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,WMSFullLocation);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // Verify: All service lines are present in warehouse shipment and the quantities match
+      Assert.IsTrue(
+        WarehouseShipmentHeader.GET(WarehouseShipmentHeader."No."),'Displayed warehouse shipment can be located');
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullMultipleServiceOrdersUsingGetSourceDocument@11();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      ServiceHeaderNo@1007 : Code[20];
+      LocationCode@1008 : Code[10];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create 2 Service orders on WHITE Location and Release them.
+      LocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      ServiceHeaderNo := ServiceHeader."No.";
+      CLEAR(ServiceHeader);
+      CLEAR(ServiceLine);
+      CLEAR(Item);
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // EXECUTE: Create Warehouse shipment on both the orders
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeaderNo,ServiceOrderInGrid);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // VERIFY: Service lines from both orders are present in warehouse shipment and the quantities match.
+      Assert.IsTrue(
+        WarehouseShipmentHeader.GET(WarehouseShipmentHeader."No."),'Displayed warehouse shipment can be located');
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeaderNo);
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+
+      // VERIFY: Only 2 shipment lines have been added to the header.
+      GetWarehouseShipmentLinesByShipmentHeader(WarehouseShipmentLine,WarehouseShipmentHeader);
+      Assert.AreEqual(2,WarehouseShipmentLine.COUNT,'No. of lines added to whse shipment is 2');
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullMultipleServiceLinesOn1OrderUsingGetSourceDocument@82();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      ServiceItemLineNo@1007 : Integer;
+      LocationCode@1008 : Code[10];
+      I@1009 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location with several service lines(of Item) and Release Service Order
+      LocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      ServiceItemLineNo := CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),LocationCode);
+      AddResourceGLServiceLinesToOrder(ServiceHeader,ServiceItemLineNo);
+      FOR I := 1 TO 5 DO BEGIN
+        CLEAR(Item);
+        LibraryInventory.CreateItem(Item);
+        AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",RANDOM(100),LocationCode);
+      END;
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // EXECUTE: Create Warehouse shipment on this order using the get source document functionality.
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,WMSFullLocation);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // VERIFY: All service lines are present in warehouse shipment and the quantities match
+      Assert.IsTrue(
+        WarehouseShipmentHeader.GET(WarehouseShipmentHeader."No."),'Displayed warehouse shipment can be located');
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullServiceLinesAddLinePullAgainUsingGetSourceDocument@95();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      ServiceItemLineNo@1007 : Integer;
+      LocationCode@1008 : Code[10];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location, Release and Pull the line into a new whse shipment
+      LocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      ServiceItemLineNo := CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // EXECUTE: Reopen Service Order, Add Extra Service Line release and pull into same shipment again.
+      CLEAR(Item);
+      LibraryInventory.CreateItem(Item);
+      LibraryService.ReopenServiceDocument(ServiceHeader);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",RANDOM(100),LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // VERIFY: All service lines are present in warehouse shipment and the quantities match and the first line is not repeated
+      Assert.IsTrue(
+        WarehouseShipmentHeader.GET(WarehouseShipmentHeader."No."),'Displayed warehouse shipment can be located');
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullServiceLinesToMultipleHeadersUsingGetSourceDocument@110();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      ServiceItemLineNo@1007 : Integer;
+      LocationCode@1008 : Code[10];
+      ServiceLineNo@1000 : Integer;
+      WarehouseShipmentHeaderNo@1003 : Code[20];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location, Release and Pull the line into a new whse shipment
+      LocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      ServiceItemLineNo := CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      WarehouseShipmentHeaderNo := CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // EXECUTE: Reopen Service Order, Add Extra Service Line release and pull into a different shipment header.
+      CLEAR(Item);
+      CLEAR(WarehouseShipmentHeader);
+      LibraryInventory.CreateItem(Item);
+      LibraryService.ReopenServiceDocument(ServiceHeader);
+      ServiceLineNo := AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",RANDOM(100),LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // VERIFY: Second Shipment header has only the second service line pulled in.
+      Assert.IsTrue(
+        WarehouseShipmentHeader.GET(WarehouseShipmentHeader."No."),'Displayed warehouse shipment can be located');
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      ServiceLine.SETFILTER("Line No.",FORMAT(ServiceLineNo));
+      ServiceLine.FINDSET;
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+
+      // VERIFY: First shipment has only one line and has not been modifed.
+      WarehouseShipmentHeader.GET(WarehouseShipmentHeaderNo);
+      GetWarehouseShipmentLinesByShipmentHeader(WarehouseShipmentLine,WarehouseShipmentHeader);
+      Assert.AreEqual(1,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match for the first shipment');
+      ServiceLine.SETFILTER("Line No.",'<>%1',ServiceLineNo);
+      ServiceLine.FINDSET;
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE Pull1ServiceLineToMultipleHeadersUsingGetSourceDocument@121();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      LocationCode@1008 : Code[10];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location, Release and Pull the line into a new whse shipment
+      LocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // EXECUTE: Create new whse shipment header and try to pull the old service header.
+      CLEAR(WarehouseShipmentHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      ASSERTERROR AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // VERIFY: Error message is displayed.
+      Assert.AreEqual(FORMAT(NoWarehouseShipmentsMessage),GETLASTERRORTEXT,'Verify displayed error message');
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullServiceLineDeleteAndPullWithGetSourceDocument@135();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      LocationCode@1008 : Code[10];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location, Release and Pull the line into a new whse shipment
+      LocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // EXECUTE: Delete The Warehouse shipment line and re-pull again.
+      GetWarehouseShipmentLinesByShipmentHeader(WarehouseShipmentLine,WarehouseShipmentHeader);
+      WarehouseShipmentLine.DELETE(TRUE);
+      CLEAR(WarehouseShipmentLine);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // VERIFY: Warehouse shipment line is created again.
+      WarehouseShipmentHeader.GET(WarehouseShipmentHeader."No.");
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullServiceHeaderNonWMSLocationWithGetSourceDocument@161();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      NonWMSLocationCode@1008 : Code[10];
+      WMSLocationCode@1000 : Code[10];
+      ServiceItemLineNo@1003 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order with header on BLUE Location and service lines on WHITE, Release
+      NonWMSLocationCode := CreateLocation;
+      WMSLocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+      ServiceHeader."Location Code" := NonWMSLocationCode;
+      ServiceHeader.MODIFY(TRUE);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",RANDOM(100),WMSLocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // EXECUTE: Pull service header with BLUE location code into whse shipment with WHITE.
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,WMSLocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // VERIFY: Warehouse shipment line is created with the service lines.
+      WarehouseShipmentHeader.GET(WarehouseShipmentHeader."No.");
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullServiceLinesOnNonWMSLocationWithGetSourceDocument@170();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      NonWMSLocationCode@1008 : Code[10];
+      WMSLocationCode@1000 : Code[10];
+      ServiceItemLineNo@1003 : Integer;
+      ServiceLineNo@1007 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order with service lines on WHITE and new BLUE Location, Release
+      NonWMSLocationCode := CreateLocation;
+      WMSLocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",RANDOM(100),NonWMSLocationCode);
+      ServiceLineNo := AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",RANDOM(100),WMSLocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // EXECUTE: Pull service lines into shipment header with WHITE location code.
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,WMSLocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // VERIFY: Warehouse shipment line is created with only WHITE service Line.
+      WarehouseShipmentHeader.GET(WarehouseShipmentHeader."No.");
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      ServiceLine.SETFILTER("Line No.",FORMAT(ServiceLineNo));
+      ServiceLine.FINDSET;
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullServiceLinesOnManyWMSLocationsWithGetSourceDocument@174();
+    VAR
+      Location@1009 : Record 14;
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      NewWMSLocationCode@1008 : Code[10];
+      DefaultWMSLocationCode@1000 : Code[10];
+      ServiceItemLineNo@1003 : Integer;
+      ServiceLineNo@1007 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order with service  WHITE Location and a new full WMS location and Release order.
+      CreateFullWarehouseLocation(Location);
+      NewWMSLocationCode := Location.Code;
+      DefaultWMSLocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",RANDOM(100),DefaultWMSLocationCode);
+      ServiceLineNo := AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",RANDOM(100),NewWMSLocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // EXECUTE: Pull service lines into shipment header with new WMS Location.
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,NewWMSLocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // VERIFY: Warehouse shipment line is created with only WHITE service Line.
+      WarehouseShipmentHeader.GET(WarehouseShipmentHeader."No.");
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      ServiceLine.SETFILTER("Line No.",FORMAT(ServiceLineNo));
+      ServiceLine.FINDSET;
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      VerifyWarehouseShipmentLines(WarehouseShipmentLine,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(VerifyNoDocumentInGetSourceDocuments)]
+    PROCEDURE PullUnreleasedServiceOrderWithGetSourceDocument@123();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      DefaultWMSLocationCode@1000 : Code[10];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order with service  WHITE Location and a new full WMS location and Release order.
+      DefaultWMSLocationCode := WMSFullLocation;
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),DefaultWMSLocationCode);
+
+      // EXECUTE: Pull service lines into shipment header with new WMS Location.
+      // VERIFY: The document is not displayed when get source document is invoked.
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,DefaultWMSLocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullAndPostWarehouseShipmentUsingGetSourceDocument@3();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      LocationCode@1003 : Code[10];
+      Quantity@1000 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order, Create Whse Shpment header using Get Source Doc
+      LocationCode := WMSFullLocation;
+      Quantity := RANDOM(100);
+      CreateItemAndSupply(Item,LocationCode,Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // EXECUTE: Create Pick, Register Pick and post Warehouse shipment with ship option.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // Verify: All service lines are present in warehouse shipment and the quantities match
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      Assert.AreEqual(Quantity,ServiceLine."Quantity Shipped",ServiceLine.FIELDCAPTION("Quantity Shipped"));
+      Assert.AreEqual(Quantity,ServiceLine."Qty. Shipped Not Invoiced",ServiceLine.FIELDCAPTION("Qty. Shipped Not Invoiced"));
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullAndPostMulitpleServiceLinesUsingGetSourceDocument@136();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseEntry@1009 : Record 7312;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      LocationCode@1003 : Code[10];
+      Delta@1008 : Integer;
+      LineQuantity@1000 : Integer;
+      ServiceItemLineNo@1004 : Integer;
+      I@1007 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location with multiple service lines,Release Service Order with multiple service items
+      // One line should have not enough supply
+      // Create Whse Shpment header using Get Source Doc and pull all lines in
+      LocationCode := WMSFullLocation;
+
+      ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+
+      FOR I := 1 TO 5 DO BEGIN
+        LineQuantity := RANDOM(100);
+        CLEAR(Item);
+        CreateItemAndSupply(Item,LocationCode,LineQuantity);
+        AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity,LocationCode);
+      END;
+
+      ServiceItemLineNo := AddNewServiceItemLinesToOrder(ServiceHeader);
+      Delta := RANDOM(10);
+      LineQuantity := RANDOM(100);
+      CLEAR(Item);
+      CreateItemAndSupply(Item,LocationCode,LineQuantity);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity + Delta,LocationCode);
+
+      ServiceHeader.FIND;
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // EXECUTE: Create Pick, Register Pick and post Warehouse shipment with ship option.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // VERIFY: All service lines are present in warehouse shipment and the quantities match
+      // VERIFY: The last Service line is only partially fulfilled.
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      ServiceLine.SETFILTER("No.",'<>%1',Item."No.");
+      ServiceLine.FINDSET;
+
+      WITH ServiceLine DO BEGIN
+        Assert.AreEqual(5,COUNT,'The right number of rows are returned by the filter');
+        I := 0;
+        REPEAT
+          Assert.AreEqual(Quantity,"Quantity Shipped",STRSUBSTNO('Service line %1: %2',I,FIELDCAPTION("Quantity Shipped")));
+          Assert.AreEqual(
+            Quantity,"Qty. Shipped Not Invoiced",STRSUBSTNO('Service line %1: %2',I,FIELDCAPTION("Qty. Shipped Not Invoiced")));
+          GetAndVerifyWarehouseEntry(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Negative Adjmt.",-"Quantity Shipped");
+          Assert.AreEqual(1,WarehouseEntry.COUNT,'Verify Only one warehouse entry is created per service line');
+          I := I + 1;
+        UNTIL NEXT = 0;
+
+        SETFILTER("No.",Item."No.");
+        FINDSET;
+        Assert.AreEqual(Quantity - Delta,"Quantity Shipped",'Service Line 6: ' + FIELDCAPTION("Quantity Shipped"));
+        Assert.AreEqual(Quantity - Delta,"Qty. Shipped Not Invoiced",'Service Line 6: ' + FIELDCAPTION("Qty. Shipped Not Invoiced"));
+        GetAndVerifyWarehouseEntry(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Negative Adjmt.",-"Quantity Shipped");
+        Assert.AreEqual(1,WarehouseEntry.COUNT,'Verify Only one warehouse entry is created per service line');
+      END
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullAndPostMulitpleServiceHeadersUsingGetSourceDocument@175();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      LocationCode@1003 : Code[10];
+      LineQuantity@1000 : Integer;
+      ServiceItemLineNo@1004 : Integer;
+      I@1007 : Integer;
+      ServiceHeaderNo@1010 : ARRAY [6] OF Code[20];
+      NumberOfServiceHeaders@1011 : Integer;
+    BEGIN
+      Initialize;
+      // SETUP: Create Multiple Service orders on WHITE Location,Release Service Order.
+      // Create Whse Shpment header using Get Source Doc and pull all headers in.
+      LocationCode := WMSFullLocation;
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      NumberOfServiceHeaders := LibraryRandom.RandIntInRange(2,6);
+
+      FOR I := 1 TO NumberOfServiceHeaders DO BEGIN
+        LineQuantity := RANDOM(100);
+        CLEAR(Item);
+        CLEAR(ServiceHeader);
+        CreateItemAndSupply(Item,LocationCode,LineQuantity);
+        ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+        AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity,LocationCode);
+        ServiceHeaderNo[I] := ServiceHeader."No.";
+        LibraryService.ReleaseServiceDocument(ServiceHeader);
+        AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+      END;
+
+      // EXECUTE: Create Pick, Register Pick and post Warehouse shipment with ship option.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // VERIFY: All service lines are present in warehouse shipment and the quantities match
+      FOR I := 1 TO NumberOfServiceHeaders DO BEGIN
+        ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeaderNo[I]);
+        CLEAR(ServiceLine);
+        GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+        WITH ServiceLine DO BEGIN
+          REPEAT
+            Assert.AreEqual(Quantity,"Quantity Shipped",FIELDCAPTION("Quantity Shipped"));
+            Assert.AreEqual(Quantity,"Qty. Shipped Not Invoiced",FIELDCAPTION("Qty. Shipped Not Invoiced"));
+          UNTIL NEXT = 0;
+        END
+      END;
+    END;
+
+    [Test]
+    PROCEDURE PullAndPostMixedHeadersUsingUseFilters@187();
+    VAR
+      Customer@1013 : Record 18;
+      Item@1002 : Record 27;
+      SalesHeader@1014 : Record 36;
+      SalesLine@1016 : Record 37;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1006 : Record 5902;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseSourceFilter@1017 : Record 5771;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      LocationCode@1003 : Code[10];
+      LineQuantity@1000 : Integer;
+      ServiceItemLineNo@1004 : Integer;
+      I@1007 : Integer;
+      ServiceHeaderNo@1010 : ARRAY [6] OF Code[20];
+      SalesHeaderNo@1015 : ARRAY [6] OF Code[20];
+      NumberOfHeaders@1011 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create and Release Service orders and sales orders on WHITE Location with multiple service lines
+      // Create Whse Shpment header using Get Source Doc and pull all lines in
+      LocationCode := WMSFullLocation;
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      NumberOfHeaders := LibraryRandom.RandIntInRange(2,6);
+
+      LibrarySales.CreateCustomer(Customer);
+      FOR I := 1 TO NumberOfHeaders DO BEGIN
+        LineQuantity := RANDOM(100);
+        CLEAR(Item);
+        CLEAR(ServiceHeader);
+        CLEAR(SalesHeader);
+        CreateItemAndSupply(Item,LocationCode,2 * LineQuantity);
+        LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+        ServiceItemLineNo := AddNewServiceItemLinesToOrder(ServiceHeader);
+        AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity,LocationCode);
+        ServiceHeaderNo[I] := ServiceHeader."No.";
+        LibraryService.ReleaseServiceDocument(ServiceHeader);
+        CreateAndReleaseSalesOrder(SalesHeader,Item."No.",LocationCode,LineQuantity,FALSE);
+        SalesHeaderNo[I] := SalesHeader."No.";
+      END;
+
+      // EXECUTE: Create Pick, Register Pick and post Warehouse shipment with ship option.
+      LibraryWarehouse.CreateWarehouseSourceFilter(WarehouseSourceFilter,WarehouseSourceFilter.Type::Outbound);
+      WarehouseSourceFilter.VALIDATE("Service Orders",TRUE);
+      WarehouseSourceFilter.VALIDATE("Sales Orders",TRUE);
+      WarehouseSourceFilter.VALIDATE("Customer No. Filter",Customer."No.");
+      WarehouseSourceFilter.MODIFY(TRUE);
+      LibraryWarehouse.GetSourceDocumentsShipment(WarehouseShipmentHeader,WarehouseSourceFilter,WMSFullLocation);
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // VERIFY: All service lines and Sales Lines have been posted and the quantities match
+      FOR I := 1 TO NumberOfHeaders DO BEGIN
+        ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeaderNo[I]);
+        CLEAR(ServiceLine);
+        CLEAR(SalesLine);
+        GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+        SalesHeader.GET(SalesHeader."Document Type",SalesHeaderNo[I]);
+        GetSalesLinesOfTypeItem(SalesLine,SalesHeader);
+        WITH ServiceLine DO
+          REPEAT
+            Assert.AreEqual(Quantity,"Quantity Shipped",FIELDCAPTION("Quantity Shipped"));
+            Assert.AreEqual(Quantity,"Qty. Shipped Not Invoiced",FIELDCAPTION("Qty. Shipped Not Invoiced"));
+          UNTIL NEXT = 0;
+
+        WITH SalesLine DO BEGIN
+          REPEAT
+            Assert.AreEqual(Quantity,"Quantity Shipped",FIELDCAPTION("Quantity Shipped"));
+            Assert.AreEqual(Quantity,"Qty. Shipped Not Invoiced",FIELDCAPTION("Qty. Shipped Not Invoiced"));
+          UNTIL NEXT = 0;
+        END
+      END;
+    END;
+
+    [Test]
+    PROCEDURE PullServiceLineNoShipmentUsingUseFilter@231();
+    VAR
+      Customer@1000 : Record 18;
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseSourceFilter@1006 : Record 5771;
+      LocationCode@1008 : Code[10];
+      ServiceItemLineNo@1003 : Integer;
+      Quantity@1004 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create new customer, service item, Service order on WHITE Location, Release
+      LocationCode := WMSFullLocation;
+      Quantity := RANDOM(100);
+      LibrarySales.CreateCustomer(Customer);
+      LibraryInventory.CreateItem(Item);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      ServiceItemLineNo := AddNewServiceItemLinesToOrder(ServiceHeader);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",Quantity,LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // EXECUTE: Try to Pull using filters on a customer with no orders.
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      CLEAR(Customer);
+      LibrarySales.CreateCustomer(Customer);
+      LibraryWarehouse.CreateWarehouseSourceFilter(WarehouseSourceFilter,WarehouseSourceFilter.Type::Outbound);
+      WarehouseSourceFilter.VALIDATE("Service Orders",TRUE);
+      WarehouseSourceFilter.VALIDATE("Sales Orders",FALSE);
+      WarehouseSourceFilter.VALIDATE("Customer No. Filter",Customer."No.");
+      WarehouseSourceFilter.MODIFY(TRUE);
+      ASSERTERROR LibraryWarehouse.GetSourceDocumentsShipment(WarehouseShipmentHeader,WarehouseSourceFilter,WMSFullLocation);
+
+      // VERIFY: Error message is displayed.
+      Assert.AreEqual(FORMAT(NoWarehouseShipmentsMessage),GETLASTERRORTEXT,'Verify displayed error message');
+    END;
+
+    [Test]
+    PROCEDURE PullServiceLineTwiceUsingUseFilter@243();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseSourceFilter@1006 : Record 5771;
+      LocationCode@1008 : Code[10];
+      Quantity@1004 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create new customer, service item, Service order on WHITE Location, Release
+      LocationCode := WMSFullLocation;
+      Quantity := RANDOM(100);
+      LibraryInventory.CreateItem(Item);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,WMSFullLocation);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // EXECUTE: Try to Pull Twice using the same filters
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      LibraryWarehouse.CreateWarehouseSourceFilter(WarehouseSourceFilter,WarehouseSourceFilter.Type::Outbound);
+      WarehouseSourceFilter.VALIDATE("Service Orders",TRUE);
+      WarehouseSourceFilter.VALIDATE("Sales Orders",FALSE);
+      WarehouseSourceFilter.VALIDATE("Source No. Filter",ServiceHeader."No.");
+      WarehouseSourceFilter.MODIFY(TRUE);
+      LibraryWarehouse.GetSourceDocumentsShipment(WarehouseShipmentHeader,WarehouseSourceFilter,WMSFullLocation);
+      ASSERTERROR LibraryWarehouse.GetSourceDocumentsShipment(WarehouseShipmentHeader,WarehouseSourceFilter,WMSFullLocation);
+
+      // VERIFY: Error message is displayed.
+      Assert.AreEqual(FORMAT(NoWarehouseShipmentsMessage),GETLASTERRORTEXT,'Verify displayed error message');
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage,ConfirmationHandler)]
+    PROCEDURE UndoWarehouseShipmentFullyShippedOrder@26();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseEntry@1008 : Record 7312;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      TempServiceLine@1007 : TEMPORARY Record 5902;
+      WarehouseShipment@1004 : TestPage 7335;
+      LocationCode@1003 : Code[10];
+      Quantity@1000 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order, Create Whse Shpment header.
+      // SETUP: Create and Register Pick. Post the Whse Shpment with The Ship option.
+      LocationCode := WMSFullLocation;
+      Quantity := RANDOM(100);
+      CreateItemAndSupply(Item,LocationCode,Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+      WarehouseShipmentHeader.GET(WarehouseShipment."No.");
+
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // EXECUTE: Undo the Posted Service Shipment.
+      LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // VERIFY: Ledger entries are created correctly.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine,Quantity);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine,Quantity);
+      VerifyValueEntry(TempServiceLine,Quantity);
+      VerifyServiceLedgerEntry(TempServiceLine,Quantity);
+
+      GetAndVerifyWarehouseEntry(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Positive Adjmt.",ServiceLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments,ConfirmationHandler)]
+    PROCEDURE UndoShipmentMulitpleServiceLines@220();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      TempServiceLine@1009 : TEMPORARY Record 5902;
+      LocationCode@1003 : Code[10];
+      Delta@1008 : Integer;
+      LineQuantity@1000 : Integer;
+      ServiceItemLineNo@1004 : Integer;
+      I@1007 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location with multiple service lines,Release Service Order with multiple service items
+      // SETUP: One line should have not enough supply
+      // SETUP: Create Whse Shpment header using Get Source Doc and pull all lines in
+      LocationCode := WMSFullLocation;
+
+      ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+      LineQuantity := RANDOM(100);
+      FOR I := 1 TO 5 DO BEGIN
+        CLEAR(Item);
+        CreateItemAndSupply(Item,LocationCode,LineQuantity);
+        AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity,LocationCode);
+      END;
+
+      ServiceItemLineNo := AddNewServiceItemLinesToOrder(ServiceHeader);
+      Delta := RANDOM(10);
+      CLEAR(Item);
+      CreateItemAndSupply(Item,LocationCode,LineQuantity);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity + Delta,LocationCode);
+
+      ServiceHeader.FIND;
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // EXECUTE: Create Pick, Register Pick and post Warehouse shipment with ship option.
+      // EXECUTE: Undo the posted shipment.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+      LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // VERIFY: Ledger entries are created correctly.
+      // VERIFY: Quantities in shipments are revereed correctly.
+      // VERIFY: Service Lines have quantities set correctly.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine,LineQuantity);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine,LineQuantity);
+      VerifyValueEntry(TempServiceLine,LineQuantity);
+      VerifyServiceLedgerEntry(TempServiceLine,LineQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmationHandler)]
+    PROCEDURE UndoWarehouseShipmentMixedHeaders@260();
+    VAR
+      Customer@1013 : Record 18;
+      Item@1002 : Record 27;
+      SalesHeader@1014 : Record 36;
+      SalesLine@1016 : Record 37;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1006 : Record 5902;
+      TempServiceLine@1008 : TEMPORARY Record 5902;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseSourceFilter@1017 : Record 5771;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      LocationCode@1003 : Code[10];
+      LineQuantity@1000 : Integer;
+      ServiceItemLineNo@1004 : Integer;
+      I@1007 : Integer;
+      ServiceHeaderNo@1010 : ARRAY [6] OF Code[20];
+      SalesHeaderNo@1015 : ARRAY [6] OF Code[20];
+      NumberOfHeaders@1011 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create and Release Service orders and sales orders on WHITE Location with multiple service lines
+      // Create Whse Shpment header using Get Source Doc and pull all lines in
+      LocationCode := WMSFullLocation;
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      NumberOfHeaders := LibraryRandom.RandIntInRange(2,6);
+
+      LibrarySales.CreateCustomer(Customer);
+      LineQuantity := RANDOM(100);
+      FOR I := 1 TO NumberOfHeaders DO BEGIN
+        CLEAR(Item);
+        CLEAR(ServiceHeader);
+        CLEAR(ServiceLine);
+        CLEAR(SalesHeader);
+        CreateItemAndSupply(Item,LocationCode,2 * LineQuantity);
+        LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+        ServiceItemLineNo := AddNewServiceItemLinesToOrder(ServiceHeader);
+        AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity,LocationCode);
+        ServiceHeaderNo[I] := ServiceHeader."No.";
+        LibraryService.ReleaseServiceDocument(ServiceHeader);
+        GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+        SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+        CreateAndReleaseSalesOrder(SalesHeader,Item."No.",LocationCode,LineQuantity,FALSE);
+        SalesHeaderNo[I] := SalesHeader."No.";
+      END;
+
+      // EXECUTE: Create Pick, Register Pick and post Warehouse shipment with ship option.
+      LibraryWarehouse.CreateWarehouseSourceFilter(WarehouseSourceFilter,WarehouseSourceFilter.Type::Outbound);
+      WarehouseSourceFilter.VALIDATE("Service Orders",TRUE);
+      WarehouseSourceFilter.VALIDATE("Sales Orders",TRUE);
+      WarehouseSourceFilter.VALIDATE("Customer No. Filter",Customer."No.");
+      WarehouseSourceFilter.MODIFY(TRUE);
+      LibraryWarehouse.GetSourceDocumentsShipment(WarehouseShipmentHeader,WarehouseSourceFilter,WMSFullLocation);
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // VERIFY: All service lines and Sales Lines have been posted and the quantities match
+      FOR I := 1 TO NumberOfHeaders DO BEGIN
+        CLEAR(ServiceLine);
+        CLEAR(SalesLine);
+
+        TempServiceLine.SETFILTER("Document No.",ServiceHeaderNo[I]);
+        LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeaderNo[I]);
+
+        SalesHeader.GET(SalesHeader."Document Type",SalesHeaderNo[I]);
+        UndoAllShipmentsForSalesHeader(SalesHeader."No.");
+        GetSalesLinesOfTypeItem(SalesLine,SalesHeader);
+
+        VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+        VerifyQtyOnServiceShipmentLine(TempServiceLine,LineQuantity);
+        VerifyQtyOnItemLedgerEntry(TempServiceLine,LineQuantity);
+        VerifyValueEntry(TempServiceLine,LineQuantity);
+        VerifyServiceLedgerEntry(TempServiceLine,LineQuantity);
+
+        WITH SalesLine DO BEGIN
+          REPEAT
+            Assert.AreEqual(0,"Quantity Shipped",FIELDCAPTION("Quantity Shipped"));
+            Assert.AreEqual(0,"Qty. Shipped Not Invoiced",FIELDCAPTION("Qty. Shipped Not Invoiced"));
+          UNTIL NEXT = 0;
+        END
+      END;
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage,ConfirmationHandler)]
+    PROCEDURE UndoWarehouseShipmentFullyShippedOrderMultipleshipments@93();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      ServiceShipmentHeader@1009 : Record 5990;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseEntry@1014 : Record 7312;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1007 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      TempServiceLine@1011 : TEMPORARY Record 5902;
+      WarehouseShipment@1004 : TestPage 7335;
+      LocationCode@1003 : Code[10];
+      ServiceShipmentHeaderNo@1010 : Code[20];
+      Quantity@1000 : Integer;
+      FirstShipmentQuantity@1008 : Integer;
+      DeltaQuantity@1013 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order, Create Whse Shpment header.
+      LocationCode := WMSFullLocation;
+      Quantity := LibraryRandom.RandIntInRange(2,100);
+      CreateItemAndSupply(Item,LocationCode,Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+      WarehouseShipmentHeader.GET(WarehouseShipment."No.");
+
+      // EXECUTE: Create and Register Pick. Post the whse shpmnt twice with the ship option.
+      // EXECUTE: Undo the Second posted service shipment only.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      GetWarehouseShipmentLinesByShipmentHeader(WarehouseShipmentLine,WarehouseShipmentHeader);
+      FirstShipmentQuantity := LibraryRandom.RandIntInRange(1,Quantity - 1);
+      DeltaQuantity := Quantity - FirstShipmentQuantity;
+      WarehouseShipmentLine.VALIDATE("Qty. to Ship",FirstShipmentQuantity);
+      WarehouseShipmentLine.MODIFY(TRUE);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      ServiceShipmentHeader.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceShipmentHeader.FINDFIRST;
+      ServiceShipmentHeaderNo := ServiceShipmentHeader."No.";
+
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      GetAndVerifyWarehouseEntry(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Negative Adjmt.",-FirstShipmentQuantity);
+
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+      CLEAR(WarehouseEntry);
+      GetWarehouseEntries(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Negative Adjmt.");
+      WarehouseEntry.FINDLAST;
+      VerifyWarehouseEntry(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Negative Adjmt.",-DeltaQuantity);
+
+      ServiceShipmentHeader.SETFILTER("Order No.",ServiceHeader."No.");
+      ServiceShipmentHeader.SETFILTER("No.",'<>%1',ServiceShipmentHeaderNo);
+      ServiceShipmentHeader.FINDFIRST;
+      LibraryService.UndoShipmentLinesByServiceDocNo(ServiceShipmentHeader."No.");
+
+      // VERIFY: Ledger entries are created correctly.
+      // VERIFY: Quantity shipped in the first shipment is not affected  by undoing the second shipment.
+      // VERIFY: Warehouse entries are created correctly
+      Assert.AreEqual(
+        ServiceLine."Quantity Shipped",FirstShipmentQuantity,
+        'Verify undoing one shipment returns Quantity Shipped field to values prior to undo');
+      Assert.AreEqual(ServiceLine."Qty. to Ship",0,'Verify undoing one shipment returns Qty. to Ship field to values prior to undo');
+      Assert.AreEqual(
+        ServiceLine."Quantity Invoiced",0,'Verify undoing one shipment returns Quantity Invoiced field to values prior to undo');
+      Assert.AreEqual(
+        ServiceLine."Qty. to Invoice",FirstShipmentQuantity,
+        'Verify undoing one shipment returns Qty. to Invoice field to values prior to undo');
+
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine,DeltaQuantity);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine,DeltaQuantity);
+      VerifyValueEntry(TempServiceLine,DeltaQuantity);
+      VerifyServiceLedgerEntry(TempServiceLine,DeltaQuantity);
+
+      GetAndVerifyWarehouseEntry(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Positive Adjmt.",DeltaQuantity);
+      Assert.AreEqual(1,WarehouseEntry.COUNT,'Only one warehouse reverse entry is created');
+
+      CLEAR(WarehouseEntry);
+      GetWarehouseEntries(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Negative Adjmt.");
+      Assert.AreEqual(2,WarehouseEntry.COUNT,'2 warehouse entries are created');
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage,ConfirmationHandler)]
+    PROCEDURE UndoWarehouseShipmentPartiallyShippedOrder@224();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1007 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      TempServiceLine@1011 : TEMPORARY Record 5902;
+      WarehouseShipment@1004 : TestPage 7335;
+      LocationCode@1003 : Code[10];
+      Quantity@1000 : Integer;
+      FirstShipmentQuantity@1008 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order, Create Whse Shpment header.
+      LocationCode := WMSFullLocation;
+      Quantity := LibraryRandom.RandIntInRange(2,100);
+      CreateItemAndSupply(Item,LocationCode,Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+      WarehouseShipmentHeader.GET(WarehouseShipment."No.");
+
+      // EXECUTE: Create and Register Pick. Post the whse shpmnt twice with the ship option.
+      // EXECUTE: Undo the Second posted service shipment only.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      GetWarehouseShipmentLinesByShipmentHeader(WarehouseShipmentLine,WarehouseShipmentHeader);
+      FirstShipmentQuantity := LibraryRandom.RandIntInRange(1,Quantity - 1);
+      WarehouseShipmentLine.VALIDATE("Qty. to Ship",FirstShipmentQuantity);
+      WarehouseShipmentLine.MODIFY(TRUE);
+
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+      LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // VERIFY: Ledger entries are created correctly.
+      // VERIFY: Quantity shipped in the first shipment is not affected  by undoing the second shipment.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine,FirstShipmentQuantity);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine,FirstShipmentQuantity);
+      VerifyValueEntry(TempServiceLine,FirstShipmentQuantity);
+      VerifyServiceLedgerEntry(TempServiceLine,FirstShipmentQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage,ConfirmationHandler)]
+    PROCEDURE UndoWarehouseShipmentFullyShippedOrderOnBlockedItem@159();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1006 : Record 5902;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipment@1004 : TestPage 7335;
+      LocationCode@1003 : Code[10];
+      Quantity@1000 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order, Create Whse Shpment header.
+      // SETUP: Create and Register Pick. Post the Whse Shpment with The Ship option.
+      LocationCode := WMSFullLocation;
+      Quantity := RANDOM(100);
+      CreateItemAndSupply(Item,LocationCode,Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+      WarehouseShipmentHeader.GET(WarehouseShipment."No.");
+
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // EXECUTE: Block the Item and Undo the Posted Service Shipment.
+      Item.GET(Item."No.");
+      Item.VALIDATE(Blocked,TRUE);
+      Item.MODIFY(TRUE);
+      ASSERTERROR LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // VERIFY: Error Message is thrown.
+      // Verify: Quantity shipped on the Service Lien is not affected.
+      Assert.AreEqual(
+        STRSUBSTNO(BlockedItemErrorMessage,Item."No."),GETLASTERRORTEXT,
+        'Verify error is thrown when undoing a shipment on a blocked item');
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      Assert.AreEqual(Quantity,ServiceLine."Quantity Shipped",'Quantity Shipped is not affected when undo fails');
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage,ConfirmationHandler)]
+    PROCEDURE UndoWarehouseShipmentPartailyInvoicedSingleShipment@169();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      ServiceShipmentHeader@1011 : Record 5990;
+      ServiceShipmentLine@1013 : Record 5991;
+      WarehouseShipment@1004 : TestPage 7335;
+      LocationCode@1003 : Code[10];
+      ServiceShipmentHeaderNo@1009 : Code[20];
+      ServiceShipmentLineNo@1010 : Integer;
+      Quantity@1000 : Integer;
+      InvoiceQuantity@1008 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order, Create Whse Shpment header using Get Source Doc
+      LocationCode := WMSFullLocation;
+      Quantity := LibraryRandom.RandIntInRange(2,100);
+      CreateItemAndSupply(Item,LocationCode,Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+      WarehouseShipmentHeader.GET(WarehouseShipment."No.");
+
+      // EXECUTE: Create Pick, Register Pick and post Warehouse shipment with ship option, Invoice Service order partialy.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      InvoiceQuantity := LibraryRandom.RandIntInRange(1,Quantity - 1);
+      ServiceLine."Qty. to Invoice" := InvoiceQuantity;
+      ServiceLine.MODIFY(TRUE);
+
+      ServiceShipmentHeader.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceShipmentHeader.FINDFIRST;
+      ServiceShipmentHeaderNo := ServiceShipmentHeader."No.";
+
+      ServiceShipmentLine.SETRANGE("Document No.",ServiceShipmentHeaderNo);
+      ServiceShipmentLine.FINDFIRST;
+      ServiceShipmentLineNo := ServiceShipmentLine."Line No.";
+
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.PostServiceOrder(ServiceHeader,FALSE,FALSE,TRUE);
+      ASSERTERROR LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // VERIFY: Error Message is thrown when an invoiced line is undone.
+      Assert.AreEqual(
+        STRSUBSTNO(
+          ShippedNotInvoicedError,Quantity,ServiceShipmentHeaderNo,
+          ServiceShipmentLineNo,Quantity - InvoiceQuantity),
+        GETLASTERRORTEXT,
+        'Verify error is thrown when undoing a shipment on a blocked item');
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage,ConfirmationHandler)]
+    PROCEDURE UndoAndReShipWarehouseShipmentFullyShippedOrder@194();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      WarehouseShipment@1004 : TestPage 7335;
+      LocationCode@1003 : Code[10];
+      Quantity@1000 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order, Create Whse Shpment header
+      // SETUP: Create Registe Pick, Post Whse Shpmnt, Undo the posted service shipment
+      LocationCode := WMSFullLocation;
+      Quantity := RANDOM(100);
+      CreateItemAndSupply(Item,LocationCode,2 * Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+      WarehouseShipmentHeader.GET(WarehouseShipment."No.");
+      WarehouseShipment.CLOSE;
+
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+      LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // EXECUTE: Re-Open, Release order, create Whse Shipment again, Create Pick, Register Pick
+      // EXECUTE: Post the new Warehouse shipment with ship option.
+      ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+      LibraryService.ReopenServiceDocument(ServiceHeader);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+      WarehouseShipmentHeader.GET(WarehouseShipment."No.");
+      WarehouseShipment.CLOSE;
+
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // VERIFY: All service lines are present in warehouse shipment and the quantities match
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      Assert.AreEqual(Quantity,ServiceLine."Quantity Shipped",ServiceLine.FIELDCAPTION("Quantity Shipped"));
+      Assert.AreEqual(Quantity,ServiceLine."Qty. Shipped Not Invoiced",ServiceLine.FIELDCAPTION("Qty. Shipped Not Invoiced"));
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE DueDateCalculationAllBlankShippingTime@66();
+    VAR
+      Customer@1002 : Record 18;
+      ShippingAgent@1011 : Record 291;
+      LocationCode@1009 : Code[10];
+      ShippingAgentServicesCode@1010 : ARRAY [6] OF Code[10];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Customer with blank shipping details
+      LibrarySales.CreateCustomer(Customer);
+      CreateShippingAgentServices(ShippingAgent,ShippingAgentServicesCode);
+      LocationCode := WMSFullLocation;
+
+      // VERIFY: Create Service ORder with blank shipping time and blank set shipping age service code
+      TestCreateWarehouseShipmentDueDateCalculation(
+        Customer,
+        ShippingAgent.Code,// ServiceHeaderShippingAgentCode
+        '',// ServiceHeaderShippingServiceCode
+        LocationCode,// ServiceLineLocationCode
+        '',// ServiceheaderShippingTime
+        '',// ExpectedServiceLineShippingTimeOffset
+        '<0D>');// ExpectedWarehouseLineDueDateOffset
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE DueDateCalculationZeroShippingTime@163();
+    VAR
+      Customer@1002 : Record 18;
+      ShippingAgent@1011 : Record 291;
+      LocationCode@1009 : Code[10];
+      ShippingAgentServicesCode@1010 : ARRAY [6] OF Code[10];
+      DateOffset@1001 : Integer;
+    BEGIN
+      Initialize;
+
+      LibrarySales.CreateCustomer(Customer);
+      CreateShippingAgentServices(ShippingAgent,ShippingAgentServicesCode);
+      LocationCode := WMSFullLocation;
+
+      DateOffset := LibraryRandom.RandIntInRange(1,6);
+      TestCreateWarehouseShipmentDueDateCalculation(
+        Customer,
+        ShippingAgent.Code,// ServiceHeaderShippingAgentCode
+        ShippingAgentServicesCode[DateOffset],// ServiceHeaderShippingServiceCode
+        LocationCode,// ServiceLineLocationCode
+        '<0D>',// ServiceheaderShippingTime
+        '<0D>',// ExpectedServiceLineShippingTimeOffset
+        '<0D>');// ExpectedWarehouseLineDueDateOffset
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE DueDateCalculationShippingTimeFlowsFromAgentService@156();
+    VAR
+      Customer@1002 : Record 18;
+      ShippingAgent@1011 : Record 291;
+      LocationCode@1009 : Code[10];
+      ShippingAgentServicesCode@1010 : ARRAY [6] OF Code[10];
+      DateOffset@1001 : Integer;
+    BEGIN
+      Initialize;
+
+      LibrarySales.CreateCustomer(Customer);
+      CreateShippingAgentServices(ShippingAgent,ShippingAgentServicesCode);
+      LocationCode := WMSFullLocation;
+
+      DateOffset := LibraryRandom.RandIntInRange(1,6);
+      TestCreateWarehouseShipmentDueDateCalculation(
+        Customer,
+        ShippingAgent.Code,// ServiceHeaderShippingAgentCode
+        ShippingAgentServicesCode[DateOffset],// ServiceHeaderShippingServiceCode
+        LocationCode,// ServiceLineLocationCode
+        '',// ServiceheaderShippingTime
+        STRSUBSTNO('<%1D>',DateOffset),// ExpectedServiceLineShippingTimeOffset
+        STRSUBSTNO('<-%1D>',DateOffset));// ExpectedWarehouseLineDueDateOffset
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE DueDateCalculationBlankServiceHeaderAgentCode@167();
+    VAR
+      Customer@1002 : Record 18;
+      ShippingAgent@1011 : Record 291;
+      LocationCode@1009 : Code[10];
+      ShippingAgentServicesCode@1010 : ARRAY [6] OF Code[10];
+      DateOffset@1001 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Customer with blank shipping details
+      DateOffset := LibraryRandom.RandIntInRange(10,20);
+      CreateCustomerWithShippingDetails(Customer,STRSUBSTNO('<%1D>',DateOffset));
+      CreateShippingAgentServices(ShippingAgent,ShippingAgentServicesCode);
+      LocationCode := WMSFullLocation;
+
+      // VERIFY: Create Service Order with blank shipping time and blank set shipping age service code
+      TestCreateWarehouseShipmentDueDateCalculation(
+        Customer,
+        '',// ServiceHeaderShippingAgentCode
+        '',// ServiceHeaderShippingServiceCode
+        LocationCode,// ServiceLineLocationCode
+        '',// ServiceheaderShippingTime
+        '',// ExpectedServiceLineShippingTimeOffset
+        '<0D>');// ExpectedWarehouseLineDueDateOffset
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE DueDateCalculationFlowsFromCustomerNonZeroShipTime@177();
+    VAR
+      Customer@1002 : Record 18;
+      ShippingAgent@1011 : Record 291;
+      LocationCode@1009 : Code[10];
+      ShippingAgentServicesCode@1010 : ARRAY [6] OF Code[10];
+      DateOffset@1001 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Customer with blank shipping details
+      DateOffset := LibraryRandom.RandIntInRange(10,20);
+      CreateCustomerWithShippingDetails(Customer,STRSUBSTNO('<%1D>',DateOffset));
+      CreateShippingAgentServices(ShippingAgent,ShippingAgentServicesCode);
+      LocationCode := WMSFullLocation;
+
+      // VERIFY: Create Service Order with blank shipping time and blank set shipping age service code
+      TestCreateWarehouseShipmentDueDateCalculation(
+        Customer,
+        ShippingAgent.Code,// ServiceHeaderShippingAgentCode
+        '',// ServiceHeaderShippingServiceCode
+        LocationCode,// ServiceLineLocationCode
+        '',// ServiceheaderShippingTime
+        STRSUBSTNO('<%1D>',DateOffset),// ExpectedServiceLineShippingTimeOffset
+        STRSUBSTNO('<-%1D>',DateOffset));// ExpectedWarehouseLineDueDateOffset
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE DueDateCalculationAllShippingTimeSet@184();
+    VAR
+      Customer@1002 : Record 18;
+      ShippingAgent@1011 : Record 291;
+      LocationCode@1009 : Code[10];
+      ShippingAgentServicesCode@1010 : ARRAY [6] OF Code[10];
+      DateOffset@1001 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Customer with blank shipping details
+      DateOffset := LibraryRandom.RandIntInRange(10,20);
+      CreateCustomerWithShippingDetails(Customer,STRSUBSTNO('<%1D>',DateOffset));
+      CreateShippingAgentServices(ShippingAgent,ShippingAgentServicesCode);
+      LocationCode := WMSFullLocation;
+
+      // VERIFY: Create Service Order with blank shipping time and blank set shipping age service code
+      DateOffset := LibraryRandom.RandIntInRange(1,10);
+      TestCreateWarehouseShipmentDueDateCalculation(
+        Customer,
+        ShippingAgent.Code,// ServiceHeaderShippingAgentCode
+        ShippingAgentServicesCode[LibraryRandom.RandIntInRange(1,6)],// ServiceHeaderShippingServiceCode
+        LocationCode,// ServiceLineLocationCode
+        STRSUBSTNO('<%1M>',DateOffset),// ServiceheaderShippingTime
+        STRSUBSTNO('<%1M>',DateOffset),// ExpectedServiceLineShippingTimeOffset
+        STRSUBSTNO('<-%1M>',DateOffset));// ExpectedWarehouseLineDueDateOffset
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE DueDateWithtMulitpleServiceHeaders@188();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      ShippingAgent@1014 : Record 291;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1013 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      ShippingTime@1008 : DateFormula;
+      ShippingAgentServicesCode@1009 : ARRAY [6] OF Code[10];
+      LocationCode@1003 : Code[10];
+      LineQuantity@1000 : Integer;
+      ServiceItemLineNo@1004 : Integer;
+      I@1007 : Integer;
+      ServiceHeaderNo@1010 : ARRAY [6] OF Code[20];
+      NumberOfServiceHeaders@1011 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Multiple Service orders on WHITE Location,Release Service Order.
+
+      LocationCode := WMSFullLocation;
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      NumberOfServiceHeaders := LibraryRandom.RandIntInRange(2,6);
+
+      // EXECUTE: Modify the shipping time on service header.
+      // EXECUTE: Create a warehouse shipment and add all the created orders.
+      FOR I := 1 TO NumberOfServiceHeaders DO BEGIN
+        CLEAR(ShippingAgent);
+        CLEAR(ShippingAgentServicesCode);
+        CreateShippingAgentServices(ShippingAgent,ShippingAgentServicesCode);
+        LineQuantity := RANDOM(100);
+        CLEAR(Item);
+        CLEAR(ServiceHeader);
+        CreateItemAndSupply(Item,LocationCode,LineQuantity);
+        ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+        ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeader."No.");
+        ServiceHeader.VALIDATE("Shipping Agent Code",ShippingAgent.Code);
+        ServiceHeader.VALIDATE("Shipping Agent Service Code",ShippingAgentServicesCode[LibraryRandom.RandIntInRange(1,6)]);
+        EVALUATE(ShippingTime,STRSUBSTNO('<%1D>',I));
+        ServiceHeader.VALIDATE("Shipping Time",ShippingTime);
+        ServiceHeader.MODIFY(TRUE);
+
+        AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity,LocationCode);
+        ServiceHeaderNo[I] := ServiceHeader."No.";
+        LibraryService.ReleaseServiceDocument(ServiceHeader);
+        AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+      END;
+
+      // VERIFY: Due Dates on all the service lines
+      FOR I := 1 TO NumberOfServiceHeaders DO BEGIN
+        ServiceHeader.GET(ServiceHeader."Document Type",ServiceHeaderNo[I]);
+        CLEAR(ServiceLine);
+        CLEAR(WarehouseShipmentLine);
+        GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+        FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+        Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+
+        EVALUATE(ShippingTime,STRSUBSTNO('<-%1D>',I));
+        Assert.AreEqual(CALCDATE(ShippingTime,ServiceLine."Needed by Date"),WarehouseShipmentLine."Due Date",'Due date matches');
+      END;
+    END;
+
+    LOCAL PROCEDURE TestCreateWarehouseShipmentDueDateCalculation@101(VAR Customer@1007 : Record 18;ServiceHeaderShippingAgentCode@1009 : Code[10];ServiceHeaderShippingServiceCode@1014 : Code[10];ServiceLineLocationCode@1016 : Code[10];ServiceheaderShippingTime@1012 : Text[10];ExpectedServiceLineShippingTimeOffset@1015 : Text[10];ExpectedWarehouseLineDueDateOffset@1017 : Text[10]);
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1004 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      WarehouseShipment@1000 : TestPage 7335;
+      ShippingTime@1003 : DateFormula;
+      ServiceItemLineNo@1008 : Integer;
+    BEGIN
+      // SETUP: Create Service order on a location with Specified Customer, Shipping Agent and Shipping agent services Service order and Shipping Time
+      LibraryInventory.CreateItem(Item);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+
+      // EXECUTE: Add the service line and set the needed properties
+      // EXECUTE: Create Warehouse shipment on this order
+      IF ServiceHeaderShippingAgentCode <> '' THEN BEGIN
+        ServiceHeader.VALIDATE("Shipping Agent Code",ServiceHeaderShippingAgentCode);
+        IF ServiceHeaderShippingServiceCode <> '' THEN
+          ServiceHeader.VALIDATE("Shipping Agent Service Code",ServiceHeaderShippingServiceCode);
+      END;
+      IF ServiceheaderShippingTime <> '' THEN BEGIN
+        EVALUATE(ShippingTime,ServiceheaderShippingTime);
+        ServiceHeader.VALIDATE("Shipping Time",ShippingTime);
+      END;
+      ServiceHeader.MODIFY(TRUE);
+      ServiceItemLineNo := AddNewServiceItemLinesToOrder(ServiceHeader);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",RANDOM(100),ServiceLineLocationCode);
+
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      WarehouseShipment.TRAP;
+
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+
+      // VERIFY: warehouse shipment Line:Due Date = ServiceLine."Needed by date" - Service Line.Shipping Time
+      // VERIFY: Shipping time on service line matches the expected offset
+      // VERIFY: WHSe Shipment Line.Shipping date= = ServiceLine."Needed by date" - ServiceLine.Shipping Time - Location."Whse Outbound handling time"
+      WarehouseShipmentHeader.GET(WarehouseShipment."No.");
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      FindWarehouseShipmentLinesByServiceOrder(WarehouseShipmentLine,ServiceHeader,WarehouseShipmentHeader);
+
+      Assert.AreEqual(ServiceLine.COUNT,WarehouseShipmentLine.COUNT,'Count of Lines in Whse shipment and service lines match');
+      REPEAT
+        EVALUATE(ShippingTime,ExpectedWarehouseLineDueDateOffset);
+        WarehouseShipmentLine.SETFILTER("Source Line No.",FORMAT(ServiceLine."Line No."));
+        WarehouseShipmentLine.FINDFIRST;
+        Assert.AreEqual(CALCDATE(ShippingTime,ServiceLine."Needed by Date"),WarehouseShipmentLine."Due Date",'Due date matches');
+
+        EVALUATE(ShippingTime,ExpectedServiceLineShippingTimeOffset);
+        Assert.AreEqual(FORMAT(ShippingTime),FORMAT(ServiceLine."Shipping Time"),'Service Line Shipping Time matches');
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CheckQuantityAvailabilityCalculationsWithMixedOrders@80(LocationCode@1008 : Code[10];IsYellowLocation@1003 : Boolean);
+    VAR
+      Customer@1013 : Record 18;
+      Item@1002 : Record 27;
+      SalesHeader@1014 : Record 36;
+      SalesLine@1016 : Record 37;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1006 : Record 5902;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      SalesHeaderNo@1015 : Code[20];
+      LineQuantity@1004 : Integer;
+      ServiceItemLineNo@1000 : Integer;
+    BEGIN
+      // SETUP: Create an item and create a supply of quantity = 2X
+      // SETUP: Create and Release Service orders on WHITE Location with Quantity = x
+      // SETUP: Create Whse Shpment, Create Pick, Register pick of qty X
+      // SETUP: Post Whse Shipment  and verify that the Qty X was shipped successfully.
+      LibrarySales.CreateCustomer(Customer);
+      LineQuantity := RANDOM(100);
+      IF IsYellowLocation THEN
+        CreateItemAndSupplyForYellowLocation(Item,LocationCode,2 * LineQuantity)
+      ELSE
+        CreateItemAndSupply(Item,LocationCode,2 * LineQuantity);
+
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,Customer."No.");
+      ServiceItemLineNo := AddNewServiceItemLinesToOrder(ServiceHeader);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity,LocationCode);
+      ReleaseServiceHeaderAndCreateWarehouseShipment(ServiceHeader,WarehouseShipmentHeader);
+      CreateAndRegisterWarehousePick(WarehouseShipmentHeader,ServiceHeader."No.");
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      Assert.AreEqual(LineQuantity,ServiceLine."Quantity Shipped",'Verify that qty has been shipped');
+
+      // EXECUTE: Create and Release Sales order on WHITE Location with Quantity = x
+      // EXECUTE: Create Whse shipment, create Pick, Register Pick and post Warehouse shipment with ship option.
+      CreateAndReleaseSalesOrder(SalesHeader,Item."No.",LocationCode,LineQuantity,FALSE);
+      CreateWarehouseShipmentFromSalesOrder(SalesHeader,WarehouseShipmentHeader);
+      SalesHeaderNo := SalesHeader."No.";
+      CreateAndRegisterWarehousePick(WarehouseShipmentHeader,SalesHeaderNo);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // VERIFY: Sales Lines have been posted and the quantities match
+      SalesHeader.GET(SalesHeader."Document Type",SalesHeaderNo);
+      GetSalesLinesOfTypeItem(SalesLine,SalesHeader);
+      WITH SalesLine DO BEGIN
+        Assert.AreEqual(Quantity,"Qty. Shipped Not Invoiced",FIELDCAPTION("Qty. Shipped Not Invoiced"));
+        Assert.AreEqual(LineQuantity,"Quantity Shipped",FIELDCAPTION("Quantity Shipped"));
+      END
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE QuantityAvailabilityCalculationsMixedOrdersOnWhiteLocation@162();
+    BEGIN
+      Initialize;
+      // VERIFY: Quantity Availability Calculations with WHITE Location
+      CheckQuantityAvailabilityCalculationsWithMixedOrders(WMSFullLocation,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE PostShipmentAndConsumeOnSilverLocation@67();
+    VAR
+      Bin@1005 : Record 7354;
+      Item@1002 : Record 27;
+      Location@1003 : Record 14;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1008 : Record 5902;
+      Quantity@1007 : Integer;
+      LineQuantity@1000 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create an new Silver location, create a new item.
+      // SETUP: Create Supply for that item in the specific location and bin.
+      Quantity := LibraryRandom.RandIntInRange(2,100);
+      LineQuantity := Quantity - 1;
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+
+      CreateSilverLocation(Location,Bin);
+      CreateItemAndSupplyForSilverLocation(Item,Location,Bin,Quantity);
+
+      // EXECUTE: Create Service order on the new SILVER Location.
+      // EXECUTE: Release the service order.
+      // EXECUTE: Try to create a Warehouse shipment on this order.
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,Location.Code);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      ServiceLine.VALIDATE("Bin Code",Bin.Code);
+      ServiceLine.VALIDATE("Qty. to Ship",LineQuantity);
+      ServiceLine.VALIDATE("Qty. to Invoice",0);
+      ServiceLine.VALIDATE("Qty. to Consume",LineQuantity);
+      ServiceLine.MODIFY(TRUE);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+
+      // VERIFY: No shipments are created since SERVICE ORDER on silver locations cannot be released.
+      // VERIFY: After dismissing the message service order can be posted with consume
+      Assert.AreEqual(FORMAT(NoWarehouseRequestErrorMessage),ShipmentConfirmationMessage,'Verify displayed error message');
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,TRUE,FALSE);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      WITH ServiceLine DO BEGIN
+        TESTFIELD("Quantity Shipped",LineQuantity);
+        TESTFIELD("Quantity Consumed",LineQuantity);
+        TESTFIELD("Qty. to Ship",1);
+      END;
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE PostShipmentOnBlueLocation@111();
+    VAR
+      Item@1002 : Record 27;
+      Location@1003 : Record 14;
+      ServiceHeader@1001 : Record 5900;
+      Quantity@1007 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create an new BLUE location, create a new item.
+
+      Quantity := RANDOM(100);
+      LibraryInventory.CreateItem(Item);
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+
+      // EXECUTE: Create Service order on the new BLUE Location.
+      // EXECUTE: Release the service order.
+      // EXECUTE: Try to create a Warehouse shipment on this order.
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,Location.Code);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+
+      // VERIFY: No shipments are created since SERVICE ORDER on silver locations cannot be released.
+      // VERIFY: After dismissing the message service order can be posted.
+      Assert.AreEqual(FORMAT(NoWarehouseRequestErrorMessage),ShipmentConfirmationMessage,'Verify displayed error message');
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmationHandler)]
+    PROCEDURE UndoShipmentOnSilverLocation@64();
+    VAR
+      Bin@1005 : Record 7354;
+      Item@1002 : Record 27;
+      Location@1003 : Record 14;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1008 : Record 5902;
+      TempServiceLine@1000 : TEMPORARY Record 5902;
+      LineQuantity@1007 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create an new Silver location, create a new item.
+      // SETUP: Create Supply for that item in the specific location and bin.
+      // SETUP: Create Service order on the new SILVER Location.
+      // SETUP: Release the service order.
+      LineQuantity := RANDOM(100);
+      CreateSilverLocation(Location,Bin);
+      CreateItemAndSupplyForSilverLocation(Item,Location,Bin,LineQuantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",LineQuantity,Location.Code);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      ServiceLine.VALIDATE("Bin Code",Bin.Code);
+      ServiceLine.MODIFY(TRUE);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // EXECUTE: Post Service Order.
+      // EXECUTE: Undo the Posted Service Shipment.
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // VERIFY: Shipment is undone.
+      // VERIFY: Ledger entries are created correctly.
+      CLEAR(ServiceLine);
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      VerifyServiceLineAfterFullUndoShipment(ServiceLine,LineQuantity);
+      VerifyServiceShipmentLineAfterFullUndo(TempServiceLine,LineQuantity);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine,LineQuantity);
+      VerifyValueEntry(TempServiceLine,LineQuantity);
+      VerifyServiceLedgerEntry(TempServiceLine,LineQuantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullAndPostUsingGetSourceDocumentOnYellowLocation@104();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      LocationCode@1003 : Code[10];
+      Quantity@1000 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order, Create Whse Shpment header using Get Source Doc
+      LocationCode := YellowLocationCode;
+      Quantity := RANDOM(100);
+      CreateItemAndSupplyForYellowLocation(Item,LocationCode,Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // EXECUTE: Create Pick, Register Pick and post Warehouse shipment with ship option.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // VERIFY: All service lines are present in warehouse shipment and the quantities match
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      VerifyServiceLineAfterOnlyShip(ServiceLine,0);
+      VerifyQtyOnServiceShipmentLineAfterShip(ServiceLine,Quantity);
+      VerifyQtyOnItemLedgerEntryAfterShip(ServiceLine,Quantity);
+      VerifyValueEntryAfterShip(ServiceLine,Quantity);
+      VerifyServiceLedgerEntryAfterShip(ServiceLine,Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage,ConfirmationHandler)]
+    PROCEDURE UndoWarehouseShipmentOnYellowLocation@32();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      TempServiceLine@1007 : TEMPORARY Record 5902;
+      LocationCode@1003 : Code[10];
+      Quantity@1000 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on YELLOW Location and Release Service Order, Create Whse Shpment header.
+      // SETUP: Create and Register Pick. Post the Whse Shpment with The Ship option.
+      LocationCode := YellowLocationCode;
+      Quantity := RANDOM(100);
+      CreateItemAndSupplyForYellowLocation(Item,LocationCode,Quantity);
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      ReleaseServiceHeaderAndCreateWarehouseShipment(ServiceHeader,WarehouseShipmentHeader);
+      CreateAndRegisterWarehousePick(WarehouseShipmentHeader,ServiceHeader."No.");
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // EXECUTE: Undo the Posted Service Shipment.
+      LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // VERIFY: Ledger entries are created and reversed correctly.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine,Quantity);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine,Quantity);
+      VerifyValueEntry(TempServiceLine,Quantity);
+      VerifyServiceLedgerEntry(TempServiceLine,Quantity);
+      VerifyNoWarehouseEntriesCreated(ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE QuantityAvailabilityCalculationsOnYellowOrders@166();
+    BEGIN
+      Initialize;
+      // VERIFY: Quantity Availability Calculations with YELLOW Location
+      CheckQuantityAvailabilityCalculationsWithMixedOrders(YellowLocationCode,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE PullAndPostMulitpleServiceLinesonYellowLocation@128();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      ServiceLine@1006 : Record 5902;
+      LocationCode@1003 : Code[10];
+      Delta@1008 : Integer;
+      LineQuantity@1000 : Integer;
+      ServiceItemLineNo@1004 : Integer;
+      I@1007 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on YELLOW Location with multiple service lines,Release Service Order with multiple service items
+      // One line should have not enough supply
+      // Create Whse Shpment header using Get Source Doc and pull all lines in
+      LocationCode := YellowLocationCode;
+
+      ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+      FOR I := 1 TO 5 DO BEGIN
+        LineQuantity := RANDOM(100);
+        CLEAR(Item);
+        CreateItemAndSupplyForYellowLocation(Item,LocationCode,LineQuantity);
+        AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity,LocationCode);
+      END;
+
+      ServiceItemLineNo := AddNewServiceItemLinesToOrder(ServiceHeader);
+      Delta := RANDOM(10);
+      LineQuantity := RANDOM(100);
+      CLEAR(Item);
+      CreateItemAndSupplyForYellowLocation(Item,LocationCode,LineQuantity);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,Item."No.",LineQuantity + Delta,LocationCode);
+
+      ServiceHeader.FIND;
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // EXECUTE: Create Pick, Register Pick and post Warehouse shipment with ship option.
+      CreateAndRegisterWarehousePick(WarehouseShipmentHeader,ServiceHeader."No.");
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // VERIFY: All service lines are present in warehouse shipment and the quantities match
+      // VERIFY: The last Service line is only partially fulfilled.
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      ServiceLine.SETFILTER("No.",'<>%1',Item."No.");
+      ServiceLine.FINDSET;
+
+      WITH ServiceLine DO BEGIN
+        Assert.AreEqual(5,COUNT,'The right number of rows are returned by the filter');
+        I := 0;
+        REPEAT
+          VerifyServiceLineAfterOnlyShip(ServiceLine,0);
+          I := I + 1;
+        UNTIL NEXT = 0;
+
+        SETFILTER("No.",Item."No.");
+        FINDSET;
+        VerifyServiceLineAfterOnlyShip(ServiceLine,Delta);
+      END
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage,ConfirmationHandler)]
+    PROCEDURE UndoWarehouseShipmentPartiallyShippedOrderYellowLocation@129();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1007 : Record 7321;
+      ServiceLine@1006 : Record 5902;
+      TempServiceLine@1011 : TEMPORARY Record 5902;
+      LocationCode@1003 : Code[10];
+      Quantity@1000 : Integer;
+      FirstShipmentQuantity@1008 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on YELLOW Location and Release Service Order, Create Whse Shpment header.
+      LocationCode := YellowLocationCode;
+      Quantity := LibraryRandom.RandIntInRange(2,100);
+      CreateItemAndSupplyForYellowLocation(Item,LocationCode,Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      ReleaseServiceHeaderAndCreateWarehouseShipment(ServiceHeader,WarehouseShipmentHeader);
+
+      // EXECUTE: Create and Register Pick. Post the whse shpmnt twice with the ship option.
+      // EXECUTE: Undo the Second posted service shipment only.
+      CreateAndRegisterWarehousePick(WarehouseShipmentHeader,ServiceHeader."No.");
+      GetWarehouseShipmentLinesByShipmentHeader(WarehouseShipmentLine,WarehouseShipmentHeader);
+      FirstShipmentQuantity := LibraryRandom.RandIntInRange(1,Quantity - 1);
+      WarehouseShipmentLine.VALIDATE("Qty. to Ship",FirstShipmentQuantity);
+      WarehouseShipmentLine.MODIFY(TRUE);
+
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+      LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // VERIFY: Ledger entries are created correctly.
+      // VERIFY: Quantity shipped in the first shipment is not affected  by undoing the second shipment.
+      VerifyUpdatedShipQtyAfterShip(TempServiceLine);
+      VerifyQtyOnServiceShipmentLine(TempServiceLine,FirstShipmentQuantity);
+      VerifyQtyOnItemLedgerEntry(TempServiceLine,FirstShipmentQuantity);
+      VerifyValueEntry(TempServiceLine,FirstShipmentQuantity);
+      VerifyServiceLedgerEntry(TempServiceLine,FirstShipmentQuantity);
+    END;
+
+    [Test]
+    PROCEDURE PostUnreleasedOrderOnYellowLocation@137();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      Quantity@1007 : Integer;
+      LocationCode@1000 : Code[10];
+    BEGIN
+      Initialize;
+      // SETUP: Create an new YELLOW location, create a new item.
+
+      LocationCode := YellowLocationCode;
+      Quantity := RANDOM(100);
+      CreateItemAndSupplyForYellowLocation(Item,LocationCode,Quantity);
+
+      // EXECUTE: Create Service order on the new YELLOW Location.
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+
+      // VERIFY: Posting service order throws an error.
+      ASSERTERROR LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      Assert.AreEqual(
+        FORMAT(NothingToPostError),
+        GETLASTERRORTEXT,'Verify that error message is displayed when Posting without releasing');
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmationHandler)]
+    PROCEDURE UndoServiceShipmentWithNoWarehouseShipmentOnYellow@141();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      TempServiceLine@1004 : TEMPORARY Record 5902;
+      LineQuantity@1005 : Integer;
+      LocationCode@1000 : Code[10];
+    BEGIN
+      Initialize;
+      // SETUP: Create an new YELLOW location, create a new item.
+
+      LocationCode := YellowLocationCode;
+      LineQuantity := RANDOM(100);
+      CreateItemAndSupplyForYellowLocation(Item,LocationCode,LineQuantity);
+
+      // EXECUTE: Create Service order on the new YELLOW Location.
+      // EXECUTE: Undo shipment
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",LineQuantity,LocationCode);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      LineQuantity -= 1;
+      ServiceLine.VALIDATE("Qty. to Ship",LineQuantity);
+      ServiceLine.MODIFY(TRUE);
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      LibraryService.UndoShipmentLinesByServiceOrderNo(ServiceHeader."No.");
+
+      // VERIFY: Posting order doesn't throw an error.
+      CLEAR(ServiceLine);
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      VerifyServiceLineAfterFullUndoShipment(ServiceLine,LineQuantity + 1);
+      VerifyServiceShipmentLineAfterFullUndo(TempServiceLine,LineQuantity);
+
+      VerifyQtyOnItemLedgerEntry(TempServiceLine,LineQuantity);
+      VerifyValueEntry(TempServiceLine,LineQuantity);
+      VerifyServiceLedgerEntry(TempServiceLine,LineQuantity);
+    END;
+
+    [Test]
+    PROCEDURE EditQtyToShipUnreleasedOrderOnYellowLocation@154();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+      LineQuantity@1007 : Integer;
+      LocationCode@1000 : Code[10];
+    BEGIN
+      Initialize;
+      // SETUP: Create an new YELLOW location, create a new item.
+
+      LocationCode := YellowLocationCode;
+      LineQuantity := RANDOM(100);
+      CreateItemAndSupplyForYellowLocation(Item,LocationCode,LineQuantity);
+
+      // EXECUTE: Create Service order on the new BLUE Location.
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",LineQuantity,LocationCode);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      LineQuantity -= 1;
+      ServiceLine.VALIDATE("Qty. to Ship",LineQuantity);
+      ServiceLine.MODIFY(TRUE);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+
+      // VERIFY: Posting order doesn't throw an error.
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      Assert.AreEqual(LineQuantity,ServiceLine."Qty. Shipped Not Invoiced",'Qty. Shipped Not Invoiced matches');
+      Assert.AreEqual(LineQuantity,ServiceLine."Quantity Shipped",'Quantity Shipped matches');
+    END;
+
+    [Test]
+    PROCEDURE CheckQuantitiesOnYellowLocation@52();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+      Item@1002 : Record 27;
+      LocationCode@1003 : Code[10];
+      LineQuantity@1004 : Integer;
+    BEGIN
+      Initialize;
+      // SETUP: Create an new YELLOW location, create a new item.
+      LocationCode := YellowLocationCode;
+      LineQuantity := RANDOM(100);
+      CreateItemAndSupplyForYellowLocation(Item,LocationCode,LineQuantity);
+
+      // EXECUTE: Create Service order on the new BLUE Location.
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",LineQuantity,LocationCode);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      ServiceLine.VALIDATE("Qty. to Ship",ServiceLine.Quantity);
+
+      // VERIFY: Quantities are correct on service line
+      WITH ServiceLine DO BEGIN
+        Assert.AreEqual("Quantity (Base)","Qty. to Invoice (Base)",'Quantity to Invoice (Base) matches');
+        Assert.AreEqual("Quantity (Base)","Qty. to Ship (Base)",'Quantity to Ship (Base) matches');
+        Assert.AreEqual("Qty. to Consume (Base)",0,'Quantity to Consume (Base) matches 0');
+        VALIDATE("Qty. to Consume",Quantity);
+        Assert.AreEqual("Quantity (Base)","Qty. to Consume (Base)",'Quantity to Consume (Base) matches Quantity');
+        Assert.AreEqual("Qty. to Invoice (Base)",0,'Quantity to Invoice (Base) matches 0');
+      END;
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage)]
+    PROCEDURE PostPartialWarehouseShipmentWithCompleteShippingAdvice@72();
+    VAR
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      WarehouseActivityLine@1012 : Record 5767;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      WarehouseShipmentLine@1007 : Record 7321;
+      WarehouseShipment@1004 : TestPage 7335;
+      LocationCode@1003 : Code[10];
+      Quantity@1000 : Integer;
+      FirstShipmentQuantity@1008 : Integer;
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Service order on WHITE Location and Release Service Order, Create Whse Shpment header.
+      LocationCode := WMSFullLocation;
+      Quantity := LibraryRandom.RandIntInRange(2,100);
+      CreateItemAndSupply(Item,LocationCode,Quantity);
+
+      CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",Quantity,LocationCode);
+      ServiceHeader.VALIDATE("Shipping Advice",ServiceHeader."Shipping Advice"::Complete);
+      ServiceHeader.MODIFY(TRUE);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+      WarehouseShipmentHeader.GET(WarehouseShipment."No.");
+
+      // EXECUTE: Create an warehouse shipment with the release service order.
+      // EXECUTE: Create and register pick for the full quantity.
+      // EXECUTE: Edit the whse. shipment lines to ship partially.
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+      GetWarehouseShipmentLinesByShipmentHeader(WarehouseShipmentLine,WarehouseShipmentHeader);
+      FirstShipmentQuantity := LibraryRandom.RandIntInRange(1,Quantity - 1);
+      WarehouseShipmentLine.VALIDATE("Qty. to Ship",FirstShipmentQuantity);
+      WarehouseShipmentLine.MODIFY(TRUE);
+
+      // VERIFY: Error is thrown when shipping a partial warehouse shipment with full shipping advice.
+      ASSERTERROR LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+      Assert.AreEqual(STRSUBSTNO(WarehousePartialShippingErrorTxt,FirstShipmentQuantity,
+          WarehouseShipmentLine."No.",WarehouseShipmentLine."Line No.",Quantity),
+        GETLASTERRORTEXT,
+        'Error when shipping partially with fully shipping advice');
+    END;
+
+    [Test]
+    PROCEDURE TestSuspendStatusCheckReleasedServiceOrder@86();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1002 : Record 5902;
+    BEGIN
+      Initialize;
+
+      // Setup: Create a service order with service lines
+      CreateServiceOrderWithServiceLines(ServiceHeader);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+
+      // Execute: Suspend status check
+      GetAllServiceLinesOfTypeItem(ServiceLine,ServiceHeader);
+      ServiceLine.SuspendStatusCheck(TRUE);
+
+      // Verify that service line can be edited with status check suspended.
+      ServiceLine.VALIDATE(Quantity,ServiceLine.Quantity + 1);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnWhiteWithNonItemLines@76();
+    BEGIN
+      Initialize;
+
+      // Post a Service Invoice on WHITE Location with lines of type not item.
+      TestPostServiceInvoiceWithNonItemLines(WMSFullLocation);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnYellowWithNonItemLines@130();
+    BEGIN
+      Initialize;
+
+      // Post a Service Invoice on Yellow Location with lines of type not item.
+      TestPostServiceInvoiceWithNonItemLines(YellowLocationCode);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnSilverWithNonItemLines@131();
+    VAR
+      SilverLocation@1000 : Record 14;
+      Bin@1001 : Record 7354;
+    BEGIN
+      Initialize;
+
+      // Post a Service Invoice on Silver Location with lines of type not item.
+      CreateSilverLocation(SilverLocation,Bin);
+      TestPostServiceInvoiceWithNonItemLines(SilverLocation.Code);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCreditMemoOnWhiteWithNonItemLines@155();
+    BEGIN
+      Initialize;
+
+      // Post a Service Credit Memo on WHITE Location with lines of type not item.
+      TestPostServiceCreditMemoWithNonItemLines(WMSFullLocation);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCreditMemoOnYellowWithNonItemLines@153();
+    BEGIN
+      Initialize;
+
+      // Post a Service Credit Memo on Yellow Location with lines of type not item.
+      TestPostServiceCreditMemoWithNonItemLines(YellowLocationCode);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCreditMemoOnSilverWithNonItemLines@151();
+    VAR
+      SilverLocation@1000 : Record 14;
+      Bin@1001 : Record 7354;
+    BEGIN
+      Initialize;
+
+      // Post a Service Credit Memo on Silver Location with lines of type not item.
+      CreateSilverLocation(SilverLocation,Bin);
+      TestPostServiceCreditMemoWithNonItemLines(SilverLocation.Code);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnSilverWithItemEmptyBinCode@78();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service invoice for an Item with quantity in STOCK with empty bin code
+      ASSERTERROR TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::Invoice,1,1,TRUE);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,BinMandatoryErrorTxt) > 0,BinMandatoryErrorTxt);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnSilverWithItemInStock@171();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service invoice for an Item with quantity in STOCK
+      TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::Invoice,1,1,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnSilverWithItemOutOfStock@179();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service invoice for an Item with quantity out of STOCK
+      ASSERTERROR TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::Invoice,1,-1,FALSE);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,QuantityInsufficientErrorTxt) > 0,QuantityInsufficientErrorTxt);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCreditMemoOnSilverWithItemInStock@176();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service Credit Memo for an Item with quantity in STOCK
+      TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::"Credit Memo",1,1,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCreditMemoOnSilverWithItemOutOfStock@185();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service Credit Memo for an Item with quantity out of STOCK
+      TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::"Credit Memo",1,-1,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCreditMemoOnSilverWithItemEmptyBinCode@203();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service Credit Memo for an Item with quantity in Stock and use empty Bin code
+      ASSERTERROR TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::"Credit Memo",1,1,TRUE);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,BinMandatoryErrorTxt) > 0,BinMandatoryErrorTxt);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnYellowWithItemInStock@228();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service invoice for an Item with quantity in STOCK
+      TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::Invoice,2,1,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnYellowWithItemOutOfStock@238();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service invoice for an Item with quantity in STOCK
+      TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::Invoice,2,-1,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCreditMemoOnYellowWithItemInStock@241();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service Credit Memo for an Item with quantity in STOCK
+      TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::"Credit Memo",2,1,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCreditMemoOnYellowWithItemOutOfStock@240();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service Credit memo for an Item with quantity in STOCK
+      TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::"Credit Memo",2,-1,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnWhiteWithItemEmptyBinCode@245();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service invoice for an Item with quantity in STOCK
+      ASSERTERROR TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::Invoice,3,1,TRUE);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,BinMandatoryErrorTxt) > 0,BinMandatoryErrorTxt);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnWhiteWithItemInStock@248();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service invoice for an Item with quantity in STOCK
+      TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::Invoice,3,1,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceInvoiceOnWhiteWithItemOutOfStock@261();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service invoice for an Item with quantity out of stock.
+      ASSERTERROR TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::Invoice,3,-1,FALSE);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,QuantityInsufficientErrorTxt) > 0,QuantityInsufficientErrorTxt);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCrMemoOnWhiteWithItemEmptyBinCode@258();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service Credit Memo for an Item with quantity in STOCK with empty bin code
+      ASSERTERROR TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::"Credit Memo",3,1,TRUE);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,BinMandatoryErrorTxt) > 0,BinMandatoryErrorTxt);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceCrMemoOnWhiteWithItemInStock@257();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      Initialize;
+
+      // Post service Credit Memo for an Item with quantity in STOCK
+      TestPostServiceDocumentWithItem(ServiceHeader."Document Type"::"Credit Memo",3,1,FALSE);
+    END;
+
+    [Test]
+    PROCEDURE PostServiceDocumentOnWhiteWithNonPickableBin@270();
+    VAR
+      Bin@1005 : Record 7354;
+      Item@1002 : Record 27;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1008 : Record 5902;
+      Zone@1013 : Record 7300;
+      Quantity@1007 : Integer;
+      LineQuantity@1000 : Integer;
+      LocationCode@1011 : Code[10];
+      BinCode@1012 : Code[20];
+    BEGIN
+      Initialize;
+
+      // SETUP: Create Supply for that item in the specific location and bin.
+      Quantity := LibraryRandom.RandIntInRange(2,100);
+      LineQuantity := Quantity - 1;
+
+      LocationCode := WMSFullLocation;
+      CreateItemAndSupply(Item,LocationCode,Quantity);
+
+      // Find the non pickable zone and bin with quantity content.
+      Zone.SETRANGE("Location Code",LocationCode);
+      Zone.SETRANGE("Location Code");
+      FindPickableNonPickableZone(Zone,LocationCode,FALSE,FALSE); // We find a non-pickable zone
+      LibraryWarehouse.FindBin(Bin,LocationCode,Zone.Code,2);  // Find Bin for Zone for Index 2.
+
+      BinCode := Bin.Code;
+
+      // EXECUTE: Create Service Invoice on the Location and use a non-pickable bin.
+      // VERIFY: Error is displayed when a non-pickable bin is used.
+      CreateServiceDocumentWithServiceLine(ServiceHeader,ServiceHeader."Document Type"::Invoice,Item."No.",LineQuantity,LocationCode);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      ASSERTERROR ServiceLine.VALIDATE("Bin Code",BinCode);
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,NonPickableBinErrorTxt) > 0,'Non Pickable error-Invoice');
+
+      // EXECUTE: Create Service Credit memo on the Location and use a non-pickable bin.
+      CLEAR(ServiceLine);
+      CLEAR(ServiceHeader);
+      CreateServiceDocumentWithServiceLine(ServiceHeader,
+        ServiceHeader."Document Type"::"Credit Memo",Item."No.",
+        LineQuantity,LocationCode);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      ServiceLine.VALIDATE("Bin Code",BinCode);
+      ServiceLine.MODIFY(TRUE);
+
+      // VERIFY: Service Document can be posted
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+    END;
+
+    [Test]
+    PROCEDURE TryToShipServiceOrderWithCompleteShptAdvice@79();
+    VAR
+      Item@1008 : Record 27;
+      ServiceHeader@1007 : Record 5900;
+      ServiceLine@1004 : Record 5902;
+      LocationCode@1002 : Code[10];
+      Quantity@1001 : Integer;
+      FirstShipmentQuantity@1000 : Integer;
+      ServLineNo@1003 : Integer;
+    BEGIN
+      // Try to partially ship an order with 'Complete' shipping advice and last service line contains only description.
+
+      // Setup: Create Service Order.
+      Initialize;
+      LocationCode := WMSFullLocation;
+      Quantity := LibraryRandom.RandIntInRange(2,100);
+      CreateItemAndUpdateInventory(Item,LocationCode,Quantity);
+
+      ServLineNo := CreateServiceOrderAndServiceLinesGetLineNo(ServiceHeader,Item."No.",Quantity,LocationCode);
+      ServiceHeader.VALIDATE("Shipping Advice",ServiceHeader."Shipping Advice"::Complete);
+      ServiceHeader.MODIFY(TRUE);
+      ServiceLine.GET(ServiceLine."Document Type"::Order,ServiceHeader."No.",ServLineNo);
+      AddDescriptionServiceLineToOrder(ServiceHeader,ServiceLine."Service Item Line No.",DescriptionTxt); // Descr. doesn't matter.
+
+      // Execute: Edit the order service lines to ship partially.
+      FirstShipmentQuantity := LibraryRandom.RandIntInRange(1,Quantity - 1);
+      ServiceLine.VALIDATE("Qty. to Ship",FirstShipmentQuantity);
+      ServiceLine.MODIFY(TRUE);
+
+      // Verify: Error is thrown when shipping a partial service order with full shipping advice.
+      ASSERTERROR LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,FALSE);
+      Assert.ExpectedError(ServiceOrderShipmentErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleGetSourceDocuments)]
+    PROCEDURE ResGLCostQtyToShipAfterItemWhseShipment@98();
+    VAR
+      ServiceHeader@1003 : Record 5900;
+      WarehouseShipmentHeader@1004 : Record 7320;
+      WarehouseActivityLine@1005 : Record 5767;
+      Item@1002 : Record 27;
+      LocationCode@1000 : Code[10];
+      ItemQty@1001 : Decimal;
+      ServiceItemLineNo@1006 : Integer;
+    BEGIN
+      // [FEATURE] [Warehouse]
+      // [SCENARIO 123577] Resource, G/L Acount, Cost "Qty. to Ship" remains after post Item's Warehouse Shipment
+      Initialize;
+
+      // [GIVEN] Supply item on WHITE location
+      LocationCode := WMSFullLocation;
+      ItemQty := LibraryRandom.RandInt(100);
+      CreateItemAndSupply(Item,LocationCode,ItemQty);
+
+      // [GIVEN] Service Order with Item, Resource ("A" qty.), G/L Account ("B" qty.), Cost ("C" qty.)
+      ServiceItemLineNo := CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",ItemQty,LocationCode);
+      AddResourceGLServiceLinesToOrder(ServiceHeader,ServiceItemLineNo);
+
+      // [GIVEN] Create warehouse shipment from Service Order, register Pick for item
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(ServiceHeader."No.",WarehouseActivityLine."Activity Type"::Pick);
+
+      // [WHEN] Post warehouse shipment
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+
+      // [THEN] Resource "Qty. to Ship" = "A"
+      // [THEN] G/L Account "Qty. to Ship" = "B"
+      // [THEN] Cost "Qty. to Ship" = "C"
+      VerifyResGLCostQtyToShip(ServiceHeader);
+    END;
+
+    [Test]
+    PROCEDURE VATAmountAfterServiceOrderReopen@92();
+    VAR
+      ServiceHeader@1000 : Record 5900;
+      ServiceLine@1001 : Record 5902;
+      AmountIncludingVAT@1002 : Decimal;
+    BEGIN
+      // [FEATURE] [Reopen]
+      // [SCENARIO 378451] VAT Amount remains after reopen Service Order
+      Initialize;
+
+      // [GIVEN] Released service order with service lines
+      CreateServiceOrderWithServiceLines(ServiceHeader);
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      AmountIncludingVAT := ServiceLine."Amount Including VAT";
+
+      // [WHEN] Re-open the service order
+      LibraryService.ReopenServiceDocument(ServiceHeader);
+
+      // [THEN] Service Line Amount Including VAT remains
+      ServiceLine.FIND;
+      ServiceLine.TESTFIELD("Amount Including VAT",AmountIncludingVAT);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandleWarehouseShipmentCreatedMessage,VerifyNoDocumentInGetSourceDocuments)]
+    PROCEDURE NoSourceDocToWhseShpmtWhenServLinesCompletelyShipped@4();
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      WarehouseShipmentHeader@1005 : Record 7320;
+      LocationCode@1011 : Code[10];
+    BEGIN
+      // [FEATURE] [Warehouse Shipment] [Get Source Documents]
+      // [SCENARIO 379395] "Get Source Documents" should not find Source Document when Sevice Lines with Items are completely shipped.
+      Initialize;
+
+      // [GIVEN] Location with "Require Shipment".
+      CreateLocationWithRequireShip(LocationCode);
+      // [GIVEN] Service Order with Service Lines as Item, Resourse, Cost and G/L Account.
+      CreateSeviceOrderWithSeviceLinesAsItemResCostGL(ServiceHeader,LocationCode);
+      // [GIVEN] Release Service Order and post Warehouse Shipment as ship.
+      ReleaseServiceHeaderAndCreateWarehouseShipment(ServiceHeader,WarehouseShipmentHeader);
+      LibraryWarehouse.PostWhseShipment(WarehouseShipmentHeader,FALSE);
+      // [GIVEN] Create Warehouse Shipment.
+      CreateWareHouseShipmentHeader(WarehouseShipmentHeader,LocationCode);
+
+      // [WHEN] Run the procedure "Get Source Documents"
+      AddWarehouseShipmentLineUsingGetSourceDocument(WarehouseShipmentHeader,ServiceHeader."No.",ServiceOrderInGrid);
+
+      // [THEN] Source Document is not found.
+      // Checked on PageHandler named VerifyNoDocumentInGetSourceDocuments.
+    END;
+
+    LOCAL PROCEDURE Initialize@6();
+    VAR
+      WarehouseEmployee@1000 : Record 7301;
+      Location@1001 : Record 14;
+      LibraryERMCountryData@1002 : Codeunit 131305;
+    BEGIN
+      ClearGlobals;
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryService.SetupServiceMgtNoSeries;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      IsInitialized := TRUE;
+      WMSFullLocation := GetWhiteLocation;
+      YellowLocationCode := CreateYellowLocation(Location);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,WMSFullLocation,FALSE);
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE AddResourceGLServiceLinesToOrder@45(VAR ServiceHeader@1002 : Record 5900;ServiceItemLineNo@1007 : Integer);
+    VAR
+      Resource@1001 : Record 156;
+      ServiceLine@1000 : Record 5902;
+      ServiceCost@1005 : Record 5905;
+      LibraryERM@1004 : Codeunit 131300;
+      LibraryResource@1003 : Codeunit 130511;
+    BEGIN
+      LibraryResource.FindResource(Resource);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Resource,Resource."No.");
+      UpdateServiceLine(ServiceLine,ServiceItemLineNo,LibraryRandom.RandInt(100));
+      CLEAR(ServiceLine);
+      LibraryService.CreateServiceLine(
+        ServiceLine,ServiceHeader,ServiceLine.Type::"G/L Account",LibraryERM.CreateGLAccountWithSalesSetup);
+      UpdateServiceLine(ServiceLine,ServiceItemLineNo,LibraryRandom.RandInt(100));
+      CLEAR(ServiceLine);
+      LibraryService.FindServiceCost(ServiceCost);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Cost,ServiceCost.Code);
+      UpdateServiceLine(ServiceLine,ServiceItemLineNo,LibraryRandom.RandInt(100));
+      CLEAR(ServiceLine);
+    END;
+
+    LOCAL PROCEDURE AddItemServiceLinesToOrder@85(VAR ServiceHeader@1002 : Record 5900;ServiceItemLineNo@1007 : Integer;ItemNo@1009 : Code[20];ItemQuantity@1008 : Integer;LocationCode@1005 : Code[10]) : Integer;
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ItemNo);
+      UpdateServiceLine(ServiceLine,ServiceItemLineNo,ItemQuantity);
+      ServiceLine.SetHideReplacementDialog(TRUE);
+      ServiceLine.VALIDATE("Location Code",LocationCode);
+      ServiceLine.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2));
+      ServiceLine.MODIFY;
+      EXIT(ServiceLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE AddNewServiceItemLinesToOrder@152(VAR ServiceHeader@1002 : Record 5900) : Integer;
+    VAR
+      ServiceItemLine@1000 : Record 5901;
+      ServiceItem@1001 : Record 5940;
+    BEGIN
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      EXIT(ServiceItemLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE AddDescriptionServiceLineToOrder@84(VAR ServiceHeader@1002 : Record 5900;ServiceItemLineNo@1001 : Integer;LineDescription@1003 : Text[50]) : Integer;
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::" ",'');
+      WITH ServiceLine DO BEGIN
+        VALIDATE("Service Item Line No.",ServiceItemLineNo);
+        VALIDATE(Description,LineDescription);
+        MODIFY;
+      END;
+      EXIT(ServiceLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE AddWarehouseShipmentLineUsingGetSourceDocument@33(WarehouseShipmentHeader@1000 : Record 7320;SourceDocumentNoToSelect@1002 : Code[20];SourceDocumentTypeToSelect@1001 : Text[200]);
+    VAR
+      GetSourceDocOutbound@1003 : Codeunit 5752;
+    BEGIN
+      SourceDocumentNo := SourceDocumentNoToSelect;
+      SourceDocumentType := SourceDocumentTypeToSelect;
+      GetSourceDocOutbound.GetSingleOutboundDoc(WarehouseShipmentHeader);
+    END;
+
+    LOCAL PROCEDURE CalculateAndPostWhseAdjustment@9(Item@1000 : Record 27;LocationCode@1001 : Code[10]);
+    BEGIN
+      LibraryWarehouse.RegisterWhseJournalLine(
+        WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,LocationCode,TRUE);
+      ItemJournalSetup;
+      LibraryWarehouse.CalculateWhseAdjustment(Item,ItemJournalBatch);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateCustomerWithShippingDetails@127(VAR Customer@1000 : Record 18;CustomerShippingTime@1002 : Text[10]);
+    VAR
+      ShippingAgent@1004 : Record 291;
+      ShippingTime@1003 : DateFormula;
+      ShippingAgentServicesCode@1001 : ARRAY [6] OF Code[10];
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+
+      CreateShippingAgentServices(ShippingAgent,ShippingAgentServicesCode);
+      Customer.VALIDATE("Shipping Agent Code",ShippingAgent.Code);
+      Customer.VALIDATE("Shipping Agent Service Code",ShippingAgentServicesCode[LibraryRandom.RandIntInRange(1,6)]);
+
+      IF CustomerShippingTime <> '' THEN BEGIN
+        EVALUATE(ShippingTime,CustomerShippingTime);
+        Customer.VALIDATE("Shipping Time",ShippingTime);
+      END;
+
+      Customer.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemAndSupply@138(VAR Item@1006 : Record 27;LocationCode@1001 : Code[10];Quantity@1000 : Decimal);
+    BEGIN
+      CreateItemAndUpdateInventory(Item,LocationCode,Quantity);
+      CreatePutAwayForPurchaseOrder(LocationCode,Item."No.",Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateItemAndUpdateInventory@5(VAR Item@1000 : Record 27;LocationCode@1005 : Code[10];Quantity@1006 : Decimal);
+    VAR
+      Location@1007 : Record 14;
+      FirstZone@1004 : Record 7300;
+      FirstBin@1002 : Record 7354;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      FindZonesAndBins(FirstZone,FirstBin,LocationCode);
+      FindLocationByCode(Location,LocationCode);
+      UpdateInventoryUsingWhseAdjustmentForTwoZone(Location,Item,Quantity,FirstZone.Code,FirstBin.Code);  // For large Quantity.
+    END;
+
+    LOCAL PROCEDURE CreateItemAndSupplyForYellowLocation@81(VAR Item@1006 : Record 27;LocationCode@1001 : Code[10];Quantity@1000 : Decimal);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      CreatePutAwayForPurchaseOrder(LocationCode,Item."No.",Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateItemAndSupplyForSilverLocation@134(VAR Item@1006 : Record 27;Location@1001 : Record 14;Bin@1002 : Record 7354;Quantity@1000 : Decimal);
+    VAR
+      BinContent@1003 : Record 7302;
+    BEGIN
+      LibraryWarehouse.CreateBinContent(
+        BinContent,Location.Code,'',Bin.Code,LibraryInventory.CreateItem(Item),'',Item."Base Unit of Measure");
+      CreateQuantityForLocationWithBin(Location,Bin,Item,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateLocation@164() : Code[10];
+    VAR
+      Location@1001 : Record 14;
+    BEGIN
+      // Creates a new Location. Wrapper for the library method.
+      LibraryWarehouse.CreateLocation(Location);
+      EXIT(Location.Code);
+    END;
+
+    LOCAL PROCEDURE CreateLocationWithRequireShip@17(VAR LocationCode@1000 : Code[10]);
+    VAR
+      Location@1001 : Record 14;
+    BEGIN
+      LocationCode := LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Location.VALIDATE("Require Shipment",TRUE);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateFullWarehouseLocation@70(VAR Location@1000 : Record 14);
+    BEGIN
+      LibraryService.CreateFullWarehouseLocation(Location,2);  // Value used for number of bin per zone.
+    END;
+
+    LOCAL PROCEDURE CreateSeviceOrderWithSeviceLinesAsItemResCostGL@77(VAR ServiceHeader@1008 : Record 5900;LocationCode@1000 : Code[10]);
+    VAR
+      WarehouseEmployee@1003 : Record 7301;
+      ServiceLine@1009 : Record 5902;
+      ServiceItemLineNo@1001 : Integer;
+    BEGIN
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,LocationCode,FALSE);
+      ServiceItemLineNo :=
+        CreateServiceOrderAndServiceLines(
+          ServiceHeader,LibraryInventory.CreateItemNo,LibraryRandom.RandInt(100),LocationCode);
+      AddResourceGLServiceLinesToOrder(ServiceHeader,ServiceItemLineNo);
+      SetLocationCodeOnServiceLines(ServiceLine,ServiceHeader,LocationCode,ServiceItemLineNo);
+    END;
+
+    LOCAL PROCEDURE CreateYellowLocation@65(VAR Location@1000 : Record 14) : Code[10];
+    BEGIN
+      EXIT(LibraryService.CreateDefaultYellowLocation(Location));
+    END;
+
+    LOCAL PROCEDURE CreateSilverLocation@126(VAR Location@1000 : Record 14;VAR Bin@1002 : Record 7354) : Code[10];
+    VAR
+      WarehouseEmployee@1001 : Record 7301;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      Location.VALIDATE("Bin Mandatory",TRUE);
+      Location.MODIFY(TRUE);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,TRUE);
+      LibraryWarehouse.CreateBin(Bin,Location.Code,LibraryUtility.GenerateGUID,'','');
+      EXIT(Location.Code);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@42(VAR PurchaseHeader@1006 : Record 38;VAR PurchaseLine@1001 : Record 39;LocationCode@1003 : Code[10];ItemNo@1004 : Code[20];Quantity@1000 : Decimal);
+    VAR
+      LibraryPurchase@1005 : Codeunit 130512;
+    BEGIN
+      // Create Purchase Order with One Item Line. Random values used are not important for test.
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleasePurchaseOrder@105(VAR PurchaseHeader@1002 : Record 38;LocationCode@1003 : Code[10];ItemNo@1004 : Code[20];Quantity@1000 : Decimal);
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      CreatePurchaseOrder(PurchaseHeader,PurchaseLine,LocationCode,ItemNo,Quantity);
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostWhseReceiptFromPO@116(VAR PurchaseHeader@1000 : Record 38);
+    VAR
+      WarehouseReceiptLine@1001 : Record 7317;
+    BEGIN
+      LibraryWarehouse.CreateWhseReceiptFromPO(PurchaseHeader);
+      PostWarehouseReceipt(WarehouseReceiptLine."Source Document"::"Purchase Order",PurchaseHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePutAwayForPurchaseOrder@39(LocationCode@1002 : Code[10];ItemNo@1003 : Code[20];Quantity@1004 : Decimal);
+    VAR
+      PurchaseHeader@1001 : Record 38;
+      WarehouseActivityLine@1000 : Record 5767;
+    BEGIN
+      CreateAndReleasePurchaseOrder(PurchaseHeader,LocationCode,ItemNo,Quantity);
+      CreateAndPostWhseReceiptFromPO(PurchaseHeader);
+      RegisterWarehouseActivity(PurchaseHeader."No.",WarehouseActivityLine."Activity Type"::"Put-away");
+    END;
+
+    LOCAL PROCEDURE CreateQuantityForLocationWithBin@96(Location@1001 : Record 14;Bin@1000 : Record 7354;Item@1002 : Record 27;Quantity@1004 : Integer);
+    VAR
+      ItemJournalLine@1003 : Record 83;
+    BEGIN
+      ItemJournalSetup;
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,
+        ItemJournalBatch."Journal Template Name",
+        ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",
+        Item."No.",
+        Quantity);
+      ItemJournalLine.VALIDATE("Location Code",Location.Code);
+      ItemJournalLine.VALIDATE("Bin Code",Bin.Code);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE CreateShippingAgentServices@83(VAR ShippingAgent@1002 : Record 291;VAR ShippingAgentServicesCode@1004 : ARRAY [6] OF Code[10]);
+    VAR
+      ShippingAgentServices@1003 : Record 5790;
+      ShippingTime@1000 : DateFormula;
+      j@1001 : Integer;
+    BEGIN
+      LibraryInventory.CreateShippingAgent(ShippingAgent);
+
+      FOR j := 1 TO 6 DO BEGIN
+        EVALUATE(ShippingTime,'<' + FORMAT(j) + 'D>');
+        LibraryInventory.CreateShippingAgentService(ShippingAgentServices,ShippingAgent.Code,ShippingTime);
+        ShippingAgentServicesCode[j] := ShippingAgentServices.Code;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateServiceDocumentWithServiceLine@91(VAR ServiceHeader@1004 : Record 5900;ServiceDocumentType@1002 : Option;ItemNo@1001 : Code[20];ItemQuantity@1000 : Integer;LocationCode@1009 : Code[10]);
+    VAR
+      Customer@1003 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceDocumentType,Customer."No.");
+      ServiceHeader.VALIDATE("Location Code",LocationCode);
+      ServiceHeader.MODIFY(TRUE);
+      AddItemServiceLinesToOrder(ServiceHeader,0,ItemNo,ItemQuantity,LocationCode);
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrderAndServiceLines@1(VAR ServiceHeader@1004 : Record 5900;ItemNo@1001 : Code[20];ItemQuantity@1000 : Integer;LocationCode@1009 : Code[10]) : Integer;
+    VAR
+      ServiceItemLineNo@1005 : Integer;
+    BEGIN
+      ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+      AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,ItemNo,ItemQuantity,LocationCode);
+      EXIT(ServiceItemLineNo);
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrderAndServiceLinesGetLineNo@97(VAR ServiceHeader@1004 : Record 5900;ItemNo@1001 : Code[20];ItemQuantity@1000 : Integer;LocationCode@1009 : Code[10]) : Integer;
+    VAR
+      ServiceItemLineNo@1005 : Integer;
+    BEGIN
+      ServiceItemLineNo := CreateServiceOrder(ServiceHeader);
+      EXIT(AddItemServiceLinesToOrder(ServiceHeader,ServiceItemLineNo,ItemNo,ItemQuantity,LocationCode));
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrderWithServiceLines@12(VAR ServiceHeader@1003 : Record 5900) : Integer;
+    VAR
+      Item@1001 : Record 27;
+      ServiceItemLineNo@1000 : Integer;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      ServiceItemLineNo := CreateServiceOrderAndServiceLines(ServiceHeader,Item."No.",RANDOM(100),'');
+      EXIT(ServiceItemLineNo);
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrder@30(VAR ServiceHeader@1001 : Record 5900) : Integer;
+    VAR
+      Customer@1003 : Record 18;
+      ServiceItemLine@1000 : Record 5901;
+      ServiceItem@1002 : Record 5940;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceItem(ServiceItem,Customer."No.");
+      UpdateAccountsInCustPostingGroup(ServiceItem."Customer No.");
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,ServiceItem."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      EXIT(ServiceItemLine."Line No.");
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseShipmentFromServiceHeader@71(ServiceHeader@1000 : Record 5900);
+    VAR
+      GetSourceDocOutbound@1001 : Codeunit 5752;
+    BEGIN
+      GetSourceDocOutbound.CreateFromServiceOrder(ServiceHeader);
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseShipmentFromSalesOrder@119(VAR SalesHeader@1000 : Record 36;VAR WarehouseShipmentHeader@1004 : Record 7320);
+    VAR
+      WarehouseShipmentHeaderNo@1001 : Code[20];
+    BEGIN
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      WarehouseShipmentHeaderNo :=
+        LibraryWarehouse.FindWhseShipmentNoBySourceDoc(
+          DATABASE::"Sales Line",SalesHeader."Document Type",SalesHeader."No.");
+      WarehouseShipmentHeader.GET(WarehouseShipmentHeaderNo);
+    END;
+
+    LOCAL PROCEDURE CreateWareHouseShipmentHeader@18(VAR WarehouseShipmentHeader@1000 : Record 7320;LocationCode@1001 : Code[10]) : Code[20];
+    BEGIN
+      LibraryWarehouse.CreateWarehouseShipmentHeader(WarehouseShipmentHeader);
+      WarehouseShipmentHeader.VALIDATE("Location Code",LocationCode);
+      WarehouseShipmentHeader.MODIFY(TRUE);
+      EXIT(WarehouseShipmentHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndRegisterWarehousePick@100(VAR WarehouseShipmentHeader@1001 : Record 7320;SourceNo@1002 : Code[20]);
+    VAR
+      WarehouseActivityLine@1003 : Record 5767;
+    BEGIN
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+      RegisterWarehouseActivity(SourceNo,WarehouseActivityLine."Activity Type"::Pick);
+    END;
+
+    LOCAL PROCEDURE FindLocationByCode@133(VAR Location@1001 : Record 14;LocationCode@1002 : Code[10]);
+    BEGIN
+      Location.SETRANGE(Code,LocationCode);
+      Location.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindFirstServiceLineByServiceHeader@47(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1001 : Record 5900);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindServiceLinesByHeaderNo@49(VAR ServiceLine@1001 : Record 5902;ServiceHeader@1000 : Record 5900);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceHeader."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceHeader."No.");
+      ServiceLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseActivityNo@88(SourceNo@1002 : Code[20];ActivityType@1003 : Option) : Code[20];
+    VAR
+      WarehouseActivityLine@1004 : Record 5767;
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Source No.",SourceNo);
+      WarehouseActivityLine.SETRANGE("Activity Type",ActivityType);
+      WarehouseActivityLine.FINDFIRST;
+      EXIT(WarehouseActivityLine."No.");
+    END;
+
+    LOCAL PROCEDURE FindWarehouseReceiptNo@56(SourceDocument@1002 : Option;SourceNo@1003 : Code[20]) : Code[20];
+    VAR
+      WarehouseReceiptLine@1004 : Record 7317;
+    BEGIN
+      WarehouseReceiptLine.SETRANGE("Source Document",SourceDocument);
+      WarehouseReceiptLine.SETRANGE("Source No.",SourceNo);
+      WarehouseReceiptLine.FINDFIRST;
+      EXIT(WarehouseReceiptLine."No.");
+    END;
+
+    LOCAL PROCEDURE FindWarehouseShipmentLinesByServiceOrder@51(VAR WarehouseShipmentLine@1000 : Record 7321;ServiceHeader@1003 : Record 5900;WarehouseShipmentHeader@1001 : Record 7320);
+    BEGIN
+      CLEAR(WarehouseShipmentLine);
+      WarehouseShipmentLine.SETRANGE("No.",WarehouseShipmentHeader."No.");
+      WarehouseShipmentLine.SETRANGE("Source Type",DATABASE::"Service Line");
+      WarehouseShipmentLine.SETRANGE("Source Subtype",1);
+      WarehouseShipmentLine.SETRANGE("Source No.",ServiceHeader."No.");
+      WarehouseShipmentLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE FindServiceCreditMemoHeader@87(VAR ServiceCrMemoHeader@1000 : Record 5994;PreAssignedNo@1001 : Code[20]);
+    BEGIN
+      ServiceCrMemoHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceCrMemoHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindServiceInvoiceHeader@103(VAR ServiceInvoiceHeader@1000 : Record 5992;PreAssignedNo@1001 : Code[20]);
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      ServiceInvoiceHeader.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindZonesAndBins@7(VAR FirstZone@1000 : Record 7300;VAR FirstBin@1002 : Record 7354;LocationCode@1004 : Code[10]);
+    BEGIN
+      FindPickableNonPickableZone(FirstZone,LocationCode,FALSE,TRUE);
+      LibraryWarehouse.FindBin(FirstBin,LocationCode,FirstZone.Code,2);  // Find Bin for Zone for Index 2.
+    END;
+
+    LOCAL PROCEDURE FindPickableNonPickableZone@2000(VAR Zone@2100 : Record 7300;LocationCode@2101 : Code[10];NewZone@2102 : Boolean;FindPickable@2104 : Boolean);
+    VAR
+      Step@2001 : Integer;
+    BEGIN
+      Zone.SETRANGE("Location Code",LocationCode);
+      IF NewZone THEN BEGIN
+        Zone.FINDLAST;
+        Step := -1;
+      END ELSE BEGIN
+        Zone.FINDFIRST;
+        Step := 1;
+      END;
+      WHILE NOT ZoneIsPickableNonPickable(Zone,FindPickable) DO
+        Zone.NEXT(Step);
+    END;
+
+    LOCAL PROCEDURE ZoneIsPickableNonPickable@2002(Zone@2003 : Record 7300;TakePickable@2120 : Boolean) : Boolean;
+    VAR
+      BinType@2004 : Record 7303;
+    BEGIN
+      BinType.GET(Zone."Bin Type Code");
+      IF TakePickable THEN
+        EXIT(BinType.Pick);
+      EXIT(NOT BinType.Pick);
+    END;
+
+    LOCAL PROCEDURE GetWarehouseShipmentLinesByShipmentHeader@60(VAR WarehouseShipmentLine@1000 : Record 7321;WarehouseShipmentHeader@1001 : Record 7320);
+    BEGIN
+      CLEAR(WarehouseShipmentLine);
+      WarehouseShipmentLine.SETRANGE("No.",WarehouseShipmentHeader."No.");
+      WarehouseShipmentLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE GetSalesLinesOfTypeItem@202(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36);
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+      SalesLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE GetAllServiceLinesOfTypeItem@53(VAR ServiceLine@1000 : Record 5902;ServiceHeader@1001 : Record 5900);
+    BEGIN
+      FindServiceLinesByHeaderNo(ServiceLine,ServiceHeader);
+      ServiceLine.SETRANGE(Type,ServiceLine.Type::Item);
+      ServiceLine.FINDSET;
+    END;
+
+    LOCAL PROCEDURE GetWarehouseEntries@74(VAR ServiceLine@1000 : Record 5902;VAR WarehouseEntry@1001 : Record 7312;EntryType@1002 : Option);
+    BEGIN
+      WarehouseEntry.SETRANGE("Source Document",WarehouseEntry."Source Document"::"Serv. Order");
+      WarehouseEntry.SETRANGE("Source No.",ServiceLine."Document No.");
+      WarehouseEntry.SETRANGE("Source Line No.",ServiceLine."Line No.");
+      WarehouseEntry.SETRANGE("Entry Type",EntryType);
+      WarehouseEntry.FINDSET;
+    END;
+
+    LOCAL PROCEDURE GetWhiteLocation@55() : Code[10];
+    VAR
+      LocationWhite@1000 : Record 14;
+    BEGIN
+      LocationWhite.SETRANGE("Directed Put-away and Pick",TRUE);
+      LocationWhite.FINDFIRST;
+      EXIT(LocationWhite.Code);
+    END;
+
+    LOCAL PROCEDURE ItemJournalSetup@75();
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type::Item,ItemJournalTemplate.Name);
+      ItemJournalBatch.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE PostWarehouseReceipt@44(SourceDocument@1000 : Option;SourceNo@1001 : Code[20]);
+    VAR
+      WarehouseReceiptHeader@1002 : Record 7316;
+    BEGIN
+      WarehouseReceiptHeader.GET(FindWarehouseReceiptNo(SourceDocument,SourceNo));
+      LibraryWarehouse.PostWhseReceipt(WarehouseReceiptHeader);
+    END;
+
+    LOCAL PROCEDURE RegisterWarehouseActivity@46(SourceNo@1002 : Code[20];Type@1000 : Option);
+    VAR
+      WarehouseActivityHeader@1003 : Record 5766;
+    BEGIN
+      WarehouseActivityHeader.SETRANGE(Type,Type);
+      WarehouseActivityHeader.SETRANGE("No.",FindWarehouseActivityNo(SourceNo,Type));
+      WarehouseActivityHeader.FINDFIRST;
+      IF Type = 1 THEN // Put-away
+        PlaceInNonPickableZones(WarehouseActivityHeader);
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+    END;
+
+    LOCAL PROCEDURE PlaceInNonPickableZones@2010(WarehouseActivityHeader@2121 : Record 5766);
+    VAR
+      FirstZone@2122 : Record 7300;
+      FirstBin@2123 : Record 7354;
+    BEGIN
+      FirstZone.SETRANGE("Location Code",WarehouseActivityHeader."Location Code");
+      IF FirstZone.ISEMPTY THEN
+        EXIT;
+      FirstZone.SETRANGE("Location Code");
+      FindPickableNonPickableZone(FirstZone,WarehouseActivityHeader."Location Code",FALSE,FALSE); // We find a non-pickable zone
+      LibraryWarehouse.FindBin(FirstBin,WarehouseActivityHeader."Location Code",FirstZone.Code,2);  // Find Bin for Zone for Index 2.
+      ModifyPutAwayLinesToNonPickableZoneBin(WarehouseActivityHeader,FirstZone.Code,FirstBin.Code);
+    END;
+
+    LOCAL PROCEDURE ModifyPutAwayLinesToNonPickableZoneBin@3000(WarehouseActivityHeader@2224 : Record 5766;ZoneCode@2125 : Code[10];BinCode@2126 : Code[20]);
+    VAR
+      WarehouseActivityLine@2127 : Record 5767;
+    BEGIN
+      WITH WarehouseActivityLine DO BEGIN
+        SETRANGE("Activity Type",WarehouseActivityHeader.Type);
+        SETRANGE("No.",WarehouseActivityHeader."No.");
+        SETRANGE("Action Type","Action Type"::Place);
+        IF FINDSET THEN
+          REPEAT
+            VALIDATE("Zone Code",ZoneCode);
+            VALIDATE("Bin Code",BinCode);
+            MODIFY;
+          UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE ReleaseServiceHeaderAndCreateWarehouseShipment@89(VAR ServiceHeader@1000 : Record 5900;VAR WarehouseShipmentHeader@1004 : Record 7320);
+    VAR
+      WarehouseShipment@1003 : TestPage 7335;
+      WarehouseShipmentHeaderNo@1001 : Code[20];
+    BEGIN
+      LibraryService.ReleaseServiceDocument(ServiceHeader);
+      WarehouseShipment.TRAP;
+      CreateWarehouseShipmentFromServiceHeader(ServiceHeader);
+      WarehouseShipmentHeaderNo := WarehouseShipment."No.".VALUE;
+      WarehouseShipment.CLOSE;
+      CLEAR(WarehouseShipment);
+      WarehouseShipmentHeader.GET(WarehouseShipmentHeaderNo);
+    END;
+
+    LOCAL PROCEDURE SaveServiceLineInTempTable@132(VAR TempServiceLine@1001 : TEMPORARY Record 5902;ServiceLine@1000 : Record 5902);
+    BEGIN
+      ServiceLine.SETRANGE("Document Type",ServiceLine."Document Type");
+      ServiceLine.SETRANGE("Document No.",ServiceLine."Document No.");
+      ServiceLine.FINDSET;
+      REPEAT
+        TempServiceLine := ServiceLine;
+        TempServiceLine.INSERT;
+      UNTIL ServiceLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE SetLocationCodeOnServiceLines@14(VAR ServiceLine@1001 : Record 5902;ServiceHeader@1002 : Record 5900;LocationCode@1003 : Code[10];ServiceItemLineNo@1000 : Integer);
+    BEGIN
+      WITH ServiceLine DO BEGIN
+        SETRANGE("Document Type",ServiceHeader."Document Type");
+        SETRANGE("Document No.",ServiceHeader."No.");
+        SETRANGE("Service Item Line No.",ServiceItemLineNo);
+        SETRANGE(Type,Type::Resource,Type::"G/L Account");
+        FINDSET(TRUE);
+        REPEAT
+          VALIDATE("Location Code",LocationCode);
+          MODIFY(TRUE);
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE TestPostServiceDocumentWithItem@146(ServiceDocumentType@1004 : Option;LocationType@1006 : Integer;LineQuantityDelta@1009 : Integer;IsBlankBincode@1010 : Boolean);
+    VAR
+      Bin@1005 : Record 7354;
+      Item@1002 : Record 27;
+      Location@1003 : Record 14;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1008 : Record 5902;
+      Zone@1013 : Record 7300;
+      WarehouseEntry@1015 : Record 7312;
+      TempServiceLine@1007 : TEMPORARY Record 5902;
+      Quantity@1014 : Integer;
+      LineQuantity@1000 : Integer;
+      LocationCode@1011 : Code[10];
+      BinCode@1012 : Code[20];
+    BEGIN
+      // PARAM: LocationType Indicates the tyep of warehouse location that should be used, 1 - Silver, 2 - Yellow, 3 - White
+      // PARAM: LineQuantityDelta: Quantity to subtract from the supply quantity set on the line
+      // IsBlankBincode: Set Bin code ot blank in the service line
+
+      // SETUP: Create an new location, create a new item.
+      // SETUP: Create Supply for that item in the specific location and bin.
+      Quantity := LibraryRandom.RandIntInRange(2,100);
+      LineQuantity := Quantity - LineQuantityDelta;
+
+      BinCode := '';
+
+      CASE LocationType OF
+        1: // SILVER
+          BEGIN
+            LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+            CreateSilverLocation(Location,Bin);
+            CreateItemAndSupplyForSilverLocation(Item,Location,Bin,Quantity);
+            LocationCode := Location.Code;
+            BinCode := Bin.Code;
+          END;
+        2: // YELLOW
+          BEGIN
+            LocationCode := YellowLocationCode;
+            CreateItemAndSupplyForYellowLocation(Item,LocationCode,Quantity);
+          END;
+        3: // WHITE
+          BEGIN
+            LocationCode := WMSFullLocation;
+            CreateItemAndSupply(Item,LocationCode,Quantity);
+            FindZonesAndBins(Zone,Bin,LocationCode); // This the pickable zone
+            BinCode := Bin.Code;
+          END;
+      END;
+
+      IF IsBlankBincode THEN
+        BinCode := '';
+
+      // EXECUTE: Create Service Document on the Location.
+      CreateServiceDocumentWithServiceLine(ServiceHeader,ServiceDocumentType,Item."No.",LineQuantity,LocationCode);
+      FindFirstServiceLineByServiceHeader(ServiceLine,ServiceHeader);
+      ServiceLine.VALIDATE("Bin Code",BinCode);
+      ServiceLine.MODIFY(TRUE);
+
+      // VERIFY: Service Document has been posted
+      SaveServiceLineInTempTable(TempServiceLine,ServiceLine);
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      IF ServiceDocumentType = ServiceHeader."Document Type"::"Credit Memo" THEN
+        LineQuantity := -LineQuantity;
+      VerifyQtyOnItemLedgerEntry(TempServiceLine,LineQuantity);
+
+      // No Warehouse entries are created by yellow location.
+      IF LocationType = 2 THEN
+        EXIT;
+
+      IF ServiceDocumentType = ServiceHeader."Document Type"::Invoice THEN
+        GetAndVerifyWarehouseEntry(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Negative Adjmt.",-ServiceLine.Quantity)
+      ELSE
+        GetAndVerifyWarehouseEntry(ServiceLine,WarehouseEntry,WarehouseEntry."Entry Type"::"Positive Adjmt.",ServiceLine.Quantity);
+
+      Assert.AreEqual(WarehouseEntry.COUNT,1,'No. of warehouse entries created');
+      WarehouseEntry.TESTFIELD("Bin Code",BinCode);
+    END;
+
+    LOCAL PROCEDURE TestPostServiceInvoiceWithNonItemLines@144(LocationCode@1000 : Code[10]);
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      TestPostServiceDocumentWithNonItemLines(LocationCode,ServiceHeader."Document Type"::Invoice);
+    END;
+
+    LOCAL PROCEDURE TestPostServiceCreditMemoWithNonItemLines@149(LocationCode@1000 : Code[10]);
+    VAR
+      ServiceHeader@1001 : Record 5900;
+    BEGIN
+      TestPostServiceDocumentWithNonItemLines(LocationCode,ServiceHeader."Document Type"::"Credit Memo");
+    END;
+
+    LOCAL PROCEDURE TestPostServiceDocumentWithNonItemLines@113(LocationCode@1005 : Code[10];ServiceDocumentType@1006 : Option);
+    VAR
+      ServiceHeader@1001 : Record 5900;
+      ServiceItem@1004 : Record 5940;
+      ServiceInvoiceHeader@1000 : Record 5992;
+      ServiceCrMemoHeader@1002 : Record 5994;
+      Customer@1003 : Record 18;
+    BEGIN
+      // Setup: Create a service invoice with service lines of type resource, gl and cost
+      LibrarySales.CreateCustomer(Customer);
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceDocumentType,Customer."No.");
+      ServiceHeader.VALIDATE("Location Code",LocationCode);
+      ServiceHeader.MODIFY(TRUE);
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      AddResourceGLServiceLinesToOrder(ServiceHeader,0);
+
+      // EXECUTE: Post the Service Header
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // VERIFY: The Header has been posted and the posted doucments can be found
+      IF ServiceHeader."Document Type" = ServiceHeader."Document Type"::Invoice THEN
+        FindServiceInvoiceHeader(ServiceInvoiceHeader,ServiceHeader."No.")
+      ELSE
+        FindServiceCreditMemoHeader(ServiceCrMemoHeader,ServiceHeader."No.");
+    END;
+
+    LOCAL PROCEDURE UndoAllShipmentsForSalesHeader@262(SalesOrderNo@1001 : Code[20]);
+    VAR
+      SalesShipmentLine@1000 : Record 111;
+    BEGIN
+      SalesShipmentLine.SETRANGE("Order No.",SalesOrderNo);
+      LibrarySales.UndoSalesShipmentLine(SalesShipmentLine);
+    END;
+
+    LOCAL PROCEDURE UpdateServiceLine@19(VAR ServiceLine@1003 : Record 5902;ServiceItemLineNo@1002 : Integer;ItemQuantity@1000 : Integer);
+    BEGIN
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLineNo);
+      ServiceLine.VALIDATE(Quantity,ItemQuantity);  // Use Random to select Random Quantity.
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateInventoryUsingWhseAdjustmentForTwoZone@94(Location@1000 : Record 14;Item@1002 : Record 27;Quantity@1003 : Decimal;ZoneCode@1004 : Code[10];BinCode@1007 : Code[20]);
+    VAR
+      WarehouseJournalLine@1001 : Record 7311;
+    BEGIN
+      WarehouseJournalSetup(Location.Code);
+      LibraryWarehouse.CreateWhseJournalLine(
+        WarehouseJournalLine,WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,Location.Code,ZoneCode,BinCode,
+        WarehouseJournalLine."Entry Type"::"Positive Adjmt.",Item."No.",Quantity);
+      CalculateAndPostWhseAdjustment(Item,Location.Code);
+    END;
+
+    LOCAL PROCEDURE UpdateAccountsInCustPostingGroup@294(CustNo@1000 : Code[20]);
+    VAR
+      Customer@1001 : Record 18;
+      CustPostingGroup@1002 : Record 92;
+    BEGIN
+      Customer.GET(CustNo);
+      CustPostingGroup.GET(Customer."Customer Posting Group");
+      IF CustPostingGroup."Payment Disc. Debit Acc." = '' THEN
+        CustPostingGroup.VALIDATE("Payment Disc. Debit Acc.",LibraryERM.CreateGLAccountNo);
+      IF CustPostingGroup."Payment Disc. Credit Acc." = '' THEN
+        CustPostingGroup.VALIDATE("Payment Disc. Credit Acc.",LibraryERM.CreateGLAccountNo);
+      CustPostingGroup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE WarehouseJournalSetup@114(LocationCode@1000 : Code[10]);
+    BEGIN
+      CLEAR(WarehouseJournalTemplate);
+      WarehouseJournalTemplate.INIT;
+      LibraryWarehouse.SelectWhseJournalTemplateName(WarehouseJournalTemplate,WarehouseJournalTemplate.Type::Item);
+      WarehouseJournalTemplate.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      WarehouseJournalTemplate.MODIFY(TRUE);
+
+      CLEAR(WarehouseJournalBatch);
+      WarehouseJournalBatch.INIT;
+      LibraryWarehouse.SelectWhseJournalBatchName(
+        WarehouseJournalBatch,WarehouseJournalTemplate.Type,WarehouseJournalTemplate.Name,LocationCode);
+      WarehouseJournalBatch.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      WarehouseJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@22(VAR SalesHeader@1001 : Record 36;LocationCode@1002 : Code[10];ItemNo@1004 : Code[20];Quantity@1003 : Decimal;ShipmentDate@1006 : Date);
+    VAR
+      SalesLine@1000 : Record 37;
+    BEGIN
+      // Random values used are not important for test.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.VALIDATE("Shipment Date",ShipmentDate);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ReserveFromSalesOrder@192(No@1000 : Code[20]);
+    VAR
+      SalesOrder@1001 : TestPage 42;
+    BEGIN
+      SalesOrder.OPENEDIT;
+      SalesOrder.FILTER.SETFILTER("No.",No);
+      SalesOrder.SalesLines.Reserve.INVOKE;
+      SalesOrder.CLOSE;
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrder@191(VAR SalesHeader@1004 : Record 36;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10];Quantity@1000 : Decimal;Reserve@1005 : Boolean);
+    BEGIN
+      CreateSalesOrder(SalesHeader,LocationCode,ItemNo,Quantity,WORKDATE);
+      IF Reserve THEN
+        ReserveFromSalesOrder(SalesHeader."No.");
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+    END;
+
+    [MessageHandler]
+    PROCEDURE HandleWarehouseShipmentCreatedMessage@59(Message@1000 : Text[1024]);
+    BEGIN
+      ShipmentConfirmationMessage := Message;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE HandleGetSourceDocuments@28(VAR SourceDocuments@1000 : TestPage 5793);
+    BEGIN
+      SourceDocuments.FILTER.SETFILTER("Source No.",SourceDocumentNo);
+      SourceDocuments.FILTER.SETFILTER("Source Document",SourceDocumentType);
+      Assert.AreEqual(SourceDocumentNo,SourceDocuments."Source No.".VALUE,'Source Document no is found in the list');
+      Assert.AreEqual(SourceDocumentType,SourceDocuments."Source Document".VALUE,'Source Document Type found in the list');
+      SourceDocuments.OK.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmationHandler@73(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE VerifyNoDocumentInGetSourceDocuments@118(VAR SourceDocuments@1000 : TestPage 5793);
+    BEGIN
+      SourceDocuments.FILTER.SETFILTER("Source No.",SourceDocumentNo);
+      SourceDocuments.FILTER.SETFILTER("Source Document",SourceDocumentType);
+      Assert.AreEqual('',SourceDocuments."Source No.".VALUE,'Source Document no is found in the list');
+      SourceDocuments.Cancel.INVOKE;
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseShipmentLines@62(VAR WarehouseShipmentLine@1000 : Record 7321;VAR ServiceLine@1001 : Record 5902);
+    BEGIN
+      REPEAT
+        WarehouseShipmentLine.SETRANGE("Source Line No.",ServiceLine."Line No.");
+        WarehouseShipmentLine.FINDSET;
+        Assert.AreEqual(1,WarehouseShipmentLine.COUNT,'Only one warehouse shipment line per service line is present');
+        Assert.AreEqual(ServiceLine.Quantity,WarehouseShipmentLine.Quantity,'Whse shpmt Quantity matches service line');
+        Assert.AreEqual(
+          ServiceLine."Location Code",WarehouseShipmentLine."Location Code",'Whse shpmt location code matches service line');
+        Assert.AreEqual(
+          ServiceLine."Document No.",WarehouseShipmentLine."Source No.",'Whse shpmt Source No matches service document no');
+      UNTIL (ServiceLine.NEXT = 0);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceHeaderReleaseStatus@57(ServiceHeader@1000 : Record 5900;ReleaseStatus@1001 : Option;ServiceHeaderStatus@1002 : Option);
+    BEGIN
+      Assert.AreEqual(ReleaseStatus,ServiceHeader."Release Status",'Verify Release Status');
+      Assert.AreEqual(ServiceHeaderStatus,ServiceHeader.Status,'Verify Status of Service Header');
+    END;
+
+    LOCAL PROCEDURE VerifyUpdatedShipQtyAfterShip@63(VAR TempServiceLineBeforePosting@1002 : TEMPORARY Record 5902);
+    VAR
+      ServiceLine@1001 : Record 5902;
+    BEGIN
+      // Verify that the value of the field Quantity Shipped of the new Service Line is equal to the value of the field
+      // Qty. to Ship of the relevant old Service Line.
+      TempServiceLineBeforePosting.FINDSET;
+      REPEAT
+        ServiceLine.GET(
+          TempServiceLineBeforePosting."Document Type",TempServiceLineBeforePosting."Document No.",
+          TempServiceLineBeforePosting."Line No.");
+        ServiceLine.TESTFIELD("Quantity Shipped",TempServiceLineBeforePosting."Quantity Shipped");
+        ServiceLine.TESTFIELD("Qty. to Ship",0);
+      UNTIL TempServiceLineBeforePosting.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnServiceShipmentLine@61(VAR TempServiceLineBeforePosting@1000 : TEMPORARY Record 5902;QuantityShipped@1001 : Decimal);
+    VAR
+      ServiceShipmentLine@1004 : Record 5991;
+    BEGIN
+      // Verify that the values of the fields Qty. Shipped Not Invoiced and Quantity of Service Shipment Line are equal to the value of
+      // the field Qty. to Ship of the relevant Service Line.
+      TempServiceLineBeforePosting.FINDSET;
+      ServiceShipmentLine.SETRANGE("Order No.",TempServiceLineBeforePosting."Document No.");
+      REPEAT
+        ServiceShipmentLine.SETRANGE("Order Line No.",TempServiceLineBeforePosting."Line No.");
+        ServiceShipmentLine.FINDLAST;  // Find the Shipment Line for the second shipment.
+        ServiceShipmentLine.TESTFIELD("Qty. Shipped Not Invoiced",TempServiceLineBeforePosting."Qty. to Ship");
+        ServiceShipmentLine.TESTFIELD(Quantity,-QuantityShipped);
+      UNTIL TempServiceLineBeforePosting.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnItemLedgerEntry@50(VAR TempServiceLineBeforePosting@1000 : TEMPORARY Record 5902;QuantityShipped@1002 : Decimal);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      // Verify that the value of the field Quantity of the Item Ledger Entry is equal to the value of the field Qty. to Ship of the
+      // relevant Service Line.
+      TempServiceLineBeforePosting.FINDSET;
+      IF TempServiceLineBeforePosting."Document Type"::"Credit Memo" = TempServiceLineBeforePosting."Document Type" THEN
+        ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Credit Memo")
+      ELSE
+        ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Shipment");
+
+      ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Service);
+      ItemLedgerEntry.SETRANGE("Order No.",TempServiceLineBeforePosting."Document No.");
+      REPEAT
+        ItemLedgerEntry.SETRANGE("Document Line No.",TempServiceLineBeforePosting."Line No.");
+        ItemLedgerEntry.FINDLAST;  // Find the Item Ledger Entry for the second action.
+        ItemLedgerEntry.TESTFIELD(Quantity,-QuantityShipped);
+      UNTIL TempServiceLineBeforePosting.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntry@48(VAR TempServiceLineBeforePosting@1000 : TEMPORARY Record 5902;QuantityShipped@1003 : Decimal);
+    VAR
+      ValueEntry@1001 : Record 5802;
+      ServiceShipmentHeader@1002 : Record 5990;
+    BEGIN
+      // Verify that the value ofthe field Valued Quantity of the Value Entry is equal to the value of the field Qty. to Ship of
+      // the relevant Service Line.
+      TempServiceLineBeforePosting.FINDSET;
+      ServiceShipmentHeader.SETRANGE("Order No.",TempServiceLineBeforePosting."Document No.");
+      ServiceShipmentHeader.FINDLAST;  // Find the second shipment.
+      ValueEntry.SETRANGE("Document Type",ValueEntry."Document Type"::"Service Shipment");
+      ValueEntry.SETRANGE("Document No.",ServiceShipmentHeader."No.");
+      REPEAT
+        ValueEntry.SETRANGE("Document Line No.",TempServiceLineBeforePosting."Line No.");
+        ValueEntry.FINDLAST;
+        ValueEntry.TESTFIELD("Valued Quantity",-QuantityShipped);
+      UNTIL TempServiceLineBeforePosting.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyServiceLedgerEntry@54(VAR TempServiceLineBeforePosting@1000 : TEMPORARY Record 5902;QuantityShipped@1003 : Decimal);
+    VAR
+      ServiceLedgerEntry@1001 : Record 5907;
+      ServiceShipmentHeader@1002 : Record 5990;
+    BEGIN
+      // Verify that the Service Ledger Entry created corresponds with the relevant Service Line by matching the fields No., Posting Date
+      // and Bill-to Customer No.
+      TempServiceLineBeforePosting.FINDSET;
+      ServiceShipmentHeader.SETRANGE("Order No.",TempServiceLineBeforePosting."Document No.");
+      ServiceShipmentHeader.FINDLAST;  // Find the second shipment.
+      ServiceLedgerEntry.SETRANGE("Document Type",ServiceLedgerEntry."Document Type"::Shipment);
+      ServiceLedgerEntry.SETRANGE("Document No.",ServiceShipmentHeader."No.");
+      REPEAT
+        ServiceLedgerEntry.SETRANGE("Document Line No.",TempServiceLineBeforePosting."Line No.");
+        ServiceLedgerEntry.FINDLAST;
+        ServiceLedgerEntry.TESTFIELD("No.",TempServiceLineBeforePosting."No.");
+        ServiceLedgerEntry.TESTFIELD("Posting Date",TempServiceLineBeforePosting."Posting Date");
+        ServiceLedgerEntry.TESTFIELD("Bill-to Customer No.",TempServiceLineBeforePosting."Bill-to Customer No.");
+        ServiceLedgerEntry.TESTFIELD(Quantity,-QuantityShipped);
+        ServiceLedgerEntry.TESTFIELD("Charged Qty.",-QuantityShipped);
+      UNTIL TempServiceLineBeforePosting.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseEntry@99(VAR ServiceLine@1001 : Record 5902;VAR WarehouseEntry@1000 : Record 7312;EntryType@1003 : Option;QuantityPosted@1002 : Decimal);
+    BEGIN
+      WarehouseEntry.TESTFIELD("Location Code",ServiceLine."Location Code");
+      WarehouseEntry.TESTFIELD("Item No.",ServiceLine."No.");
+      WarehouseEntry.TESTFIELD(Quantity,QuantityPosted);
+      WarehouseEntry.TESTFIELD("Qty. (Base)",QuantityPosted);
+      WarehouseEntry.TESTFIELD("Entry Type",EntryType);
+    END;
+
+    LOCAL PROCEDURE GetAndVerifyWarehouseEntry@68(VAR ServiceLine@1001 : Record 5902;VAR WarehouseEntry@1000 : Record 7312;EntryType@1003 : Option;QuantityPosted@1002 : Decimal);
+    BEGIN
+      CLEAR(WarehouseEntry);
+      GetWarehouseEntries(ServiceLine,WarehouseEntry,EntryType);
+      VerifyWarehouseEntry(ServiceLine,WarehouseEntry,EntryType,QuantityPosted);
+    END;
+
+    LOCAL PROCEDURE VerifyNoWarehouseEntriesCreated@90(VAR ServiceLine@1000 : Record 5902);
+    VAR
+      WarehouseEntry@1002 : Record 7312;
+    BEGIN
+      WarehouseEntry.SETRANGE("Source Document",WarehouseEntry."Source Document"::"Serv. Order");
+      WarehouseEntry.SETRANGE("Source No.",ServiceLine."Document No.");
+      WarehouseEntry.SETRANGE("Source Line No.",ServiceLine."Line No.");
+      Assert.AreEqual(FALSE,WarehouseEntry.FIND,'No Ware house entries are created');
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnItemLedgerEntryAfterShip@112(VAR ServiceLine@1000 : Record 5902;QuantityShipped@1002 : Decimal);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      // Verify that the value of the field Quantity of the Item Ledger Entry is equal to the value of the field Qty. to Ship of the
+      // relevant Service Line after a shipment has been posted and not invoiced
+      ItemLedgerEntry.SETRANGE("Document Type",ItemLedgerEntry."Document Type"::"Service Shipment");
+      ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Service);
+      ItemLedgerEntry.SETRANGE("Order No.",ServiceLine."Document No.");
+      ItemLedgerEntry.SETRANGE("Document Line No.",ServiceLine."Line No.");
+      ItemLedgerEntry.FINDLAST;  // Find the Item Ledger Entry for the second shipment.
+      ItemLedgerEntry.TESTFIELD(Quantity,-QuantityShipped);
+    END;
+
+    LOCAL PROCEDURE VerifyValueEntryAfterShip@109(VAR ServiceLine@1000 : Record 5902;QuantityShipped@1003 : Decimal);
+    VAR
+      ValueEntry@1001 : Record 5802;
+      ServiceShipmentHeader@1002 : Record 5990;
+    BEGIN
+      // Verify that the value ofthe field Valued Quantity of the Value Entry is equal to the value of the Quantity shipped of
+      // the relevant Service Line after a shipment has been posted and not invoiced
+      ServiceShipmentHeader.SETRANGE("Order No.",ServiceLine."Document No.");
+      ServiceShipmentHeader.FINDLAST;  // Find the second shipment.
+      ValueEntry.SETRANGE("Document Type",ValueEntry."Document Type"::"Service Shipment");
+      ValueEntry.SETRANGE("Document No.",ServiceShipmentHeader."No.");
+      ValueEntry.SETRANGE("Document Line No.",ServiceLine."Line No.");
+      ValueEntry.FINDFIRST;
+      ValueEntry.TESTFIELD("Valued Quantity",-QuantityShipped);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceLedgerEntryAfterShip@107(VAR ServiceLine@1000 : Record 5902;QuantityShipped@1003 : Decimal);
+    VAR
+      ServiceLedgerEntry@1001 : Record 5907;
+      ServiceShipmentHeader@1002 : Record 5990;
+    BEGIN
+      // Verify that the Service Ledger Entry created corresponds with the relevant Service Line by matching the fields No., Posting Date
+      // and Bill-to Customer No. after a shipment has been posted and not invoiced
+      ServiceShipmentHeader.SETRANGE("Order No.",ServiceLine."Document No.");
+      ServiceShipmentHeader.FINDLAST;  // Find the second shipment.
+      ServiceLedgerEntry.SETRANGE("Document Type",ServiceLedgerEntry."Document Type"::Shipment);
+      ServiceLedgerEntry.SETRANGE("Document No.",ServiceShipmentHeader."No.");
+
+      ServiceLedgerEntry.SETRANGE("Document Line No.",ServiceLine."Line No.");
+      ServiceLedgerEntry.FINDLAST;
+      ServiceLedgerEntry.TESTFIELD("No.",ServiceLine."No.");
+      ServiceLedgerEntry.TESTFIELD("Posting Date",ServiceLine."Posting Date");
+      ServiceLedgerEntry.TESTFIELD("Bill-to Customer No.",ServiceLine."Bill-to Customer No.");
+      ServiceLedgerEntry.TESTFIELD(Quantity,QuantityShipped);
+      ServiceLedgerEntry.TESTFIELD("Charged Qty.",QuantityShipped);
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnServiceShipmentLineAfterShip@115(VAR ServiceLine@1000 : Record 5902;QuantityShipped@1001 : Decimal);
+    VAR
+      ServiceShipmentLine@1004 : Record 5991;
+    BEGIN
+      // Verify that the values of the fields Qty. Shipped Not Invoiced and Quantity of Service Shipment Line are equal to the value of
+      // the field Qty. to Ship of the relevant Service Line.
+      ServiceLine.FINDSET;
+      ServiceShipmentLine.SETRANGE("Order No.",ServiceLine."Document No.");
+      ServiceShipmentLine.SETRANGE("Order Line No.",ServiceLine."Line No.");
+      ServiceShipmentLine.FINDLAST;  // Find the Shipment Line for the second shipment.
+      ServiceShipmentLine.TESTFIELD("Qty. Shipped Not Invoiced",QuantityShipped);
+      ServiceShipmentLine.TESTFIELD(Quantity,QuantityShipped);
+    END;
+
+    LOCAL PROCEDURE VerifyServiceLineAfterFullUndoShipment@145(VAR ServiceLine@1002 : Record 5902;LineQuantity@1000 : Integer);
+    VAR
+      Location@1001 : Record 14;
+      QuantityToCheck@1003 : Integer;
+    BEGIN
+      // Verify that service line has all quantites set to correct values after a complete undo
+      WITH ServiceLine DO BEGIN
+        TESTFIELD("Quantity Shipped",0);
+        TESTFIELD("Quantity Invoiced",0);
+        TESTFIELD(Quantity,LineQuantity);
+        QuantityToCheck := LineQuantity;
+        IF '' <> "Location Code" THEN BEGIN
+          FindLocationByCode(Location,"Location Code");
+          IF Location."Require Shipment" THEN
+            QuantityToCheck := 0
+        END;
+        TESTFIELD("Qty. to Ship",QuantityToCheck);
+        TESTFIELD("Qty. to Invoice",QuantityToCheck);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyServiceShipmentLineAfterFullUndo@147(VAR TempServiceLine@1000 : TEMPORARY Record 5902;QuantityShipped@1001 : Decimal);
+    VAR
+      ServiceShipmentLine@1004 : Record 5991;
+    BEGIN
+      // Verify service shipment line quantities match after all shipments are undone
+      WITH ServiceShipmentLine DO BEGIN
+        SETRANGE("Order No.",TempServiceLine."Document No.");
+        SETRANGE("Order Line No.",TempServiceLine."Line No.");
+        FINDLAST;
+        TESTFIELD("Qty. Shipped Not Invoiced",TempServiceLine."Quantity Shipped");
+        TESTFIELD(Quantity,-QuantityShipped);
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyServiceLineAfterOnlyShip@158(VAR ServiceLine@1002 : Record 5902;Delta@1000 : Integer);
+    BEGIN
+      // Verify that service line has all quantites set to correct values after a complete undo
+      WITH ServiceLine DO BEGIN
+        Assert.AreEqual(
+          Quantity - Delta,"Quantity Shipped",STRSUBSTNO('Service line Field %1: Matches',FIELDCAPTION("Quantity Shipped")));
+        Assert.AreEqual(
+          Quantity - Delta,"Qty. Shipped Not Invoiced",
+          STRSUBSTNO('Service line Field %1: Matches',FIELDCAPTION("Qty. Shipped Not Invoiced")));
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyResGLCostQtyToShip@102(ServiceHeader@1001 : Record 5900);
+    VAR
+      ServiceLine@1000 : Record 5902;
+    BEGIN
+      WITH ServiceLine DO BEGIN
+        SETRANGE(Type,Type::Resource,Type::"G/L Account");
+        FindServiceLinesByHeaderNo(ServiceLine,ServiceHeader);
+        REPEAT
+          Assert.AreEqual(Quantity,"Qty. to Ship",FIELDCAPTION("Qty. to Ship"));
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Order] [Status] [Service]
+      ATDD Scenarios:
+      1. Daniel is able to release-to-ship service order by pressing release to ship button.
+         Release status of service Order changes to released
+      2. Daniel is able to reopen a existing released service order by pressing reopen button.
+         Release status of service changes to open
+      3. Daniel will not be able to release an order if it has already been released
+      4. Delete a released service order
+      5. Delete a re-opened service order
+      6. Try to partially ship an order with 'Complete' shipping advice and last service line contains only description.
+
+      -----------------------------------------------------------------------------------------------------
+      Test Function Name                                                                          TFS ID
+      -----------------------------------------------------------------------------------------------------
+      TryToShipServiceOrderWithCompleteShptAdvice                                                 351183
+    }
+    END.
+  }
+}
+

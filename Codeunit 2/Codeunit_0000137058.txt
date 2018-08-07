@@ -1,0 +1,1022 @@
+OBJECT Codeunit 137058 SCM Planning Transparency
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      RequisitionLine@1009 : Record 246;
+      LocationBlue@1011 : Record 14;
+      LocationRed@1010 : Record 14;
+      LibraryInventory@1000 : Codeunit 132201;
+      LibraryWarehouse@1012 : Codeunit 132204;
+      LibraryManufacturing@1020 : Codeunit 132202;
+      LibraryPurchase@1023 : Codeunit 130512;
+      LibrarySales@1022 : Codeunit 130509;
+      LibraryRandom@1001 : Codeunit 130440;
+      LibraryUtility@1007 : Codeunit 131000;
+      Assert@1002 : Codeunit 130000;
+      LibraryPlanning@1008 : Codeunit 132203;
+      Counter@1015 : Integer;
+      UntrackedQuantity@1004 : Decimal;
+      TotalQuantity@1005 : Decimal;
+      isInitialized@1006 : Boolean;
+      TrackingMessage@1003 : TextConst 'ENU=The change will not affect existing entries';
+      NoTrackingLines@1014 : TextConst 'ENU=There are no order tracking entries for this line';
+      Source@1013 : ARRAY [7] OF Text[250];
+      ExceptionMessage@1016 : TextConst 'ENU=Exception: The projected available inventory is below Safety Stock Quantity';
+      AttentionMessage@1017 : TextConst 'ENU="Attention: The Starting Date "';
+      AttentionProdOrderMessage@1031 : TextConst 'ENU=Attention: The Status of Prod. Order';
+      SafetyStockMessage@1030 : TextConst 'ENU=Safety Stock Quantity';
+      OrderMultipleMessage@1029 : TextConst 'ENU=Order Multiple';
+      MinOrderQtyMessage@1028 : TextConst 'ENU=Minimum Order Quantity';
+      ReorderPointMessage@1027 : TextConst 'ENU=Reorder Point';
+      ReorderQtyMessage@1026 : TextConst 'ENU=Reorder Quantity';
+      BlanketOrderMessage@1025 : TextConst 'ENU=Blanket Order';
+      ProductionForecastMessage@1024 : TextConst 'ENU=Production Forecast';
+      MaximumInventoryMessage@1021 : TextConst 'ENU=Maximum Inventory';
+      ErrUntrackedPlanningElementMsg@1018 : TextConst 'ENU=Untracked Planning Element Source must be same.';
+      GlobalItemNo@1019 : Code[20];
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForPurchaseOrderBeforeCarryOutActionMsg@1();
+    BEGIN
+      // Setup.
+      Initialize;
+      OrderTrackingForPurchaseOrder(FALSE);  // Do not run Regenerative Plan or modify Sales Order.
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForPurchaseOrderCarryOutAMAndUpdateSalesQuantity@16();
+    BEGIN
+      // Setup.
+      Initialize;
+      OrderTrackingForPurchaseOrder(TRUE);  // Run Regenerative Plan, Carry Out Action message and modify Sales Order.
+    END;
+
+    LOCAL PROCEDURE OrderTrackingForPurchaseOrder@21(CalcPlanAndUpdateSales@1005 : Boolean);
+    VAR
+      Item@1004 : Record 27;
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1001 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1000 : Record 37;
+      PurchaseQuantity@1006 : Decimal;
+    BEGIN
+      // Create Item with Maximum Quantity. Create Purchase and Sales Order.
+      CreateMaxQtyItem(
+        Item,LibraryRandom.RandInt(5) + 5,LibraryRandom.RandInt(2),1,Item."Replenishment System"::Purchase);  // Value important for test. Maximum Inventory, Reorder Point. Safety Stock Quantity.
+      PurchaseQuantity := LibraryRandom.RandDec(5,2) + 10;
+      CreatePurchaseOrder(
+        PurchaseHeader,PurchaseHeader."Document Type"::Order,Item."No.",PurchaseQuantity,WORKDATE + 1);  // Large Random Value required for Test, Receipt date includes safety lead time.
+      CreateSalesOrder(SalesHeader,Item."No.",'',PurchaseQuantity - 5,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'D>',WORKDATE));  // Value must be less than Purchase Order Qty. Random shipment date.
+
+      IF CalcPlanAndUpdateSales THEN BEGIN
+        // Planning Worksheet -> Calculate Regenerative plan & Carry Out Action Message.
+        LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+        CarryOutActionMessage(Item."No.");
+        ModifySalesOrderQuantity(SalesHeader,'',PurchaseQuantity - 10);  // New quantity less than previous sales quantity.
+      END;
+
+      // Select Sales and Purchase Line for Expected quantities.
+      SelectSalesLine(SalesLine,SalesHeader);
+      SelectPurchaseLine(PurchaseLine,PurchaseLine."Document Type"::Order,PurchaseHeader."No.");
+
+      // Exercise & Verify: Open Order Tracking from Purchase Order page.Verification is done inside test page handler - OrderTrackingPageHandler.
+      UntrackedQuantity := PurchaseLine.Quantity - SalesLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := PurchaseLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForPurchase(PurchaseLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForPurchaseOrderCalcRegenPlanAndCarryOutActionMsg@7();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1006 : Record 39;
+      PurchaseLine2@1007 : Record 39;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1005 : Record 37;
+      PurchaseQuantity@1008 : Decimal;
+    BEGIN
+      // Setup: Create Item with Purchase and Sales Order. Planning Worksheet -> Calculate Regenerative plan & Carry Out Action Message.
+      Initialize;
+      CreateMaxQtyItem(
+        Item,LibraryRandom.RandInt(5) + 10,LibraryRandom.RandInt(10),LibraryRandom.RandInt(5),
+        Item."Replenishment System"::Purchase);  // Value important for Test. Maximum Inventory,Reorder Point,Safety Stock Qty.
+      PurchaseQuantity := LibraryRandom.RandDec(5,2) + 10;
+      CreatePurchaseOrder(
+        PurchaseHeader,PurchaseHeader."Document Type"::Order,Item."No.",PurchaseQuantity,WORKDATE + 1);  // Large Random Value required for Test, Receipt date includes safety lead time.
+      CreateSalesOrder(SalesHeader,Item."No.",'',PurchaseQuantity - 5,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'D>',WORKDATE));  // Value must be less than Purchase Order Qty. Random shipment date.
+
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+      CarryOutActionMessage(Item."No.");
+
+      // Select Sales and Purchase Lines for Expected quantities.
+      SelectSalesLine(SalesLine,SalesHeader);
+      SelectPurchaseLine(PurchaseLine,PurchaseLine."Document Type"::Order,PurchaseHeader."No.");
+      SelectPurchaseLine2(PurchaseLine2,PurchaseLine2."Document Type"::Order,PurchaseHeader."No.",Item."No.");
+
+      // Exercise & Verify: Open Order Tracking from Purchase Order page. Verification is done inside test page handler - OrderTrackingPageHandler.
+      UntrackedQuantity := PurchaseLine.Quantity - SalesLine.Quantity + Item."Safety Stock Quantity";  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := PurchaseLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForPurchase(PurchaseLine);
+
+      UntrackedQuantity := 0;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := PurchaseLine2.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForPurchase(PurchaseLine2);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForPurchaseReturnOrderWithCarryOutActionMsg@15();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1002 : Record 39;
+      PurchaseLine2@1005 : Record 39;
+    BEGIN
+      // Setup: Create Create Lot for Lot item with Purchase return order, Planning Worksheet -> Calculate Regenerative plan  & Carry Out Action Message.
+      Initialize;
+      CreateLotForLotItem(
+        Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(5) + 5,LibraryRandom.RandInt(10) + 5,
+        LibraryRandom.RandInt(5) + 5,0);  // Value important for Test.
+      CreatePurchaseOrder(
+        PurchaseHeader,PurchaseHeader."Document Type"::"Return Order",Item."No.",
+        LibraryRandom.RandInt(5),WORKDATE + 1);  // Small Random Value required for Test, Date includes safety lead time.
+
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+      CarryOutActionMessage(Item."No.");
+
+      // Select Purchase Return Line and Purchase Order Line for Expected Quantities.
+      SelectPurchaseLine(PurchaseLine,PurchaseLine."Document Type"::"Return Order",PurchaseHeader."No.");
+      SelectPurchaseLine2(PurchaseLine2,PurchaseLine2."Document Type"::Order,PurchaseHeader."No.",Item."No.");
+
+      // Exercise & Verify: Open Order Tracking from Purchase Order page. Verification is done inside test page handler - OrderTrackingPageHandler.
+      UntrackedQuantity := PurchaseLine2.Quantity - PurchaseLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := PurchaseLine2.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForPurchase(PurchaseLine2);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForPurchaseReturnOrderWithoutCarryoutMsg@17();
+    VAR
+      PurchaseReturnQty@1000 : Decimal;
+      MinimumOrderQty@1001 : Decimal;
+      SafetyStockQty@1002 : Decimal;
+      OrderMultipleQty@1003 : Decimal;
+    BEGIN
+      // Setup: Select Item planning parameters with Purchase return order qty. Values important for test.
+      Initialize;
+      SelectUntrackedPlanningSource(Source,ExceptionMessage,AttentionMessage,SafetyStockMessage,'','');
+      MinimumOrderQty := LibraryRandom.RandInt(5) * 10;
+      SafetyStockQty := MinimumOrderQty / 2;
+      OrderMultipleQty := SafetyStockQty / 2;
+      PurchaseReturnQty := MinimumOrderQty + OrderMultipleQty + SafetyStockQty;
+      OrderTrackingForPurchaseReturnOrder(PurchaseReturnQty,SafetyStockQty,MinimumOrderQty,OrderMultipleQty,Source);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForPurchaseReturnOrderWithOrderMultipleQty@23();
+    VAR
+      PurchaseReturnQty@1004 : Decimal;
+      MinimumOrderQty@1002 : Decimal;
+      SafetyStockQty@1001 : Decimal;
+      OrderMultipleQty@1000 : Decimal;
+    BEGIN
+      // Setup: Select Item planning parameters with Purchase return order qty. Values important for test.
+      Initialize;
+      SelectUntrackedPlanningSource(Source,ExceptionMessage,AttentionMessage,SafetyStockMessage,OrderMultipleMessage,'');
+      MinimumOrderQty := LibraryRandom.RandInt(5) * 10;
+      SafetyStockQty := MinimumOrderQty / 2;
+      OrderMultipleQty := SafetyStockQty / 2;
+      PurchaseReturnQty := MinimumOrderQty + SafetyStockQty + 1;
+      OrderTrackingForPurchaseReturnOrder(PurchaseReturnQty,SafetyStockQty,MinimumOrderQty,OrderMultipleQty,Source);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForPurchaseReturnOrderWithOrderMultipleAndMinimimOrderQty@12();
+    VAR
+      PurchaseReturnQty@1003 : Decimal;
+      MinimumOrderQty@1002 : Decimal;
+      SafetyStockQty@1001 : Decimal;
+      OrderMultipleQty@1000 : Decimal;
+    BEGIN
+      // Setup: Select Item planning parameters with Purchase return order qty. Values important for test.
+      Initialize;
+      SelectUntrackedPlanningSource(
+        Source,ExceptionMessage,AttentionMessage,SafetyStockMessage,MinOrderQtyMessage,OrderMultipleMessage);
+      MinimumOrderQty := LibraryRandom.RandInt(5) * 10;
+      SafetyStockQty := MinimumOrderQty / 2 - 1;
+      OrderMultipleQty := MinimumOrderQty / 2 + 1;
+      PurchaseReturnQty := OrderMultipleQty;
+      OrderTrackingForPurchaseReturnOrder(PurchaseReturnQty,SafetyStockQty,MinimumOrderQty,OrderMultipleQty,Source);
+    END;
+
+    LOCAL PROCEDURE OrderTrackingForPurchaseReturnOrder@52(PurchaseReturnQuantity@1004 : Decimal;SafetyStockQuantity@1006 : Decimal;MinimumOrderQuantity@1005 : Decimal;OrderMultiple@1003 : Decimal;Source@1008 : ARRAY [7] OF Text[250]);
+    VAR
+      Item@1000 : Record 27;
+      PurchaseHeader@1001 : Record 38;
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      // Create Lot for Lot item with Purchase return order, Planning Worksheet -> Calculate Regenerative plan.
+      CreateLotForLotItem(Item,Item."Replenishment System"::Purchase,SafetyStockQuantity,MinimumOrderQuantity,OrderMultiple,0);
+      CreatePurchaseOrder(
+        PurchaseHeader,PurchaseHeader."Document Type"::"Return Order",Item."No.",
+        PurchaseReturnQuantity,WORKDATE + 1);  // Purchase Line Quantity important for Test, Date include safety lead time.
+      SelectPurchaseLine(PurchaseLine,PurchaseLine."Document Type"::"Return Order",PurchaseHeader."No.");
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+
+      // Select Requisition Line for Expected Quantities.
+      SelectRequisitionLine(RequisitionLine,Item."No.",'');
+      RequisitionLine.NEXT;
+
+      // Exercise & Verify: Open Order Tracking from Purchase Return Order page. Verify untracked Quantity is caused by Safety Stock Quantity, Minimum Order Quantity, Order Multiple in test page handler - OrderTrackingPageHandler.
+      UntrackedQuantity := RequisitionLine.Quantity - PurchaseLine.Quantity + Item."Safety Stock Quantity";  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := RequisitionLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForRequisition(RequisitionLine);
+
+      // Verify Untracked planning elements.
+      VerifyUntrackedPlanningElementSource(Source);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForItemWithFixedReorderQtyWithCarryOutMsg@29();
+    VAR
+      Item@1000 : Record 27;
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      // Setup: Create item with Fixed Reorder Quantity, Planning Worksheet -> Calculate Regenerative plan.
+      Initialize;
+      CreateFixedReorderQtyItem(Item,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5));  // Reorder Point, Reorder Quantity.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+      CarryOutActionMessage(Item."No.");
+
+      // Select Purchase Line for Expected Quantities.
+      SelectPurchaseLineUsingItem(PurchaseLine,Item."No.");
+      PurchaseLine.FINDFIRST;
+
+      // Exercise & Verify: Open Order Tracking from Purchase Order p age. Verification is done inside test page handler - OrderTrackingPageHandler.
+      UntrackedQuantity := PurchaseLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := PurchaseLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForPurchase(PurchaseLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForSalesOrderWithFixedReorderQtyWithCalRegenPlan@35();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1006 : Record 37;
+    BEGIN
+      // Setup: Create item with Fixed Reorder Quantity, Create Sales Order, Planning Worksheet -> Calculate Regenerative plan.
+      Initialize;
+      CreateFixedReorderQtyItem(Item,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5));  // Reorder Point, Reorder Quantity.
+      CreateSalesOrder(
+        SalesHeader,Item."No.",'',LibraryRandom.RandInt(10) + 10,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'D>',WORKDATE));  // Large Random Value required for Test. Random shipment date.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+
+      // Select Sales Line and Requisition Line for Expected Quantities.
+      SelectSalesLine(SalesLine,SalesHeader);
+      SelectRequisitionLine(RequisitionLine,Item."No.",'');
+
+      // Exercise & Verify: Open Order Tracking from Planning Worksheet  page. Verify untracked Quantity is caused by Reorder Quantity in test page handler - OrderTrackingPageHandler.
+      UntrackedQuantity := SelectRequisitionLineQuantity(RequisitionLine) - SalesLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := RequisitionLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForRequisition(RequisitionLine);
+
+      SelectRequisitionLine(RequisitionLine,Item."No.",'');
+      RequisitionLine.FINDLAST;
+      UntrackedQuantity := RequisitionLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := RequisitionLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForRequisition(RequisitionLine);
+
+      // Verify Untracked planning elements.
+      SelectUntrackedPlanningSource(Source,ExceptionMessage,ReorderPointMessage,ReorderQtyMessage,'','');
+      VerifyUntrackedPlanningElementSource(Source);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForSalesOrderWithFixedReorderQtyWithCarryOutMsg@37();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1006 : Record 37;
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      // Setup: Create item with Fixed Reorder Quantity,Planning Worksheet -> Calculate Regenerative plan with Carry Out Message.
+      Initialize;
+      CreateFixedReorderQtyItem(Item,LibraryRandom.RandInt(5),LibraryRandom.RandInt(5));  // Reorder Point, Reorder Quantity.
+      CreateSalesOrder(
+        SalesHeader,Item."No.",'',LibraryRandom.RandInt(10) + 10,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'D>',WORKDATE));  // Large Random Value required for Test. Random shipment date.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+      CarryOutActionMessage(Item."No.");
+
+      // Select Sales Line for Expected Quantities.
+      SelectSalesLine(SalesLine,SalesHeader);
+      SelectPurchaseLineUsingItem(PurchaseLine,Item."No.");
+      PurchaseLine.FINDLAST;
+
+      // Exercise & Verify: Open Order Tracking from Sales Order  page. Verify untracked Quantity is caused by Reorder Quantity in test page handler - OrderTrackingPageHandler.
+      UntrackedQuantity := PurchaseLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := PurchaseLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForPurchase(PurchaseLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForSalesOrderAfterCalcRegenPlanLFLItem@13();
+    BEGIN
+      // Setup:
+      Initialize;
+      OrderTrackingForSalesOrderWithSKU(FALSE);  // Update Sales and Calc Plan - FALSE.
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForSalesOrderAfterCalcRegenPlanAndUpdateSalesQuantityLFLItem@26();
+    BEGIN
+      // Setup:
+      Initialize;
+      OrderTrackingForSalesOrderWithSKU(TRUE);  // Update Sales and Calc Plan - TRUE.
+    END;
+
+    LOCAL PROCEDURE OrderTrackingForSalesOrderWithSKU@28(UpdateSalesAndCalcPlan@1005 : Boolean);
+    VAR
+      Item@1001 : Record 27;
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+      SalesLineQty@1004 : Decimal;
+    BEGIN
+      // Create Item Stockkeeping Unit setup and sales order. Planning Worksheet -> Calculate Regenerative plan.
+      CreateLotForLotItemSKUSetup(Item);
+      SalesLineQty := LibraryRandom.RandInt(10) + 10;  // Value required.
+      CreateSalesOrder(SalesHeader,Item."No.",LocationBlue.Code,SalesLineQty,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'D>',WORKDATE));  // Random shipment date.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,WORKDATE + LibraryRandom.RandInt(30));
+
+      IF UpdateSalesAndCalcPlan THEN BEGIN  // Update Sales Order. Run Regenerative plan again & Select Requisition Line for Expected quantities.
+        ModifySalesOrderQuantity(SalesHeader,LocationRed.Code,SalesLineQty - 1);  // New quantity less than previous sales quantity.
+        LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,WORKDATE + LibraryRandom.RandInt(30));
+        SelectRequisitionLine(RequisitionLine,Item."No.",LocationRed.Code);
+      END ELSE
+        SelectRequisitionLine(RequisitionLine,Item."No.",LocationBlue.Code);
+
+      // Select Sales and Requisition Line for Expected quantities.
+      SelectSalesLine(SalesLine,SalesHeader);
+      UntrackedQuantity := SalesLine.Quantity - RequisitionLine.Quantity;  // Assign Global variable for Page Handler.
+      TotalQuantity := SalesLine.Quantity;  // Assign Global variable for Page Handler.
+
+      // Exercise & Verify: Open Order Tracking page. Verification is done inside test page handler - OrderTrackingPageHandler.
+      OpenOrderTrackingForRequisition(RequisitionLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(NoTrackingLinesMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForBlanketSalesOrderAfterCalcRegenPlanOrderItem@41();
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      // Setup: Create Item with re-order policy - Order, Create Blanket Sales Order, Planning Worksheet -> Calculate Regenerative plan.
+      Initialize;
+      CreateItem(Item,Item."Replenishment System"::Purchase,Item."Reordering Policy"::Order,Item."Order Tracking Policy"::None);
+      CreateBlanketSalesOrder(
+        SalesHeader,Item."No.",LibraryRandom.RandInt(10) + 10,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'D>',WORKDATE));  // Large Random Value required for Test. Random shipment date.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+
+      // Select Sales Line and Requisition Line for Expected Quantities.
+      SelectSalesLine(SalesLine,SalesHeader);
+      SelectRequisitionLine(RequisitionLine,Item."No.",'');
+
+      // Exercise & Verify: Open Order Tracking from Planning Worksheet  page. Verify untracked Quantity in page handler - OrderTrackingPageHandler.
+      UntrackedQuantity := SalesLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := SalesLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForRequisition(RequisitionLine);
+
+      // Verify Untracked planning elements.
+      SelectUntrackedPlanningSource(Source,BlanketOrderMessage,'','','','');
+      VerifyUntrackedPlanningElementSource(Source);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForReleasedProdOrderAfterCalcRegenPlanLFLItem@39();
+    VAR
+      Item@1005 : Record 27;
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup: Create Item with re-order policy - LFL and planning parameters, Create Released Prod. Order, Planning Worksheet -> Calculate Regenerative plan.
+      Initialize;
+      CreateLotForLotItem(
+        Item,Item."Replenishment System"::"Prod. Order",LibraryRandom.RandInt(5) + 20,0,LibraryRandom.RandInt(5),
+        LibraryRandom.RandInt(5) + 10);  // Values required.
+      CreateAndRefreshReleasedProductionOrder(ProductionOrder,Item."No.",Item."Maximum Order Quantity");  // Large Random Value required for Test.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+
+      // Select Requisition Line for Expected Quantities.
+      SelectRequisitionLine(RequisitionLine,Item."No.",'');
+
+      // Exercise & Verify: Open Order Tracking from Planning Worksheet  page. Verify untracked Quantity in page handler - OrderTrackingPageHandler.
+      REPEAT
+        UntrackedQuantity := RequisitionLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+        TotalQuantity := RequisitionLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+        OpenOrderTrackingForRequisition(RequisitionLine);
+      UNTIL RequisitionLine.NEXT = 0;
+
+      // Verify Untracked planning elements.
+      SelectUntrackedPlanningSource(
+        Source,SafetyStockMessage,ExceptionMessage,AttentionMessage,AttentionMessage,AttentionProdOrderMessage);
+      VerifyUntrackedPlanningElementSource(Source);
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,CalculateRegenPlanPlanWkshRequestPageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForForecastAfterCalcRegenPlanLFLItem@38();
+    VAR
+      Item@1005 : Record 27;
+      ManufacturingSetup@1000 : Record 99000765;
+    BEGIN
+      // Setup: Create Item with re-order policy - Order, Create Blanket Sales Order, Planning Worksheet -> Calculate Regenerative plan.
+      Initialize;
+      ManufacturingSetup.GET;
+      CreateLotForLotItem(
+        Item,Item."Replenishment System"::Purchase,LibraryRandom.RandInt(5) + 5,LibraryRandom.RandInt(5) + 20,
+        LibraryRandom.RandInt(5) + 10,0);  // Values required.
+      CreateProductionForecastSetup(Item."No.");
+      GlobalItemNo := Item."No.";
+      CalcRegenPlanForPlanningWorksheet;  // Calculate plan using Planning worksheet page.
+
+      // Select Requisition Line for Expected Quantities.
+      SelectRequisitionLine(RequisitionLine,Item."No.",'');
+
+      // Exercise & Verify: Open Order Tracking from Planning Worksheet page. Verify untracked Quantity in page handler - OrderTrackingPageHandler.
+      UntrackedQuantity := RequisitionLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      TotalQuantity := RequisitionLine.Quantity;  // Assign Global variable for Page Handler OrderTrackingPageHandler.
+      OpenOrderTrackingForRequisition(RequisitionLine);
+
+      // Verify Untracked planning elements.
+      SelectUntrackedPlanningSource(
+        Source,ProductionForecastMessage,SafetyStockMessage,ExceptionMessage,AttentionMessage,'');
+      VerifyUntrackedPlanningElementSource(Source);
+
+      // Tear Down.
+      UpdateForecastOnManufacturingSetup(
+        ManufacturingSetup."Current Production Forecast",ManufacturingSetup."Use Forecast on Locations");
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForProductionWithSalesAfterCalcPlan@48();
+    BEGIN
+      // Setup.
+      Initialize;
+      OrderTrackingForProductionOrder(FALSE,FALSE);  // Sales Order only. Calculate Plan only.
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForProductionWithSalesAndFirmPlanProdCalcPlan@54();
+    BEGIN
+      // Setup.
+      Initialize;
+      OrderTrackingForProductionOrder(TRUE,FALSE);  // Sales Order with Firm Plan Production Order. Calculate Plan only.
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForProductionWithSalesAfterCalcPlanCarryOutActionMsg@67();
+    BEGIN
+      // Setup.
+      Initialize;
+      OrderTrackingForProductionOrder(FALSE,TRUE);  // Sales Order only. Calculate Plan and Carry Out Action message.
+    END;
+
+    [Test]
+    [HandlerFunctions(TrackingLineMessageHandler,OrderTrackingPageHandler)]
+    PROCEDURE OrderTrackingForProductionWithSalesAndFirmPlanProdCalcPlanCarryOutActionMsg@66();
+    BEGIN
+      // Setup.
+      Initialize;
+      OrderTrackingForProductionOrder(TRUE,TRUE);  // Sales Order with Firm Plan Production Order. Calculate Plan and Carry Out Action message.
+    END;
+
+    LOCAL PROCEDURE OrderTrackingForProductionOrder@47(ExistFirmPlanProdOrder@1005 : Boolean;CarryOutActionMessageForProdOrder@1007 : Boolean);
+    VAR
+      Item@1004 : Record 27;
+      SalesHeader@1002 : Record 36;
+      ProductionOrder@1001 : Record 5405;
+      ProdOrderLine@1009 : Record 5406;
+      FirmPlannedProdQty@1003 : Decimal;
+      SalesOrderQty@1006 : Decimal;
+      SalesShipmentDate@1008 : Date;
+    BEGIN
+      // Create Item, Reorder Policy - Maximum Quantity.
+      CreateMaxQtyItem(
+        Item,LibraryRandom.RandInt(5) + 100,LibraryRandom.RandInt(5) + 10,0,
+        Item."Replenishment System"::"Prod. Order");  // Value important for test. Maximum Inventory, Reorder Point. Safety Stock Quantity.
+
+      // Create Firm Planned Production Order.
+      IF ExistFirmPlanProdOrder THEN BEGIN
+        FirmPlannedProdQty := Item."Reorder Point";
+        CreateAndRefreshFirmPlannedProductionOrder(ProductionOrder,Item."No.",FirmPlannedProdQty);
+      END;
+
+      // Create Sales Order.
+      SalesOrderQty := Item."Reorder Point" + FirmPlannedProdQty + 1;
+      SalesShipmentDate := CALCDATE('<' + '+' + FORMAT(RANDOM(2) + 1) + 'D>',WORKDATE);  // Shipment date greater than WORKDATE.
+      CreateSalesOrder(SalesHeader,Item."No.",'',SalesOrderQty,SalesShipmentDate);
+
+      // Calculate Order Tracking Expected quantities.
+      UntrackedQuantity := Item."Maximum Inventory" - SalesOrderQty;  // Assign Global variable - Page Handler OrderTrackingPageHandler.
+      TotalQuantity := Item."Maximum Inventory" - FirmPlannedProdQty;  // Assign Global variable - Page Handler OrderTrackingPageHandler.
+
+      // Exercise: Planning Worksheet -> Calculate Regenerative plan & Carry Out Action Message.
+      LibraryPlanning.CalcRegenPlanForPlanWksh(Item,WORKDATE,CALCDATE('<' + '+' + FORMAT(RANDOM(30)) + 'D>',WORKDATE));  // Start Date and End Date to cover any shipments.
+      IF CarryOutActionMessageForProdOrder THEN
+        CarryOutActionMessage(Item."No.");
+
+      // Verify: Verify quantities using Order Tracking, Production Quantity, and Untracked planning source for Requisition line.
+      IF CarryOutActionMessageForProdOrder THEN BEGIN
+        SelectProdOrderLine(ProdOrderLine,Item."No.");
+        OpenOrderTrackingForProduction(ProdOrderLine);  // Open and verify Order Tracking from Production Order page.Verification is inside test page handler - OrderTrackingPageHandler.
+        ProdOrderLine.TESTFIELD(Quantity,TotalQuantity);  // Verify New Production Order Quantity.
+      END ELSE BEGIN
+        SelectRequisitionLine(RequisitionLine,Item."No.",'');
+        OpenOrderTrackingForRequisition(RequisitionLine);  // Open and verify Order Tracking from Planning Worksheet page.Verification is inside test page handler - OrderTrackingPageHandler.
+        SelectUntrackedPlanningSource(Source,ReorderPointMessage,MaximumInventoryMessage,'','','');
+        VerifyUntrackedPlanningElementSource(Source);  // Verify untracked planning element for Requisition line.
+      END;
+    END;
+
+    LOCAL PROCEDURE Initialize@5();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      ClearGlobals;
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.CreateVATData;
+      NoSeriesSetup;
+      CreateLocationSetup;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE ClearGlobals@18();
+    VAR
+      ReservationEntry@1001 : Record 337;
+      UntrackedPlanningElement@1000 : Record 99000855;
+    BEGIN
+      ReservationEntry.DELETEALL;
+      UntrackedPlanningElement.DELETEALL;
+      RequisitionLine.DELETEALL;
+
+      CLEAR(UntrackedQuantity);
+      CLEAR(TotalQuantity);
+      CLEAR(Counter);
+      CLEAR(Source);
+      CLEAR(GlobalItemNo);
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@31();
+    VAR
+      PurchasesPayablesSetup@1005 : Record 312;
+      SalesReceivablesSetup@1001 : Record 311;
+    BEGIN
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.VALIDATE("Return Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.MODIFY(TRUE);
+
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateLocationSetup@19();
+    BEGIN
+      LibraryWarehouse.CreateLocation(LocationBlue);
+      LibraryWarehouse.CreateLocation(LocationRed);
+    END;
+
+    LOCAL PROCEDURE CreateMaxQtyItem@46(VAR Item@1000 : Record 27;MaximumInventory@1001 : Integer;ReorderPoint@1002 : Integer;SafetyStockQuantity@1003 : Integer;ReplenishmentSystem@1004 : Option);
+    BEGIN
+      CreateItem(Item,ReplenishmentSystem,Item."Reordering Policy"::"Maximum Qty.",Item."Order Tracking Policy"::"Tracking Only");
+      Item.VALIDATE("Maximum Inventory",MaximumInventory);
+      Item.VALIDATE("Reorder Point",ReorderPoint);
+      Item.VALIDATE("Safety Stock Quantity",SafetyStockQuantity);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateLotForLotItem@36(VAR Item@1000 : Record 27;ReplenishmentSystem@1004 : Option;SafetyStockQuantity@1001 : Decimal;MinimumOrderQuantity@1002 : Decimal;OrderMultiple@1003 : Decimal;MaximumOrderQuantity@1005 : Decimal);
+    BEGIN
+      // Create Lot-for-Lot Item with Order Multiple and Minimum Order Quantity.
+      CreateItem(Item,ReplenishmentSystem,Item."Reordering Policy"::"Lot-for-Lot",Item."Order Tracking Policy"::"Tracking Only");
+      Item.VALIDATE("Safety Stock Quantity",SafetyStockQuantity);
+      Item.VALIDATE("Minimum Order Quantity",MinimumOrderQuantity);
+      IF ReplenishmentSystem = Item."Replenishment System"::"Prod. Order" THEN
+        Item.VALIDATE("Maximum Order Quantity",MaximumOrderQuantity);
+      Item.VALIDATE("Order Multiple",OrderMultiple);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ModifySalesOrderQuantity@34(SalesHeader@1000 : Record 36;LocationCode@1002 : Code[10];Quantity@1003 : Decimal);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      SelectSalesLine(SalesLine,SalesHeader);
+      SalesLine.VALIDATE(Quantity,Quantity);  // Quantity less than original.
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateFixedReorderQtyItem@32(VAR Item@1001 : Record 27;ReorderPoint@1000 : Integer;ReorderQuantity@1002 : Integer);
+    BEGIN
+      CreateItem(
+        Item,Item."Replenishment System"::Purchase,Item."Reordering Policy"::"Fixed Reorder Qty.",
+        Item."Order Tracking Policy"::"Tracking Only");
+      Item.VALIDATE("Reorder Point",ReorderPoint);
+      Item.VALIDATE("Reorder Quantity",ReorderQuantity);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItem@27(VAR Item@1000 : Record 27;ReplenishmentSystem@1001 : Option;ReorderingPolicy@1002 : Option;OrderTrackingPolicy@1003 : Option);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Replenishment System",ReplenishmentSystem);
+      Item.VALIDATE("Reordering Policy",ReorderingPolicy);
+      Item.VALIDATE("Order Tracking Policy",OrderTrackingPolicy);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateLotForLotItemSKUSetup@24(VAR Item@1000 : Record 27);
+    VAR
+      ItemVariant@1002 : Record 5401;
+      TransferRoute@1001 : Record 5742;
+      StockkeepingUnit@1003 : Record 5700;
+    BEGIN
+      CreateItem(
+        Item,Item."Replenishment System"::Purchase,Item."Reordering Policy"::"Lot-for-Lot",
+        Item."Order Tracking Policy"::"Tracking Only");
+      LibraryInventory.CreateItemVariant(ItemVariant,Item."No.");
+      CreateTransferRoute(TransferRoute,LocationBlue.Code,LocationRed.Code);
+      CreateStockkeepingUnit(
+        LocationRed.Code,Item."No.",ItemVariant.Code,StockkeepingUnit."Replenishment System"::Transfer,
+        LibraryRandom.RandDec(5,2),LocationBlue.Code);
+      CreateStockkeepingUnit(
+        LocationBlue.Code,Item."No.",ItemVariant.Code,StockkeepingUnit."Replenishment System"::Purchase,
+        LibraryRandom.RandDec(5,2) + 3,'');  // Value required.
+    END;
+
+    LOCAL PROCEDURE CreateStockkeepingUnit@40(LocationCode@1001 : Code[10];ItemNo@1002 : Code[20];VariantCode@1003 : Code[10];ReplenishmentSystem@1004 : Option;OrderMultiple@1005 : Decimal;TransferFromCode@1006 : Code[10]);
+    VAR
+      StockkeepingUnit@1000 : Record 5700;
+    BEGIN
+      LibraryInventory.CreateStockkeepingUnitForLocationAndVariant(StockkeepingUnit,LocationCode,ItemNo,VariantCode);
+      StockkeepingUnit.VALIDATE("Replenishment System",ReplenishmentSystem);
+      StockkeepingUnit.VALIDATE("Order Multiple",OrderMultiple);
+      StockkeepingUnit.VALIDATE("Transfer-from Code",TransferFromCode);
+      StockkeepingUnit.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@4(VAR PurchaseHeader@1003 : Record 38;DocumentType@1004 : Option;ItemNo@1002 : Code[20];Quantity@1005 : Decimal;ExpectedReceiptDate@1006 : Date);
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,DocumentType,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Quantity);
+      PurchaseLine.VALIDATE("Expected Receipt Date",ExpectedReceiptDate);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@8(VAR SalesHeader@1000 : Record 36;ItemNo@1003 : Code[20];LocationCode@1004 : Code[10];Quantity@1005 : Decimal;ShipmentDate@1006 : Date);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,ShipmentDate);
+      LibrarySales.CreateSalesLineWithShipmentDate(
+        SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,SalesHeader."Shipment Date",Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesHeader@43(VAR SalesHeader@1000 : Record 36;DocumentType@1002 : Option;ShipmentDate@1006 : Date);
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,'');
+      SalesHeader.VALIDATE("Shipment Date",ShipmentDate);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateBlanketSalesOrder@42(VAR SalesHeader@1004 : Record 36;ItemNo@1003 : Code[20];Quantity@1001 : Decimal;ShipmentDate@1000 : Date);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Blanket Order",ShipmentDate);
+      LibrarySales.CreateSalesLineWithShipmentDate(
+        SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,SalesHeader."Shipment Date",Quantity);
+    END;
+
+    LOCAL PROCEDURE SelectSalesLine@9(VAR SalesLine@1000 : Record 37;SalesHeader@1001 : Record 36);
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.SETRANGE(Type,SalesLine.Type::Item);
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SelectPurchaseLine@10(VAR PurchaseLine@1000 : Record 39;DocumentType@1002 : Option;DocumentNo@1001 : Code[20]);
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",DocumentType);
+      PurchaseLine.SETRANGE("Document No.",DocumentNo);
+      PurchaseLine.SETRANGE(Type,PurchaseLine.Type::Item);
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SelectPurchaseLine2@69(VAR PurchaseLine@1000 : Record 39;DocumentType@1002 : Option;DocumentNo@1001 : Code[20];ItemNo@1003 : Code[20]);
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",DocumentType);
+      PurchaseLine.SETFILTER("Document No.",'<>%1',DocumentNo);
+      PurchaseLine.SETRANGE(Type,PurchaseLine.Type::Item);
+      PurchaseLine.SETRANGE("No.",ItemNo);
+      PurchaseLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE SelectPurchaseLineUsingItem@11(VAR PurchaseLine@1000 : Record 39;ItemNo@1001 : Code[20]);
+    BEGIN
+      PurchaseLine.SETRANGE(Type,PurchaseLine.Type::Item);
+      PurchaseLine.SETRANGE("No.",ItemNo);
+    END;
+
+    LOCAL PROCEDURE SelectRequisitionLine@64(VAR RequisitionLine2@1000 : Record 246;ItemNo@1001 : Code[20];LocationCode@1002 : Code[10]);
+    BEGIN
+      RequisitionLine2.SETRANGE(Type,RequisitionLine.Type::Item);
+      RequisitionLine2.SETRANGE("No.",ItemNo);
+      RequisitionLine2.SETRANGE("Location Code",LocationCode);
+      RequisitionLine2.FINDSET;
+    END;
+
+    LOCAL PROCEDURE SelectRequisitionLineQuantity@45(VAR RequisitionLine2@1000 : Record 246) RequisitionLineQuantity : Decimal;
+    BEGIN
+      RequisitionLineQuantity := RequisitionLine2.Quantity;
+      RequisitionLine2.NEXT;
+      RequisitionLineQuantity += RequisitionLine2.Quantity;
+    END;
+
+    LOCAL PROCEDURE OpenOrderTrackingForPurchase@6(VAR PurchaseLine@1001 : Record 39);
+    VAR
+      OrderTracking@1000 : Page 99000822;
+    BEGIN
+      // Open Order Tracking page for required Purchase Order.
+      OrderTracking.SetPurchLine(PurchaseLine);
+      OrderTracking.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE OpenOrderTrackingForRequisition@25(VAR RequisitionLine@1001 : Record 246);
+    VAR
+      OrderTracking@1000 : Page 99000822;
+    BEGIN
+      // Open Order Tracking page for required Purchase Order.
+      OrderTracking.SetReqLine(RequisitionLine);
+      OrderTracking.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE OpenOrderTrackingForProduction@74(VAR ProdOrderLine@1001 : Record 5406);
+    VAR
+      OrderTracking@1000 : Page 99000822;
+    BEGIN
+      // Open Order Tracking page for required Production Order.
+      OrderTracking.SetProdOrderLine(ProdOrderLine);
+      OrderTracking.RUNMODAL;
+    END;
+
+    LOCAL PROCEDURE CarryOutActionMessage@83(ItemNo@1000 : Code[20]);
+    BEGIN
+      AcceptActionMessage(ItemNo);
+      SelectRequisitionLine(RequisitionLine,ItemNo,'');
+      LibraryPlanning.CarryOutActionMsgPlanWksh(RequisitionLine);
+    END;
+
+    LOCAL PROCEDURE AcceptActionMessage@14(ItemNo@1001 : Code[20]);
+    VAR
+      RequisitionLine2@1000 : Record 246;
+      VendorNo@1002 : Code[20];
+    BEGIN
+      VendorNo := LibraryPurchase.CreateVendorNo;
+      SelectRequisitionLine(RequisitionLine2,ItemNo,'');
+      REPEAT
+        IF RequisitionLine2."Ref. Order Type" = RequisitionLine2."Ref. Order Type"::Purchase THEN
+          RequisitionLine2.VALIDATE("Vendor No.",VendorNo);
+        RequisitionLine2.VALIDATE("Accept Action Message",TRUE);
+        RequisitionLine2.MODIFY(TRUE);
+      UNTIL RequisitionLine2.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateTransferRoute@33(VAR TransferRoute@1000 : Record 5742;TransferFrom@1002 : Code[10];TransferTo@1001 : Code[10]);
+    BEGIN
+      // Find Transfer Route.
+      TransferRoute.SETRANGE("Transfer-from Code",TransferFrom);
+      TransferRoute.SETRANGE("Transfer-to Code",TransferTo);
+
+      // If Transfer Not Found then Create it.
+      IF NOT TransferRoute.FINDFIRST THEN
+        LibraryWarehouse.CreateTransferRoute(TransferRoute,TransferFrom,TransferTo);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshReleasedProductionOrder@3(VAR ProductionOrder@1000 : Record 5405;ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    BEGIN
+      // Create Released Production Order.
+      CreateAndRefreshProductionOrder(ProductionOrder,ItemNo,Quantity,ProductionOrder.Status::Released);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshFirmPlannedProductionOrder@55(VAR ProductionOrder@1000 : Record 5405;ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    BEGIN
+      // Create Firm Planned Production Order.
+      CreateAndRefreshProductionOrder(ProductionOrder,ItemNo,Quantity,ProductionOrder.Status::"Firm Planned");
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshProductionOrder@56(VAR ProductionOrder@1002 : Record 5405;ItemNo@1001 : Code[20];Quantity@1000 : Decimal;Status@1003 : Option);
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(ProductionOrder,Status,ProductionOrder."Source Type"::Item,ItemNo,Quantity);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE UpdateForecastOnManufacturingSetup@116(CurrentProductionForecast@1001 : Code[10];UseForecastOnLocations@1002 : Boolean);
+    VAR
+      ManufacturingSetup@1000 : Record 99000765;
+    BEGIN
+      ManufacturingSetup.GET;
+      ManufacturingSetup.VALIDATE("Current Production Forecast",CurrentProductionForecast);
+      ManufacturingSetup.VALIDATE("Use Forecast on Locations",UseForecastOnLocations);
+      ManufacturingSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateProductionForecastSetup@120(ItemNo@1002 : Code[20]);
+    VAR
+      ProductionForecastEntry@1000 : Record 99000852;
+      ProductionForecastName@1003 : Record 99000851;
+    BEGIN
+      // Using Random Value and Dates based on WORKDATE.
+      LibraryManufacturing.CreateProductionForecastName(ProductionForecastName);
+      UpdateForecastOnManufacturingSetup(ProductionForecastName.Name,TRUE);
+      LibraryManufacturing.CreateProductionForecastEntry(ProductionForecastEntry,ProductionForecastName.Name,ItemNo,'',WORKDATE,FALSE);
+      ProductionForecastEntry.VALIDATE("Forecast Quantity (Base)",LibraryRandom.RandDec(5,2) + 200);  // Large random value required.
+      ProductionForecastEntry.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CalcRegenPlanForPlanningWorksheet@99();
+    VAR
+      RequisitionWkshName@1001 : Record 245;
+      PlanningWorksheet@1000 : TestPage 99000852;
+    BEGIN
+      COMMIT;
+      RequisitionWkshName.FINDFIRST;
+      PlanningWorksheet.OPENEDIT;
+      PlanningWorksheet.CurrentWkshBatchName.SETVALUE(RequisitionWkshName.Name);
+      PlanningWorksheet.CalculateRegenerativePlan.INVOKE;  // Open report on Handler CalculatePlanPlanWkshRequestPageHandler.
+      PlanningWorksheet.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE SelectUntrackedPlanningSource@20(VAR Source@1000 : ARRAY [7] OF Text[250];Message@1001 : Text[250];Message2@1002 : Text[250];Message3@1003 : Text[250];Message4@1004 : Text[250];Message5@1005 : Text[250]);
+    BEGIN
+      Source[1] := Message;
+      Source[2] := Message2;
+      Source[3] := Message3;
+      Source[4] := Message4;
+      Source[5] := Message5;
+    END;
+
+    LOCAL PROCEDURE SelectProdOrderLine@76(VAR ProdOrderLine@1000 : Record 5406;ItemNo@1002 : Code[20]);
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,ProdOrderLine.Status::"Firm Planned");
+      ProdOrderLine.SETRANGE("Item No.",ItemNo);
+      ProdOrderLine.FINDLAST;
+    END;
+
+    LOCAL PROCEDURE VerifyUntrackedPlanningElementSource@150(Source2@1000 : ARRAY [7] OF Text[250]);
+    VAR
+      UntrackedPlanningElement@1001 : Record 99000855;
+      Index@1002 : Integer;
+    BEGIN
+      UntrackedPlanningElement.FINDSET;
+      Index := 1;
+      REPEAT
+        Assert.IsTrue(STRPOS(UntrackedPlanningElement.Source,Source2[Index]) > 0,ErrUntrackedPlanningElementMsg);
+        Index += 1;
+      UNTIL UntrackedPlanningElement.NEXT = 0;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE OrderTrackingPageHandler@22(VAR OrderTracking@1001 : TestPage 99000822);
+    BEGIN
+      // Verify required Quantity values - Total Qty and Untracked Qty.
+      OrderTracking."Untracked Quantity".ASSERTEQUALS(UntrackedQuantity);
+      OrderTracking."Total Quantity".ASSERTEQUALS(TotalQuantity);
+    END;
+
+    [MessageHandler]
+    PROCEDURE TrackingLineMessageHandler@30(Message@1000 : Text[1024]);
+    BEGIN
+      Counter += 1;
+      CASE Counter OF
+        1:
+          Assert.IsTrue(STRPOS(Message,TrackingMessage) > 0,Message);
+        2:
+          Assert.IsTrue(STRPOS(Message,NoTrackingLines) > 0,Message);
+      END;
+    END;
+
+    [MessageHandler]
+    PROCEDURE NoTrackingLinesMessageHandler@44(Message@1000 : Text[1024]);
+    BEGIN
+      Assert.IsTrue(STRPOS(Message,NoTrackingLines) > 0,Message);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE CalculateRegenPlanPlanWkshRequestPageHandler@108(VAR CalculatePlanPlanWksh@1000 : TestRequestPage 99001017);
+    BEGIN
+      // Calculate Regenerative Plan using page.
+      CalculatePlanPlanWksh.Item.SETFILTER("No.",GlobalItemNo);
+      CalculatePlanPlanWksh.StartingDate.SETVALUE(WORKDATE);
+      CalculatePlanPlanWksh.EndingDate.SETVALUE(CALCDATE('<' + '+' + FORMAT(RANDOM(5)) + 'M>',WORKDATE));
+      CalculatePlanPlanWksh.OK.INVOKE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Planning] [Order Tracking] [SCM]
+      Test Planning transparency using Order Tracking:
+
+        1. Create Purchase and Sales Order setup with Purchase Quantity more than Sales Qty. Open Order Tracking page and Verify required Quantity values.
+        2. Create Purchase and Sales Order setup with Purchase Quantity more than Sales Qty. Calculate Regenerative Plan and Carry Out Action Message. Open Order Tracking page Verify required Quantity values.
+        3. Create Purchase and Sales Order setup with Purchase Quantity more than Sales Qty. Calculate Regenerative Plan and Carry Out Action Message. Modify Sales Order Qty. Open Order Tracking page Verify required Quantity values.
+        4. Create Lot For Lot Item, Purchase Return Order, Calculate Regenerative plan & Carry Out Action Message, Open Order Tracking page Verify required Quantity   values.
+        5. Create Lot For Lot Item, Purchase Return Order, Calculate Regenerative plan, Open Order Tracking page for Requisition Line, Verify required Quantity values.
+        6. Create Lot For Lot Item, Purchase Return Order, Calculate Regenerative plan, Open Order Tracking page for Requisition Line, Verify required Quantity values.
+        7. Create Lot For Lot Item, Purchase Return Order, Calculate Regenerative plan, Open Order Tracking page for Requisition Line, Verify required Quantity values.
+        8. Create Fixed Reorder Quantity Item, Calculate Regenerative plan, Open Order Tracking page for Requisition Line, Verify required Quantity values.
+        9. Create Fixed Reorder Quantity Item, Create Sales Order, Calculate Regenerative plan, Open Order Tracking page for Sales Line, Verify required Quantity values.
+       10. Create Fixed Reorder Quantity Item, Create Sales Order Calculate Regenerative plan and Carry out Action Message, Open Order Tracking page for Sales Line, Verify required Quantity values.
+       11. Create Lot For Lot Item, and Stockkeeping units setup with Sales Order. Calculate Regenerative Plan. Open Order Tracking page and verify untracked values.
+       12. Create Lot For Lot Item, and Stockkeeping units setup with Sales Order. Calculate Regenerative Plan. Modify Sales Order Quantity and calculate Regenerative Plan again. Open Order Tracking page and verify untracked values.
+       13. Create Order Item, and Blanket Sales Order. Calculate Regenerative Plan. Open Order Tracking page and verify untracked values.
+       14. Create Lot For Lot Item, and Released Production Order. Calculate Regenerative Plan. Open Order Tracking page and verify untracked values.
+       15. Create Lot For Lot Item, and Production Forecast. Calculate Regenerative Plan. Open Order Tracking page and verify untracked values.
+       16. Create Max. Qty Item, and Sales Order setup. Calculate Regenerative Plan. Open Order Tracking page and verify untracked values and Source.
+       17. Create Max. Qty Item, and Sales Order and Production setup. Calculate Regenerative Plan. Open Order Tracking page and verify untracked values and Source.
+       18. Create Max. Qty Item, and Sales Order setup. Calculate Regenerative plan and Carry out Action Message. Open Order Tracking page and verify untracked values and Production Qty.
+       19. Create Max. Qty Item, and Sales Order and Production setup. Calculate Regenerative plan and Carry out Action Message. Open Order Tracking page and verify untracked values and Production Qty.
+
+       Covers Test cases:
+       --------------------------------------------------------------------------------------
+         Test Function                                                                 TFS ID
+       --------------------------------------------------------------------------------------
+        OrderTrackingForPurchaseOrderBeforeCarryOutActionMsg                           131945
+        OrderTrackingForPurchaseOrderCarryOutAMAndUpdateSalesQuantity                  131945
+        OrderTrackingForPurchaseOrderCalcRegenPlanAndCarryOutActionMsg                 131945
+        OrderTrackingForPurchaseReturnOrderWithCarryOutActionMsg                       131947
+        OrderTrackingForPurchaseReturnOrderWithoutCarryoutActionMsg                    131947
+        OrderTrackingForPurchaseReturnOrderWithOrderMultipleQty                        131947
+        OrderTrackingForPurchaseReturnOrderWithOrderMultipleAndMinimimOrderQty         139147
+        OrderTrackingForItemWithFixedReorderQtyWithCarryOutMsg                         131946
+        OrderTrackingForSalesOrderWithFixedReorderQtyWithCalRegenPlan                  139146
+        OrderTrackingForSalesOrderWithFixedReorderQtyWithCarryOutMsg                   139146
+        OrderTrackingForSalesOrderAfterCalcRegenPlanLFLItem                            130843
+        OrderTrackingForSalesOrderAfterCalcRegenPlanAndUpdateSalesQuantityLFLItem      130843
+        OrderTrackingForBlanketSalesOrderAfterCalcRegenPlanOrderItem                   131942
+        OrderTrackingForReleasedProdOrderAfterCalcRegenPlanLFLItem                     131941
+        OrderTrackingForForecastAfterCalcRegenPlanLFLItem                              131943,131940
+        OrderTrackingForProductionWithSalesAfterCalcPlan                               143006
+        OrderTrackingForProductionWithSalesAndFirmPlanProdCalcPlan                     143006
+        OrderTrackingForProductionWithSalesAfterCalcPlanCarryOutActionMsg              143006
+        OrderTrackingForProductionWithSalesAndFirmPlanProdCalcPlanCarryOutActionMsg    143006
+    }
+    END.
+  }
+}
+

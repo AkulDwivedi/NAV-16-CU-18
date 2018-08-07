@@ -1,0 +1,606 @@
+OBJECT Codeunit 137005 SCM WMS regressions
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            Initialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryInventory@1004 : Codeunit 132201;
+      LibraryManufacturing@1010 : Codeunit 132202;
+      LibraryWarehouse@1005 : Codeunit 132204;
+      LibraryUtility@1007 : Codeunit 131000;
+      LibraryERMCountryData@1012 : Codeunit 131305;
+      LibraryRandom@1013 : Codeunit 130440;
+      Assert@1015 : Codeunit 130000;
+      Initialized@1017 : Boolean;
+      ExpErrorActualErrorConst@1009 : TextConst 'ENU=Expected error: ''%1''\Actual error: ''%2''.';
+      EmptyStringConst@1000 : TextConst 'ENU=" "';
+      NoPutAwayCreatedForPrdOrdConst@1020 : TextConst 'ENU=No put-away created for the production order!';
+      PutAwayNotDeletedConst@1023 : TextConst 'ENU=Put-away was not deleted! Most probably it was not successfully registered.';
+      PickNotFoundInHistoryConst@1016 : TextConst 'ENU=Pick not in history! Post failed!';
+      NoPickCreatedForProdOrdConst@1006 : TextConst 'ENU=No put-away created for the production order!';
+      PickNotDeletedConst@1025 : TextConst 'ENU=Put away was not deleted! Most probably it was not successfully registered.';
+      ProdOrderLinesNotCreatedConst@1003 : TextConst 'ENU=Production order lines not created after refresh!';
+      ProdOrdCompLinesNotCrtdConst@1021 : TextConst 'ENU=Production order component lines not created after refresh!';
+      NoOfPickCreatedConst@1002 : TextConst 'ENU=Number of Invt. Pick activities created: 1 out of a total of 1.';
+      InboundWhseReqCreatedConst@1001 : TextConst 'ENU=Inbound Whse. Requests are created.';
+      NoOfPutAwayCreatedConst@1022 : TextConst 'ENU=Number of Invt. Put-away activities created: 1 out of a total of 1.';
+      KGConst@1008 : TextConst 'ENU=KG';
+      PutAwayNotFoundInHistConst@1011 : TextConst 'ENU=Put Away not in history! Post failed!';
+      WrongNoOfTermOperationsErr@1014 : TextConst '@@@="%1 = production order no., %2 = routing no.";ENU=Actual number of termination processes in prod. order %1 route %2  is 0.';
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@1102();
+    VAR
+      WarehouseSetup@1001 : Record 5769;
+      SalesReceivablesSetup@1002 : Record 311;
+    BEGIN
+      IF Initialized THEN
+        EXIT;
+
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      WarehouseSetup.GET;
+      WarehouseSetup."Whse. Ship Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      WarehouseSetup.MODIFY(TRUE);
+
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup."Order Nos." := LibraryUtility.GetGlobalNoSeriesCode;
+      SalesReceivablesSetup.MODIFY(TRUE);
+
+      Initialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateItemHierarchy@25(VAR ProdBOMHeader@1002 : Record 99000771;VAR ParentItem@1000 : Record 27;VAR ChildItem@1001 : Record 27;QuantityPer@1005 : Integer);
+    VAR
+      ProdBOMLine@1004 : Record 99000772;
+    BEGIN
+      IF ChildItem."No." = '' THEN
+        LibraryInventory.CreateItem(ChildItem);
+      IF ParentItem."No." = '' THEN
+        LibraryInventory.CreateItem(ParentItem);
+      ParentItem.VALIDATE("Replenishment System",ParentItem."Replenishment System"::"Prod. Order");
+      ParentItem.MODIFY(TRUE);
+
+      IF ProdBOMHeader."No." = '' THEN
+        LibraryManufacturing.CreateProductionBOMHeader(ProdBOMHeader,ParentItem."Base Unit of Measure")
+      ELSE BEGIN
+        ProdBOMHeader.VALIDATE(Status,ProdBOMHeader.Status::New);
+        ProdBOMHeader.MODIFY(TRUE);
+      END;
+
+      // Create the BOM line - or change qty if exist
+      ProdBOMLine.SETRANGE("Production BOM No.",ProdBOMHeader."No.");
+      ProdBOMLine.SETRANGE("Version Code",'');
+      ProdBOMLine.SETRANGE(Type,ProdBOMLine.Type::Item);
+      ProdBOMLine.SETRANGE("No.",ChildItem."No.");
+      IF NOT ProdBOMLine.FINDFIRST THEN
+        LibraryManufacturing.CreateProductionBOMLine(ProdBOMHeader,ProdBOMLine,'',ProdBOMLine.Type::Item,ChildItem."No.",QuantityPer)
+      ELSE BEGIN
+        ProdBOMLine.VALIDATE("Quantity per",QuantityPer);
+        ProdBOMLine.MODIFY(TRUE);
+      END;
+
+      // Add the BOM to the parent item
+      ParentItem.VALIDATE("Production BOM No.",ProdBOMHeader."No.");
+      ParentItem.MODIFY(TRUE);
+
+      // Certify the BOM
+      ProdBOMHeader.VALIDATE(Status,ProdBOMHeader.Status::Certified);
+      ProdBOMHeader.MODIFY(TRUE);
+
+      // Reload the items as they might change in the statement above
+      ParentItem.GET(ParentItem."No.");
+      ChildItem.GET(ChildItem."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(HNDLChgQtyOnCompLinesAndPick)]
+    PROCEDURE ChangeQtyOnCompLinesAndPick@40();
+    VAR
+      Location@1000 : Record 14;
+      ItemUOM@1002 : Record 5404;
+      ProductionOrder@1003 : Record 5405;
+      WarehouseActivityHeader@1005 : Record 5766;
+      ProdBOMHeader@1010 : Record 99000771;
+      ParentItem@1008 : Record 27;
+      ChildItem@1004 : Record 27;
+      ItemJournalLine@1001 : Record 83;
+      PostedInvtPickHeader@1007 : Record 7342;
+      ItemJournalTemplate@1020 : Record 82;
+      ItemJournalBatch@1021 : Record 233;
+      WarehouseRequest@1015 : Record 5765;
+      Assert@1011 : Codeunit 130000;
+    BEGIN
+      // [FEATURE] [Warehouse] [Pick] [Production Order]
+      // This is implementation for Scenario 1, bug 40394 from "Navision Corsica" database
+
+      Initialize;
+
+      // Step 1 - Create item hiercarchy: BOM with hierachy: PARENT and CHILD
+      // Add a new UOM to child item = KG
+      CreateItemHierarchy(ProdBOMHeader,ParentItem,ChildItem,RANDOM(10));
+      LibraryInventory.CreateItemUnitOfMeasure(ItemUOM,ChildItem."No.",KGConst,3);
+
+      // Step 2 - Create location with require pick and require put-away
+      CreatePickPutAwayLocation(Location);
+
+      // Step 3 - Add 1000 PCS of child item into inventory by posting item journal into created location
+      LibraryInventory.FindItemJournalTemplate(ItemJournalTemplate);
+      ItemJournalBatch.SETRANGE("Journal Template Name",ItemJournalTemplate.Name);
+      ItemJournalBatch.FINDFIRST;
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalTemplate.Name,ItemJournalBatch.Name,ItemJournalLine."Entry Type"::"Positive Adjmt.",
+        ChildItem."No.",1000);
+      ItemJournalLine.VALIDATE("Location Code",Location.Code);
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalTemplate.Name,ItemJournalBatch.Name);
+
+      // Step 4 - Create released production order for new item and refresh it
+      CreateReleasedProdOrderAndRefresh(ProductionOrder,ParentItem,Location.Code,RANDOM(10));
+
+      // Step 5 - change the UOM to KG on the component lines
+      ChangeUOMOnComponentLines(ProductionOrder,KGConst);
+
+      // Step 6 - create the inventory pick
+      WarehouseRequest.SETFILTER("Source Document",'%1|%2',
+        WarehouseRequest."Source Document"::"Prod. Consumption",
+        WarehouseRequest."Source Document"::"Prod. Output");
+      WarehouseRequest.SETRANGE("Source No.",ProductionOrder."No.");
+      LibraryWarehouse.CreateInvtPutPickMovement(
+        WarehouseRequest."Source Document"::"Prod. Consumption",ProductionOrder."No.",FALSE,TRUE,FALSE);
+
+      // Step 7 - autofill qty to handle and post pick
+      Assert.IsTrue(FindAndSelInvActvOnSrcNoAndLoc(WarehouseActivityHeader,
+          WarehouseActivityHeader."Source Document"::"Prod. Consumption",ProductionOrder."No.",Location.Code),
+        NoPutAwayCreatedForPrdOrdConst);
+
+      LibraryWarehouse.AutoFillQtyInventoryActivity(WarehouseActivityHeader);
+      LibraryWarehouse.PostInventoryActivity(WarehouseActivityHeader,TRUE);
+
+      // Step 8 - verify that the pick has been posted - it has been deleted
+      Assert.IsFalse(FindAndSelInvActvOnSrcNoAndLoc(WarehouseActivityHeader,
+          WarehouseActivityHeader."Source Document"::"Prod. Consumption",ProductionOrder."No.",Location.Code),
+        PutAwayNotDeletedConst);
+
+      // Step 9 - Verify that pick has been posted - in history
+      Assert.IsTrue(
+        FindAndSelPstPickOnSrcNoAndLoc(PostedInvtPickHeader,
+          PostedInvtPickHeader."Source Document"::"Prod. Consumption",ProductionOrder."No.",Location.Code),
+        PickNotFoundInHistoryConst);
+    END;
+
+    [Test]
+    [HandlerFunctions(HNDLChgQtyOnProdLinesAndPAway)]
+    PROCEDURE ChangeQtyOnProdLinesAndPutAway@18();
+    VAR
+      Location@1000 : Record 14;
+      Item@1001 : Record 27;
+      ItemUOM@1002 : Record 5404;
+      ProductionOrder@1003 : Record 5405;
+      WarehouseActivityHeader@1005 : Record 5766;
+      PostedInvtPutAwayHeader@1007 : Record 7340;
+      WarehouseRequest@1010 : Record 5765;
+      Assert@1004 : Codeunit 130000;
+    BEGIN
+      // [FEATURE] [Warehouse] [Put-Away] [Production Order] [UOM]
+      // This is implementation for Scenario 2, bug 40394 from "Navision Corsica" database
+
+      Initialize;
+
+      // SCENARIO 2
+
+      // Step 1 - Create item with base UOM=PCS and additional UOM=KG
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItemUnitOfMeasure(ItemUOM,Item."No.",KGConst,3);
+
+      // Step 2 - Create location with require pick and require put-away
+      CreatePickPutAwayLocation(Location);
+
+      // Step 3 - Create released production order for new item and refresh it
+      CreateReleasedProdOrderAndRefresh(ProductionOrder,Item,Location.Code,RANDOM(10));
+
+      // Step 4 - change the UOM to KG on the production line
+      ChangeUOMOnProdLine(ProductionOrder,KGConst);
+
+      // Step 5 - Create the inbound whse req for the PO
+      LibraryWarehouse.CreateInboundWhseReqFromProdO(ProductionOrder);
+
+      // Step 6 - create the inventory put-away
+      WarehouseRequest.SETFILTER("Source Document",'%1|%2',
+        WarehouseRequest."Source Document"::"Prod. Consumption",
+        WarehouseRequest."Source Document"::"Prod. Output");
+      WarehouseRequest.SETRANGE("Source No.",ProductionOrder."No.");
+      LibraryWarehouse.CreateInvtPutAwayPick(WarehouseRequest,TRUE,FALSE,FALSE);
+
+      // Step 7 - autofill qty to handle and post put-away
+      Assert.IsTrue(FindAndSelInvActvOnSrcNoAndLoc(WarehouseActivityHeader,
+          WarehouseActivityHeader."Source Document"::"Prod. Output",ProductionOrder."No.",Location.Code),
+        NoPickCreatedForProdOrdConst);
+
+      LibraryWarehouse.AutoFillQtyInventoryActivity(WarehouseActivityHeader);
+      LibraryWarehouse.PostInventoryActivity(WarehouseActivityHeader,TRUE);
+
+      // Step 8 - verify that the put-away has been posted - it has been deleted
+      Assert.IsFalse(FindAndSelInvActvOnSrcNoAndLoc(WarehouseActivityHeader,
+          WarehouseActivityHeader."Source Document"::"Prod. Output",ProductionOrder."No.",Location.Code),
+        PickNotDeletedConst);
+
+      // Step 9 - Verify that put-away has been posted - in history
+      Assert.IsTrue(
+        FindAndSelPostPAwOnSrcNoAndLoc(PostedInvtPutAwayHeader,
+          PostedInvtPutAwayHeader."Source Document"::"Prod. Output",ProductionOrder."No.",Location.Code),
+        PutAwayNotFoundInHistConst);
+    END;
+
+    [Test]
+    [HandlerFunctions(HNDLChgQtyOnProdLinesAndPAway)]
+    PROCEDURE PostPutAwayFromProdOrderWithWrongRoutingFails@1();
+    VAR
+      Location@1000 : Record 14;
+      WorkCenter@1003 : Record 99000754;
+      RoutingHeader@1001 : Record 99000763;
+      RoutingLine@1002 : Record 99000764;
+      Item@1004 : Record 27;
+      ProductionOrder@1005 : Record 5405;
+      ProdOrderRoutingLine@1008 : Record 5409;
+    BEGIN
+      // [FEATURE] [Production] [Routing] [Production Order Routing Line]
+      // [SCENARIO 376980] Put-away from production order output cannot be posted if the source prod. order's routing has setup errors
+
+      Initialize;
+
+      CreatePickPutAwayLocation(Location);
+
+      // [GIVEN] Create and certify a serial production routing "R"
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine,'',LibraryUtility.GenerateGUID,RoutingLine.Type::"Work Center",WorkCenter."No.");
+      CertifyRouting(RoutingHeader);
+
+      // [GIVEN] Create item with routing "R"
+      CreateItemWithRouting(Item,RoutingHeader."No.");
+
+      // [GIVEN] Create and refresh production order
+      CreateReleasedProdOrderAndRefresh(ProductionOrder,Item,Location.Code,LibraryRandom.RandInt(100));
+
+      // [GIVEN] Update the last production routing line: set "Next Operation No." to a non-existing operation no.
+      ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderRoutingLine.FINDFIRST;
+      ProdOrderRoutingLine.VALIDATE("Next Operation No.",LibraryUtility.GenerateGUID);
+      ProdOrderRoutingLine.MODIFY(TRUE);
+
+      // [WHEN] Create and post put-away from production order
+      ASSERTERROR CreateAndPostPutAwayFromProdOrder(ProductionOrder);
+
+      // [THEN] Error: production order routing has no trerminating operation
+      Assert.ExpectedError(
+        STRSUBSTNO(WrongNoOfTermOperationsErr,ProdOrderRoutingLine."Prod. Order No.",ProdOrderRoutingLine."Routing No."));
+    END;
+
+    [Test]
+    [HandlerFunctions(HNDLChgQtyOnProdLinesAndPAway)]
+    PROCEDURE PostPutAwayFromProdOrderWithParallelRoutingSucceeds@13();
+    VAR
+      Location@1000 : Record 14;
+      WorkCenter@1003 : Record 99000754;
+      RoutingHeader@1001 : Record 99000763;
+      RoutingLine@1002 : ARRAY [2] OF Record 99000764;
+      Item@1004 : Record 27;
+      ProductionOrder@1005 : Record 5405;
+      ItemLedgerEntry@1006 : Record 32;
+    BEGIN
+      // [FEATURE] [Production] [Routing] [Production Order Routing Line]
+      // [SCENARIO 376980] Put-away from production order should be posted if the terminating operation in the routing is the first operaton in the list
+      Initialize;
+
+      // [GIVEN] Create a parallel production routing "R" with 2 operatioins "1" and "2"
+      CreatePickPutAwayLocation(Location);
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Parallel);
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine[1],'',LibraryUtility.GenerateGUID,RoutingLine[1].Type::"Work Center",WorkCenter."No.");
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine[2],'',LibraryUtility.GenerateGUID,RoutingLine[2].Type::"Work Center",WorkCenter."No.");
+
+      // [GIVEN] Set operation "2" to be the starting routing operation, "1" - terminating operation
+      RoutingLine[1]."Previous Operation No." := RoutingLine[2]."Operation No.";
+      RoutingLine[1].MODIFY;
+      RoutingLine[2]."Next Operation No." := RoutingLine[1]."Operation No.";
+      RoutingLine[2].MODIFY;
+
+      CertifyRouting(RoutingHeader);
+
+      // [GIVEN] Create item with routing "R", create and refresh production order
+      CreateItemWithRouting(Item,RoutingHeader."No.");
+      CreateReleasedProdOrderAndRefresh(ProductionOrder,Item,Location.Code,LibraryRandom.RandInt(100));
+
+      // [WHEN] Create and post put-away from production order
+      CreateAndPostPutAwayFromProdOrder(ProductionOrder);
+
+      // [THEN] Output item ledger entry is created
+      ItemLedgerEntry.SETRANGE("Item No.",Item."No.");
+      ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::Output);
+      Assert.RecordIsNotEmpty(ItemLedgerEntry);
+    END;
+
+    [Test]
+    PROCEDURE CheckProdOrderRoutingWithExcludeFinishedLines@2();
+    VAR
+      ProductionOrder@1004 : Record 5405;
+      ProdOrderLine@1010 : Record 5406;
+      ProdOrderRouteManagement@1009 : Codeunit 99000772;
+    BEGIN
+      // [FEATURE] [Production] [Routing]
+      // [SCEARIO 381546] Function Check in codeunit 99000772 Prod. Order Route Management throws an error when verifying a route with terinating operation finished and ExcludeFinishedLines = TRUE
+
+      // [GIVEN] Production order with routing
+      CreateProductionOrderWithNewItem(ProductionOrder);
+
+      // [GIVEN] Post output from production order and mark routing line as finished
+      PostProdOrderOutput(ProductionOrder);
+
+      FindProdOrderLine(ProdOrderLine,ProductionOrder.Status,ProductionOrder."No.");
+
+      // [WHEN] Check production order line with option "Exclude finished lines" = TRUE
+      ASSERTERROR ProdOrderRouteManagement.Check(ProdOrderLine,TRUE);
+
+      // [THEN] Error: "Actual number of termination processes is 0"
+      Assert.ExpectedError(STRSUBSTNO(WrongNoOfTermOperationsErr,ProductionOrder."No.",ProdOrderLine."Routing No."));
+    END;
+
+    [Test]
+    PROCEDURE CheckProdOrderRoutingDoNotExcludeFinishedLines@41();
+    VAR
+      ProductionOrder@1004 : Record 5405;
+      ProdOrderLine@1010 : Record 5406;
+      ProdOrderRouteManagement@1009 : Codeunit 99000772;
+    BEGIN
+      // [FEATURE] [Production] [Routing]
+      // [SCEARIO 381546] Function Check in codeunit 99000772 Prod. Order Route Management does not throw errors when verifying a route with terinating operation finished and ExcludeFinishedLines = FALSE
+
+      // [GIVEN] Production order with routing
+      CreateProductionOrderWithNewItem(ProductionOrder);
+
+      // [GIVEN] Post output from production order and mark routing line as finished
+      PostProdOrderOutput(ProductionOrder);
+
+      FindProdOrderLine(ProdOrderLine,ProductionOrder.Status,ProductionOrder."No.");
+
+      // [WHEN] Check production order line with option "Exclude finished lines" = FALSE
+      ProdOrderRouteManagement.Check(ProdOrderLine,FALSE);
+
+      // [THEN] Verification is completed successfully
+    END;
+
+    LOCAL PROCEDURE CertifyRouting@17(VAR RoutingHeader@1000 : Record 99000763);
+    BEGIN
+      RoutingHeader.VALIDATE(Status,RoutingHeader.Status::Certified);
+      RoutingHeader.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ChangeUOMOnProdLine@35(ProductionOrder@1001 : Record 5405;UOMCode@1002 : Code[10]);
+    VAR
+      ProdOrderLine@1000 : Record 5406;
+      Assert@1004 : Codeunit 130000;
+    BEGIN
+      ProdOrderLine.RESET;
+      ProdOrderLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      Assert.IsTrue(ProdOrderLine.FINDSET,ProdOrderLinesNotCreatedConst);
+      REPEAT
+        ProdOrderLine.VALIDATE("Unit of Measure Code",UOMCode);
+        ProdOrderLine.MODIFY(TRUE);
+      UNTIL ProdOrderLine.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ChangeUOMOnComponentLines@34(ProductionOrder@1001 : Record 5405;UOMCode@1002 : Code[10]);
+    VAR
+      ProdOrderComponent@1004 : Record 5407;
+      Assert@1000 : Codeunit 130000;
+    BEGIN
+      ProdOrderComponent.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderComponent.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      Assert.IsTrue(ProdOrderComponent.FINDSET,ProdOrdCompLinesNotCrtdConst);
+      REPEAT
+        ProdOrderComponent.VALIDATE("Unit of Measure Code",UOMCode);
+        ProdOrderComponent.MODIFY(TRUE);
+      UNTIL ProdOrderComponent.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPutAwayFromProdOrder@22(ProductionOrder@1001 : Record 5405);
+    VAR
+      WarehouseActivityHeader@1000 : Record 5766;
+    BEGIN
+      CreatePutAwayFromProdOrder(ProductionOrder);
+      FindWarehouseActivity(WarehouseActivityHeader,WarehouseActivityHeader."Source Document"::"Prod. Output",ProductionOrder."No.");
+      LibraryWarehouse.AutoFillQtyInventoryActivity(WarehouseActivityHeader);
+      LibraryWarehouse.PostInventoryActivity(WarehouseActivityHeader,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithNewRouting@14(VAR Item@1000 : Record 27);
+    VAR
+      WorkCenter@1001 : Record 99000754;
+      RoutingHeader@1002 : Record 99000763;
+      RoutingLine@1003 : Record 99000764;
+    BEGIN
+      LibraryManufacturing.CreateWorkCenter(WorkCenter);
+      LibraryManufacturing.CreateRoutingHeader(RoutingHeader,RoutingHeader.Type::Serial);
+      LibraryManufacturing.CreateRoutingLine(
+        RoutingHeader,RoutingLine,'',LibraryUtility.GenerateGUID,RoutingLine.Type::"Work Center",WorkCenter."No.");
+      CertifyRouting(RoutingHeader);
+
+      CreateItemWithRouting(Item,RoutingHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemWithRouting@20(VAR Item@1000 : Record 27;RoutingNo@1001 : Code[20]);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Routing No.",RoutingNo);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateOutputJournalLine@16(VAR ItemJournalLine@1000 : Record 83;ProductionOrder@1003 : Record 5405);
+    VAR
+      ItemJournalTemplate@1001 : Record 82;
+      ItemJournalBatch@1002 : Record 233;
+      ProdOrderRoutingLine@1004 : Record 5409;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Output);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type::Output,ItemJournalTemplate.Name);
+      LibraryManufacturing.CreateOutputJournal(
+        ItemJournalLine,ItemJournalTemplate,ItemJournalBatch,ProductionOrder."Source No.",ProductionOrder."No.");
+
+      ProdOrderRoutingLine.SETRANGE(Status,ProductionOrder.Status);
+      ProdOrderRoutingLine.SETRANGE("Prod. Order No.",ProductionOrder."No.");
+      ProdOrderRoutingLine.FINDFIRST;
+
+      ItemJournalLine.VALIDATE("Operation No.",ProdOrderRoutingLine."Operation No.");
+      ItemJournalLine.VALIDATE("Output Quantity",ProductionOrder.Quantity);
+      ItemJournalLine.VALIDATE(Finished,TRUE);
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateReleasedProdOrderAndRefresh@21(VAR ProductionOrder@1000 : Record 5405;Item@1001 : Record 27;LocationCode@1002 : Code[10];Qty@1003 : Integer);
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,Item."No.",Qty);
+      ProductionOrder.VALIDATE("Location Code",LocationCode);
+      ProductionOrder.MODIFY(TRUE);
+      ProductionOrder.SETRANGE("No.",ProductionOrder."No.");
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreatePickPutAwayLocation@27(VAR Location@1000 : Record 14);
+    VAR
+      WarehouseEmployee@1003 : Record 7301;
+    BEGIN
+      LibraryWarehouse.CreateLocationWithInventoryPostingSetup(Location);
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,FALSE);
+      Location.VALIDATE("Require Put-away",TRUE);
+      Location.VALIDATE("Require Pick",TRUE);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateProductionOrderWithNewItem@26(VAR ProductionOrder@1001 : Record 5405);
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      CreateItemWithNewRouting(Item);
+      CreateReleasedProdOrderAndRefresh(ProductionOrder,Item,'',LibraryRandom.RandInt(100));
+    END;
+
+    LOCAL PROCEDURE CreatePutAwayFromProdOrder@11(ProductionOrder@1000 : Record 5405);
+    VAR
+      WarehouseRequest@1001 : Record 5765;
+    BEGIN
+      LibraryWarehouse.CreateInboundWhseReqFromProdO(ProductionOrder);
+      LibraryWarehouse.CreateInvtPutPickMovement(
+        WarehouseRequest."Source Document"::"Prod. Output",ProductionOrder."No.",TRUE,FALSE,FALSE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE FindAndSelInvActvOnSrcNoAndLoc@36(VAR WarehouseActivityHeader@1000 : Record 5766;ActivitySourceType@1004 : Option;ActivitySourceNo@1001 : Code[20];LocationCode@1002 : Code[10]) : Boolean;
+    BEGIN
+      WarehouseActivityHeader.RESET;
+      WarehouseActivityHeader.SETRANGE("Location Code",LocationCode);
+      WarehouseActivityHeader.SETRANGE("Source Document",ActivitySourceType);
+      WarehouseActivityHeader.SETRANGE("Source No.",ActivitySourceNo);
+      EXIT(WarehouseActivityHeader.FINDFIRST);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE FindAndSelPostPAwOnSrcNoAndLoc@3(VAR PostedInvtPutAwayHeader@1000 : Record 7340;SourceDoc@1004 : Option;SourceNo@1001 : Code[20];LocationCode@1002 : Code[10]) : Boolean;
+    BEGIN
+      PostedInvtPutAwayHeader.RESET;
+      PostedInvtPutAwayHeader.SETRANGE("Location Code",LocationCode);
+      PostedInvtPutAwayHeader.SETRANGE("Source Document",SourceDoc);
+      PostedInvtPutAwayHeader.SETRANGE("Source No.",SourceNo);
+      EXIT(PostedInvtPutAwayHeader.FINDFIRST);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE FindAndSelPstPickOnSrcNoAndLoc@8(VAR PostedInvtPickHeader@1000 : Record 7342;SourceDoc@1004 : Option;SourceNo@1001 : Code[20];LocationCode@1002 : Code[10]) : Boolean;
+    BEGIN
+      PostedInvtPickHeader.RESET;
+      PostedInvtPickHeader.SETRANGE("Location Code",LocationCode);
+      PostedInvtPickHeader.SETRANGE("Source Document",SourceDoc);
+      PostedInvtPickHeader.SETRANGE("Source No.",SourceNo);
+      EXIT(PostedInvtPickHeader.FINDFIRST);
+    END;
+
+    LOCAL PROCEDURE FindProdOrderLine@23(VAR ProdOrderLine@1000 : Record 5406;ProdOrderStatus@1001 : Option;ProdOrderNo@1002 : Code[20]);
+    BEGIN
+      ProdOrderLine.SETRANGE(Status,ProdOrderStatus);
+      ProdOrderLine.SETRANGE("Prod. Order No.",ProdOrderNo);
+      ProdOrderLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindWarehouseActivity@7(VAR WarehouseActivityHeader@1000 : Record 5766;SourceDocument@1001 : Option;SourceNo@1002 : Code[20]);
+    BEGIN
+      WITH WarehouseActivityHeader DO BEGIN
+        SETRANGE("Source Document",SourceDocument);
+        SETRANGE("Source No.",SourceNo);
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE PostProdOrderOutput@28(ProductionOrder@1000 : Record 5405);
+    VAR
+      ItemJournalLine@1001 : Record 83;
+    BEGIN
+      CreateOutputJournalLine(ItemJournalLine,ProductionOrder);
+      LibraryInventory.PostItemJournalLine(ItemJournalLine."Journal Template Name",ItemJournalLine."Journal Batch Name");
+    END;
+
+    [MessageHandler]
+    PROCEDURE HNDLChgQtyOnCompLinesAndPick@31(Message@1000 : Text[1024]);
+    BEGIN
+      CASE Message OF
+        NoOfPickCreatedConst:
+          ;
+        ELSE
+          ERROR(ExpErrorActualErrorConst,EmptyStringConst,Message);
+      END;
+    END;
+
+    [MessageHandler]
+    PROCEDURE HNDLChgQtyOnProdLinesAndPAway@33(Message@1000 : Text[1024]);
+    BEGIN
+      CASE Message OF
+        InboundWhseReqCreatedConst:
+          ;
+        NoOfPutAwayCreatedConst:
+          ;
+        ELSE
+          ERROR(ExpErrorActualErrorConst,EmptyStringConst,Message);
+      END;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [SCM]
+      This codeunit should contain automation of the scenarios contained into the most important
+      WMS related fixed bugs
+      This codeunit will be one of the codeunits guarding eventual future regressions.
+    }
+    END.
+  }
+}
+

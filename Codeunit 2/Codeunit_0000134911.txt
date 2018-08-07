@@ -1,0 +1,696 @@
+OBJECT Codeunit 134911 ERM Create Finance Charge Memo
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1003 : Codeunit 130000;
+      LibraryERM@1002 : Codeunit 131300;
+      LibrarySales@1004 : Codeunit 130509;
+      LibraryReportDataset@1006 : Codeunit 131007;
+      LibraryVariableStorage@1009 : Codeunit 131004;
+      LibraryRandom@1001 : Codeunit 130440;
+      LibrarySetupStorage@1011 : Codeunit 131009;
+      IsInitialized@1000 : Boolean;
+      AmountErr@1005 : TextConst 'ENU=Amount must be %1 for Finance Charge Header No: %2.';
+      FinChrgMemoHeaderFilterTxt@1007 : TextConst 'ENU=Finance Charge Memo: No.: %1';
+      WrongNumberOfMemosErr@1008 : TextConst 'ENU=Wrong number of created Finance Charge Memos.';
+      WrongNumberOfPrintedDocsErr@1010 : TextConst 'ENU=Wrong number of printed Finance Charge Memos.';
+      PrintDocRef@1012 : ' ,Print,Email';
+      EmailTxt@1013 : TextConst '@@@={Locked};ENU=abc@microsoft.com';
+      CannotSendMailThenDownloadQst@1014 : TextConst 'ENU=You cannot send the e-mail.';
+
+    [Test]
+    PROCEDURE FinChargeMemoWithCurrency@2();
+    BEGIN
+      // Create and Issue Finance Charge Memo with Currency.
+      // Setup.
+      Initialize;
+      FinanceChargeMemo(CreateCurrencyAndUpdateExcRate);
+    END;
+
+    [Test]
+    PROCEDURE FinChargeMemoWithOutCurrency@9();
+    BEGIN
+      // Create and Issue Finance Charge Memo without Currency.
+      // Setup.
+      Initialize;
+      FinanceChargeMemo('');
+    END;
+
+    LOCAL PROCEDURE FinanceChargeMemo@8(CurrencyCode@1006 : Code[10]);
+    VAR
+      SalesHeader@1002 : Record 36;
+      FinanceChargeTerms@1005 : Record 5;
+      FinanceChargeMemoHeader@1007 : Record 302;
+      FinanceChargeMemoAmount@1000 : Decimal;
+      SalesLineAmount@1001 : Decimal;
+    BEGIN
+      // Create and Post Sales Invoice with Currency and Create Finance Charge Memo.
+      SalesLineAmount := CreateAndPostSalesInvoice(SalesHeader,CurrencyCode);
+      GetFinanceChargeTerms(FinanceChargeTerms,SalesHeader."Sell-to Customer No.");
+      CreateFinanceChargeMemo(
+        SalesHeader."Sell-to Customer No.",CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',
+          CALCDATE(FinanceChargeTerms."Due Date Calculation",SalesHeader."Due Date")));
+
+      // Exercise: Calculate Finance Charge Memo Remaining Amount and Issue Finance Charge Memo.
+      FinanceChargeMemoHeader.SETRANGE("Customer No.",SalesHeader."Sell-to Customer No.");
+      FinanceChargeMemoHeader.FINDFIRST;
+      FinanceChargeMemoAmount :=
+        SalesLineAmount * (FinanceChargeMemoHeader."Document Date" - FinanceChargeMemoHeader."Posting Date") /
+        FinanceChargeTerms."Interest Period (Days)" * FinanceChargeTerms."Interest Rate" / 100;
+      IssuingFinanceChargeMemos(FinanceChargeMemoHeader."No.");
+
+      // Verify: Finance Charge Memo Amount.
+      VerifyFinanceChargeMemoAmount(FinanceChargeMemoHeader."No.",FinanceChargeMemoAmount);
+    END;
+
+    [Test]
+    PROCEDURE SuggestFinanceChargeMemo@20();
+    VAR
+      Customer@1001 : Record 18;
+      CreateFinanceChargeMemos@1000 : Report 191;
+      CreationDate@1002 : Date;
+    BEGIN
+      // Create Finance Charge Memo using suggest finance charge memo document.
+
+      // 1. Setup: Create Customer and Sales Invoice.
+      Initialize;
+      Customer.GET(CreateCustomer);
+      CreateAndPostSalesInvoiceBySalesJournal(Customer."No.");
+      CreationDate := CALCDATE('<' + FORMAT(2 * LibraryRandom.RandInt(5)) + 'M>',WORKDATE);
+
+      // 2. Exercise: Run Create Finance Charge Memos Report.
+      CreateFinanceChargeMemos.SETTABLEVIEW(Customer);
+      CreateFinanceChargeMemos.InitializeRequest(CreationDate,CreationDate);
+      CreateFinanceChargeMemos.USEREQUESTPAGE(FALSE);
+      CreateFinanceChargeMemos.RUN;
+
+      // 3. Verify: Check Finance Charge Memo Document.
+      VerifyFinanceChargeMemoDocument(Customer."No.");
+    END;
+
+    [Test]
+    PROCEDURE SuggestFinanceChargeMemoLine@21();
+    VAR
+      FinanceChargeMemoHeader@1001 : Record 302;
+      CustomerNo@1002 : Code[20];
+    BEGIN
+      // Create Finance Charge Memo using suggest finance charge memo line.
+
+      // 1. Setup: Create Customer and Sales Invoice.
+      Initialize;
+      CustomerNo := CreateCustomer;
+      CreateAndPostSalesInvoiceBySalesJournal(CustomerNo);
+
+      // 2. Exercise: Create Finance Charge Memo using suggest line.
+      CreateSuggestFinanceChargeMemo(
+        FinanceChargeMemoHeader,CustomerNo,CALCDATE('<' + FORMAT(2 * LibraryRandom.RandInt(5)) + 'M>',WORKDATE));
+
+      // 3. Verify: Check Finance Charge Memo Document.
+      VerifyFinanceChargeMemoDocument(CustomerNo);
+    END;
+
+    [Test]
+    PROCEDURE FinChargeMemoWithoutCustomerNo@13();
+    VAR
+      FinanceChargeMemoHeader@1000 : Record 302;
+      LibraryUtility@1003 : Codeunit 131000;
+      FinanceChargeMemoStatistics@1002 : TestPage 449;
+    BEGIN
+      // Verify that no error exists on opening Statistics Page after creating Finance Charge Memo without Customer No.
+
+      // Setup: Create Finance Charge Memo Header.
+      Initialize;
+      FinanceChargeMemoHeader.INIT;
+      FinanceChargeMemoHeader."No." :=
+        LibraryUtility.GenerateRandomCode(
+          FinanceChargeMemoHeader.FIELDNO("No."),DATABASE::"Finance Charge Memo Header");
+      FinanceChargeMemoHeader.INSERT;
+
+      // Exercise: Open Statistics Page.
+      FinanceChargeMemoStatistics.TRAP;
+      PAGE.RUN(PAGE::"Finance Charge Memo Statistics",FinanceChargeMemoHeader);
+
+      // Verify: Verify that no error exists on opening Statistics Page without Customer No.
+      FinanceChargeMemoStatistics.VatAmount.ASSERTEQUALS(0);
+      FinanceChargeMemoStatistics.Interest.ASSERTEQUALS(0);
+    END;
+
+    [Test]
+    [HandlerFunctions(FinChargeMemoReportTestRequestPageHandler)]
+    PROCEDURE FinChargeMemoReportTest@17();
+    VAR
+      FinanceChargeMemoHeader@1000 : Record 302;
+      FinanceChargeMemoPage@1002 : TestPage 446;
+    BEGIN
+      // Verify No. is filled in Finance Charge Memo test report when clicking Finance Charge Memo Test button from Finance Charge Memo Card
+
+      // Setup: Create Finance Charge Memo
+      LibraryERM.CreateFinanceChargeMemoHeader(FinanceChargeMemoHeader,CreateCustomer);
+      COMMIT; // Use COMMIT to finish write transaction so that Report can run in Exercise step
+
+      // Exercise: Navigate to the created Finance Charge Memo, open its card and run Report 'Finance Charge Memo - Test'
+      FinanceChargeMemoPage.OPENEDIT;
+      FinanceChargeMemoPage.FILTER.SETFILTER("No.",FinanceChargeMemoHeader."No.");
+
+      // Run Report 'Finance Charge Memo - Test'. Note, before importing bug solution, this case will fail at this step with error 'The method
+      // RunReport is not supported for TestPages', because the original code for this Action runs report by setting the RunObject Property.
+      // After importing bug solution, this step can be executed successfully
+      FinanceChargeMemoPage.TestReport.INVOKE;
+
+      // Verify: Finance Charge Memo Header Filter "No." is set to the No. of current Finance Charge Memo
+      LibraryReportDataset.LoadDataSetFile;
+
+      // The Finance Charge Memo Filter value cannot be read from the Test Request Page, so we verify it in the Report
+      // Below element indicates the Finance Charge Memo Filter value set in the request page
+      LibraryReportDataset.AssertElementWithValueExists(
+        'STRSUBSTNO_Text008_FinChrgMemoHeaderFilter_',STRSUBSTNO(FinChrgMemoHeaderFilterTxt,FinanceChargeMemoHeader."No."));
+    END;
+
+    [Test]
+    PROCEDURE SuggestFinanceChargeMemoWithCurrencies@18();
+    VAR
+      Customer@1000 : Record 18;
+      SalesHeader@1001 : Record 36;
+      CreateFinanceChargeMemos@1003 : Report 191;
+      DueDateMonths@1004 : Integer;
+    BEGIN
+      // Create Finance Charge Memo using 'Suggest Finance Charge Memos' when invoices with different currencies exist.
+
+      // 1. Setup: Create Customer and Sales Invoice.
+      Initialize;
+      DueDateMonths := LibraryRandom.RandInt(5);
+      Customer.GET(CreateCustomerWithFinanceChargeTerms(CreateFinanceChargeTerms(DueDateMonths)));
+      CreateAndPostSalesInvoiceWithCustomerAtDate(SalesHeader,'',Customer."No.",WORKDATE);
+      WORKDATE(CALCDATE('<1M>',SalesHeader."Posting Date"));
+      CreateAndPostSalesInvoiceWithCustomerAtDate(
+        SalesHeader,CreateCurrencyAndUpdateExcRate,Customer."No.",WORKDATE);
+
+      // 2. Exercise: Run Create Finance Charge Memos Report.
+      WITH CreateFinanceChargeMemos DO BEGIN
+        SETTABLEVIEW(Customer);
+        InitializeRequest(SalesHeader."Posting Date",SalesHeader."Posting Date");
+        USEREQUESTPAGE(FALSE);
+        RUN;
+      END;
+
+      // 3. Verify: Check Finance Charge Memo Document.
+      VerifyNumberOfFinChargeMemos(Customer."No.",1);
+    END;
+
+    [Test]
+    [HandlerFunctions(FinanceChargeMemoHandler,IssueFinanceChargeMemosHandler,ConfirmHandler,FinanceChargeMemoListHandler)]
+    PROCEDURE TryIssueFinChargeMemoOutOfAllowedDates@54();
+    VAR
+      Customer@1000 : Record 18;
+      PrintCountVar@1006 : Variant;
+      FinChargeMemoHeaderFilter@1004 : Text;
+    BEGIN
+      // Create and Issue Finance Charge Memo, then create another one Issue Finance Charge Memo with Posting Date out of allowed range of Posting Dates and try to issue and print it by running report 193.
+      // Another issued Finance Charge Memos should not be printed.
+
+      // 1. Setup: Create and issue Finance Charge Memo, then setup allowed posting dates.
+      Initialize;
+      Customer.GET(CreateCustomerWithFinanceChargeTerms(CreateFinanceChargeTerms(1)));
+      LibraryVariableStorage.Enqueue(PrintDocRef::Print);
+      LibraryVariableStorage.Enqueue(FALSE);
+      LibraryVariableStorage.Enqueue(CreateFinChargeMemoAtDate(Customer."No.",CALCDATE('<-1D>',WORKDATE)));
+      LibraryVariableStorage.Enqueue(0); // Initial no of prints
+      COMMIT;
+      IssueAndPrintFinChargeMemo;
+
+      UpdateAllowedPostingDates(CALCDATE('<-1M>',WORKDATE),WORKDATE);
+
+      // 2. Exercise: Run report "Issue Finance Charge Memos".
+      FinChargeMemoHeaderFilter := FORMAT(CreateFinChargeMemoAtDate(Customer."No.",CALCDATE('<+1M-1D>',WORKDATE)));
+      FinChargeMemoHeaderFilter += '..' + FORMAT(CreateFinChargeMemoAtDate(Customer."No.",CALCDATE('<+1M>',WORKDATE)));
+      COMMIT;
+      LibraryVariableStorage.Enqueue(PrintDocRef::Print);
+      LibraryVariableStorage.Enqueue(FALSE);
+      LibraryVariableStorage.Dequeue(PrintCountVar); // Extract no of prints
+      LibraryVariableStorage.Enqueue(FinChargeMemoHeaderFilter);
+      LibraryVariableStorage.Enqueue(PrintCountVar); // Push no of prints
+      IssueAndPrintFinChargeMemo;
+
+      // 3. Verify: Verify number of printed Fin Charge Memos
+      LibraryVariableStorage.Dequeue(PrintCountVar); // Extract no of prints
+      Assert.AreEqual(1,PrintCountVar,WrongNumberOfPrintedDocsErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(IssueFinanceChargeMemosHandler,EMailDialogPageHandler)]
+    PROCEDURE IssueFinChargeMemoEmail@22();
+    VAR
+      IssuedFinChargeMemoHeader@1004 : Record 304;
+      CustomerNo@1001 : Code[20];
+    BEGIN
+      // [FEATURE] [EMail]
+      // [SCENARIO 376445] Issue Finance Charge Memo with Print = E-Mail and Hide Email-Dialog = No should show 'E-Mail Dialog' page
+      Initialize;
+
+      // [GIVEN] Customer "A" with Finance Charge Memo
+      CustomerNo := CreateCustomerWithFinanceChargeTerms(CreateFinanceChargeTerms(1));
+      LibraryVariableStorage.Enqueue(PrintDocRef::Email);
+      LibraryVariableStorage.Enqueue(FALSE);
+      LibraryVariableStorage.Enqueue(CreateFinChargeMemoAtDate(CustomerNo,CALCDATE('<-1D>',WORKDATE)));
+      COMMIT;
+
+      // [WHEN] Issue Finance Charge Memo Print = E-Mail and Hide Email-Dialog = No
+      IssueAndPrintFinChargeMemo;
+
+      // [THEN] Cancel on Email Dialog appeared
+      // [THEN] Issued Finance Charge Memo for Customer "A" exists
+      IssuedFinChargeMemoHeader.INIT;
+      IssuedFinChargeMemoHeader.SETRANGE("Customer No.",CustomerNo);
+      Assert.RecordIsNotEmpty(IssuedFinChargeMemoHeader);
+    END;
+
+    [Test]
+    [HandlerFunctions(IssueFinanceChargeMemosHandler,EMailConfirmHandler)]
+    PROCEDURE IssueFinChargeMemoEmailHideDialog@46();
+    VAR
+      IssuedFinChargeMemoHeader@1000 : Record 304;
+      CustomerNo@1001 : Code[20];
+    BEGIN
+      // [FEATURE] [EMail]
+      // [SCENARIO 376445] Issue Finance Charge Memo with Print = E-Mail and Hide Email-Dialog = Yes should try to send email without 'E-Mail Dialog' page
+      Initialize;
+
+      // [GIVEN] Finance Charge Memo
+      CustomerNo := CreateCustomerWithFinanceChargeTerms(CreateFinanceChargeTerms(1));
+      LibraryVariableStorage.Enqueue(PrintDocRef::Email);
+      LibraryVariableStorage.Enqueue(TRUE);
+      LibraryVariableStorage.Enqueue(CreateFinChargeMemoAtDate(CustomerNo,CALCDATE('<-1D>',WORKDATE)));
+      COMMIT;
+
+      // [WHEN] Issue Finance Charge Memo with Print = E-Mail and Hide Email-Dialog = Yes
+      IssueAndPrintFinChargeMemo;
+
+      // [THEN] No Email Dialog appeared
+      // [THEN] Cancel on 'You cannot send the e-mail.' confirmation
+      // [THEN] Issued Finance Charge Memo for Customer "A" exists
+      IssuedFinChargeMemoHeader.INIT;
+      IssuedFinChargeMemoHeader.SETRANGE("Customer No.",CustomerNo);
+      Assert.RecordIsNotEmpty(IssuedFinChargeMemoHeader);
+    END;
+
+    LOCAL PROCEDURE Initialize@14();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      LibrarySetupStorage.Restore;
+      IF IsInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.CreateGeneralPostingSetupData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibrarySetupStorage.Save(DATABASE::"General Ledger Setup");
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE UpdateAllowedPostingDates@38(FromDate@1000 : Date;ToDate@1004 : Date);
+    VAR
+      GeneralLedgerSetup@1003 : Record 98;
+    BEGIN
+      WITH GeneralLedgerSetup DO BEGIN
+        GET;
+        VALIDATE("Allow Posting From",FromDate);
+        VALIDATE("Allow Posting To",ToDate);
+        MODIFY;
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@3() : Code[20];
+    BEGIN
+      EXIT(CreateCustomerWithFinanceChargeTerms(FindFinChargeTerms));
+    END;
+
+    LOCAL PROCEDURE FindFinChargeTerms@30() : Code[10];
+    VAR
+      FinanceChargeTerms@1000 : Record 5;
+    BEGIN
+      WITH FinanceChargeTerms DO BEGIN
+        SETFILTER("Due Date Calculation",'<>''''');
+        FINDFIRST;
+        EXIT(Code);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateCustomerWithFinanceChargeTerms@29(FinChargeTermsCode@1002 : Code[10]) : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Fin. Charge Terms Code",FinChargeTermsCode);
+      Customer.VALIDATE("Application Method",Customer."Application Method"::"Apply to Oldest");
+      Customer.VALIDATE("E-Mail",EmailTxt);
+      Customer.MODIFY(TRUE);
+      SetupInterestAccOfCust(Customer."Customer Posting Group");
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateFinanceChargeTerms@34(DueDateMonths@1003 : Integer) : Code[10];
+    VAR
+      FinanceChargeTerms@1001 : Record 5;
+      VarDateFormula@1000 : DateFormula;
+    BEGIN
+      LibraryERM.CreateFinanceChargeTerms(FinanceChargeTerms);
+      WITH FinanceChargeTerms DO BEGIN
+        VALIDATE("Interest Period (Days)",LibraryRandom.RandIntInRange(10,30));
+        EVALUATE(VarDateFormula,'<+' + FORMAT(LibraryRandom.RandIntInRange(2,10)) + 'D>');
+        VALIDATE("Grace Period",VarDateFormula);
+        VALIDATE("Interest Rate",LibraryRandom.RandDecInRange(1,5,2));
+        VALIDATE("Additional Fee (LCY)",LibraryRandom.RandDecInRange(1,10,2));
+        VALIDATE("Post Interest",TRUE);
+        VALIDATE("Post Additional Fee",TRUE);
+        EVALUATE(VarDateFormula,'<+' + FORMAT(DueDateMonths) + 'M>');
+        VALIDATE("Due Date Calculation",VarDateFormula);
+        MODIFY;
+        EXIT(Code);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesInvoice@10(VAR SalesHeader@1001 : Record 36;CurrencyCode@1003 : Code[10]) : Decimal;
+    BEGIN
+      EXIT(CreateAndPostSalesInvoiceWithCustomerAtDate(SalesHeader,CurrencyCode,CreateCustomer,WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesInvoiceWithCustomerAtDate@53(VAR SalesHeader@1001 : Record 36;CurrencyCode@1003 : Code[10];CustomerNo@1002 : Code[20];PostingDate@1005 : Date) : Decimal;
+    VAR
+      SalesLine@1000 : Record 37;
+      SalesInvoiceHeader@1004 : Record 112;
+    BEGIN
+      // Create and Post Sales Invoice. Using Random value for Quantity.
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,CustomerNo);
+      WITH SalesHeader DO BEGIN
+        VALIDATE("Currency Code",CurrencyCode);
+        VALIDATE("Posting Date",PostingDate);
+        VALIDATE("Document Date",PostingDate);
+        VALIDATE("Due Date",PostingDate);
+        MODIFY(TRUE);
+      END;
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,CreateItem,LibraryRandom.RandInt(10));
+      SalesInvoiceHeader.GET(LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE));
+      SalesInvoiceHeader.CALCFIELDS("Amount Including VAT");
+      EXIT(SalesInvoiceHeader."Amount Including VAT");
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesInvoiceBySalesJournal@15(CustomerNo@1000 : Code[20]);
+    VAR
+      GenJournalLine@1001 : Record 81;
+      GenJournalTemplate@1002 : Record 80;
+      GenJournalBatch@1003 : Record 232;
+      GLAccount@1004 : Record 15;
+    BEGIN
+      GenJournalTemplate.SETRANGE(Type,GenJournalTemplate.Type::Sales);
+      LibraryERM.FindGenJournalTemplate(GenJournalTemplate);
+      LibraryERM.CreateGenJournalBatch(GenJournalBatch,GenJournalTemplate.Name);
+      LibraryERM.CreateGLAccount(GLAccount);
+
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalTemplate.Name,GenJournalBatch.Name,GenJournalLine."Document Type"::Invoice,
+        GenJournalLine."Account Type"::Customer,CustomerNo,50 * LibraryRandom.RandDec(100,2));  // Multiplying Amount by 50 to have more amount than minimum amount on Finance Charge Term.
+      GenJournalLine.VALIDATE("Bal. Account No.",GLAccount."No.");
+      GenJournalLine.MODIFY(TRUE);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE CreateCurrencyAndUpdateExcRate@1() : Code[10];
+    VAR
+      Currency@1001 : Record 4;
+      LibraryERM@1003 : Codeunit 131300;
+    BEGIN
+      LibraryERM.CreateCurrency(Currency);
+      LibraryERM.CreateRandomExchangeRate(Currency.Code);
+      EXIT(Currency.Code);
+    END;
+
+    LOCAL PROCEDURE CreateFinanceChargeMemo@12(No@1002 : Code[20];DocumentDate@1003 : Date);
+    VAR
+      Customer@1001 : Record 18;
+      CreateFinanceChargeMemos@1000 : Report 191;
+    BEGIN
+      Customer.SETRANGE("No.",No);
+      CreateFinanceChargeMemos.SETTABLEVIEW(Customer);
+      CreateFinanceChargeMemos.InitializeRequest(WORKDATE,DocumentDate);
+      CreateFinanceChargeMemos.USEREQUESTPAGE(FALSE);
+      CreateFinanceChargeMemos.RUN;
+    END;
+
+    LOCAL PROCEDURE CreateFinChargeMemoAtDate@25(CustomerNo@1000 : Code[20];PostingDate@1001 : Date) : Code[20];
+    VAR
+      FinChargeMemoHeader@1003 : Record 302;
+      FinChargeMemoLine@1004 : Record 303;
+      GLAccount@1005 : Record 15;
+    BEGIN
+      LibraryERM.CreateFinanceChargeMemoHeader(FinChargeMemoHeader,CustomerNo);
+      FinChargeMemoHeader.VALIDATE("Posting Date",PostingDate);
+      FinChargeMemoHeader.MODIFY(TRUE);
+      LibraryERM.CreateFinanceChargeMemoLine(FinChargeMemoLine,FinChargeMemoHeader."No.",FinChargeMemoLine.Type::"G/L Account");
+      LibraryERM.FindGLAccount(GLAccount);
+      WITH FinChargeMemoLine DO BEGIN
+        VALIDATE("No.",GLAccount."No.");
+        VALIDATE(Amount,LibraryRandom.RandDecInDecimalRange(10,1000,2));
+        MODIFY(TRUE);
+      END;
+
+      EXIT(FinChargeMemoHeader."No.");
+    END;
+
+    LOCAL PROCEDURE IssueAndPrintFinChargeMemo@40();
+    VAR
+      IssueFinanceChargeMemos@1001 : Report 193;
+    BEGIN
+      CLEAR(IssueFinanceChargeMemos);
+      IssueFinanceChargeMemos.USEREQUESTPAGE(TRUE);
+      IssueFinanceChargeMemos.RUN;
+    END;
+
+    LOCAL PROCEDURE CreateItem@16() : Code[20];
+    VAR
+      Item@1001 : Record 27;
+      LibraryInventory@1000 : Codeunit 132201;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+
+      // Using fix value with Random value because the value is important for test case.
+      Item.VALIDATE("Unit Price",1000 + LibraryRandom.RandDec(10,2));
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateSuggestFinanceChargeMemo@7(VAR FinanceChargeMemoHeader@1002 : Record 302;CustomerNo@1004 : Code[20];DocumentDate@1001 : Date);
+    BEGIN
+      LibraryERM.CreateFinanceChargeMemoHeader(FinanceChargeMemoHeader,CustomerNo);
+      FinanceChargeMemoHeader.VALIDATE("Document Date",DocumentDate);
+      FinanceChargeMemoHeader.MODIFY(TRUE);
+      SuggestFinanceChargeMemoLines(FinanceChargeMemoHeader);
+    END;
+
+    LOCAL PROCEDURE SetupInterestAccOfCust@19(CustPostGroupCode@1000 : Code[10]);
+    VAR
+      GLAccount@1003 : Record 15;
+      GenProdPostGroup@1002 : Record 251;
+      CustPostGroup@1001 : Record 92;
+    BEGIN
+      CustPostGroup.GET(CustPostGroupCode);
+      GLAccount.GET(CustPostGroup."Interest Account");
+      GenProdPostGroup.GET(GLAccount."Gen. Prod. Posting Group");
+      IF GenProdPostGroup."Def. VAT Prod. Posting Group" = '' THEN BEGIN
+        GenProdPostGroup.VALIDATE("Def. VAT Prod. Posting Group",GLAccount."VAT Prod. Posting Group");
+        GenProdPostGroup.MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE GetFinanceChargeTerms@4(VAR FinanceChargeTerms@1000 : Record 5;CustomerNo@1001 : Code[20]);
+    VAR
+      Customer@1002 : Record 18;
+    BEGIN
+      // Fix added for Mininum Amount of Finance Charge Term to make test world ready.
+      Customer.GET(CustomerNo);
+      FinanceChargeTerms.GET(Customer."Fin. Charge Terms Code");
+      FinanceChargeTerms.VALIDATE("Minimum Amount (LCY)",LibraryRandom.RandInt(5));
+      FinanceChargeTerms.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE IssuingFinanceChargeMemos@5(FinanceChargeMemoHeaderNo@1002 : Code[20]);
+    VAR
+      FinanceChargeMemoHeader@1001 : Record 302;
+    BEGIN
+      FinanceChargeMemoHeader.GET(FinanceChargeMemoHeaderNo);
+      LibraryERM.IssueFinanceChargeMemo(FinanceChargeMemoHeader);
+    END;
+
+    LOCAL PROCEDURE SuggestFinanceChargeMemoLines@11(FinanceChargeMemoHeader@1000 : Record 302);
+    VAR
+      SuggestFinChargeMemoLines@1001 : Report 192;
+    BEGIN
+      FinanceChargeMemoHeader.SETRANGE("No.",FinanceChargeMemoHeader."No.");
+      SuggestFinChargeMemoLines.SETTABLEVIEW(FinanceChargeMemoHeader);
+      SuggestFinChargeMemoLines.USEREQUESTPAGE(FALSE);
+      SuggestFinChargeMemoLines.RUN;
+    END;
+
+    [ReportHandler]
+    PROCEDURE FinanceChargeMemoHandler@60(VAR FinanceChargeMemo@1000 : Report 118);
+    VAR
+      PrintCountVar@1001 : Variant;
+      PrintCount@1003 : Integer;
+    BEGIN
+      LibraryVariableStorage.Dequeue(PrintCountVar);
+      PrintCount := PrintCountVar;
+      PrintCount += 1;
+      LibraryVariableStorage.Enqueue(PrintCount);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE IssueFinanceChargeMemosHandler@61(VAR IssueFinanceChargeMemos@1000 : TestRequestPage 193);
+    BEGIN
+      IssueFinanceChargeMemos.PrintDoc.SETVALUE(LibraryVariableStorage.DequeueInteger);
+      IssueFinanceChargeMemos.HideEmailDialog.SETVALUE(LibraryVariableStorage.DequeueBoolean);
+      IssueFinanceChargeMemos."Finance Charge Memo Header".SETFILTER("No.",LibraryVariableStorage.DequeueText);
+      IssueFinanceChargeMemos.OK.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@62(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE FinanceChargeMemoListHandler@63(VAR FinanceChargeMemoList@1000 : TestPage 448);
+    BEGIN
+    END;
+
+    LOCAL PROCEDURE VerifyFinanceChargeMemoAmount@6(PreAssignedNo@1000 : Code[20];CalcFinanceChargeMemoAmount@1003 : Decimal);
+    VAR
+      IssuedFinChargeMemoHeader@1001 : Record 304;
+      IssuedFinChargeMemoLine@1002 : Record 305;
+    BEGIN
+      IssuedFinChargeMemoHeader.SETRANGE("Pre-Assigned No.",PreAssignedNo);
+      IssuedFinChargeMemoHeader.FINDFIRST;
+      IssuedFinChargeMemoLine.SETRANGE("Finance Charge Memo No.",IssuedFinChargeMemoHeader."No.");
+      IssuedFinChargeMemoLine.FINDFIRST;
+
+      Assert.AreNearlyEqual(
+        CalcFinanceChargeMemoAmount,IssuedFinChargeMemoLine.Amount,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(AmountErr,CalcFinanceChargeMemoAmount,PreAssignedNo));
+    END;
+
+    LOCAL PROCEDURE VerifyFinanceChargeMemoDocument@41(CustomerNo@1000 : Code[20]);
+    VAR
+      FinanceChargeMemoHeader@1001 : Record 302;
+      FinanceChargeMemoLine@1002 : Record 303;
+    BEGIN
+      FinanceChargeMemoHeader.SETRANGE("Customer No.",CustomerNo);
+      FinanceChargeMemoHeader.FINDFIRST;
+
+      FinanceChargeMemoLine.SETRANGE("Finance Charge Memo No.",FinanceChargeMemoHeader."No.");
+      FinanceChargeMemoLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE VerifyNumberOfFinChargeMemos@26(CustomerNo@1000 : Code[20];ExpectedNumber@1003 : Integer);
+    VAR
+      FinanceChargeMemoHeader@1001 : Record 302;
+    BEGIN
+      FinanceChargeMemoHeader.SETRANGE("Customer No.",CustomerNo);
+      Assert.AreEqual(ExpectedNumber,FinanceChargeMemoHeader.COUNT,WrongNumberOfMemosErr);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE FinChargeMemoReportTestRequestPageHandler@24(VAR FinChargeMemoTest@1000 : TestRequestPage 123);
+    BEGIN
+      FinChargeMemoTest.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE EMailDialogPageHandler@56(VAR EMailDialog@1000 : TestPage 9700);
+    BEGIN
+      EMailDialog.Cancel.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE EMailConfirmHandler@23(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.ExpectedMessage(CannotSendMailThenDownloadQst,Question);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Finance Charge Memo]
+      Unsupported version tags:
+      NA: Unable to Compile
+      ES: Unable to Execute
+      SE: Unable to Execute
+
+      Test Create and Issue Finance Charge Memo with and Without Currency for Customer.
+        1. Verify Finance Charge Memo with Currency after Running Issue Finance Charge Memo Report.
+        2. Verify Finance Charge Memo Without Currency after Running Issue Finance Charge Memo Report.
+        3. Create Finance Charge Memo using suggest finance charge memo document.
+        4. Create Finance Charge Memo using suggest finance charge memo line.
+        5. Verify that no error exists on opening Statistics Page after creating Finance Charge Memo without Customer No.
+        6. Verify No. is filled in Finance Charge Memo test report when clicking Finance Charge Memo Test button from Finance Charge Memo Card.
+        7. Create Finance Charge Memo using 'Suggest Finance Charge Memos' when invoices with different currencies exist.
+        8. Create and Issue Finance Charge Memo, then create another one Issue Finance Charge Memo with Posting Date out of allowed range of Posting Dates and try to issue and print it by running report 193.
+
+        Covers Test Cases
+        -------------------------------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        -------------------------------------------------------------------------------------
+        FinChargeMemoWithCurrency,FinChargeMemoWithOutCurrency   125705,125706,125707,125708
+
+        TFS_TS_ID = 264236
+        Cover Test cases:
+        --------------------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        --------------------------------------------------------------------------
+        SuggestFinanceChargeMemo                                 230197
+        SuggestFinanceChargeMemoLine                             230196
+
+        Bug ID 114863
+        --------------------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        --------------------------------------------------------------------------
+        FinChargeMemoWithoutCustomerNo
+
+        Cover Sicily SE Merge Bug
+        --------------------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        --------------------------------------------------------------------------
+        FinChargeMemoReportTest                                  46164
+
+        TFS_TS_ID = 88268
+        Cover Test cases:
+        --------------------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        --------------------------------------------------------------------------
+        SuggestFinanceChargeMemoWithCurrencies                   88268
+
+        TFS_TS_ID = 91786
+        Cover Test cases:
+        --------------------------------------------------------------------------
+        Test Function Name                                       TFS ID
+        --------------------------------------------------------------------------
+        TryIssueFinChargeMemoOutOfAllowedDates                   91786
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,3506 @@
+OBJECT Codeunit 137049 SCM Reservation
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      ItemJournalTemplate@1007 : Record 82;
+      ItemJournalBatch@1005 : Record 233;
+      OutputItemJournalTemplate@1019 : Record 82;
+      OutputItemJournalBatch@1015 : Record 233;
+      GeneralLedgerSetup@1024 : Record 98;
+      Assert@1002 : Codeunit 130000;
+      LibraryCosting@1023 : Codeunit 132200;
+      LibraryInventory@1016 : Codeunit 132201;
+      LibraryUtility@1010 : Codeunit 131000;
+      LibraryPurchase@1004 : Codeunit 130512;
+      LibrarySales@1026 : Codeunit 130509;
+      LibraryManufacturing@1001 : Codeunit 132202;
+      LibraryAssembly@1033 : Codeunit 132207;
+      LibraryVariableStorage@1031 : Codeunit 131004;
+      LibraryRandom@1006 : Codeunit 130440;
+      LibraryWarehouse@1008 : Codeunit 132204;
+      isInitialized@1000 : Boolean;
+      MessageCounter@1003 : Integer;
+      InitialInventory@1011 : Decimal;
+      ExpCurrentReservedQty@1012 : Decimal;
+      ErrMsgQty@1013 : TextConst 'ENU=Total Quantity must match.';
+      ErrMsgReservedQty@1014 : TextConst 'ENU=Current Reserved Quantity must match.';
+      MsgCancelReservation@1017 : TextConst 'ENU=Do you want to cancel all reservations';
+      NegativeAdjQty@1018 : Decimal;
+      OutputQuantity@1020 : 'Partial,Full,Excess';
+      MsgQuestion@1021 : TextConst 'ENU=Some output is still missing. Do you still want to finish the order?';
+      ErrMsgAmounts@1025 : TextConst 'ENU=The amounts must match.';
+      ErrMsgApplyToItemEntry@1027 : TextConst 'ENU=Applies-to Entry must not be filled out when reservations exist in Item Ledger Entry';
+      ErrMsgUnknownError@1028 : TextConst 'ENU=Unknown Error.';
+      NotTrueDemandErr@1029 : TextConst 'ENU=You cannot reserve this entry because it is not a true demand or supply.';
+      ReservEntryMustNotExistErr@1030 : TextConst 'ENU=Supply Reservation Entries for Item Ledger Entries must not exist after cancelling the reservation.';
+      ProdOrderCreatedMsg@1032 : TextConst 'ENU=Released Prod. Order';
+      ShipDateChangedErr@1034 : TextConst 'ENU=Shipment Date should not be changed';
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialReserveSalesOrder@2();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservation(InitialInventory,InitialInventory - 1);  // Item inventory value and partial Sales quantity for reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullReserveSalesOrder@11();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservation(InitialInventory,InitialInventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE PartialAutoReserveSalesOrder@23();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservation(InitialInventory,InitialInventory - 1);  // Item inventory value and partial Sales quantity for reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE FullAutoReserveSalesOrder@8();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservation(InitialInventory,InitialInventory);
+    END;
+
+    LOCAL PROCEDURE SalesOrderReservation@9(ItemQty@1000 : Decimal;SalesQty@1001 : Decimal);
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+    BEGIN
+      // Create Item and Sales Order.
+      CreateItemAndUpdateInventory(Item,ItemQty);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+      ExpCurrentReservedQty := SelectSalesLineQty(SalesHeader."No.");
+
+      // Exercise: Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify: Verify Reservation Quantities through Page Handler.
+      ReservationFromSalesOrder(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE ReduceReservedQtySalesOrder@14();
+    VAR
+      Item@1001 : Record 27;
+      SalesHeader@1002 : Record 36;
+      ReservationEntry@1006 : Record 337;
+      ReducedInventory@1009 : Decimal;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      CreateItemAndUpdateInventory(Item,InitialInventory);
+      CreateSalesOrder(SalesHeader,Item."No.",InitialInventory);
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Exercise: Reduce reservation quantity in Reservation Entry.
+      ReducedInventory := InitialInventory - 10;
+      ReservationEntry.SETRANGE("Item No.",Item."No.");
+      ReservationEntry.FINDSET;
+      REPEAT
+        IF ReservationEntry."Quantity (Base)" < 0 THEN
+          ReducedInventory := -ReducedInventory;
+        ReservationEntry.VALIDATE("Quantity (Base)",ReservationEntry."Quantity (Base)" - ReducedInventory);
+        ReservationEntry.MODIFY(TRUE)
+      UNTIL ReservationEntry.NEXT = 0;
+
+      // Verify: Verify Reservation Quantities through Page Handler.
+      ExpCurrentReservedQty := SelectSalesLineQty(SalesHeader."No.") - ReducedInventory;
+      ReservationFromSalesOrder(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE ReserveFromTwoPurchaseOrder@51();
+    VAR
+      Item@1001 : Record 27;
+      PurchaseHeader@1006 : Record 38;
+      SalesHeader@1002 : Record 36;
+      PurchaseQty@1007 : Decimal;
+    BEGIN
+      // Setup: Create Item and Two Purchase Orders.
+      Initialize;
+      PurchaseQty := LibraryRandom.RandDec(10,2);
+      LibraryInventory.CreateItem(Item);
+      CreateAndPostPurchaseOrder(PurchaseHeader,Item."No.",PurchaseQty,TRUE);  // invoice.
+      CreateAndPostPurchaseOrder(PurchaseHeader,Item."No.",PurchaseQty + 10,TRUE);  // invoice.
+      InitialInventory := PurchaseQty + PurchaseQty + 10;  // Quantity for Sales is sum of purchase.
+      CreateSalesOrder(SalesHeader,Item."No.",InitialInventory);
+      ExpCurrentReservedQty := SelectSalesLineQty(SalesHeader."No.");
+
+      // Exercise: Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify: Verify Reservation Quantities through Page Handler.
+      ReservationFromSalesOrder(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialReservFirmPlanProdOrder@15();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservation(ProductionOrder.Status::"Firm Planned",InitialInventory,InitialInventory - 1);  // Partial reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullReserveFirmPlanProdOrder@13();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservation(ProductionOrder.Status::"Firm Planned",InitialInventory,InitialInventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialReserveRelProdOrder@17();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservation(ProductionOrder.Status::Released,InitialInventory,InitialInventory - 1);  // Partial reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullReserveRelProdOrder@16();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservation(ProductionOrder.Status::Released,InitialInventory,InitialInventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE PartialAutoReserveFirmPlanProd@21();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservation(ProductionOrder.Status::"Firm Planned",InitialInventory,InitialInventory - 1);  // Partial reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE FullAutoReseveFirmPlanProd@20();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservation(ProductionOrder.Status::"Firm Planned",InitialInventory,InitialInventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE PartialAutoReserveRelProd@19();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservation(ProductionOrder.Status::Released,InitialInventory,InitialInventory - 1);  // Partial reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE FullAutoReserveRelProdOrder@18();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservation(ProductionOrder.Status::Released,InitialInventory,InitialInventory);
+    END;
+
+    LOCAL PROCEDURE ProdOrderReservation@12(ProdOrderStatus@1001 : Option;ItemQty@1000 : Decimal;SalesQty@1003 : Decimal);
+    VAR
+      ProductionOrder@1002 : Record 5405;
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+    BEGIN
+      // Create Item and Create Production Order. Create Sales Order and Reserve.
+      CreateItemsSetup(Item);
+      CreateAndRefreshProdOrder(ProductionOrder,ProdOrderStatus,Item."No.",ItemQty);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+      ExpCurrentReservedQty := SelectSalesLineQty(SalesHeader."No.");
+
+      // Exercise: Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify: Verify Reservation Quantities through Page Handler.
+      ReservationFromSalesOrder(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(TwoProdOrderReservPageHandler)]
+    PROCEDURE FullReservFirmRelProdOrder@26();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;
+      ReservFirmAndReleasedProdOrder(InitialInventory - 1,1,InitialInventory);  // Prod. Qty.: Firm Planned,Released and Sales Line Qty.
+    END;
+
+    [Test]
+    [HandlerFunctions(TwoProdAutoReservPageHandler)]
+    PROCEDURE FullAutoReservFirmRelProdOrder@7();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;
+      ReservFirmAndReleasedProdOrder(InitialInventory - 1,1,InitialInventory);  // Prod. Qty.: Firm Planned,Released and Sales Line Qty.
+    END;
+
+    [Test]
+    [HandlerFunctions(TwoProdOrderReservPageHandler)]
+    PROCEDURE PartialReservFirmRelProdOrder@25();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;
+      ReservFirmAndReleasedProdOrder(
+        InitialInventory / 2,InitialInventory / 2,
+        InitialInventory - LibraryRandom.RandDec(10,2));  // Prod. Qty.: Firm Planned,Released and Sales Line Qty.
+    END;
+
+    [Test]
+    [HandlerFunctions(TwoProdAutoReservPageHandler)]
+    PROCEDURE PartAutoReservFirmRelProdOrder@24();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;
+      ReservFirmAndReleasedProdOrder(
+        InitialInventory / 2,InitialInventory / 2,
+        InitialInventory - LibraryRandom.RandDec(10,2));  // Prod. Qty.: Firm Planned,Released and Sales Line Qty.
+    END;
+
+    LOCAL PROCEDURE ReservFirmAndReleasedProdOrder@37(FirmPlannedProdOrderQty@1003 : Decimal;ReleasedProdOrderQty@1004 : Decimal;SalesQty@1005 : Decimal);
+    VAR
+      Item@1002 : Record 27;
+      SalesHeader@1001 : Record 36;
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Create Item, Firm Planned and Released Production Order. Create Sales Order and Reserve.
+      CreateItemsSetup(Item);
+      CreateAndRefreshProdOrder(ProductionOrder,ProductionOrder.Status::"Firm Planned",Item."No.",FirmPlannedProdOrderQty);
+      CreateAndRefreshProdOrder(ProductionOrder,ProductionOrder.Status::Released,Item."No.",ReleasedProdOrderQty);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+      ExpCurrentReservedQty := SelectSalesLineQty(SalesHeader."No.");
+
+      // Exercise: Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify: Verify Reservation Quantities through Page Handler.
+      ReservationFromSalesOrder(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE DeleteReleasedProdOrderReserv@35();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      DeleteProductionOrderReserve(ProductionOrder.Status::Released);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE DeleteFirmPlanProdOrderReserv@34();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      DeleteProductionOrderReserve(ProductionOrder.Status::"Firm Planned");
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE DeleteRelProdOrderAutoReserv@42();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      DeleteProductionOrderReserve(ProductionOrder.Status::Released);
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE DeleteFirmPlanProdAutoReserv@41();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      DeleteProductionOrderReserve(ProductionOrder.Status::"Firm Planned");
+    END;
+
+    LOCAL PROCEDURE DeleteProductionOrderReserve@32(Status@1000 : Option);
+    VAR
+      ProductionOrder@1001 : Record 5405;
+      Item@1004 : Record 27;
+      SalesHeader@1003 : Record 36;
+    BEGIN
+      // Create Item, Released Production Order or Firm Planned Production Order. Create Sales Order and Reserve.
+      CreateItemsSetup(Item);
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;
+      CreateAndRefreshProdOrder(ProductionOrder,Status,Item."No.",InitialInventory);
+      CreateSalesOrder(SalesHeader,Item."No.",InitialInventory);
+      ExpCurrentReservedQty := SelectSalesLineQty(SalesHeader."No.");
+
+      // Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Exercise: Delete Production Order.
+      DeleteProductionOrder(Status,Item."No.");
+
+      // Verify: Verify there is no reserved quantity on Sales Line after deletion of Production Order.
+      VerifyZeroReservationSalesQty(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationCancelPageHandler,CancelReserveConfirmHandler)]
+    PROCEDURE CancelPartialResvFirmPlanProd@87();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservationCancel(ProductionOrder.Status::"Firm Planned",InitialInventory,InitialInventory - 1);  // Partial reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationCancelPageHandler,CancelReserveConfirmHandler)]
+    PROCEDURE CancelFullResvFirmPlanProd@86();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservationCancel(ProductionOrder.Status::"Firm Planned",InitialInventory,InitialInventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationCancelPageHandler,CancelReserveConfirmHandler)]
+    PROCEDURE CancelPartialResvRelProdOrder@83();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservationCancel(ProductionOrder.Status::Released,InitialInventory,InitialInventory - 1);  // Partial reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationCancelPageHandler,CancelReserveConfirmHandler)]
+    PROCEDURE CancelFullReserveRelProdOrder@82();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservationCancel(ProductionOrder.Status::Released,InitialInventory,InitialInventory);
+    END;
+
+    LOCAL PROCEDURE ProdOrderReservationCancel@84(ProdOrderStatus@1001 : Option;ItemQty@1000 : Decimal;SalesQty@1003 : Decimal);
+    VAR
+      ProductionOrder@1002 : Record 5405;
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+    BEGIN
+      // Create Item and Create Production Order. Create Sales Order and Reserve.
+      CreateItemsSetup(Item);
+      CreateAndRefreshProdOrder(ProductionOrder,ProdOrderStatus,Item."No.",ItemQty);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+
+      // Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Exercise: Sales Line -> Function -> Cancel Reservation from Current Line.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify: Verify there is no reserved quantity on Sales Line after cancellation of reservation.
+      VerifyZeroReservationSalesQty(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationCancelPageHandler,CancelReserveConfirmHandler)]
+    PROCEDURE CancelPartialReserveSalesOrder@44();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationCancel(
+        InitialInventory,InitialInventory - 1);  // Item inventory value and partial Sales quantity for reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationCancelPageHandler,CancelReserveConfirmHandler)]
+    PROCEDURE CancelFullReserveSalesOrder@43();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationCancel(InitialInventory,InitialInventory);
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReserveCancelPageHandler,CancelReserveConfirmHandler)]
+    PROCEDURE CancelPartialAutoReserveSales@40();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationCancel(
+        InitialInventory,InitialInventory - 1);  // Item inventory value and partial Sales quantity for reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReserveCancelPageHandler,CancelReserveConfirmHandler)]
+    PROCEDURE CancelFullAutoReserveSales@39();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationCancel(InitialInventory,InitialInventory);
+    END;
+
+    LOCAL PROCEDURE SalesOrderReservationCancel@46(ItemQty@1000 : Decimal;SalesQty@1001 : Decimal);
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+    BEGIN
+      // Create Item and Sales Order.
+      CreateItemAndUpdateInventory(Item,ItemQty);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+
+      // Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Exercise: Sales Line -> Function -> Cancel Reservation from Current Line.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify: Verify there is no reserved quantity on Sales Line after cancellation of reservation.
+      VerifyZeroReservationSalesQty(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullReserveFromPurchaseOrder@45();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Purchase quantity.
+      ReserveFromPurchaseOrder(InitialInventory,InitialInventory,TRUE);  // Purchase Invoice - True.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialReserveFromPurchOrder@53();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Purchase quantity.
+      ReserveFromPurchaseOrder(InitialInventory,InitialInventory - 1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullResvPurchaseOrderReceive@69();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Purchase quantity.
+      ReserveFromPurchaseOrder(InitialInventory,InitialInventory,FALSE);  // Purchase Invoice - False.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialResvPurchOrderReceive@68();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Purchase quantity.
+      ReserveFromPurchaseOrder(InitialInventory,InitialInventory - 1,FALSE);
+    END;
+
+    LOCAL PROCEDURE ReserveFromPurchaseOrder@54(ItemQty@1001 : Decimal;SalesQty@1000 : Decimal;Invoice@1006 : Boolean);
+    VAR
+      Item@1005 : Record 27;
+      PurchaseHeader@1004 : Record 38;
+      SalesHeader@1003 : Record 36;
+    BEGIN
+      // Create Item and Purchase Orders.
+      LibraryInventory.CreateItem(Item);
+      CreateAndPostPurchaseOrder(PurchaseHeader,Item."No.",ItemQty,Invoice);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+      ExpCurrentReservedQty := SelectSalesLineQty(SalesHeader."No.");
+
+      // Exercise: Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify: Verify Reservation Quantities through Page Handler.
+      ReservationFromSalesOrder(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE ResvFromPurchPartialQtyReceive@55();
+    VAR
+      Item@1003 : Record 27;
+      PurchaseHeader@1002 : Record 38;
+      SalesHeader@1001 : Record 36;
+      PurchaseQty@1000 : Decimal;
+    BEGIN
+      // Setup: Create Item and Purchase Orders with Partial Qty to Receive.
+      Initialize;
+      PurchaseQty := LibraryRandom.RandDec(10,2) + 100;  // Large random Purchase quantity.
+      LibraryInventory.CreateItem(Item);
+      CreatePurchaseOrder(PurchaseHeader,Item."No.",PurchaseQty);
+
+      // Update Purchase Order - Qty to Receive less then Quantity.
+      InitialInventory := PurchaseQty - 1;
+      UpdatePurchLineQtyToReceive(PurchaseHeader."No.",InitialInventory);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE);  // Receive only.
+      CreateSalesOrder(SalesHeader,Item."No.",InitialInventory);
+      ExpCurrentReservedQty := SelectSalesLineQty(SalesHeader."No.");
+
+      // Exercise: Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify: Verify Reservation Quantities through Page Handler.
+      ReservationFromSalesOrder(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler,StockoutPageHandler)]
+    PROCEDURE NegativeAdjAfterReservation@56();
+    VAR
+      Item@1002 : Record 27;
+      SalesHeader@1000 : Record 36;
+      ItemJournalLine@1001 : Record 83;
+      SalesReceivablesSetup@1003 : Record 311;
+      ItemCheckAvail@1004 : Codeunit 311;
+    BEGIN
+      // Setup: Update Sales Setup for Stockout warning. Create Item with Inventory and Reserve full qty in Sales Order.
+      Initialize;
+      SalesReceivablesSetup.GET;
+      UpdateSalesReceivablesSetup(TRUE);  // Stockout Warning - TRUE
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      CreateItemAndUpdateInventory(Item,InitialInventory);
+      CreateSalesOrder(SalesHeader,Item."No.",InitialInventory);
+
+      // Sales Line -> Function -> Reserve, and Create Item Journal Line with Negative adjustment for the item.
+      ReservationFromSalesOrder(SalesHeader."No.");
+      NegativeAdjQty := LibraryRandom.RandDec(10,2);
+      CreateItemJournalLine(
+        ItemJournalLine,Item."No.",NegativeAdjQty,ItemJournalLine."Entry Type"::"Negative Adjmt.");
+
+      // Exercise and Verify: Check Stockout on Item Journal Line and verify Check Availability page opens.
+      // Verify Negative Adjustment quantity in Check Availability page handler.
+      ItemCheckAvail.ItemJnlCheckLine(ItemJournalLine);
+
+      // Teardown.
+      UpdateSalesReceivablesSetup(SalesReceivablesSetup."Stockout Warning");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationOutputPartialPageHandler)]
+    PROCEDURE PartialOutputReleasedProdReserve@77();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostOutputForProduction(OutputQuantity::Partial);  // Post Partial Output.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullOutputReleasedProdReserve@76();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostOutputForProduction(OutputQuantity::Full);  // Post Full Output.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE ExcessOutputReleasedProdReserve@75();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostOutputForProduction(OutputQuantity::Excess);  // Post Excess Output.
+    END;
+
+    [Test]
+    [HandlerFunctions(TwoProdAutoReservPageHandler)]
+    PROCEDURE PartialOutputReleasedProdAutoReserve@74();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostOutputForProduction(OutputQuantity::Partial);  // Post Partial Output with Auto Reserve.
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE FullOutputReleasedProdAutoReserve@71();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostOutputForProduction(OutputQuantity::Full);  // Post Full Output with Auto Reserve.
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE ExcessOutputReleasedProdAutoReserve@65();
+    BEGIN
+      // Setup.
+      Initialize;
+      PostOutputForProduction(OutputQuantity::Excess);  // Post Excess Output with Auto Reserve.
+    END;
+
+    LOCAL PROCEDURE PostOutputForProduction@73(OutputValue@1001 : 'Partial,Full,Excess');
+    VAR
+      ProductionOrder@1005 : Record 5405;
+      Item@1004 : Record 27;
+      SalesHeader@1003 : Record 36;
+      ItemJournalLine@1002 : Record 83;
+      FinishedQty@1000 : Decimal;
+    BEGIN
+      // Create Item and Create Production Order.
+      CreateItemsSetup(Item);
+      InitialInventory := LibraryRandom.RandInt(5) + 5;  // Random Qty.
+      CreateAndRefreshProdOrder(ProductionOrder,ProductionOrder.Status::Released,Item."No.",InitialInventory);
+      ExpCurrentReservedQty := InitialInventory;
+
+      // Create Sales Order and against Released Prod. Order line.
+      CreateSalesOrder(SalesHeader,Item."No.",ExpCurrentReservedQty);
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Create Output Journal with required Output Quantity.
+      CreateOutputJournal(ProductionOrder."No.");
+      CASE OutputValue OF
+        OutputValue::Partial:
+          BEGIN
+            SelectOutputJournalLine(ItemJournalLine,ProductionOrder."No.");
+            FinishedQty := ItemJournalLine."Output Quantity" - 1;  // Reduced Output Qty.
+            UpdateOutputJournal(ItemJournalLine,FinishedQty);
+          END;
+        OutputValue::Full:
+          FinishedQty := InitialInventory;
+        OutputValue::Excess:
+          BEGIN
+            SelectOutputJournalLine(ItemJournalLine,ProductionOrder."No.");
+            FinishedQty := ItemJournalLine."Output Quantity" + 1;  // Increase Output Qty.
+            InitialInventory := FinishedQty;
+            UpdateOutputJournal(ItemJournalLine,FinishedQty);
+          END;
+      END;
+
+      // Exercise: Post Output Journal.
+      LibraryInventory.PostItemJournalLine(OutputItemJournalBatch."Journal Template Name",OutputItemJournalBatch.Name);
+
+      // Verify : Verify Reservation values through Handler.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify Quantity on Item Ledger Entry.
+      VerifyQtyOnItemLedgerEntry(Item."No.",FinishedQty);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationFinishProductionPageHandler,MissingOutputConfirmHandler)]
+    PROCEDURE FinishReleasedProdReserve@64();
+    VAR
+      ProductionOrder@1003 : Record 5405;
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+      ItemJournalLine@1006 : Record 83;
+      FinishedQty@1007 : Decimal;
+    BEGIN
+      // [FEATURE] [Reservation] [Production]
+      // [SCENARIO] Verify reserved Qty. = (R - 1) after creating released prod. order with Qty. = R, creating sales order with reserverd Qty. = R, posting output with Qty. = (R - 1), finishing production order.
+
+      // [GIVEN] Released Production Order with quantity = R. Sales Order reserved R quantity.
+      Initialize;
+      CreateItemsSetup(Item);
+      InitialInventory := LibraryRandom.RandInt(5) + 1;
+      CreateAndRefreshProdOrder(ProductionOrder,ProductionOrder.Status::Released,Item."No.",InitialInventory);
+      ExpCurrentReservedQty := InitialInventory;
+      CreateSalesOrder(SalesHeader,Item."No.",ExpCurrentReservedQty);
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // [GIVEN] Post Output Journal with Output Quantity = R - 1.
+      CreateOutputJournal(ProductionOrder."No.");
+      SelectOutputJournalLine(ItemJournalLine,ProductionOrder."No.");
+      FinishedQty := ItemJournalLine."Output Quantity" - 1;  // Reduced Output Qty.
+      ExpCurrentReservedQty := FinishedQty;
+      UpdateOutputJournal(ItemJournalLine,FinishedQty);
+      LibraryInventory.PostItemJournalLine(OutputItemJournalBatch."Journal Template Name",OutputItemJournalBatch.Name);
+
+      // [WHEN] Finish Production Order.
+      LibraryManufacturing.ChangeStatusReleasedToFinished(ProductionOrder."No.");
+
+      // [THEN] Verify Reserved = R - 1, Qty to Reserve = R.
+      ReservationFromSalesOrder(SalesHeader."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialShipAfterReserve@79();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 10;
+      ShipmentAfterReserve(InitialInventory,InitialInventory - LibraryRandom.RandDec(10,2));  // Shipment Quantity - Partial.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullShipAfterReserve@80();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2);
+      ShipmentAfterReserve(InitialInventory,InitialInventory);  // Shipment Quantity - Full.
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE PartialShipAfterAutoReserve@102();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 10;
+      ShipmentAfterReserve(InitialInventory,InitialInventory - LibraryRandom.RandDec(10,2));  // Shipment Quantity - Partial with Auto reserve.
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE FullShipAfterAutoReserve@101();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2);
+      ShipmentAfterReserve(InitialInventory,InitialInventory);  // Shipment Quantity - Full with Auto reserve.
+    END;
+
+    LOCAL PROCEDURE ShipmentAfterReserve@89(PurchaseQty@1005 : Decimal;QtyToShip@1000 : Decimal);
+    VAR
+      Item@1001 : Record 27;
+      PurchaseHeader@1002 : Record 38;
+      SalesHeader@1003 : Record 36;
+      SalesLine@1004 : Record 37;
+    BEGIN
+      // Create Item and Purchase Orders.
+      LibraryInventory.CreateItem(Item);
+      CreateAndPostPurchaseOrder(PurchaseHeader,Item."No.",PurchaseQty,TRUE);
+      CreateSalesOrder(SalesHeader,Item."No.",PurchaseQty);
+
+      // For full quantity on Sales Line: Function -> Reserve; and Update Quantity to Ship.
+      ReservationFromSalesOrder(SalesHeader."No.");
+      SelectSalesLine(SalesLine,SalesHeader."No.");
+      SalesLine.VALIDATE("Qty. to Ship",QtyToShip);
+      SalesLine.MODIFY(TRUE);
+
+      // Exercise: Ship Sales Order.
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // Verify: Verify Sales Shipment Lines.
+      VerifySalesShipment(SalesHeader."No.",QtyToShip);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE ReserveProdOrderComponentForFirmPlanned@94();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      ProductionOrderComponentReservation(ProductionOrder.Status::"Firm Planned");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE ReserveProdOrderComponentForReleased@95();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      ProductionOrderComponentReservation(ProductionOrder.Status::Released);
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE AutoReserveProdOrderComponentFirmPlanned@96();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      ProductionOrderComponentReservation(ProductionOrder.Status::"Firm Planned");  // Prod. Order Component reservation with Auto Reserve.
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE AutoReserveProdOrderComponentReleased@97();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // Setup.
+      Initialize;
+      ProductionOrderComponentReservation(ProductionOrder.Status::Released);  // Prod. Order Component reservation with Auto Reserve.
+    END;
+
+    LOCAL PROCEDURE ProductionOrderComponentReservation@103(ProdOrderStatus@1000 : Option);
+    VAR
+      ProductionOrder@1005 : Record 5405;
+      ParentItem@1004 : Record 27;
+      ChildItemNo@1006 : Code[20];
+    BEGIN
+      ChildItemNo := CreateItemsSetup(ParentItem);
+      InitialInventory := SelectItemInventory(ChildItemNo);
+      ExpCurrentReservedQty := LibraryRandom.RandInt(5);
+      CreateAndRefreshProdOrder(ProductionOrder,ProdOrderStatus,ParentItem."No.",ExpCurrentReservedQty);
+
+      // Exercise: Production Order Component -> Functions -> Reserve.
+      ReservationFromProductionOrderComponents(ChildItemNo);
+
+      // Verify: Verify Reservation values through Handler.
+      ReservationFromProductionOrderComponents(ChildItemNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialReserveSalesAdjustCostAndPostToGL@108();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Sales] [Reservation]
+      // [SCENARIO] Verify that Total Amount in GL Entries is correct after reserving Sales Order partially and run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Sales Order with partial reservation.
+      // [WHEN] Run Adjust Cost and Post Inventory Cost to G/L.
+      // [THEN] Total amount in G/L for Inventory Account is correct.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationAndPostToGL(InitialInventory,InitialInventory - 1);  // Item inventory value and partial Sales quantity for reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullReserveSalesAdjustCostAndPostToGL@107();
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Sales] [Reservation]
+      // [SCENARIO] Verify that Total Amount in GL Entries is correct after reserving Sales Order and run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Sales Order with full reservation.
+      // [WHEN] Run Adjust Cost and Post Inventory Cost to G/L.
+      // [THEN] Total amount in G/L for Inventory Account is correct.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationAndPostToGL(InitialInventory,InitialInventory);
+    END;
+
+    LOCAL PROCEDURE SalesOrderReservationAndPostToGL@100(ItemQty@1000 : Decimal;SalesQty@1001 : Decimal);
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+    BEGIN
+      // Create Item and Sales Order.
+      CreateItemAndUpdateInventory(Item,ItemQty);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+
+      // Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Exercise: Run Adjust Cost and Post Inventory Cost to G/L.
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // Verify: Verify Total amount in G/L for Inventory Account.
+      VerifyGLEntry(Item."No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialReserveRelProdOrderAdjustCostAndPostToGL@106();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Reservation]
+      // [SCENARIO] Verify that Total Amount in GL Entries is correct after creating Production Order, Sales Order reserved partially and run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Sales Order with partial reservation.
+      // [WHEN] Run Adjust Cost and Post Inventory Cost to G/L.
+      // [THEN] Total amount in G/L for Inventory Account is correct.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservationAndPostToGL(ProductionOrder.Status::Released,InitialInventory,InitialInventory - 1);  // Partial reservation.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullReserveRelProdOrderAdjustCostAndPostToGL@104();
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      // [FEATURE] [Adjust Cost Item Entries] [Post Inventory Cost To GL] [Production] [Reservation]
+      // [SCENARIO] Verify that Total Amount in GL Entries is correct after creating Production Order, Sales Order reserved and run "Adjust Cost" - "Post to GL".
+
+      // [GIVEN] Released production Order with full reservation.
+      // [WHEN] Run Adjust Cost and Post Inventory Cost to G/L.
+      // [THEN] Total amount in G/L for Inventory Account is correct.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      ProdOrderReservationAndPostToGL(ProductionOrder.Status::Released,InitialInventory,InitialInventory);
+    END;
+
+    LOCAL PROCEDURE ProdOrderReservationAndPostToGL@109(ProdOrderStatus@1001 : Option;ItemQty@1000 : Decimal;SalesQty@1003 : Decimal);
+    VAR
+      ProductionOrder@1002 : Record 5405;
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+      ChildItemNo@1006 : Code[20];
+    BEGIN
+      // Create Item and Create Production Order. Create Sales Order and Reserve.
+      ChildItemNo := CreateItemsSetup(Item);
+      CreateAndRefreshProdOrder(ProductionOrder,ProdOrderStatus,Item."No.",ItemQty);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+
+      // Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Exercise: Run Adjust Cost and Post Inventory Cost to G/L.
+      LibraryCosting.AdjustCostItemEntries(Item."No.",'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // Verify: Verify amount for component in G/L for Inventory Account.
+      VerifyGLEntry(ChildItemNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialReserveSalesWithApplyToItemEntryError@120();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationAndApplyToItemEntryAndPost(InitialInventory,InitialInventory - 1);  // Item inventory, partial Sales quantity with Apply To Item Entry.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullReserveSalesWithApplyToItemEntryError@119();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationAndApplyToItemEntryAndPost(InitialInventory,InitialInventory);
+    END;
+
+    LOCAL PROCEDURE SalesOrderReservationAndApplyToItemEntryAndPost@118(ItemQty@1000 : Decimal;SalesQty@1001 : Decimal);
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+      ItemLedgerEntry@1002 : Record 32;
+    BEGIN
+      // Create Item and Sales Order.
+      CreateItemAndUpdateInventory(Item,ItemQty);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+
+      // Update Sales Line with Apply to Item Entry.
+      SelectItemLedgerEntry(ItemLedgerEntry,Item."No.");
+      UpdateSalesLineApplyToEntry(SalesHeader."No.",ItemLedgerEntry."Entry No.");
+
+      // Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Exercise: Post Sales Order as Ship.
+      ASSERTERROR LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // Verify: Verify error message - Applies-to Entry must not be filled out when reservations exist.
+      Assert.IsTrue(STRPOS(GETLASTERRORTEXT,ErrMsgApplyToItemEntry) > 0,ErrMsgUnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE PartialReserveSalesAndShipWithoutApplyToItemEntry@117();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationAndShipWithoutApplyToItemEntry(InitialInventory,InitialInventory - 1);  // Item inventory, partial Sales quantity without Apply To Item Entry.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler)]
+    PROCEDURE FullReserveSalesAndShipWithoutApplyToItemEntry@116();
+    BEGIN
+      // Setup.
+      Initialize;
+      InitialInventory := LibraryRandom.RandDec(10,2) + 100;  // Large random Inventory value.
+      SalesOrderReservationAndShipWithoutApplyToItemEntry(InitialInventory,InitialInventory);
+    END;
+
+    LOCAL PROCEDURE SalesOrderReservationAndShipWithoutApplyToItemEntry@114(ItemQty@1000 : Decimal;SalesQty@1001 : Decimal);
+    VAR
+      Item@1005 : Record 27;
+      SalesHeader@1004 : Record 36;
+      ItemLedgerEntry@1002 : Record 32;
+    BEGIN
+      // Create Item and Sales Order.
+      CreateItemAndUpdateInventory(Item,ItemQty);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQty);
+
+      // Update Sales Line with Apply to Item Entry.
+      SelectItemLedgerEntry(ItemLedgerEntry,Item."No.");
+      UpdateSalesLineApplyToEntry(SalesHeader."No.",ItemLedgerEntry."Entry No.");
+
+      // Sales Line -> Function -> Reserve.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Update Sales Line with Apply to Item Entry equals Zero.
+      UpdateSalesLineApplyToEntry(SalesHeader."No.",0);  // Value Zero important.
+
+      // Exercise: Post Sales Order as Ship.
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // Verify: Verify Sales Shipment posted successfully.
+      VerifySalesShipment(SalesHeader."No.",SalesQty);
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesSaleILE@152();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Item Ledger Entry",DATABASE::"Sales Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesSalePurchase@153();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Purchase Line",DATABASE::"Sales Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesSaleProduction@157();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Prod. Order Line",DATABASE::"Sales Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesSaleAssembly@160();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Assembly Header",DATABASE::"Sales Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesSaleTransfer@175();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Transfer Line",DATABASE::"Sales Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesSaleSale@225();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Sales Line",DATABASE::"Sales Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPurchaseILE@287();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Item Ledger Entry",DATABASE::"Purchase Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPurchasePurchase@286();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Purchase Line",DATABASE::"Purchase Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPurchaseProduction@285();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Prod. Order Line",DATABASE::"Purchase Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPurchaseAssembly@284();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Assembly Header",DATABASE::"Purchase Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPurchaseTransfer@283();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Transfer Line",DATABASE::"Purchase Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPurchaseSale@282();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Sales Line",DATABASE::"Purchase Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesTransferILE@310();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Item Ledger Entry",DATABASE::"Transfer Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesTransferPurchase@309();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Purchase Line",DATABASE::"Transfer Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesTransferProduction@308();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Prod. Order Line",DATABASE::"Transfer Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesTransferAssembly@307();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Assembly Header",DATABASE::"Transfer Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesTransferTransfer@306();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Transfer Line",DATABASE::"Transfer Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesTransferSale@305();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Sales Line",DATABASE::"Transfer Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesProdOrderCompILE@316();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Item Ledger Entry",DATABASE::"Prod. Order Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesProdOrderCompPurchase@315();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Purchase Line",DATABASE::"Prod. Order Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesProdOrderCompProduction@314();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Prod. Order Line",DATABASE::"Prod. Order Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesProdOrderCompAssembly@313();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Assembly Header",DATABASE::"Prod. Order Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesProdOrderCompTransfer@312();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Transfer Line",DATABASE::"Prod. Order Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesProdOrderCompSale@311();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Sales Line",DATABASE::"Prod. Order Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPlanningCompILE@131();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Item Ledger Entry",DATABASE::"Planning Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPlanningCompPurchase@129();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Purchase Line",DATABASE::"Planning Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPlanningCompProduction@128();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Prod. Order Line",DATABASE::"Planning Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPlanningCompAssembly@126();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Assembly Header",DATABASE::"Planning Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPlanningCompTransfer@124();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Transfer Line",DATABASE::"Planning Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesPlanningCompSale@123();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Sales Line",DATABASE::"Planning Component");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesAsmLineILE@137();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Item Ledger Entry",DATABASE::"Assembly Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesAsmLinePurchase@136();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Purchase Line",DATABASE::"Assembly Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesAsmLineProduction@135();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Prod. Order Line",DATABASE::"Assembly Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesAsmLineAssembly@134();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Assembly Header",DATABASE::"Assembly Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesAsmLineTransfer@133();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Transfer Line",DATABASE::"Assembly Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesAsmLineSale@132();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Sales Line",DATABASE::"Assembly Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesServiceLineILE@146();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Item Ledger Entry",DATABASE::"Service Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesServiceLinePurchase@143();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Purchase Line",DATABASE::"Service Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesServiceLineProduction@142();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Prod. Order Line",DATABASE::"Service Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesServiceLineAssembly@141();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Assembly Header",DATABASE::"Service Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesServiceLineTransfer@140();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Transfer Line",DATABASE::"Service Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesServiceLineSale@139();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Sales Line",DATABASE::"Service Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesJobPlanningLineILE@155();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Item Ledger Entry",DATABASE::"Job Planning Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesJobPlanningLinePurchase@154();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Purchase Line",DATABASE::"Job Planning Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesJobPlanningLineProduction@151();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Prod. Order Line",DATABASE::"Job Planning Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesJobPlanningLineAssembly@149();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Assembly Header",DATABASE::"Job Planning Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesJobPlanningLineTransfer@148();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Transfer Line",DATABASE::"Job Planning Line");
+    END;
+
+    [Test]
+    PROCEDURE RoundingIssuesJobPlanningLineSale@147();
+    BEGIN
+      RoundingIssuesRunScenario(DATABASE::"Sales Line",DATABASE::"Job Planning Line");
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesRunScenario@169(SupplySourceType@1014 : Option;DemandSourceType@1015 : Option);
+    BEGIN
+      RoundingIssuesScenario(FALSE,FALSE,SupplySourceType,DemandSourceType);
+      RoundingIssuesScenario(TRUE,FALSE,SupplySourceType,DemandSourceType);
+      RoundingIssuesScenario(FALSE,TRUE,SupplySourceType,DemandSourceType);
+      RoundingIssuesScenario(TRUE,TRUE,SupplySourceType,DemandSourceType);
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesScenario@99(WithLot@1006 : Boolean;PreReserve@1019 : Boolean;SupplySourceType@1014 : Option;DemandSourceType@1015 : Option);
+    VAR
+      Item@1000 : Record 27;
+      ItemTrackingCode@1008 : Record 6502;
+      ItemUnitOfMeasureKG@1010 : Record 5404;
+      ItemUnitOfMeasureBAG@1001 : Record 5404;
+      ItemUnitOfMeasureCAS@1002 : Record 5404;
+      ReservMgt@1003 : Codeunit 99000845;
+      LocationCode@1018 : Code[10];
+      LotNo@1011 : Code[10];
+      FullAutoReservation@1009 : Boolean;
+      ShipmentDate@1007 : Date;
+      QtyToReserve@1004 : Decimal;
+      QtyToReserveBase@1005 : Decimal;
+      SourceSubType@1017 : Option;
+      SourceID@1016 : Code[20];
+      SourceRefNo@1013 : Integer;
+      SourceProdOrderLineNo@1012 : Integer;
+    BEGIN
+      Initialize;
+
+      // Please refer to bug in VSTF 330787 for reference to the values.
+
+      // SETUP: Create supply with diff. UOMs and then create demand to trigger rounding problem
+      Item."No." := LibraryUtility.GenerateRandomCode(Item.FIELDNO("No."),DATABASE::Item);
+      RoundingIssuesItemUOM(ItemUnitOfMeasureKG,Item."No.",
+        LibraryUtility.GenerateRandomCode(ItemUnitOfMeasureKG.FIELDNO(Code),DATABASE::"Item Unit of Measure"),1);
+      Item."Base Unit of Measure" := ItemUnitOfMeasureKG.Code;
+      RoundingIssuesItemUOM(ItemUnitOfMeasureBAG,Item."No.",
+        LibraryUtility.GenerateRandomCode(ItemUnitOfMeasureBAG.FIELDNO(Code),DATABASE::"Item Unit of Measure"),0.45);
+      RoundingIssuesItemUOM(ItemUnitOfMeasureCAS,Item."No.",
+        LibraryUtility.GenerateRandomCode(ItemUnitOfMeasureCAS.FIELDNO(Code),DATABASE::"Item Unit of Measure"),10.8);
+      IF WithLot THEN BEGIN
+        ItemTrackingCode.Code := LibraryUtility.GenerateRandomCode(ItemTrackingCode.FIELDNO(Code),DATABASE::"Item Tracking Code");
+        ItemTrackingCode."Lot Specific Tracking" := TRUE;
+        ItemTrackingCode.INSERT;
+        Item."Item Category Code" := ItemTrackingCode.Code;
+        LotNo := LibraryUtility.GenerateGUID;
+      END;
+      Item.INSERT;
+      LocationCode := LibraryUtility.GenerateGUID;
+
+      // Create supply - 2 supplies for 4 BAG and 1 supply for 10 CAS
+      // Furthermore in PreReserve cases when demand is reserved against the BAG, create the supply part of the pair.
+      RoundingIssuesCreateSupply(SupplySourceType,ItemUnitOfMeasureBAG,ItemUnitOfMeasureCAS,LocationCode,LotNo,PreReserve);
+
+      // Create demand - 1 demand for 10 CAS
+      RoundingIssuesCreateDemand(DemandSourceType,ItemUnitOfMeasureCAS,10,LocationCode,LotNo,ShipmentDate,
+        QtyToReserve,QtyToReserveBase,
+        SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,
+        PreReserve);
+
+      // EXERCISE: Reserve supply against demand
+      RoundingIssuesSetDemandSource(ReservMgt,DemandSourceType,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo);
+      IF DemandSourceType <> DATABASE::"Planning Component" THEN BEGIN
+        ReservMgt.AutoReserve(FullAutoReservation,'',ShipmentDate,QtyToReserve,QtyToReserveBase);
+
+        // VERIFY: Reserved Qty should be same as Sales Qty and it should be fully reserved
+        Assert.IsTrue(FullAutoReservation,'Demand should be fully reserved as there is enough qty available.');
+        RoundingIssuesVerify(DemandSourceType,QtyToReserve,QtyToReserveBase);
+      END ELSE BEGIN
+        ASSERTERROR ReservMgt.AutoReserve(FullAutoReservation,'',ShipmentDate,QtyToReserve,QtyToReserveBase);
+        Assert.ExpectedError(NotTrueDemandErr);
+      END;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesItemUOM@113(VAR ItemUnitOfMeasure@1000 : Record 5404;ItemNo@1001 : Code[20];UOMCode@1002 : Code[10];QtyPerUOM@1003 : Decimal);
+    BEGIN
+      CLEAR(ItemUnitOfMeasure);
+      ItemUnitOfMeasure."Item No." := ItemNo;
+      ItemUnitOfMeasure.Code := UOMCode;
+      ItemUnitOfMeasure."Qty. per Unit of Measure" := QtyPerUOM;
+      ItemUnitOfMeasure.INSERT;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateSupply@111(SourceType@1000 : Option;ItemUnitOfMeasureBAG@1001 : Record 5404;ItemUnitOfMeasureCAS@1002 : Record 5404;LocationCode@1004 : Code[10];LotNo@1003 : Code[10];PreReserve@1005 : Boolean);
+    BEGIN
+      // The sequence of the below lines is important as this would create multiple or single reservations.
+      // The objective is to arrange the supplies so that the reservation routine has to touch each line
+      // before auto-reserve is completed- this will ensure the possibility of touching the correction code.
+      CASE SourceType OF
+        DATABASE::"Item Ledger Entry":
+          BEGIN
+            RoundingIssuesCreateILE(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,LotNo,PreReserve);
+            RoundingIssuesCreateILE(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,LotNo,PreReserve);
+            RoundingIssuesCreateILE(ItemUnitOfMeasureCAS."Item No.",10,ItemUnitOfMeasureCAS.Code,LocationCode,LotNo,FALSE);
+          END;
+        DATABASE::"Purchase Line":
+          BEGIN
+            RoundingIssuesCreatePurchaseAsSupply(ItemUnitOfMeasureCAS."Item No.",10,ItemUnitOfMeasureCAS.Code,LocationCode,
+              LotNo,FALSE);
+            RoundingIssuesCreatePurchaseAsSupply(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,
+              LotNo,PreReserve);
+            RoundingIssuesCreatePurchaseAsSupply(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,
+              LotNo,PreReserve);
+          END;
+        DATABASE::"Prod. Order Line":
+          BEGIN
+            RoundingIssuesCreateProdOrder(ItemUnitOfMeasureCAS."Item No.",10,ItemUnitOfMeasureCAS.Code,LocationCode,LotNo,FALSE);
+            RoundingIssuesCreateProdOrder(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,LotNo,PreReserve);
+            RoundingIssuesCreateProdOrder(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,LotNo,PreReserve);
+          END;
+        DATABASE::"Assembly Header":
+          BEGIN
+            RoundingIssuesCreateAsmHeader(ItemUnitOfMeasureCAS."Item No.",10,ItemUnitOfMeasureCAS.Code,LocationCode,LotNo,FALSE);
+            RoundingIssuesCreateAsmHeader(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,LotNo,PreReserve);
+            RoundingIssuesCreateAsmHeader(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,LotNo,PreReserve);
+          END;
+        DATABASE::"Transfer Line":
+          BEGIN
+            RoundingIssuesCreateTransferAsSupply(ItemUnitOfMeasureCAS."Item No.",10,ItemUnitOfMeasureCAS.Code,LocationCode,
+              LotNo,FALSE);
+            RoundingIssuesCreateTransferAsSupply(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,
+              LotNo,PreReserve);
+            RoundingIssuesCreateTransferAsSupply(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,
+              LotNo,PreReserve);
+          END;
+        DATABASE::"Sales Line":
+          BEGIN
+            RoundingIssuesCreateSalesAsSupply(ItemUnitOfMeasureCAS."Item No.",10,ItemUnitOfMeasureCAS.Code,LocationCode,LotNo,FALSE);
+            RoundingIssuesCreateSalesAsSupply(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,
+              LotNo,PreReserve);
+            RoundingIssuesCreateSalesAsSupply(ItemUnitOfMeasureBAG."Item No.",4,ItemUnitOfMeasureBAG.Code,LocationCode,
+              LotNo,PreReserve);
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateDemand@122(SourceType@1003 : Option;ItemUnitOfMeasureCAS@1002 : Record 5404;Qty@1005 : Decimal;LocationCode@1011 : Code[10];LotNo@1000 : Code[10];VAR ShipmentDate@1006 : Date;VAR QtyToReserve@1001 : Decimal;VAR QtyToReserveBase@1004 : Decimal;VAR SourceSubType@1010 : Option;VAR SourceID@1009 : Code[20];VAR SourceRefNo@1008 : Integer;VAR SourceProdOrderLineNo@1007 : Integer;PreReserve@1012 : Boolean);
+    BEGIN
+      // Create demand, Set item tracking if required, set source on Reservation Management codeunit
+      CASE SourceType OF
+        DATABASE::"Sales Line":
+          RoundingIssuesCreateSalesAsDemand(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,ShipmentDate,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,PreReserve);
+        DATABASE::"Purchase Line":
+          RoundingIssuesCreatePurchaseAsDemand(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,ShipmentDate,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,PreReserve);
+        DATABASE::"Transfer Line":
+          RoundingIssuesCreateTransferAsDemand(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,ShipmentDate,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,PreReserve);
+        DATABASE::"Prod. Order Component":
+          RoundingIssuesCreateProdOrderComp(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,ShipmentDate,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,PreReserve);
+        DATABASE::"Planning Component":
+          RoundingIssuesCreatePlanningComp(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,ShipmentDate,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,PreReserve);
+        DATABASE::"Assembly Line":
+          RoundingIssuesCreateAsmLine(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,ShipmentDate,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,PreReserve);
+        DATABASE::"Service Line":
+          RoundingIssuesCreateService(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,ShipmentDate,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,PreReserve);
+        DATABASE::"Job Planning Line":
+          RoundingIssuesCreateJobPlanning(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,ShipmentDate,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,PreReserve);
+      END;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesSetDemandSource@216(VAR ReservMgt@1000 : Codeunit 99000845;SourceType@1008 : Option;SourceSubType@1007 : Option;SourceID@1006 : Code[20];SourceRefNo@1002 : Integer;SourceProdOrderLineNo@1001 : Integer);
+    VAR
+      SalesLine@1003 : Record 37;
+      PurchaseLine@1004 : Record 39;
+      TransferLine@1005 : Record 5741;
+      ProdOrderComponent@1009 : Record 5407;
+      PlanningComponent@1013 : Record 99000829;
+      AsmLine@1010 : Record 901;
+      ServiceLine@1011 : Record 5902;
+      JobPlanningLine@1012 : Record 1003;
+    BEGIN
+      CASE SourceType OF
+        DATABASE::"Sales Line":
+          BEGIN
+            SalesLine.GET(SourceSubType,SourceID,SourceRefNo);
+            ReservMgt.SetSalesLine(SalesLine);
+          END;
+        DATABASE::"Purchase Line":
+          BEGIN
+            PurchaseLine.GET(SourceSubType,SourceID,SourceRefNo);
+            ReservMgt.SetPurchLine(PurchaseLine);
+          END;
+        DATABASE::"Transfer Line":
+          BEGIN
+            TransferLine.GET(SourceID,SourceRefNo);
+            ReservMgt.SetTransferLine(TransferLine,0); // 0 stands for outbound
+          END;
+        DATABASE::"Prod. Order Component":
+          BEGIN
+            ProdOrderComponent.GET(SourceSubType,SourceID,SourceProdOrderLineNo,SourceRefNo);
+            ReservMgt.SetProdOrderComponent(ProdOrderComponent);
+          END;
+        DATABASE::"Planning Component":
+          BEGIN
+            PlanningComponent.GET('',SourceID,SourceProdOrderLineNo,SourceRefNo);
+            ReservMgt.SetPlanningComponent(PlanningComponent);
+          END;
+        DATABASE::"Assembly Line":
+          BEGIN
+            AsmLine.GET(SourceSubType,SourceID,SourceRefNo);
+            ReservMgt.SetAssemblyLine(AsmLine);
+          END;
+        DATABASE::"Service Line":
+          BEGIN
+            ServiceLine.GET(SourceSubType,SourceID,SourceRefNo);
+            ReservMgt.SetServLine(ServiceLine);
+          END;
+        DATABASE::"Job Planning Line":
+          BEGIN
+            JobPlanningLine.SETRANGE("Job No.",SourceID);
+            JobPlanningLine.FINDLAST;
+            ReservMgt.SetJobPlanningLine(JobPlanningLine);
+          END;
+      END;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesFindLastReservationToDemand@218(SourceType@1000 : Integer;VAR ReservationEntry@1001 : Record 337);
+    BEGIN
+      ReservationEntry.SETRANGE(Positive,FALSE);
+      ReservationEntry.SETRANGE("Reservation Status",ReservationEntry."Reservation Status"::Reservation);
+      ReservationEntry.SETRANGE("Source Type",SourceType);
+      ReservationEntry.FINDLAST;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateILE@110(ItemNo@1001 : Code[20];Qty@1002 : Decimal;UOMCode@1003 : Code[10];LocationCode@1006 : Code[10];LotNo@1007 : Code[10];CreateReservationEntry@1008 : Boolean);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+      ItemLedgerEntry2@1005 : Record 32;
+      ItemUnitOfMeasure@1004 : Record 5404;
+    BEGIN
+      IF ItemLedgerEntry2.FINDLAST THEN
+        ItemLedgerEntry."Entry No." := ItemLedgerEntry2."Entry No." + 1
+      ELSE
+        ItemLedgerEntry."Entry No." := 1;
+      ItemLedgerEntry."Item No." := ItemNo;
+      ItemLedgerEntry."Entry Type" := ItemLedgerEntry."Entry Type"::"Positive Adjmt.";
+      ItemLedgerEntry."Unit of Measure Code" := UOMCode;
+      ItemUnitOfMeasure.GET(ItemNo,UOMCode);
+      ItemLedgerEntry."Qty. per Unit of Measure" := ItemUnitOfMeasure."Qty. per Unit of Measure";
+      ItemLedgerEntry.Quantity := Qty * ItemLedgerEntry."Qty. per Unit of Measure";
+      ItemLedgerEntry."Remaining Quantity" := ItemLedgerEntry.Quantity;
+      ItemLedgerEntry.Open := TRUE;
+      ItemLedgerEntry.Positive := TRUE;
+      ItemLedgerEntry."Location Code" := LocationCode;
+      ItemLedgerEntry."Lot No." := LotNo;
+      ItemLedgerEntry.INSERT;
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,ItemLedgerEntry.Quantity,
+          DATABASE::"Item Ledger Entry",0,'',ItemLedgerEntry."Entry No.",0,'',ItemLedgerEntry."Qty. per Unit of Measure",
+          LotNo,0D);
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreatePurchaseAsSupply@145(ItemNo@1001 : Code[20];Qty@1002 : Decimal;UOMCode@1003 : Code[10];LocationCode@1006 : Code[10];LotNo@1007 : Code[10];CreateReservationEntry@1008 : Boolean);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      CreatePurchaseLine(PurchaseLine,ItemNo,UOMCode,Qty,LocationCode,PurchaseLine."Document Type"::Order,WORKDATE);
+      RoundingIssuesCreateReservationEntry(TRUE,FALSE,ItemNo,PurchaseLine.Quantity,PurchaseLine."Quantity (Base)",
+        DATABASE::"Purchase Line",PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.",0,'',
+        PurchaseLine."Qty. per Unit of Measure",LotNo,PurchaseLine."Expected Receipt Date");
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,PurchaseLine."Quantity (Base)",
+          DATABASE::"Purchase Line",PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.",
+          0,'',PurchaseLine."Qty. per Unit of Measure",LotNo,0D);
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreatePurchaseAsDemand@206(ItemUnitOfMeasureCAS@1009 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1007 : Code[10];VAR ShipmentDate@1003 : Date;VAR QtyToReserve@1002 : Decimal;VAR QtyToReserveBase@1001 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1006 : Integer;VAR SourceProdOrderLineNo@1004 : Integer;CreateReservationEntry@1013 : Boolean);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      CreatePurchaseLine(PurchaseLine,
+        ItemUnitOfMeasureCAS."Item No.",ItemUnitOfMeasureCAS.Code,Qty,LocationCode,
+        PurchaseLine."Document Type"::"Return Order",WORKDATE);
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(FALSE,TRUE,PurchaseLine."No.",-PurchaseLine.Quantity,-PurchaseLine."Quantity (Base)",
+          DATABASE::"Purchase Line",PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.",0,'',
+          PurchaseLine."Qty. per Unit of Measure",LotNo,PurchaseLine."Expected Receipt Date");
+
+      RoundingIssuesCreateReservationEntry(FALSE,FALSE,PurchaseLine."No.",-PurchaseLine.Quantity,-PurchaseLine."Quantity (Base)",
+        DATABASE::"Purchase Line",PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.",0,'',
+        PurchaseLine."Qty. per Unit of Measure",LotNo,PurchaseLine."Expected Receipt Date");
+
+      ShipmentDate := PurchaseLine."Expected Receipt Date";
+      QtyToReserve := PurchaseLine.Quantity;
+      QtyToReserveBase := PurchaseLine."Quantity (Base)";
+      SourceSubType := PurchaseLine."Document Type";
+      SourceID := PurchaseLine."Document No.";
+      SourceRefNo := PurchaseLine."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateProdOrder@150(ItemNo@1001 : Code[20];Qty@1002 : Decimal;UOMCode@1003 : Code[10];LocationCode@1006 : Code[10];LotNo@1007 : Code[10];CreateReservationEntry@1008 : Boolean);
+    VAR
+      ProdOrderLine@1000 : Record 5406;
+    BEGIN
+      CreateProdOrderLine(ProdOrderLine,ItemNo,UOMCode,Qty,LocationCode,WORKDATE);
+      RoundingIssuesCreateReservationEntry(TRUE,FALSE,ItemNo,ProdOrderLine.Quantity,ProdOrderLine."Quantity (Base)",
+        DATABASE::"Prod. Order Line",ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",0,ProdOrderLine."Line No.",'',
+        ProdOrderLine."Qty. per Unit of Measure",LotNo,ProdOrderLine."Due Date");
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,ProdOrderLine."Quantity (Base)",
+          DATABASE::"Prod. Order Line",ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",0,ProdOrderLine."Line No.",'',
+          ProdOrderLine."Qty. per Unit of Measure",LotNo,0D);
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateProdOrderComp@238(ItemUnitOfMeasureCAS@1009 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1007 : Code[10];VAR ShipmentDate@1003 : Date;VAR QtyToReserve@1002 : Decimal;VAR QtyToReserveBase@1001 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1006 : Integer;VAR SourceProdOrderLineNo@1004 : Integer;CreateReservationEntry@1013 : Boolean);
+    VAR
+      ProdOrderComp@1000 : Record 5407;
+    BEGIN
+      CreateProdOrderComp(ProdOrderComp,ItemUnitOfMeasureCAS."Item No.",ItemUnitOfMeasureCAS.Code,Qty,LocationCode,WORKDATE);
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(FALSE,TRUE,ProdOrderComp."Item No.",-ProdOrderComp.Quantity,
+          -ProdOrderComp."Quantity (Base)",
+          DATABASE::"Prod. Order Component",ProdOrderComp.Status,ProdOrderComp."Prod. Order No.",ProdOrderComp."Line No.",
+          ProdOrderComp."Prod. Order Line No.",'',ProdOrderComp."Qty. per Unit of Measure",LotNo,ProdOrderComp."Due Date");
+
+      RoundingIssuesCreateReservationEntry(FALSE,FALSE,ProdOrderComp."Item No.",-ProdOrderComp.Quantity,
+        -ProdOrderComp."Quantity (Base)",
+        DATABASE::"Prod. Order Component",ProdOrderComp.Status,ProdOrderComp."Prod. Order No.",ProdOrderComp."Line No.",
+        ProdOrderComp."Prod. Order Line No.",'',ProdOrderComp."Qty. per Unit of Measure",LotNo,ProdOrderComp."Due Date");
+
+      ShipmentDate := ProdOrderComp."Due Date";
+      QtyToReserve := ProdOrderComp.Quantity;
+      QtyToReserveBase := ProdOrderComp."Quantity (Base)";
+      SourceSubType := ProdOrderComp.Status;
+      SourceID := ProdOrderComp."Prod. Order No.";
+      SourceRefNo := ProdOrderComp."Line No.";
+      SourceProdOrderLineNo := ProdOrderComp."Prod. Order Line No.";
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreatePlanningComp@275(ItemUnitOfMeasureCAS@1009 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1007 : Code[10];VAR ShipmentDate@1003 : Date;VAR QtyToReserve@1002 : Decimal;VAR QtyToReserveBase@1001 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1006 : Integer;VAR SourceProdOrderLineNo@1004 : Integer;CreateReservationEntry@1013 : Boolean);
+    VAR
+      PlanningComp@1000 : Record 99000829;
+    BEGIN
+      CreatePlanningComp(PlanningComp,ItemUnitOfMeasureCAS,Qty,LocationCode,WORKDATE);
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(FALSE,TRUE,PlanningComp."Item No.",-PlanningComp.Quantity,-PlanningComp."Quantity (Base)",
+          DATABASE::"Planning Component",0,'',PlanningComp."Line No.",
+          0,'',PlanningComp."Qty. per Unit of Measure",LotNo,PlanningComp."Due Date");
+
+      RoundingIssuesCreateReservationEntry(FALSE,FALSE,PlanningComp."Item No.",-PlanningComp.Quantity,-PlanningComp."Quantity (Base)",
+        DATABASE::"Planning Component",0,'',PlanningComp."Line No.",
+        0,'',PlanningComp."Qty. per Unit of Measure",LotNo,PlanningComp."Due Date");
+
+      ShipmentDate := PlanningComp."Due Date";
+      QtyToReserve := PlanningComp.Quantity;
+      QtyToReserveBase := PlanningComp."Quantity (Base)";
+      SourceSubType := 0;
+      SourceID := '';
+      SourceRefNo := PlanningComp."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateAsmHeader@162(ItemNo@1001 : Code[20];Qty@1002 : Decimal;UOMCode@1003 : Code[10];LocationCode@1005 : Code[10];LotNo@1007 : Code[10];CreateReservationEntry@1006 : Boolean);
+    VAR
+      AsmHeader@1000 : Record 900;
+      ItemUnitOfMeasure@1004 : Record 5404;
+    BEGIN
+      AsmHeader."Document Type" := AsmHeader."Document Type"::Order;
+      AsmHeader."No." := LibraryUtility.GenerateGUID;
+      AsmHeader."Item No." := ItemNo;
+      AsmHeader."Unit of Measure Code" := UOMCode;
+      ItemUnitOfMeasure.GET(ItemNo,UOMCode);
+      AsmHeader."Qty. per Unit of Measure" := ItemUnitOfMeasure."Qty. per Unit of Measure";
+      AsmHeader.Quantity := Qty;
+      AsmHeader."Quantity (Base)" := Qty * AsmHeader."Qty. per Unit of Measure";
+      AsmHeader."Remaining Quantity" := AsmHeader.Quantity;
+      AsmHeader."Remaining Quantity (Base)" := AsmHeader."Quantity (Base)";
+      AsmHeader."Due Date" := WORKDATE;
+      AsmHeader."Location Code" := LocationCode;
+      AsmHeader.INSERT;
+
+      RoundingIssuesCreateReservationEntry(TRUE,FALSE,ItemNo,AsmHeader.Quantity,AsmHeader."Quantity (Base)",
+        DATABASE::"Assembly Header",AsmHeader."Document Type",AsmHeader."No.",0,0,'',
+        AsmHeader."Qty. per Unit of Measure",LotNo,AsmHeader."Due Date");
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,AsmHeader."Quantity (Base)",
+          DATABASE::"Assembly Header",AsmHeader."Document Type",AsmHeader."No.",0,0,'',
+          AsmHeader."Qty. per Unit of Measure",LotNo,AsmHeader."Due Date");
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateAsmLine@241(ItemUnitOfMeasureCAS@1009 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1007 : Code[10];VAR ShipmentDate@1003 : Date;VAR QtyToReserve@1002 : Decimal;VAR QtyToReserveBase@1001 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1006 : Integer;VAR SourceProdOrderLineNo@1004 : Integer;CreateReservationEntry@1013 : Boolean);
+    VAR
+      AsmLine@1000 : Record 901;
+      RecRef@1005 : RecordRef;
+    BEGIN
+      AsmLine."Document Type" := AsmLine."Document Type"::Order;
+      AsmLine."Document No." := LibraryUtility.GenerateGUID;
+      RecRef.GETTABLE(AsmLine);
+      AsmLine."Line No." := LibraryUtility.GetNewLineNo(RecRef,AsmLine.FIELDNO("Line No."));
+      AsmLine.Type := AsmLine.Type::Item;
+      AsmLine."No." := ItemUnitOfMeasureCAS."Item No.";
+      AsmLine."Unit of Measure Code" := ItemUnitOfMeasureCAS.Code;
+      AsmLine."Qty. per Unit of Measure" := ItemUnitOfMeasureCAS."Qty. per Unit of Measure";
+      AsmLine.Quantity := Qty;
+      AsmLine."Quantity (Base)" := Qty * AsmLine."Qty. per Unit of Measure";
+      AsmLine."Remaining Quantity" := AsmLine.Quantity;
+      AsmLine."Remaining Quantity (Base)" := AsmLine."Quantity (Base)";
+      AsmLine."Due Date" := WORKDATE;
+      AsmLine."Location Code" := LocationCode;
+      AsmLine.INSERT;
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(FALSE,TRUE,AsmLine."No.",-AsmLine.Quantity,-AsmLine."Quantity (Base)",
+          DATABASE::"Assembly Line",AsmLine."Document Type",AsmLine."Document No.",AsmLine."Line No.",0,'',
+          AsmLine."Qty. per Unit of Measure",LotNo,AsmLine."Due Date");
+
+      RoundingIssuesCreateReservationEntry(FALSE,FALSE,AsmLine."No.",-AsmLine.Quantity,-AsmLine."Quantity (Base)",
+        DATABASE::"Assembly Line",AsmLine."Document Type",AsmLine."Document No.",AsmLine."Line No.",0,'',
+        AsmLine."Qty. per Unit of Measure",LotNo,AsmLine."Due Date");
+
+      ShipmentDate := AsmLine."Due Date";
+      QtyToReserve := AsmLine.Quantity;
+      QtyToReserveBase := AsmLine."Quantity (Base)";
+      SourceSubType := AsmLine."Document Type";
+      SourceID := AsmLine."Document No.";
+      SourceRefNo := AsmLine."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateTransferAsSupply@172(ItemNo@1001 : Code[20];Qty@1002 : Decimal;UOMCode@1003 : Code[10];LocationCode@1006 : Code[10];LotNo@1007 : Code[10];CreateReservationEntry@1008 : Boolean);
+    VAR
+      TransferLine@1000 : Record 5741;
+    BEGIN
+      CreateTransferLine(TransferLine,ItemNo,UOMCode,Qty,LibraryUtility.GenerateGUID,LocationCode,WORKDATE,0D);
+
+      RoundingIssuesCreateReservationEntry(TRUE,FALSE,ItemNo,TransferLine.Quantity,TransferLine."Quantity (Base)",
+        DATABASE::"Transfer Line",1,TransferLine."Document No.",TransferLine."Line No.",0,'',
+        TransferLine."Qty. per Unit of Measure",LotNo,TransferLine."Receipt Date");
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,TransferLine."Quantity (Base)",
+          DATABASE::"Transfer Line",1,TransferLine."Document No.",TransferLine."Line No.",0,'',
+          TransferLine."Qty. per Unit of Measure",LotNo,TransferLine."Receipt Date");
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateTransferAsDemand@201(ItemUnitOfMeasureCAS@1008 : Record 5404;Qty@1004 : Decimal;LocationCode@1012 : Code[10];LotNo@1007 : Code[10];VAR ShipmentDate@1003 : Date;VAR QtyToReserve@1002 : Decimal;VAR QtyToReserveBase@1001 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1009 : Integer;VAR SourceProdOrderLineNo@1006 : Integer;CreateReservationEntry@1013 : Boolean);
+    VAR
+      TransferLine@1000 : Record 5741;
+    BEGIN
+      CreateTransferLine(
+        TransferLine,ItemUnitOfMeasureCAS."Item No.",
+        ItemUnitOfMeasureCAS.Code,Qty,LocationCode,LibraryUtility.GenerateGUID,0D,WORKDATE);
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(FALSE,TRUE,TransferLine."Item No.",-TransferLine.Quantity,-TransferLine."Quantity (Base)",
+          DATABASE::"Transfer Line",0,TransferLine."Document No.",TransferLine."Line No.",0,'',
+          TransferLine."Qty. per Unit of Measure",LotNo,TransferLine."Shipment Date");
+
+      RoundingIssuesCreateReservationEntry(FALSE,FALSE,TransferLine."Item No.",-TransferLine.Quantity,-TransferLine."Quantity (Base)",
+        DATABASE::"Transfer Line",0,TransferLine."Document No.",TransferLine."Line No.",0,'',
+        TransferLine."Qty. per Unit of Measure",LotNo,TransferLine."Shipment Date");
+
+      ShipmentDate := TransferLine."Shipment Date";
+      QtyToReserve := TransferLine.Quantity;
+      QtyToReserveBase := TransferLine."Quantity (Base)";
+      SourceSubType := 0;
+      SourceID := TransferLine."Document No.";
+      SourceRefNo := TransferLine."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateSalesAsSupply@212(ItemNo@1003 : Code[20];Qty@1002 : Decimal;UOMCode@1001 : Code[10];LocationCode@1006 : Code[10];LotNo@1000 : Code[10];CreateReservationEntry@1008 : Boolean);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      CreateSaleLine(SalesLine,SalesLine."Document Type"::"Return Order",ItemNo,UOMCode,Qty,LocationCode,WORKDATE);
+      RoundingIssuesCreateReservationEntry(TRUE,FALSE,ItemNo,SalesLine.Quantity,SalesLine."Quantity (Base)",
+        DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",0,'',
+        SalesLine."Qty. per Unit of Measure",LotNo,SalesLine."Shipment Date");
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,SalesLine."Quantity (Base)",
+          DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",0,'',
+          SalesLine."Qty. per Unit of Measure",LotNo,SalesLine."Shipment Date");
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateSalesAsDemand@127(ItemUnitOfMeasureCAS@1004 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1003 : Code[10];VAR ShipmentDate@1006 : Date;VAR QtyToReserve@1001 : Decimal;VAR QtyToReserveBase@1000 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1009 : Integer;VAR SourceProdOrderLineNo@1002 : Integer;CreateReservationEntry@1013 : Boolean);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      CreateSaleLine(SalesLine,SalesLine."Document Type"::Order,ItemUnitOfMeasureCAS."Item No.",
+        ItemUnitOfMeasureCAS.Code,Qty,LocationCode,WORKDATE);
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(FALSE,TRUE,SalesLine."No.",-SalesLine.Quantity,-SalesLine."Quantity (Base)",
+          DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",0,'',
+          SalesLine."Qty. per Unit of Measure",LotNo,SalesLine."Shipment Date");
+
+      RoundingIssuesCreateReservationEntry(FALSE,FALSE,SalesLine."No.",-SalesLine.Quantity,-SalesLine."Quantity (Base)",
+        DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",0,'',
+        SalesLine."Qty. per Unit of Measure",LotNo,SalesLine."Shipment Date");
+
+      ShipmentDate := SalesLine."Shipment Date";
+      QtyToReserve := SalesLine.Quantity;
+      QtyToReserveBase := SalesLine."Quantity (Base)";
+      SourceSubType := SalesLine."Document Type";
+      SourceID := SalesLine."Document No.";
+      SourceRefNo := SalesLine."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateService@246(ItemUnitOfMeasureCAS@1004 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1003 : Code[10];VAR ShipmentDate@1006 : Date;VAR QtyToReserve@1001 : Decimal;VAR QtyToReserveBase@1000 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1009 : Integer;VAR SourceProdOrderLineNo@1002 : Integer;CreateReservationEntry@1013 : Boolean);
+    VAR
+      ServiceLine@1005 : Record 5902;
+    BEGIN
+      CreateServiceLine(ServiceLine,ItemUnitOfMeasureCAS."Item No.",ItemUnitOfMeasureCAS.Code,Qty,LocationCode,WORKDATE);
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(FALSE,TRUE,ServiceLine."No.",-ServiceLine.Quantity,-ServiceLine."Quantity (Base)",
+          DATABASE::"Service Line",ServiceLine."Document Type",ServiceLine."Document No.",ServiceLine."Line No.",0,'',
+          ServiceLine."Qty. per Unit of Measure",LotNo,ServiceLine."Needed by Date");
+
+      RoundingIssuesCreateReservationEntry(FALSE,FALSE,ServiceLine."No.",-ServiceLine.Quantity,-ServiceLine."Quantity (Base)",
+        DATABASE::"Service Line",ServiceLine."Document Type",ServiceLine."Document No.",ServiceLine."Line No.",0,'',
+        ServiceLine."Qty. per Unit of Measure",LotNo,ServiceLine."Needed by Date");
+
+      ShipmentDate := ServiceLine."Needed by Date";
+      QtyToReserve := ServiceLine.Quantity;
+      QtyToReserveBase := ServiceLine."Quantity (Base)";
+      SourceSubType := ServiceLine."Document Type";
+      SourceID := ServiceLine."Document No.";
+      SourceRefNo := ServiceLine."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateJobPlanning@263(ItemUnitOfMeasureCAS@1004 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1003 : Code[10];VAR ShipmentDate@1006 : Date;VAR QtyToReserve@1001 : Decimal;VAR QtyToReserveBase@1000 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1009 : Integer;VAR SourceProdOrderLineNo@1002 : Integer;CreateReservationEntry@1013 : Boolean);
+    VAR
+      JobPlanningLine@1005 : Record 1003;
+      RecRef@1007 : RecordRef;
+    BEGIN
+      JobPlanningLine."Job No." := LibraryUtility.GenerateGUID;
+      RecRef.GETTABLE(JobPlanningLine);
+      JobPlanningLine."Line No." := LibraryUtility.GetNewLineNo(RecRef,JobPlanningLine.FIELDNO("Line No."));
+      JobPlanningLine.Status := JobPlanningLine.Status::Order;
+      JobPlanningLine.Type := JobPlanningLine.Type::Item;
+      JobPlanningLine."No." := ItemUnitOfMeasureCAS."Item No.";
+      JobPlanningLine.Quantity := Qty;
+      JobPlanningLine."Unit of Measure Code" := ItemUnitOfMeasureCAS.Code;
+      JobPlanningLine."Qty. per Unit of Measure" := ItemUnitOfMeasureCAS."Qty. per Unit of Measure";
+      JobPlanningLine."Quantity (Base)" := JobPlanningLine.Quantity * JobPlanningLine."Qty. per Unit of Measure";
+      JobPlanningLine."Remaining Qty." := JobPlanningLine.Quantity;
+      JobPlanningLine."Remaining Qty. (Base)" := JobPlanningLine."Quantity (Base)";
+      JobPlanningLine."Planning Date" := WORKDATE;
+      JobPlanningLine."Location Code" := LocationCode;
+      JobPlanningLine.INSERT;
+
+      IF CreateReservationEntry THEN
+        RoundingIssuesCreateReservationEntry(FALSE,TRUE,JobPlanningLine."No.",-JobPlanningLine.Quantity,
+          -JobPlanningLine."Quantity (Base)",
+          DATABASE::"Job Planning Line",JobPlanningLine.Status,JobPlanningLine."Job No.",
+          JobPlanningLine."Job Contract Entry No.",0,'',
+          JobPlanningLine."Qty. per Unit of Measure",LotNo,JobPlanningLine."Planning Date");
+
+      RoundingIssuesCreateReservationEntry(FALSE,FALSE,JobPlanningLine."No.",-JobPlanningLine.Quantity,
+        -JobPlanningLine."Quantity (Base)",
+        DATABASE::"Job Planning Line",JobPlanningLine.Status,JobPlanningLine."Job No.",
+        JobPlanningLine."Job Contract Entry No.",0,'',
+        JobPlanningLine."Qty. per Unit of Measure",LotNo,JobPlanningLine."Planning Date");
+
+      ShipmentDate := JobPlanningLine."Planning Date";
+      QtyToReserve := JobPlanningLine.Quantity;
+      QtyToReserveBase := JobPlanningLine."Quantity (Base)";
+      SourceSubType := JobPlanningLine.Status;
+      SourceID := JobPlanningLine."Job No.";
+      SourceRefNo := JobPlanningLine."Job Contract Entry No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesCreateReservationEntry@138(Supply@1014 : Boolean;Reservation@1015 : Boolean;ItemNo@1000 : Code[20];Quantity@1009 : Decimal;QuantityBase@1001 : Decimal;SourceType@1002 : Option;SourceSubType@1003 : Option;SourceID@1004 : Code[20];SourceRefNo@1005 : Integer;SourceProdOrderLineNo@1012 : Integer;SourceBatchName@1013 : Code[10];QtyPerUOM@1006 : Decimal;LotNo@1007 : Code[10];ShipmentDate@1008 : Date);
+    VAR
+      ReservationEntry@1011 : Record 337;
+      ReservationEntry2@1010 : Record 337;
+    BEGIN
+      IF (NOT Supply) AND (NOT Reservation) THEN // if item tracking needs to be put for demand, lot no should be non-empty
+        IF LotNo = '' THEN
+          EXIT;
+
+      IF (NOT Supply) AND Reservation THEN BEGIN // if demand needs pre-reservation, find supply side reservation entry and use it
+        ReservationEntry2.SETRANGE(Positive,TRUE);
+        ReservationEntry2.SETRANGE("Item No.",ItemNo);
+        ReservationEntry2.SETRANGE("Reservation Status",ReservationEntry2."Reservation Status"::Reservation);
+        ReservationEntry2.FINDSET;
+        REPEAT
+          // set correct values for supply side reservation
+          ReservationEntry2.Quantity := ROUND(ReservationEntry2."Quantity (Base)" / QtyPerUOM,0.00001);
+          ReservationEntry2."Shipment Date" := ShipmentDate;
+          ReservationEntry2.MODIFY;
+
+          // create demand side reservation
+          ReservationEntry := ReservationEntry2;
+          RoundingIssuesSetValuesOnResEntry(ReservationEntry,Supply,-ReservationEntry2.Quantity,
+            -ReservationEntry2."Quantity (Base)",
+            SourceType,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,SourceBatchName,
+            QtyPerUOM,LotNo,ShipmentDate);
+        UNTIL ReservationEntry2.NEXT = 0;
+
+        EXIT;
+      END;
+
+      IF ReservationEntry2.FINDLAST THEN
+        ReservationEntry."Entry No." := ReservationEntry2."Entry No." + 1
+      ELSE
+        ReservationEntry."Entry No." := 1;
+      ReservationEntry."Item No." := ItemNo;
+      IF Reservation THEN
+        ReservationEntry."Reservation Status" := ReservationEntry."Reservation Status"::Reservation
+      ELSE
+        ReservationEntry."Reservation Status" := ReservationEntry."Reservation Status"::Surplus;
+
+      // if item tracking needs to be put for demand,
+      // Reduce quantities by that which is already reserved against supply
+      IF (NOT Supply) AND (NOT Reservation) THEN BEGIN
+        ReservationEntry2.SETRANGE("Reservation Status",ReservationEntry2."Reservation Status"::Reservation);
+        ReservationEntry2.SETRANGE("Source Type",SourceType);
+        ReservationEntry2.SETRANGE("Source Subtype",SourceSubType);
+        ReservationEntry2.SETRANGE("Source ID",SourceID);
+        ReservationEntry2.SETRANGE("Source Batch Name",SourceBatchName);
+        ReservationEntry2.SETRANGE("Source Prod. Order Line",SourceProdOrderLineNo);
+        ReservationEntry2.SETRANGE("Source Ref. No.",SourceRefNo);
+        IF ReservationEntry2.FINDSET THEN
+          REPEAT
+            Quantity := Quantity - ReservationEntry2.Quantity;
+            QuantityBase := QuantityBase - ReservationEntry2."Quantity (Base)";
+          UNTIL ReservationEntry2.NEXT = 0;
+      END;
+      RoundingIssuesSetValuesOnResEntry(ReservationEntry,Supply,Quantity,QuantityBase,
+        SourceType,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,SourceBatchName,
+        QtyPerUOM,LotNo,ShipmentDate);
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesSetValuesOnResEntry@174(VAR ReservationEntry@1000 : Record 337;Supply@1012 : Boolean;Quantity@1011 : Decimal;QuantityBase@1010 : Decimal;SourceType@1009 : Option;SourceSubType@1008 : Option;SourceID@1007 : Code[20];SourceRefNo@1006 : Integer;SourceProdOrderLineNo@1005 : Integer;SourceBatchName@1004 : Code[10];QtyPerUOM@1003 : Decimal;LotNo@1002 : Code[10];ShipmentDate@1001 : Date);
+    BEGIN
+      ReservationEntry.Positive := Supply;
+      ReservationEntry."Quantity (Base)" := QuantityBase;
+      ReservationEntry."Source Type" := SourceType;
+      ReservationEntry."Source Subtype" := SourceSubType;
+      ReservationEntry."Source ID" := SourceID;
+      ReservationEntry."Source Ref. No." := SourceRefNo;
+      ReservationEntry."Source Prod. Order Line" := SourceProdOrderLineNo;
+      ReservationEntry."Source Batch Name" := SourceBatchName;
+      ReservationEntry.Quantity := Quantity;
+      ReservationEntry."Qty. per Unit of Measure" := QtyPerUOM;
+      ReservationEntry."Lot No." := LotNo;
+      ReservationEntry."Shipment Date" := ShipmentDate;
+      ReservationEntry.INSERT;
+    END;
+
+    LOCAL PROCEDURE RoundingIssuesVerify@130(SourceType@1000 : Option;Quantity@1004 : Decimal;QuantityBase@1003 : Decimal);
+    VAR
+      ReservationEntry@1002 : Record 337;
+      ReservationEntry2@1007 : Record 337;
+      SalesLine@1001 : Record 37;
+      PurchaseLine@1008 : Record 39;
+      TransferLine@1009 : Record 5741;
+      ProdOrderComp@1010 : Record 5407;
+      PlanningComp@1011 : Record 99000829;
+      AsmLine@1012 : Record 901;
+      ServiceLine@1013 : Record 5902;
+      JobPlanningLine@1014 : Record 1003;
+      ReservedQuantity@1005 : Decimal;
+      ReservedQuantityBase@1006 : Decimal;
+    BEGIN
+      RoundingIssuesFindLastReservationToDemand(SourceType,ReservationEntry);
+      ReservationEntry2.SETRANGE("Source Type",ReservationEntry."Source Type");
+      ReservationEntry2.SETRANGE("Source ID",ReservationEntry."Source ID");
+      Assert.AreEqual(3,ReservationEntry2.COUNT,
+        'There are 3 supply lines- so 3 reservations to be made, so rounding issue is covered');
+      CASE SourceType OF
+        DATABASE::"Sales Line":
+          BEGIN
+            SalesLine.GET(ReservationEntry."Source Subtype",ReservationEntry."Source ID",ReservationEntry."Source Ref. No.");
+            SalesLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            ReservedQuantity := SalesLine."Reserved Quantity";
+            ReservedQuantityBase := SalesLine."Reserved Qty. (Base)";
+          END;
+        DATABASE::"Purchase Line":
+          BEGIN
+            PurchaseLine.GET(ReservationEntry."Source Subtype",ReservationEntry."Source ID",ReservationEntry."Source Ref. No.");
+            PurchaseLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            ReservedQuantity := PurchaseLine."Reserved Quantity";
+            ReservedQuantityBase := PurchaseLine."Reserved Qty. (Base)";
+          END;
+        DATABASE::"Transfer Line":
+          BEGIN
+            TransferLine.GET(ReservationEntry."Source ID",ReservationEntry."Source Ref. No.");
+            TransferLine.CALCFIELDS("Reserved Quantity Outbnd.","Reserved Qty. Outbnd. (Base)");
+            ReservedQuantity := TransferLine."Reserved Quantity Outbnd.";
+            ReservedQuantityBase := TransferLine."Reserved Qty. Outbnd. (Base)";
+          END;
+        DATABASE::"Prod. Order Component":
+          BEGIN
+            ProdOrderComp.GET(ReservationEntry."Source Subtype",ReservationEntry."Source ID",
+              ReservationEntry."Source Prod. Order Line",ReservationEntry."Source Ref. No.");
+            ProdOrderComp.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            ReservedQuantity := ProdOrderComp."Reserved Quantity";
+            ReservedQuantityBase := ProdOrderComp."Reserved Qty. (Base)";
+          END;
+        DATABASE::"Planning Component":
+          BEGIN
+            PlanningComp.GET(ReservationEntry."Source Subtype",ReservationEntry."Source ID",
+              ReservationEntry."Source Prod. Order Line",ReservationEntry."Source Ref. No.");
+            PlanningComp.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            ReservedQuantity := PlanningComp."Reserved Quantity";
+            ReservedQuantityBase := PlanningComp."Reserved Qty. (Base)";
+          END;
+        DATABASE::"Assembly Line":
+          BEGIN
+            AsmLine.GET(ReservationEntry."Source Subtype",ReservationEntry."Source ID",ReservationEntry."Source Ref. No.");
+            AsmLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            ReservedQuantity := AsmLine."Reserved Quantity";
+            ReservedQuantityBase := AsmLine."Reserved Qty. (Base)";
+          END;
+        DATABASE::"Service Line":
+          BEGIN
+            ServiceLine.GET(ReservationEntry."Source Subtype",ReservationEntry."Source ID",ReservationEntry."Source Ref. No.");
+            ServiceLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            ReservedQuantity := ServiceLine."Reserved Quantity";
+            ReservedQuantityBase := ServiceLine."Reserved Qty. (Base)";
+          END;
+        DATABASE::"Job Planning Line":
+          BEGIN
+            JobPlanningLine.SETRANGE("Job No.",ReservationEntry."Source ID");
+            JobPlanningLine.FINDLAST;
+            JobPlanningLine.CALCFIELDS("Reserved Quantity","Reserved Qty. (Base)");
+            ReservedQuantity := JobPlanningLine."Reserved Quantity";
+            ReservedQuantityBase := JobPlanningLine."Reserved Qty. (Base)";
+          END;
+      END;
+      Assert.AreEqual(Quantity,ABS(ReservedQuantity),'The reserved qty must not have a rounding problem.');
+      Assert.AreEqual(QuantityBase,ABS(ReservedQuantityBase),'The reserved qty. base must not have a rounding problem.');
+    END;
+
+    [Test]
+    PROCEDURE CancelReservationSaleILE@161();
+    BEGIN
+      // Verify Dates on Reservation Entry when Supply is Item Ledger Entry and Demand is Sales line.
+      VerifyDatesOnReservationEntryAfterCancelReservation(DATABASE::"Item Ledger Entry",DATABASE::"Sales Line");
+    END;
+
+    [Test]
+    PROCEDURE CancelReservationPurchasePlanningComp@202();
+    BEGIN
+      // Verify Dates on Reservation Entry when Supply is Purchase Line and Demand is Planning Component.
+      VerifyDatesOnReservationEntryAfterCancelReservation(DATABASE::"Purchase Line",DATABASE::"Planning Component");
+    END;
+
+    [Test]
+    PROCEDURE CancelReservationSaleProduction@200();
+    BEGIN
+      // Verify Dates on Reservation Entry when Supply is Prod. Order line and Demand is Sales line.
+      VerifyDatesOnReservationEntryAfterCancelReservation(DATABASE::"Prod. Order Line",DATABASE::"Sales Line");
+    END;
+
+    [Test]
+    PROCEDURE CancelReservationTransferPurchase@198();
+    BEGIN
+      // Verify Dates on Reservation Entry when Supply is Transfer line and Demand is Purchase line.
+      VerifyDatesOnReservationEntryAfterCancelReservation(DATABASE::"Transfer Line",DATABASE::"Purchase Line");
+    END;
+
+    [Test]
+    PROCEDURE CancelReservationPurchaseProduction@194();
+    BEGIN
+      // Verify Dates on Reservation Entry when Supply is Prod. Order Line and Demand is Purchase Line.
+      VerifyDatesOnReservationEntryAfterCancelReservation(DATABASE::"Prod. Order Line",DATABASE::"Purchase Line");
+    END;
+
+    [Test]
+    PROCEDURE CancelReservationProdOrderCompILE@184();
+    BEGIN
+      // Verify Dates on Reservation Entry when Supply is Item Ledger Entry and Demand is Prod. Order Component.
+      VerifyDatesOnReservationEntryAfterCancelReservation(DATABASE::"Item Ledger Entry",DATABASE::"Prod. Order Component");
+    END;
+
+    [Test]
+    PROCEDURE CancelReservationILEService@179();
+    BEGIN
+      // Verify Dates on Reservation Entry when Supply is ILE and Demand is Service Line.
+      VerifyDatesOnReservationEntryAfterCancelReservation(DATABASE::"Item Ledger Entry",DATABASE::"Service Line");
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE CreateProdOrderFromSalesOrderWithMultipleUOM@164();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesQuantity@1006 : Decimal;
+      QtyPerUnitOfMeasure@1001 : Decimal;
+    BEGIN
+      // Create Sales Order with a UOM and create Production Order from Sales Order with another UOM. Verify Reservation Entry.
+
+      // Setup: Create Item (e.g., Base UOM is PCS), create a Unit of Measure (e.g., PALLET) with "Qty. per Unit of Measure" greater than 2.
+      // Create Sales Order for the Item, the UOM on Sales Line is PALLET.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      CreateItemUOMAndUpdateItem(Item,QtyPerUnitOfMeasure);
+      SalesQuantity := LibraryRandom.RandDec(10,2);
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQuantity);
+
+      // Exercise: Create Prod. Order from Sales Order, the UOM on Prod. Order Line is PCS. Reservation Entries will be generated.
+      CreateProductionOrderFromSalesOrder(SalesHeader);
+
+      // Verify: Quantity in Reservation Entries are correct.
+      VerifyQtyInReservationEntry(Item."No.",DATABASE::"Sales Line",-SalesQuantity);
+      VerifyQtyInReservationEntry(Item."No.",DATABASE::"Prod. Order Line",ROUND(SalesQuantity * QtyPerUnitOfMeasure,0.00001));
+    END;
+
+    [Test]
+    [HandlerFunctions(AutoReservationPageHandler)]
+    PROCEDURE ReserveSalesOrderFromILEWithMultipleUOM@158();
+    VAR
+      Item@1000 : Record 27;
+      SalesHeader@1003 : Record 36;
+      SalesQuantity@1006 : Decimal;
+      QtyPerUnitOfMeasure@1001 : Decimal;
+    BEGIN
+      // Increase Item's Inventory with a UOM, create Sales Order with another UOM and reserve from Item Ledger Entry. Verify Reservation Entry.
+
+      // Setup: Create Item (e.g., Base UOM is PCS) and update its Inventory, create a Unit of Measure (e.g., PALLET) with
+      // "Qty. per Unit of Measure" greater than 2. Create Sales Order for the Item, the UOM on Sales Line is PALLET.
+      Initialize;
+      CreateItemAndUpdateInventory(Item,LibraryRandom.RandDecInRange(50,100,2));
+      Item.GET(Item."No."); // Need to get Item because the Inventory has been updated
+      CreateItemUOMAndUpdateItem(Item,QtyPerUnitOfMeasure);
+      SalesQuantity := ROUND(SelectItemInventory(Item."No.") / QtyPerUnitOfMeasure,0.00001,'<');
+      CreateSalesOrder(SalesHeader,Item."No.",SalesQuantity);
+
+      // Exercise: Reserve from Item Ledger Entry for Sales Line, the UOM in Item Ledger Entry is PCS.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // Verify: Quantity in Reservation Entries are correct.
+      VerifyQtyInReservationEntry(Item."No.",DATABASE::"Sales Line",-SalesQuantity);
+      VerifyQtyInReservationEntry(Item."No.",DATABASE::"Item Ledger Entry",ROUND(SalesQuantity * QtyPerUnitOfMeasure,0.00001));
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler2,AvailableAssemblyHeadersPageHandler)]
+    PROCEDURE ReserveFromAssemblyLine@182();
+    VAR
+      Item@1000 : Record 27;
+      AssemblyItem@1003 : Record 27;
+      AssemblyHeader@1001 : Record 900;
+      AssemblyLine@1002 : Record 901;
+      Quantity@1004 : Decimal;
+    BEGIN
+      // [FEATURE] [Assembly] [Reservation] [Available - Assembly Header]
+      // [SCENARIO] Can reserve from page "Available - Assembly Headers" when supply is Assembly Line
+
+      // [GIVEN] Create Assembly Order with resulting Item "I" of Quantity "Q", set Due Date to workdate
+      Initialize;
+      CreateItemAndUpdateInventory(Item,LibraryRandom.RandIntInRange(100,200));
+      Quantity := LibraryRandom.RandIntInRange(10,20);
+      LibraryInventory.CreateItem(AssemblyItem);
+      LibraryAssembly.CreateAssemblyHeader(
+        AssemblyHeader,WORKDATE,AssemblyItem."No.",'',Quantity,'');
+      LibraryAssembly.CreateAssemblyLine(
+        AssemblyHeader,AssemblyLine,AssemblyLine.Type::Item,Item."No.",Item."Base Unit of Measure",Quantity,1,'');
+
+      // [GIVEN] Create Assembly Order with component of Item "I" of Quantity "Q", set Due Date to Workdate + 7 days
+      LibraryAssembly.CreateAssemblyHeader(
+        AssemblyHeader,CALCDATE('<+7D>',WORKDATE),LibraryInventory.CreateItemNo,'',Quantity,'');
+      LibraryAssembly.CreateAssemblyLine(
+        AssemblyHeader,AssemblyLine,AssemblyLine.Type::Item,AssemblyItem."No.",Item."Base Unit of Measure",Quantity,1,'');
+
+      // [WHEN] Reserve from page "Available - Assembly Headers"
+      ReservationFromAssemblyOrder(AssemblyHeader."No.");
+
+      // [THEN] Reservation Quantity equals to "Q"
+      VerifyQtyInReservationEntry(AssemblyItem."No.",DATABASE::"Assembly Line",-Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationPageHandler,ConfirmHandlerYes)]
+    PROCEDURE ReserveSavedOnCustomerChangeWhenBlankShipDateInSalesHeader@186();
+    VAR
+      Location@1002 : Record 14;
+      SalesHeader@1000 : Record 36;
+      SalesLine@1007 : Record 37;
+      ItemNo@1009 : Code[20];
+      TransactionDate@1008 : Date;
+      Qty@1003 : Decimal;
+    BEGIN
+      // [FEATURE] [Purchase Order] [Sales Order] [Reservation]
+      // [SCENARIO 379402] In Sales Line and in Reservation Entry, Shipment Date shouldn't be changed after changing of "Sell-to Customer No.".
+
+      Initialize;
+      LibraryWarehouse.CreateLocation(Location);
+      ItemNo := LibraryInventory.CreateItemNo;
+      Qty := LibraryRandom.RandInt(20);
+      // [GIVEN] Date "TransactionDate" of Purchase and Sales more than WORKDATE.
+      TransactionDate := WORKDATE + LibraryRandom.RandInt(30);
+      // [GIVEN] Purchase Order with "Expected Receipt Date" = "TransactionDate".
+      CreatePurchaseOrderWithExpectedReceiptDate(TransactionDate,Location.Code,ItemNo,Qty);
+      // [GIVEN] Sales Order with Shipment Date = WORKDATE and Sales Line with Shipment Date = "TransactionDate".
+      CreateSalesOrderWithShipmentDate(SalesHeader,SalesLine,TransactionDate,Location.Code,ItemNo,Qty);
+      // [GIVEN] Reservation of Quantity for Item in Sales Line.
+      ReservationFromSalesOrder(SalesHeader."No.");
+
+      // [WHEN] Change "Sell-to Customer No." in Sales Order.
+      SalesHeader.VALIDATE("Sell-to Customer No.",CreateCustomerWithLocationCode(Location.Code));
+
+      // [THEN] Shipment Date is not changed neither in Sales Line nor in Reservation Entry.
+      SalesLine.FIND;
+      VerifyShipmentDate(TransactionDate,SalesLine);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      CLEAR(InitialInventory);  // Clear Global variables.
+      CLEAR(ExpCurrentReservedQty);
+      CLEAR(MessageCounter);
+      CLEAR(OutputQuantity);
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      NoSeriesSetup;
+      ItemJournalSetup;
+      OutputJournalSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE NoSeriesSetup@31();
+    VAR
+      PurchasesPayablesSetup@1005 : Record 312;
+      SalesSetup@1004 : Record 311;
+    BEGIN
+      SalesSetup.GET;
+      SalesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesSetup.MODIFY(TRUE);
+
+      PurchasesPayablesSetup.GET;
+      PurchasesPayablesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      PurchasesPayablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ItemJournalSetup@144();
+    BEGIN
+      CLEAR(ItemJournalTemplate);
+      ItemJournalTemplate.INIT;
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplate.Type::Item);
+      ItemJournalTemplate.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalTemplate.MODIFY(TRUE);
+
+      CLEAR(ItemJournalBatch);
+      ItemJournalBatch.INIT;
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplate.Type,ItemJournalTemplate.Name);
+      ItemJournalBatch.VALIDATE("No. Series",LibraryUtility.GetGlobalNoSeriesCode);
+      ItemJournalBatch.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE OutputJournalSetup@93();
+    BEGIN
+      CLEAR(OutputItemJournalTemplate);
+      OutputItemJournalTemplate.INIT;
+      LibraryInventory.SelectItemJournalTemplateName(OutputItemJournalTemplate,OutputItemJournalTemplate.Type::Output);
+
+      CLEAR(OutputItemJournalBatch);
+      OutputItemJournalBatch.INIT;
+      LibraryInventory.SelectItemJournalBatchName(
+        OutputItemJournalBatch,OutputItemJournalTemplate.Type,OutputItemJournalTemplate.Name);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesReceivablesSetup@67(StockoutWarning@1000 : Boolean);
+    VAR
+      SalesReceivablesSetup@1001 : Record 311;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Stockout Warning",StockoutWarning);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateCustomerWithLocationCode@208(LocationCode@1000 : Code[10]) : Code[10];
+    VAR
+      Customer@1001 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Location Code",LocationCode);
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateItemWithLotSpecificTracking@156(VAR Item@1002 : Record 27;VAR ItemUnitOfMeasure@1000 : Record 5404);
+    VAR
+      ItemTrackingCode@1001 : Record 6502;
+    BEGIN
+      Item."No." := LibraryUtility.GenerateRandomCode(Item.FIELDNO("No."),DATABASE::Item);
+      RoundingIssuesItemUOM(
+        ItemUnitOfMeasure,Item."No.",
+        LibraryUtility.GenerateRandomCode(
+          ItemUnitOfMeasure.FIELDNO(Code),DATABASE::"Item Unit of Measure"),LibraryRandom.RandDec(10,2));
+      ItemTrackingCode.Code := LibraryUtility.GenerateRandomCode(ItemTrackingCode.FIELDNO(Code),DATABASE::"Item Tracking Code");
+      ItemTrackingCode."Lot Specific Tracking" := TRUE;
+      ItemTrackingCode.INSERT;
+      Item."Item Tracking Code" := ItemTrackingCode.Code;
+      Item."Base Unit of Measure" := ItemUnitOfMeasure.Code;
+      Item.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreateSupply@166(SourceType@1000 : Option;ItemUnitOfMeasure@1002 : Record 5404;LocationCode@1004 : Code[10];LotNo@1003 : Code[10];ExpectedReceiptDate@1001 : Date;Quantity@1005 : Decimal);
+    BEGIN
+      CASE SourceType OF
+        DATABASE::"Item Ledger Entry":
+          RoundingIssuesCreateILE(ItemUnitOfMeasure."Item No.",Quantity,ItemUnitOfMeasure.Code,LocationCode,LotNo,TRUE);
+        DATABASE::"Purchase Line":
+          CreatePurchaseAsSupply(ItemUnitOfMeasure."Item No.",Quantity,ItemUnitOfMeasure.Code,LocationCode,LotNo,ExpectedReceiptDate);
+        DATABASE::"Prod. Order Line":
+          CreateProdOrderAsSupply(ItemUnitOfMeasure."Item No.",Quantity,ItemUnitOfMeasure.Code,LocationCode,LotNo,ExpectedReceiptDate);
+        DATABASE::"Transfer Line":
+          CreateTransferAsSupply(ItemUnitOfMeasure."Item No.",Quantity,ItemUnitOfMeasure.Code,LocationCode,LotNo,ExpectedReceiptDate);
+        DATABASE::"Sales Line":
+          CreateSalesAsSupply(ItemUnitOfMeasure."Item No.",Quantity,ItemUnitOfMeasure.Code,LocationCode,LotNo,ExpectedReceiptDate);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateDemand@165(SourceType@1003 : Option;ItemUnitOfMeasureCAS@1002 : Record 5404;Qty@1005 : Decimal;LocationCode@1011 : Code[10];LotNo@1000 : Code[10];VAR QtyToReserve@1001 : Decimal;VAR QtyToReserveBase@1004 : Decimal;VAR SourceSubType@1010 : Option;VAR SourceID@1009 : Code[20];VAR SourceRefNo@1008 : Integer;VAR SourceProdOrderLineNo@1007 : Integer;ShipmentDate@1006 : Date);
+    BEGIN
+      CASE SourceType OF
+        DATABASE::"Sales Line":
+          CreateSalesAsDemand(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,ShipmentDate);
+        DATABASE::"Purchase Line":
+          CreatePurchaseAsDemand(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,ShipmentDate);
+        DATABASE::"Transfer Line":
+          CreateTransferAsDemand(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,ShipmentDate);
+        DATABASE::"Prod. Order Component":
+          CreateProdOrderCompAsdemand(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,ShipmentDate);
+        DATABASE::"Planning Component":
+          CreatePlanningCompAsDemand(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,ShipmentDate);
+        DATABASE::"Service Line":
+          CreateServiceAsDemand(ItemUnitOfMeasureCAS,Qty,LocationCode,LotNo,
+            QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,ShipmentDate);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseLine@167(VAR PurchaseLine@1000 : Record 39;ItemNo@1001 : Code[20];UOMCode@1002 : Code[10];Qty@1005 : Decimal;LocationCode@1006 : Code[10];DocumentType@1007 : Option;ExpectedReceiptDate@1008 : Date);
+    VAR
+      ItemUnitOfMeasure@1004 : Record 5404;
+      RecRef@1003 : RecordRef;
+    BEGIN
+      PurchaseLine."Document Type" := DocumentType;
+      PurchaseLine."Document No." := LibraryUtility.GenerateGUID;
+      RecRef.GETTABLE(PurchaseLine);
+      PurchaseLine."Line No." := LibraryUtility.GetNewLineNo(RecRef,PurchaseLine.FIELDNO("Line No."));
+      PurchaseLine.Type := PurchaseLine.Type::Item;
+      PurchaseLine."No." := ItemNo;
+      PurchaseLine."Unit of Measure Code" := UOMCode;
+      ItemUnitOfMeasure.GET(ItemNo,UOMCode);
+      PurchaseLine."Qty. per Unit of Measure" := ItemUnitOfMeasure."Qty. per Unit of Measure";
+      PurchaseLine.Quantity := Qty;
+      PurchaseLine."Quantity (Base)" := Qty * PurchaseLine."Qty. per Unit of Measure";
+      PurchaseLine."Outstanding Quantity" := PurchaseLine.Quantity;
+      PurchaseLine."Outstanding Qty. (Base)" := PurchaseLine."Quantity (Base)";
+      PurchaseLine."Expected Receipt Date" := ExpectedReceiptDate;
+      PurchaseLine."Location Code" := LocationCode;
+      PurchaseLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderWithExpectedReceiptDate@239(ExpectedReceiptDate@1000 : Date;LocationCode@1006 : Code[10];ItemNo@1005 : Code[20];Qty@1001 : Decimal);
+    VAR
+      PurchaseHeader@1003 : Record 38;
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,LibraryPurchase.CreateVendorNo);
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,Qty);
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.VALIDATE("Expected Receipt Date",ExpectedReceiptDate);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateProdOrderLine@168(VAR ProdOrderLine@1000 : Record 5406;ItemNo@1001 : Code[20];UOMCode@1002 : Code[10];Qty@1005 : Decimal;LocationCode@1006 : Code[10];DueDate@1007 : Date);
+    VAR
+      ItemUnitOfMeasure@1003 : Record 5404;
+      RecRef@1004 : RecordRef;
+    BEGIN
+      ProdOrderLine.Status := ProdOrderLine.Status::"Firm Planned";
+      ProdOrderLine."Prod. Order No." := LibraryUtility.GenerateGUID;
+      RecRef.GETTABLE(ProdOrderLine);
+      ProdOrderLine."Line No." := LibraryUtility.GetNewLineNo(RecRef,ProdOrderLine.FIELDNO("Line No."));
+      ProdOrderLine."Item No." := ItemNo;
+      ProdOrderLine."Unit of Measure Code" := UOMCode;
+      ItemUnitOfMeasure.GET(ItemNo,UOMCode);
+      ProdOrderLine."Qty. per Unit of Measure" := ItemUnitOfMeasure."Qty. per Unit of Measure";
+      ProdOrderLine.Quantity := Qty;
+      ProdOrderLine."Quantity (Base)" := Qty * ProdOrderLine."Qty. per Unit of Measure";
+      ProdOrderLine."Remaining Quantity" := ProdOrderLine.Quantity;
+      ProdOrderLine."Remaining Qty. (Base)" := ProdOrderLine."Quantity (Base)";
+      ProdOrderLine."Due Date" := DueDate;
+      ProdOrderLine."Location Code" := LocationCode;
+      ProdOrderLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreateTransferLine@170(VAR TransferLine@1000 : Record 5741;ItemNo@1001 : Code[20];UOMCode@1002 : Code[10];Qty@1005 : Decimal;TransferFromCode@1007 : Code[10];TransferToCode@1008 : Code[10];ReceiptDate@1009 : Date;ShipmentDate@1010 : Date);
+    VAR
+      ItemUnitOfMeasure@1003 : Record 5404;
+      RecRef@1004 : RecordRef;
+    BEGIN
+      TransferLine."Document No." := LibraryUtility.GenerateGUID;
+      RecRef.GETTABLE(TransferLine);
+      TransferLine."Line No." := LibraryUtility.GetNewLineNo(RecRef,TransferLine.FIELDNO("Line No."));
+      TransferLine."Item No." := ItemNo;
+      TransferLine."Unit of Measure Code" := UOMCode;
+      ItemUnitOfMeasure.GET(ItemNo,UOMCode);
+      TransferLine."Qty. per Unit of Measure" := ItemUnitOfMeasure."Qty. per Unit of Measure";
+      TransferLine.Quantity := Qty;
+      TransferLine."Quantity (Base)" := Qty * TransferLine."Qty. per Unit of Measure";
+      TransferLine."Outstanding Quantity" := TransferLine.Quantity;
+      TransferLine."Outstanding Qty. (Base)" := TransferLine."Quantity (Base)";
+      TransferLine."Receipt Date" := ReceiptDate;
+      TransferLine."Shipment Date" := ShipmentDate;
+      TransferLine."Transfer-from Code" := TransferFromCode;
+      TransferLine."Transfer-to Code" := TransferToCode;
+      TransferLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreateSaleLine@171(VAR SalesLine@1002 : Record 37;DocumentType@1003 : Option;ItemNo@1001 : Code[20];UOMCode@1000 : Code[10];Qty@1006 : Decimal;LocationCode@1007 : Code[10];ShipmentDate@1008 : Date);
+    VAR
+      ItemUnitOfMeasure@1004 : Record 5404;
+      RecRef@1005 : RecordRef;
+    BEGIN
+      SalesLine."Document Type" := DocumentType;
+      SalesLine."Document No." := LibraryUtility.GenerateGUID;
+      RecRef.GETTABLE(SalesLine);
+      SalesLine."Line No." := LibraryUtility.GetNewLineNo(RecRef,SalesLine.FIELDNO("Line No."));
+      SalesLine.Type := SalesLine.Type::Item;
+      SalesLine."No." := ItemNo;
+      SalesLine.Quantity := Qty;
+      SalesLine."Unit of Measure Code" := ItemUnitOfMeasure.Code;
+      ItemUnitOfMeasure.GET(ItemNo,UOMCode);
+      SalesLine."Qty. per Unit of Measure" := ItemUnitOfMeasure."Qty. per Unit of Measure";
+      SalesLine."Quantity (Base)" := SalesLine.Quantity * SalesLine."Qty. per Unit of Measure";
+      SalesLine."Outstanding Quantity" := SalesLine.Quantity;
+      SalesLine."Outstanding Qty. (Base)" := SalesLine."Quantity (Base)";
+      SalesLine."Shipment Date" := ShipmentDate;
+      SalesLine."Location Code" := LocationCode;
+      SalesLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderWithShipmentDate@240(VAR SalesHeader@1007 : Record 36;VAR SalesLine@1006 : Record 37;ShipmentDate@1001 : Date;LocationCode@1003 : Code[10];ItemNo@1002 : Code[20];Qty@1000 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,LibrarySales.CreateCustomerNo);
+      SalesHeader.VALIDATE("Location Code",LocationCode);
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Qty);
+      SalesLine.VALIDATE("Shipment Date",ShipmentDate);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateProdOrderComp@173(VAR ProdOrderComp@1002 : Record 5407;ItemNo@1001 : Code[20];UOMCode@1000 : Code[10];Qty@1005 : Decimal;LocationCode@1006 : Code[10];DueDate@1007 : Date);
+    VAR
+      ItemUnitOfMeasure@1003 : Record 5404;
+      RecRef@1004 : RecordRef;
+    BEGIN
+      ProdOrderComp.Status := ProdOrderComp.Status::"Firm Planned";
+      ProdOrderComp."Prod. Order No." := LibraryUtility.GenerateGUID;
+      RecRef.GETTABLE(ProdOrderComp);
+      ProdOrderComp."Prod. Order Line No." := LibraryUtility.GetNewLineNo(RecRef,ProdOrderComp.FIELDNO("Prod. Order Line No."));
+      ProdOrderComp."Line No." := LibraryUtility.GetNewLineNo(RecRef,ProdOrderComp.FIELDNO("Line No."));
+      ProdOrderComp."Item No." := ItemNo;
+      ItemUnitOfMeasure.GET(ItemNo,UOMCode);
+      ProdOrderComp."Unit of Measure Code" := ItemUnitOfMeasure.Code;
+      ProdOrderComp."Qty. per Unit of Measure" := ItemUnitOfMeasure."Qty. per Unit of Measure";
+      ProdOrderComp.Quantity := Qty;
+      ProdOrderComp."Quantity (Base)" := Qty * ProdOrderComp."Qty. per Unit of Measure";
+      ProdOrderComp."Remaining Quantity" := ProdOrderComp.Quantity;
+      ProdOrderComp."Remaining Qty. (Base)" := ProdOrderComp."Quantity (Base)";
+      ProdOrderComp."Due Date" := DueDate;
+      ProdOrderComp."Location Code" := LocationCode;
+      ProdOrderComp.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreatePlanningComp@177(VAR PlanningComp@1000 : Record 99000829;ItemUnitOfMeasure@1001 : Record 5404;Qty@1002 : Decimal;LocationCode@1004 : Code[10];DueDate@1005 : Date);
+    VAR
+      RecRef@1003 : RecordRef;
+    BEGIN
+      RecRef.GETTABLE(PlanningComp);
+      PlanningComp."Line No." := LibraryUtility.GetNewLineNo(RecRef,PlanningComp.FIELDNO("Line No."));
+      PlanningComp."Item No." := ItemUnitOfMeasure."Item No.";
+      PlanningComp."Unit of Measure Code" := ItemUnitOfMeasure.Code;
+      PlanningComp."Qty. per Unit of Measure" := ItemUnitOfMeasure."Qty. per Unit of Measure";
+      PlanningComp.Quantity := Qty;
+      PlanningComp."Quantity (Base)" := Qty * PlanningComp."Qty. per Unit of Measure";
+      PlanningComp."Net Quantity (Base)" := PlanningComp."Quantity (Base)";
+      PlanningComp."Due Date" := DueDate;
+      PlanningComp."Location Code" := LocationCode;
+      PlanningComp.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreateServiceLine@180(VAR ServiceLine@1002 : Record 5902;ItemNo@1001 : Code[20];UOMCode@1000 : Code[10];Qty@1005 : Decimal;LocationCode@1006 : Code[10];NeedByDate@1007 : Date);
+    VAR
+      ItemUnitOfMeasure@1003 : Record 5404;
+      RecRef@1004 : RecordRef;
+    BEGIN
+      ServiceLine."Document Type" := ServiceLine."Document Type"::Order;
+      ServiceLine."Document No." := LibraryUtility.GenerateGUID;
+      RecRef.GETTABLE(ServiceLine);
+      ServiceLine."Line No." := LibraryUtility.GetNewLineNo(RecRef,ServiceLine.FIELDNO("Line No."));
+      ServiceLine.Type := ServiceLine.Type::Item;
+      ServiceLine."No." := ItemNo;
+      ServiceLine.Quantity := Qty;
+      ItemUnitOfMeasure.GET(ItemNo,UOMCode);
+      ServiceLine."Unit of Measure Code" := ItemUnitOfMeasure.Code;
+      ServiceLine."Qty. per Unit of Measure" := ItemUnitOfMeasure."Qty. per Unit of Measure";
+      ServiceLine."Quantity (Base)" := ServiceLine.Quantity * ServiceLine."Qty. per Unit of Measure";
+      ServiceLine."Outstanding Quantity" := ServiceLine.Quantity;
+      ServiceLine."Outstanding Qty. (Base)" := ServiceLine."Quantity (Base)";
+      ServiceLine."Needed by Date" := NeedByDate;
+      ServiceLine."Location Code" := LocationCode;
+      ServiceLine.INSERT;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseAsSupply@197(ItemNo@1001 : Code[20];Qty@1002 : Decimal;UOMCode@1003 : Code[10];LocationCode@1006 : Code[10];LotNo@1007 : Code[10];ExpectedReceiptDate@1004 : Date);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      CreatePurchaseLine(PurchaseLine,ItemNo,UOMCode,Qty,LocationCode,PurchaseLine."Document Type"::Order,ExpectedReceiptDate);
+      RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,PurchaseLine."Quantity (Base)",
+        DATABASE::"Purchase Line",PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.",
+        0,'',PurchaseLine."Qty. per Unit of Measure",LotNo,PurchaseLine."Expected Receipt Date");
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseAsDemand@196(ItemUnitOfMeasureCAS@1009 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1007 : Code[10];VAR QtyToReserve@1002 : Decimal;VAR QtyToReserveBase@1001 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1006 : Integer;VAR SourceProdOrderLineNo@1004 : Integer;ExpectedReceiptDate@1003 : Date);
+    VAR
+      PurchaseLine@1000 : Record 39;
+    BEGIN
+      CreatePurchaseLine(PurchaseLine,
+        ItemUnitOfMeasureCAS."Item No.",ItemUnitOfMeasureCAS.Code,Qty,
+        LocationCode,PurchaseLine."Document Type"::Order,ExpectedReceiptDate);
+      RoundingIssuesCreateReservationEntry(FALSE,TRUE,PurchaseLine."No.",-PurchaseLine.Quantity,-PurchaseLine."Quantity (Base)",
+        DATABASE::"Purchase Line",PurchaseLine."Document Type",PurchaseLine."Document No.",PurchaseLine."Line No.",0,'',
+        PurchaseLine."Qty. per Unit of Measure",LotNo,PurchaseLine."Expected Receipt Date");
+
+      QtyToReserve := PurchaseLine.Quantity;
+      QtyToReserveBase := PurchaseLine."Quantity (Base)";
+      SourceSubType := PurchaseLine."Document Type";
+      SourceID := PurchaseLine."Document No.";
+      SourceRefNo := PurchaseLine."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE CreateProdOrderAsSupply@195(ItemNo@1001 : Code[20];Qty@1002 : Decimal;UOMCode@1003 : Code[10];LocationCode@1006 : Code[10];LotNo@1007 : Code[10];DueDate@1004 : Date);
+    VAR
+      ProdOrderLine@1000 : Record 5406;
+    BEGIN
+      CreateProdOrderLine(ProdOrderLine,ItemNo,UOMCode,Qty,LocationCode,DueDate);
+      RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,ProdOrderLine."Quantity (Base)",
+        DATABASE::"Prod. Order Line",ProdOrderLine.Status,ProdOrderLine."Prod. Order No.",0,ProdOrderLine."Line No.",'',
+        ProdOrderLine."Qty. per Unit of Measure",LotNo,ProdOrderLine."Due Date");
+    END;
+
+    LOCAL PROCEDURE CreateProdOrderCompAsdemand@193(ItemUnitOfMeasureCAS@1009 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1007 : Code[10];VAR QtyToReserve@1002 : Decimal;VAR QtyToReserveBase@1001 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1006 : Integer;VAR SourceProdOrderLineNo@1004 : Integer;DueDate@1003 : Date);
+    VAR
+      ProdOrderComp@1000 : Record 5407;
+    BEGIN
+      CreateProdOrderComp(ProdOrderComp,ItemUnitOfMeasureCAS."Item No.",ItemUnitOfMeasureCAS.Code,Qty,LocationCode,DueDate);
+      RoundingIssuesCreateReservationEntry(FALSE,TRUE,ProdOrderComp."Item No.",-ProdOrderComp.Quantity,
+        -ProdOrderComp."Quantity (Base)",
+        DATABASE::"Prod. Order Component",ProdOrderComp.Status,ProdOrderComp."Prod. Order No.",ProdOrderComp."Line No.",
+        ProdOrderComp."Prod. Order Line No.",'',ProdOrderComp."Qty. per Unit of Measure",LotNo,ProdOrderComp."Due Date");
+
+      QtyToReserve := ProdOrderComp.Quantity;
+      QtyToReserveBase := ProdOrderComp."Quantity (Base)";
+      SourceSubType := ProdOrderComp.Status;
+      SourceID := ProdOrderComp."Prod. Order No.";
+      SourceRefNo := ProdOrderComp."Line No.";
+      SourceProdOrderLineNo := ProdOrderComp."Prod. Order Line No.";
+    END;
+
+    LOCAL PROCEDURE CreatePlanningCompAsDemand@192(ItemUnitOfMeasureCAS@1009 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1007 : Code[10];VAR QtyToReserve@1002 : Decimal;VAR QtyToReserveBase@1001 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1006 : Integer;VAR SourceProdOrderLineNo@1004 : Integer;DueDate@1003 : Date);
+    VAR
+      PlanningComp@1000 : Record 99000829;
+    BEGIN
+      CreatePlanningComp(PlanningComp,ItemUnitOfMeasureCAS,Qty,LocationCode,DueDate);
+      RoundingIssuesCreateReservationEntry(FALSE,TRUE,PlanningComp."Item No.",-PlanningComp.Quantity,-PlanningComp."Quantity (Base)",
+        DATABASE::"Planning Component",0,'',PlanningComp."Line No.",
+        0,'',PlanningComp."Qty. per Unit of Measure",LotNo,PlanningComp."Due Date");
+
+      QtyToReserve := PlanningComp.Quantity;
+      QtyToReserveBase := PlanningComp."Quantity (Base)";
+      SourceSubType := 0;
+      SourceID := '';
+      SourceRefNo := PlanningComp."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE CreateTransferAsSupply@189(ItemNo@1001 : Code[20];Qty@1002 : Decimal;UOMCode@1003 : Code[10];LocationCode@1006 : Code[10];LotNo@1007 : Code[10];ReceiptDate@1004 : Date);
+    VAR
+      TransferLine@1000 : Record 5741;
+    BEGIN
+      CreateTransferLine(TransferLine,ItemNo,UOMCode,Qty,LibraryUtility.GenerateGUID,LocationCode,ReceiptDate,0D);
+      RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,TransferLine."Quantity (Base)",
+        DATABASE::"Transfer Line",1,TransferLine."Document No.",TransferLine."Line No.",0,'',
+        TransferLine."Qty. per Unit of Measure",LotNo,TransferLine."Receipt Date");
+    END;
+
+    LOCAL PROCEDURE CreateTransferAsDemand@188(ItemUnitOfMeasureCAS@1008 : Record 5404;Qty@1004 : Decimal;LocationCode@1012 : Code[10];LotNo@1007 : Code[10];VAR QtyToReserve@1002 : Decimal;VAR QtyToReserveBase@1001 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1009 : Integer;VAR SourceProdOrderLineNo@1006 : Integer;ShipmentDate@1003 : Date);
+    VAR
+      TransferLine@1000 : Record 5741;
+    BEGIN
+      CreateTransferLine(TransferLine,
+        ItemUnitOfMeasureCAS."Item No.",ItemUnitOfMeasureCAS.Code,Qty,LocationCode,LibraryUtility.GenerateGUID,0D,ShipmentDate);
+      RoundingIssuesCreateReservationEntry(FALSE,TRUE,TransferLine."Item No.",-TransferLine.Quantity,-TransferLine."Quantity (Base)",
+        DATABASE::"Transfer Line",0,TransferLine."Document No.",TransferLine."Line No.",0,'',
+        TransferLine."Qty. per Unit of Measure",LotNo,TransferLine."Shipment Date");
+
+      QtyToReserve := TransferLine.Quantity;
+      QtyToReserveBase := TransferLine."Quantity (Base)";
+      SourceSubType := 0;
+      SourceID := TransferLine."Document No.";
+      SourceRefNo := TransferLine."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE CreateSalesAsSupply@187(ItemNo@1003 : Code[20];Qty@1002 : Decimal;UOMCode@1001 : Code[10];LocationCode@1006 : Code[10];LotNo@1000 : Code[10];ShipmentDate@1004 : Date);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      CreateSaleLine(SalesLine,SalesLine."Document Type"::"Return Order",ItemNo,UOMCode,Qty,LocationCode,ShipmentDate);
+      RoundingIssuesCreateReservationEntry(TRUE,TRUE,ItemNo,0,SalesLine."Quantity (Base)",
+        DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",0,'',
+        SalesLine."Qty. per Unit of Measure",LotNo,SalesLine."Shipment Date");
+    END;
+
+    LOCAL PROCEDURE CreateSalesAsDemand@185(ItemUnitOfMeasureCAS@1004 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1003 : Code[10];VAR QtyToReserve@1001 : Decimal;VAR QtyToReserveBase@1000 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1009 : Integer;VAR SourceProdOrderLineNo@1002 : Integer;ShipmentDate@1006 : Date);
+    VAR
+      SalesLine@1005 : Record 37;
+    BEGIN
+      CreateSaleLine(SalesLine,SalesLine."Document Type"::Order,ItemUnitOfMeasureCAS."Item No.",
+        ItemUnitOfMeasureCAS.Code,Qty,LocationCode,ShipmentDate);
+      RoundingIssuesCreateReservationEntry(FALSE,TRUE,SalesLine."No.",-SalesLine.Quantity,-SalesLine."Quantity (Base)",
+        DATABASE::"Sales Line",SalesLine."Document Type",SalesLine."Document No.",SalesLine."Line No.",0,'',
+        SalesLine."Qty. per Unit of Measure",LotNo,SalesLine."Shipment Date");
+
+      QtyToReserve := SalesLine.Quantity;
+      QtyToReserveBase := SalesLine."Quantity (Base)";
+      SourceSubType := SalesLine."Document Type";
+      SourceID := SalesLine."Document No.";
+      SourceRefNo := SalesLine."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE CreateServiceAsDemand@183(ItemUnitOfMeasureCAS@1004 : Record 5404;Qty@1008 : Decimal;LocationCode@1012 : Code[10];LotNo@1003 : Code[10];VAR QtyToReserve@1001 : Decimal;VAR QtyToReserveBase@1000 : Decimal;VAR SourceSubType@1011 : Option;VAR SourceID@1010 : Code[20];VAR SourceRefNo@1009 : Integer;VAR SourceProdOrderLineNo@1002 : Integer;NeedByDate@1006 : Date);
+    VAR
+      ServiceLine@1005 : Record 5902;
+    BEGIN
+      CreateServiceLine(ServiceLine,ItemUnitOfMeasureCAS."Item No.",ItemUnitOfMeasureCAS.Code,Qty,LocationCode,NeedByDate);
+      RoundingIssuesCreateReservationEntry(FALSE,TRUE,ServiceLine."No.",-ServiceLine.Quantity,-ServiceLine."Quantity (Base)",
+        DATABASE::"Service Line",ServiceLine."Document Type",ServiceLine."Document No.",ServiceLine."Line No.",0,'',
+        ServiceLine."Qty. per Unit of Measure",LotNo,ServiceLine."Needed by Date");
+
+      QtyToReserve := ServiceLine.Quantity;
+      QtyToReserveBase := ServiceLine."Quantity (Base)";
+      SourceSubType := ServiceLine."Document Type";
+      SourceID := ServiceLine."Document No.";
+      SourceRefNo := ServiceLine."Line No.";
+      SourceProdOrderLineNo := 0;
+    END;
+
+    LOCAL PROCEDURE CreateItemAndUpdateInventory@6(VAR Item@1001 : Record 27;Quantity@1000 : Decimal);
+    VAR
+      ItemJournalLine@1002 : Record 83;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      CreateItemJournalLine(ItemJournalLine,Item."No.",Quantity,ItemJournalLine."Entry Type"::Purchase);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalLine@66(VAR ItemJournalLine@1003 : Record 83;ItemNo@1002 : Code[20];Quantity@1001 : Decimal;EntryType@1000 : Option);
+    BEGIN
+      // Create Item Journal to populate Item Quantity.
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,EntryType,ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Unit Cost",LibraryRandom.RandDec(10,2));
+      ItemJournalLine.VALIDATE("Unit Amount",ItemJournalLine."Unit Cost");
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@48(VAR SalesHeader@1000 : Record 36;ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+    END;
+
+    LOCAL PROCEDURE CreateProductionOrderFromSalesOrder@178(SalesHeader@1000 : Record 36);
+    VAR
+      ProductionOrder@1001 : Record 5405;
+      OrderType@1002 : 'ItemOrder,ProjectOrder';
+    BEGIN
+      LibraryVariableStorage.Enqueue(ProdOrderCreatedMsg); // Enqueue variable for created Production Order message in MessageHandler.
+      LibraryManufacturing.CreateProductionOrderFromSalesOrder(SalesHeader,ProductionOrder.Status::Released,OrderType::ItemOrder);
+    END;
+
+    LOCAL PROCEDURE CreateItemUOMAndUpdateItem@176(VAR Item@1000 : Record 27;VAR QtyPerUnitOfMeasure@1002 : Decimal);
+    VAR
+      ItemUnitOfMeasure@1001 : Record 5404;
+    BEGIN
+      LibraryInventory.CreateItemUnitOfMeasureCode(ItemUnitOfMeasure,Item."No.",LibraryRandom.RandDec(10,2));
+      Item.VALIDATE("Sales Unit of Measure",ItemUnitOfMeasure.Code);
+      Item.VALIDATE("Replenishment System",Item."Replenishment System"::"Prod. Order");
+      Item.MODIFY(TRUE);
+      QtyPerUnitOfMeasure := ItemUnitOfMeasure."Qty. per Unit of Measure";
+    END;
+
+    LOCAL PROCEDURE ReservationFromSalesOrder@5(No@1000 : Code[20]);
+    VAR
+      SalesOrder@1001 : TestPage 42;
+    BEGIN
+      SalesOrder.OPENVIEW;
+      SalesOrder.FILTER.SETFILTER("No.",No);
+      SalesOrder.SalesLines.Reserve.INVOKE;
+      SalesOrder.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ReservationFromProductionOrderComponents@105(ItemNo@1000 : Code[20]);
+    VAR
+      ProdOrderComponents@1001 : TestPage 99000818;
+    BEGIN
+      ProdOrderComponents.OPENVIEW;
+      ProdOrderComponents.FILTER.SETFILTER("Item No.",ItemNo);
+      ProdOrderComponents.Reserve.INVOKE;
+      ProdOrderComponents.CLOSE;
+    END;
+
+    LOCAL PROCEDURE ReservationFromAssemblyOrder@207(No@1000 : Code[20]);
+    VAR
+      AssemblyOrder@1001 : TestPage 900;
+    BEGIN
+      AssemblyOrder.OPENVIEW;
+      AssemblyOrder.FILTER.SETFILTER("No.",No);
+      AssemblyOrder.Lines.Reserve.INVOKE;
+      AssemblyOrder.CLOSE;
+    END;
+
+    LOCAL PROCEDURE SelectSalesLineQty@1(DocumentNo@1000 : Code[20]) : Decimal;
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      SelectSalesLine(SalesLine,DocumentNo);
+      EXIT(SalesLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE SelectSalesLine@92(VAR SalesLine@1002 : Record 37;DocumentNo@1000 : Code[20]);
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrder@33(VAR PurchaseHeader@1000 : Record 38;ItemNo@1002 : Code[20];Quantity@1003 : Decimal;Invoice@1004 : Boolean);
+    BEGIN
+      CreatePurchaseOrder(PurchaseHeader,ItemNo,Quantity);
+      LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,Invoice);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@63(VAR PurchaseHeader@1000 : Record 38;ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      PurchaseLine@1001 : Record 39;
+    BEGIN
+      LibraryPurchase.CreatePurchaseDocumentWithItem(
+        PurchaseHeader,PurchaseLine,PurchaseHeader."Document Type"::Order,'',ItemNo,Quantity,'',0D);
+    END;
+
+    LOCAL PROCEDURE UpdatePurchLineQtyToReceive@59(DocumentNo@1000 : Code[20];QtyToReceive@1001 : Decimal);
+    VAR
+      PurchaseLine@1002 : Record 39;
+    BEGIN
+      PurchaseLine.SETRANGE("Document Type",PurchaseLine."Document Type"::Order);
+      PurchaseLine.SETRANGE("Document No.",DocumentNo);
+      PurchaseLine.FINDFIRST;
+      PurchaseLine.VALIDATE("Qty. to Receive",QtyToReceive);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemsSetup@72(VAR Item@1005 : Record 27) : Code[20];
+    VAR
+      ProductionBOMHeader@1000 : Record 99000771;
+      Item2@1001 : Record 27;
+    BEGIN
+      // Create Child Items.
+      CreateItemAndUpdateInventory(Item2,LibraryRandom.RandDec(100,2));
+
+      // Create Production BOM, Parent item and Attach Production BOM.
+      CreateCertifiedProdBOM(ProductionBOMHeader,Item2);
+      CreateProdItem(Item,ProductionBOMHeader."No.");
+      EXIT(Item2."No.");
+    END;
+
+    LOCAL PROCEDURE CreateCertifiedProdBOM@78(VAR ProductionBOMHeader@1001 : Record 99000771;Item@1002 : Record 27);
+    VAR
+      ProductionBOMLine@1000 : Record 99000772;
+    BEGIN
+      // Create Production BOM.
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,Item."Base Unit of Measure");
+      LibraryManufacturing.CreateProductionBOMLine(ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,Item."No.",1);  // Value important.
+      ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::Certified);
+      ProductionBOMHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateProdItem@27(VAR Item@1000 : Record 27;ProductionBOMNo@1001 : Code[20]);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Manufacturing Policy",Item."Manufacturing Policy"::"Make-to-Order");
+      Item.VALIDATE("Production BOM No.",ProductionBOMNo);
+      Item.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectItemInventory@91(ItemNo@1000 : Code[20]) : Decimal;
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.GET(ItemNo);
+      Item.CALCFIELDS(Inventory);
+      EXIT(Item.Inventory);
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshProdOrder@58(VAR ProductionOrder@1000 : Record 5405;Status@1001 : Option;SourceNo@1002 : Code[20];Quantity@1003 : Decimal);
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(ProductionOrder,Status,ProductionOrder."Source Type"::Item,SourceNo,Quantity);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+    END;
+
+    LOCAL PROCEDURE DeleteProductionOrder@38(Status@1000 : Option;SourceNo@1001 : Code[20]);
+    VAR
+      ProductionOrder@1002 : Record 5405;
+    BEGIN
+      ProductionOrder.SETRANGE(Status,Status);
+      ProductionOrder.SETRANGE("Source No.",SourceNo);
+      ProductionOrder.FINDFIRST;
+      ProductionOrder.DELETE(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateOutputJournal@62(ProductionOrderNo@1001 : Code[20]);
+    VAR
+      ItemJournalLine@1000 : Record 83;
+    BEGIN
+      LibraryInventory.ClearItemJournal(OutputItemJournalTemplate,OutputItemJournalBatch);
+      LibraryManufacturing.CreateOutputJournal(ItemJournalLine,OutputItemJournalTemplate,OutputItemJournalBatch,'',ProductionOrderNo);
+      LibraryInventory.OutputJnlExplRoute(ItemJournalLine);
+    END;
+
+    LOCAL PROCEDURE SelectOutputJournalLine@60(VAR ItemJournalLine@1000 : Record 83;ProductionOrderNo@1001 : Code[20]);
+    BEGIN
+      ItemJournalLine.SETRANGE("Order No.",ProductionOrderNo);
+      ItemJournalLine.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindReservationEntry@204(VAR ReservationEntry@1003 : Record 337;ItemNo@1000 : Code[20];ReservationStatus@1001 : Option;SourceType@1002 : Integer);
+    BEGIN
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      ReservationEntry.SETRANGE("Reservation Status",ReservationStatus);
+      ReservationEntry.SETRANGE("Source Type",SourceType);
+      ReservationEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdateOutputJournal@57(VAR ItemJournalLine@1000 : Record 83;FinishedQty@1001 : Decimal);
+    BEGIN
+      ItemJournalLine.VALIDATE("Output Quantity",FinishedQty);
+      ItemJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectItemLedgerEntry@121(VAR ItemLedgerEntry@1001 : Record 32;ItemNo@1000 : Code[20]);
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE UpdateSalesLineApplyToEntry@125(DocumentNo@1002 : Code[20];ApplyToItemEntry@1001 : Integer);
+    VAR
+      SalesLine@1003 : Record 37;
+    BEGIN
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.FINDFIRST;
+      SalesLine.VALIDATE("Appl.-to Item Entry",ApplyToItemEntry);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE SelectGLEntry@115(VAR GLEntry@1000 : Record 17;Item@1001 : Record 27);
+    VAR
+      InventoryPostingSetup@1002 : Record 5813;
+      ItemLedgerEntry@1003 : Record 32;
+    BEGIN
+      InventoryPostingSetup.SETRANGE("Invt. Posting Group Code",Item."Inventory Posting Group");
+      InventoryPostingSetup.FINDFIRST;
+      SelectItemLedgerEntry(ItemLedgerEntry,Item."No.");
+
+      GLEntry.SETRANGE("Document No.",ItemLedgerEntry."Document No.");
+      GLEntry.SETRANGE("G/L Account No.",InventoryPostingSetup."Inventory Account");
+      GLEntry.FINDSET;
+    END;
+
+    LOCAL PROCEDURE VerifyReservationQty@3(Reservation@1003 : TestPage 498);
+    BEGIN
+      Assert.AreEqual(InitialInventory,Reservation."Total Quantity".ASDECIMAL,ErrMsgQty);
+      Assert.AreEqual(ExpCurrentReservedQty,Reservation."Current Reserved Quantity".ASDECIMAL,ErrMsgReservedQty);
+    END;
+
+    LOCAL PROCEDURE VerifyReservQtyTwoAvailableLines@30(Reservation@1003 : TestPage 498);
+    VAR
+      ActualTotalAvailable@1000 : Decimal;
+      ActualCurrentReserved@1004 : Decimal;
+    BEGIN
+      // Verify values for both Production Order lines.
+      // Retrieve value from Production Order lines.
+      Reservation.FIRST;
+      ActualTotalAvailable := Reservation."Total Quantity".ASDECIMAL;
+      ActualCurrentReserved := Reservation."Current Reserved Quantity".ASDECIMAL;
+      Reservation.NEXT;
+      ActualTotalAvailable += Reservation."Total Quantity".ASDECIMAL;
+      ActualCurrentReserved += Reservation."Current Reserved Quantity".ASDECIMAL;
+
+      // Verify Total available and reserved quantity.
+      Assert.AreEqual(InitialInventory,ActualTotalAvailable,ErrMsgQty);
+      Assert.AreEqual(ExpCurrentReservedQty,ActualCurrentReserved,ErrMsgReservedQty);
+    END;
+
+    LOCAL PROCEDURE VerifyZeroReservationSalesQty@36(DocumentNo@1000 : Code[20]);
+    VAR
+      SalesLine@1001 : Record 37;
+    BEGIN
+      SalesLine.SETRANGE("Document Type",SalesLine."Document Type"::Order);
+      SalesLine.SETRANGE("Document No.",DocumentNo);
+      SalesLine.FINDFIRST;
+      SalesLine.CALCFIELDS("Reserved Quantity");
+      SalesLine.TESTFIELD("Reserved Quantity",0);
+    END;
+
+    LOCAL PROCEDURE VerifyCurrentQty@70(CheckAvailability@1000 : TestPage 342);
+    BEGIN
+      // Verify Current Qty on Check Availability page equals qty in negative adjustment.
+      Assert.AreEqual(NegativeAdjQty,CheckAvailability.CurrentQuantity.ASDECIMAL,ErrMsgQty);
+    END;
+
+    LOCAL PROCEDURE VerifyQtyOnItemLedgerEntry@50(ItemNo@1000 : Code[20];Quantity@1001 : Decimal);
+    VAR
+      ItemLedgerEntry@1002 : Record 32;
+    BEGIN
+      SelectItemLedgerEntry(ItemLedgerEntry,ItemNo);
+      Assert.AreEqual(Quantity,ItemLedgerEntry.Quantity,ErrMsgQty);
+    END;
+
+    LOCAL PROCEDURE VerifyReservationQtyFinishProduction@81(Reservation@1003 : TestPage 498);
+    BEGIN
+      Assert.AreEqual(InitialInventory,Reservation.QtyToReserveBase.ASDECIMAL,ErrMsgQty);
+      Assert.AreEqual(ExpCurrentReservedQty,Reservation.QtyReservedBase.ASDECIMAL,ErrMsgReservedQty);
+    END;
+
+    LOCAL PROCEDURE VerifySalesShipment@112(OrderNo@1001 : Code[20];QtyToShip@1002 : Decimal);
+    VAR
+      SalesShipmentLine@1000 : Record 111;
+    BEGIN
+      SalesShipmentLine.SETRANGE("Order No.",OrderNo);
+      SalesShipmentLine.FINDFIRST;
+      Assert.AreEqual(QtyToShip,SalesShipmentLine.Quantity,ErrMsgQty);
+    END;
+
+    LOCAL PROCEDURE VerifyShipmentDate@210(TransactionDate@1000 : Date;SalesLine@1004 : Record 37);
+    VAR
+      ReservationEntry@1001 : Record 337;
+    BEGIN
+      FindReservationEntry(ReservationEntry,SalesLine."No.",ReservationEntry."Reservation Status"::Reservation,DATABASE::"Sales Line");
+      Assert.AreEqual(TransactionDate,ReservationEntry."Shipment Date",ShipDateChangedErr);
+      Assert.AreEqual(TransactionDate,SalesLine."Shipment Date",ShipDateChangedErr);
+    END;
+
+    LOCAL PROCEDURE VerifyGLEntry@229(ItemNo@1001 : Code[20]);
+    VAR
+      GLEntry@1000 : Record 17;
+      Item@1002 : Record 27;
+      ExpectedAmount@1003 : Decimal;
+    BEGIN
+      // Expected Amount.
+      GeneralLedgerSetup.GET;
+      Item.GET(ItemNo);
+      ExpectedAmount := SelectItemInventory(ItemNo) * Item."Unit Cost";
+
+      // Select GL Entry - Inventory Account.
+      SelectGLEntry(GLEntry,Item);
+
+      // Verify Amounts are equal.
+      Assert.AreNearlyEqual(ExpectedAmount,GLEntry.Amount,GeneralLedgerSetup."Amount Rounding Precision",ErrMsgAmounts);
+    END;
+
+    LOCAL PROCEDURE VerifyDatesOnReservationEntryAfterCancelReservation@163(SupplySourceType@1014 : Option;DemandSourceType@1015 : Option);
+    VAR
+      Item@1000 : Record 27;
+      ItemUnitOfMeasure@1002 : Record 5404;
+      ReservationEntry@1006 : Record 337;
+      ReservationEngineMgt@1001 : Codeunit 99000831;
+      ReservationManagement@1003 : Codeunit 99000845;
+      LocationCode@1018 : Code[10];
+      LotNo@1011 : Code[10];
+      FullAutoReservation@1009 : Boolean;
+      QtyToReserve@1004 : Decimal;
+      QtyToReserveBase@1005 : Decimal;
+      SourceSubType@1017 : Option;
+      SourceID@1016 : Code[20];
+      SourceRefNo@1013 : Integer;
+      SourceProdOrderLineNo@1012 : Integer;
+      ShipmentDate@1007 : Date;
+    BEGIN
+      // Setup: Create Supply and Demand with Lot.
+      Initialize;
+      CreateItemWithLotSpecificTracking(Item,ItemUnitOfMeasure);
+      LotNo := LibraryUtility.GenerateGUID;
+      LocationCode := LibraryUtility.GenerateGUID;
+      ShipmentDate := CALCDATE(STRSUBSTNO('<%1D>',LibraryRandom.RandInt(5)),WORKDATE);
+      CreateSupply(SupplySourceType,ItemUnitOfMeasure,LocationCode,LotNo,WORKDATE,LibraryRandom.RandDecInRange(15,20,2));
+      CreateDemand(DemandSourceType,ItemUnitOfMeasure,LibraryRandom.RandDec(10,2),LocationCode,LotNo,
+        QtyToReserve,QtyToReserveBase,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo,ShipmentDate);
+
+      // Reserve supply against demand.
+      RoundingIssuesSetDemandSource(ReservationManagement,DemandSourceType,SourceSubType,SourceID,SourceRefNo,SourceProdOrderLineNo);
+      ReservationManagement.AutoReserve(FullAutoReservation,'',WORKDATE,QtyToReserve,QtyToReserveBase);
+      FindReservationEntry(ReservationEntry,Item."No.",ReservationEntry."Reservation Status"::Reservation,SupplySourceType);
+
+      // Exercise: Cancel Reservation.
+      ReservationEngineMgt.CancelReservation(ReservationEntry);
+
+      // Verify: Verify Expected Receipt,Shipment Dates on Reservation Entries and no Reservation Entries exist for ILE after Cancel Reservation.
+      IF SupplySourceType = DATABASE::"Item Ledger Entry" THEN BEGIN
+        ReservationEntry.SETRANGE("Item No.",Item."No.");
+        ReservationEntry.SETRANGE("Reservation Status",ReservationEntry."Reservation Status"::Surplus);
+        ReservationEntry.SETRANGE("Source Type",SupplySourceType);
+        Assert.IsTrue(ReservationEntry.ISEMPTY,ReservEntryMustNotExistErr)
+      END ELSE
+        VerifyShipmentAndExpRcptDateOnReservationEntry(ReservationEntry,Item."No.",SupplySourceType,0D,WORKDATE);
+      VerifyShipmentAndExpRcptDateOnReservationEntry(ReservationEntry,Item."No.",DemandSourceType,ShipmentDate,0D);
+    END;
+
+    LOCAL PROCEDURE VerifyShipmentAndExpRcptDateOnReservationEntry@159(ReservationEntry@1002 : Record 337;ItemNo@1000 : Code[20];SourceType@1001 : Integer;ShipmentDate@1005 : Date;ExpectedReceiptDate@1006 : Date);
+    BEGIN
+      FindReservationEntry(ReservationEntry,ItemNo,ReservationEntry."Reservation Status"::Surplus,SourceType);
+      ReservationEntry.TESTFIELD("Shipment Date",ShipmentDate);
+      ReservationEntry.TESTFIELD("Expected Receipt Date",ExpectedReceiptDate);
+    END;
+
+    LOCAL PROCEDURE VerifyQtyInReservationEntry@181(ItemNo@1001 : Code[20];SourceType@1002 : Integer;Quantity@1003 : Decimal);
+    VAR
+      ReservationEntry@1000 : Record 337;
+    BEGIN
+      FindReservationEntry(ReservationEntry,ItemNo,ReservationEntry."Reservation Status"::Reservation,SourceType);
+      ReservationEntry.TESTFIELD(Quantity,Quantity);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationPageHandler@10(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      MessageCounter := MessageCounter + 1;
+      CASE MessageCounter OF
+        1:
+          Reservation."Reserve from Current Line".INVOKE;  // Reserve from Current Line.
+        2:
+          VerifyReservationQty(Reservation);  // Verify Total and Reserved Quantities.
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationPageHandler2@199(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      Reservation."Total Quantity".DRILLDOWN;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AvailableAssemblyHeadersPageHandler@209(VAR AvailableAssemblyHeaders@1000 : TestPage 925);
+    BEGIN
+      AvailableAssemblyHeaders.Reserve.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AutoReservationPageHandler@22(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      MessageCounter := MessageCounter + 1;
+      CASE MessageCounter OF
+        1:
+          Reservation."Auto Reserve".INVOKE;  // Auto Reserve.
+        2:
+          VerifyReservationQty(Reservation);  // Verify Total and Reserved Quantities.
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE TwoProdOrderReservPageHandler@29(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      MessageCounter := MessageCounter + 1;
+      CASE MessageCounter OF
+        1:
+          BEGIN
+            Reservation.FIRST;
+            Reservation."Reserve from Current Line".INVOKE;  // Reserve from Current Line for first Production Order.
+            Reservation.NEXT;
+            Reservation."Reserve from Current Line".INVOKE;  // Reserve from Current Line for second Production Order.
+          END;
+        2:
+          VerifyReservQtyTwoAvailableLines(Reservation);  // Verify Total and Reserved Quantities.
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE TwoProdAutoReservPageHandler@28(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      MessageCounter := MessageCounter + 1;
+      CASE MessageCounter OF
+        1:
+          Reservation."Auto Reserve".INVOKE;  // Auto Reserve.
+        2:
+          VerifyReservQtyTwoAvailableLines(Reservation);  // Verify Total and Reserved Quantities.
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationCancelPageHandler@52(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      MessageCounter := MessageCounter + 1;
+      CASE MessageCounter OF
+        1:
+          Reservation."Reserve from Current Line".INVOKE;  // Reserve from Current Line.
+        2:
+          Reservation.CancelReservationCurrentLine.INVOKE;  // Cancel Reservation.
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AutoReserveCancelPageHandler@49(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      MessageCounter := MessageCounter + 1;
+      CASE MessageCounter OF
+        1:
+          Reservation."Auto Reserve".INVOKE;  // Auto Reserve.
+        2:
+          Reservation.CancelReservationCurrentLine.INVOKE;  // Cancel Reservation.
+      END;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE CancelReserveConfirmHandler@47(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.IsTrue(STRPOS(Question,MsgCancelReservation) > 0,Question);
+      Reply := TRUE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE StockoutPageHandler@61(VAR CheckAvailability@1000 : TestPage 342);
+    BEGIN
+      // Verify Current Qty on Check Availability page.
+      VerifyCurrentQty(CheckAvailability);
+      CheckAvailability.Yes.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationOutputPartialPageHandler@90(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      MessageCounter := MessageCounter + 1;
+      CASE MessageCounter OF
+        1:
+          Reservation."Reserve from Current Line".INVOKE;  // Reserve from Current Line.
+        2:
+          VerifyReservQtyTwoAvailableLines(Reservation);  // Verify Total and Reserved Quantities.
+      END;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationFinishProductionPageHandler@88(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      MessageCounter := MessageCounter + 1;
+      CASE MessageCounter OF
+        1:
+          Reservation."Reserve from Current Line".INVOKE;  // Reserve from Current Line.
+        2:
+          VerifyReservationQtyFinishProduction(Reservation);  // Verify Quantity To Reserve and Quantity Reserved as per finished Production Order.
+      END;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerYes@205(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE MissingOutputConfirmHandler@85(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      Assert.IsTrue(STRPOS(Question,MsgQuestion) > 0,Question);
+      Reply := TRUE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@348(Message@1000 : Text[1024]);
+    VAR
+      ExpectedMessage@1001 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ExpectedMessage); // Dequeue variable.
+      Assert.IsTrue(STRPOS(Message,ExpectedMessage) > 0,Message);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Reservation] [SCM]
+      Test various Sales reservation scenarios:
+        1. Reserve through Sales Order and verify reservation lines for partial reservation - Manual Reservation.
+        2. Reserve through Sales Order and verify reservation lines for full reservation - Manual Reservation.
+        3. Reserve through Sales Order and verify reservation lines for partial reservation - Auto Reserve.
+        4. Reserve through Sales Order and verify reservation lines for full reservation - Auto Reserve.
+        5. Create Sales Order and verify reservation lines after reducing reservation quantity.
+        6. Create Two Purchase Order, reserve total quantity through Sales Order and verify reservation lines for full reservation.
+        7. Create Firm Planned Production Order, reserve through Sales Order and verify partial reservation - Manual Reserve.
+        8. Create Firm Planned Production Order, reserve through Sales Order and verify full reservation - Manual Reserve.
+        9. Create Released Production Order, reserve through Sales Order and verify partial reservation - Manual Reserve.
+       10. Create Released Production Order, reserve through Sales Order and verify full reservation - Manual Reserve.
+       11. Create Firm Planned Production Order, reserve through Sales Order and verify partial reservation - Auto Reserve.
+       12. Create Firm Planned Production Order, reserve through Sales Order and verify full reservation - Auto Reserve.
+       13. Create Released Production Order, reserve through Sales Order and verify partial reservation - Auto Reserve.
+       14. Create Released Production Order, reserve through Sales Order and verify full reservation - Auto Reserve.
+       15. Create Firm Planned and Released Production Order, reserve through Sales Order and verify full reservation.
+       16. Create Firm Planned and Released Production Order, reserve through Sales Order and verify full reservation - Auto Reserve.
+       17. Create Firm Planned and Released Production Order, reserve through Sales Order and verify partial reservation.
+       18. Create Firm Planned and Released Production Order, reserve through Sales Order and verify partial reservation - Auto Reserve.
+       19. Create Released Production Order, reserve through Sales Order. Delete Production Order and verify reservation.
+       20. Create Firm Planned Production Order, reserve through Sales Order. Delete Production Order and verify reservation.
+       21. Create Released Production Order, reserve through Sales Order. Delete Production Order, verify reservation - Auto Reserve.
+       22. Create Firm Planned Production Order, reserve through Sales Order. Delete Production Order, verify reservation - Auto Reserve.
+       23. Reserve through Sales Order for Firm Planned Production Order and verify cancelled reservation for partial reservation.
+       24. Reserve through Sales Order for Firm Planned Production Order and verify cancelled reservation for full  reservation.
+       25. Reserve through Sales Order for Released Production Order and verify cancelled reservation for partial reservation.
+       26. Reserve through Sales Order for Released Production Order and verify cancelled reservation for full reservation.
+       27. Reserve through Sales Order and verify cancelled reservation for partial reservation - Manual Reservation.
+       28. Reserve through Sales Order and verify cancelled reservation for full reservation - Manual Reservation.
+       29. Reserve through Sales Order and verify cancelled reservation for partial reservation - Auto Reserve.
+       30. Reserve through Sales Order and verify cancelled reservation for full reservation - Auto Reserve.
+       31. Create Purchase Order, reserve through Sales Order and verify reservation lines for full reservation.
+       32. Create Purchase Order, reserve through Sales Order and verify reservation lines for partial reservation.
+       33. Create Purchase Order with Receive only, reserve through Sales Order and verify reservation lines for full reservation.
+       34. Create Purchase Order with Receive only, reserve through Sales Order and verify reservation lines for partial reservation.
+       35. Create Purchase Order with Partial Qty to Receive, and Receive only, reserve and verify reservation.
+       36. Reserve full qty through Sales Order and create negative adjustment.
+           Check that Availability warning page opens and verify Qty on the page.
+       37. Reserve through Sales Order for Released Production Order. Post partial Output and verify reservation.
+       38. Reserve through Sales Order for Released Production Order. Post full Output and verify reservation.
+       39. Reserve through Sales Order for Released Production Order. Post excess Output and verify reservation.
+       40. Reserve through Sales Order for Released Production Order. Post partial Output and verify reservation - Auto Reservation.
+       41. Reserve through Sales Order for Released Production Order. Post full Output and verify reservation - Auto Reservation.
+       42. Reserve through Sales Order for Released Production Order. Post excess Output and verify reservation - Auto Reservation.
+       43. Reserve through Sales Order for Released Production Order. Post Output. Finish Production Order and verify reservation.
+       44. Reserve through Sales Order for Purchase. Post partial quantity to Ship. Verify Shipment Lines.
+       45. Reserve through Sales Order for Purchase. Post full quantity to Ship. Verify Shipment Lines.
+       46. Reserve through Sales Order for Purchase. Post partial quantity to Ship. Verify Shipment Lines - Auto Reservation.
+       47. Reserve through Sales Order for Purchase. Post full quantity to Ship. Verify Shipment Lines - Auto Reservation.
+       48. Reserve through Production Order Component for Firm Planned Production Order.
+       49. Reserve through Production Order Component for Released Production Order.
+       50. Reserve through Production Order Component for Firm Planned Production Order - Auto Reservation.
+       51. Reserve through Production Order Component for Released Production Order - Auto Reservation.
+       52. Reserve through Sales Order for partial reservation, Adjust Cost, Post Inventory Cost to G/L, and verify GL entries.
+       53. Reserve through Sales Order for full reservation, Adjust Cost, Post Inventory Cost to G/L, and verify GL entries.
+       54. Reserve through Sales Order for partial reservation for Released Production Order, Adjust Cost, Post Inventory Cost to G/L, and verify GL entries.
+       55. Reserve through Sales Order for full reservation for Released Production Order, Adjust Cost, Post Inventory Cost to G/L, and verify GL entries.
+       56. Reserve through Sales Order for partial reservation. Select Apply to Item Entry and reserve. Ship Sales order and verify error.
+       57. Reserve through Sales Order for full reservation. Select Apply to Item Entry and reserve. Ship Sales order and verify error.
+       58. Reserve through Sales Order for partial reservation. Select Apply to Item Entry and reserve. Remove Apply to Item Entry and verify Shipped Sales Order.
+       59. Reserve through Sales Order for full reservation. Select Apply to Item Entry and reserve. Remove Apply to Item Entry and verify Shipped Sales Order.
+       60. Verify Dates on Reservation Entry when Supply is Item Ledger Entry and Demand is Sales line.
+       61. Verify Dates on Reservation Entry when Supply is Purchase Line and Demand is Planning Component.
+       62. Verify Dates on Reservation Entry when Supply is Prod. Order line and Demand is Sales line.
+       63. Verify Dates on Reservation Entry when Supply is Transfer line and Demand is Sales line.
+       64. Verify Dates on Reservation Entry when Supply is Prod. Order Line and Demand is Purchase Line.
+       65. Verify Dates on Reservation Entry when Supply is Item Ledger Entry and Demand is Prod. Order Component.
+       67. Verify Dates on Reservation Entry when Supply is ILE and Demand is Service Line.
+       68. Create Sales Order with a UOM and create Production Order from Sales Order with another UOM. Verify Reservation Entry.
+       69. Increase Item's Inventory with a UOM, create Sales Order with another UOM and reserve from Item Ledger Entry. Verify Reservation Entry.
+       70. Can reserve from page "Available - Assembly Headers" when supply is Assembly Line.
+
+          Covers Test Cases:
+        -------------------------------------------------------------------------
+          Test Function Name                              TFS ID
+        -------------------------------------------------------------------------
+
+          PartialReserveSalesOrder                              135606
+          FullReserveSalesOrder                                 135606
+          PartialAutoReserveSalesOrder                          135606
+          FullAutoReserveSalesOrder                             135606
+          ReduceReservedQtySalesOrder                           135606
+          ReserveFromTwoPurchaseOrder                           135609
+          PartialReservFirmPlanProdOrder                        135608
+          FullReserveFirmPlanProdOrder                          135608
+          PartialReserveRelProdOrder                            135607
+          FullReserveRelProdOrder                               135607
+          PartialAutoReserveFirmPlanProd                        135611
+          FullAutoReseveFirmPlanProd                            135611
+          PartialAutoReserveRelProd                             135611
+          FullAutoReserveRelProdOrder                           135611
+          FullReservFirmRelProdOrder                            135610
+          FullAutoReservFirmRelProdOrder                        135610
+          PartialReservFirmRelProdOrder                         135610
+          PartAutoReservFirmRelProdOrder                        135610
+          DeleteReleasedProdOrderReserv                         135615
+          DeleteFirmPlanProdOrderReserv                         135615
+          DeleteRelProdOrderAutoReserv                          135615
+          DeleteFirmPlanProdAutoReserv                          135615
+          CancelPartialResvFirmPlanProd                         135621
+          CancelFullResvFirmPlanProd                            135621
+          CancelPartialResvRelProdOrder                         135621
+          CancelFullReserveRelProdOrder                         135621
+          CancelPartialReserveSalesOrder                        135616
+          CancelFullReserveSalesOrder                           135616
+          CancelPartialAutoReserveSales                         135616
+          CancelFullAutoReserveSales                            135616
+          FullReserveFromPurchaseOrder                          135618
+          PartialReserveFromPurchOrder                          135618
+          FullResvPurchaseOrderReceive                          135619
+          PartialResvPurchOrderReceive                          135619
+          ResvFromPurchPartialQtyReceive                        135619
+          NegativeAdjAfterReservation                           135617
+          PartialOutputReleasedProdReserve                      135622
+          FullOutputReleasedProdReserve                         135622
+          ExcessOutputReleasedProdReserve                       135622
+          PartialOutputReleasedProdAutoReserve                  135622
+          FullOutputReleasedProdAutoReserve                     135622
+          ExcessOutputReleasedProdAutoReserve                   135622
+          FinishReleasedProdReserve                             135624
+          PartialShipAfterReserve                               135623
+          FullShipAfterReserve                                  135623
+          PartialShipAfterAutoReserve                           135623
+          FullShipAfterAutoReserve                              135623
+          ReserveProdOrderComponentForFirmPlanned               135620,135629
+          ReserveProdOrderComponentForReleased                  135620,135629
+          AutoReserveProdOrderComponentFirmPlanned              135620,135629
+          AutoReserveProdOrderComponentReleased                 135620,135629
+          PartialReserveSalesAdjustCostAndPostToGL              135625
+          FullReserveSalesAdjustCostAndPostToGL                 135625
+          PartialReserveRelProdOrderAdjustCostAndPostToGL       135626
+          FullReserveRelProdOrderAdjustCostAndPostToGL          135626
+          PartialReserveSalesWithApplyToItemEntryError          135627,135628
+          FullReserveSalesWithApplyToItemEntryError             135627,135628
+          PartialReserveSalesAndShipWithoutApplyToItemEntry     135627,135628
+          FullReserveSalesAndShipWithoutApplyToItemEntry        135627,135628
+          CancelReservationSaleILE                              6640
+          CancelReservationSalePurchase                         6640
+          CancelReservationSaleProduction                       6640
+          CancelReservationTransferPurchase                     6640
+          CancelReservationPurchaseProduction                   6640
+          CancelReservationProdOrderCompILE                     6640
+          CancelReservationServiceLinePurchase                  6640
+          CancelReservationILEService                           6640
+
+          Covers Test Cases for Sicily Bug:
+        -------------------------------------------------------------------------
+          Test Function Name                                    TFS ID
+        -------------------------------------------------------------------------
+          CreateProdOrderFromSalesOrderWithMultipleUOM          58037
+          ReserveSalesOrderFromILEWithMultipleUOM               58037
+
+          Covers Test Cases for Sicily Bug:
+        -------------------------------------------------------------------------
+          Test Function Name                                    TFS ID
+        -------------------------------------------------------------------------
+          ReserveFromAssemblyLine                               130826
+    }
+    END.
+  }
+}
+

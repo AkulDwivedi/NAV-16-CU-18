@@ -1,0 +1,1046 @@
+OBJECT Codeunit 134131 ERM Reverse GL Entries
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            IsInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1004 : Codeunit 130000;
+      LibraryRandom@1003 : Codeunit 130440;
+      LibraryERM@1002 : Codeunit 131300;
+      LibraryInventory@1013 : Codeunit 132201;
+      LibrarySales@1014 : Codeunit 130509;
+      LibraryPurchase@1015 : Codeunit 130512;
+      LibraryVariableStorage@1010 : Codeunit 131004;
+      IsInitialized@1000 : Boolean;
+      OutOfBalanceError@1007 : TextConst 'ENU=You cannot reverse the transaction because it is out of balance.';
+      ReversalErrorFromLedger@1005 : TextConst 'ENU="Blocked must be equal to ''No''  in G/L Account: No.=%1. Current value is ''Yes''."';
+      ReversalErrorForInvoice@1006 : TextConst 'ENU=You can only reverse entries that were posted from a journal.';
+      ErrorsMustMatch@1001 : TextConst 'ENU=Errors must match.';
+      ReversalErrorForPeriod@1008 : TextConst 'ENU=You cannot reverse %1 No. %2 because the posting date is not within the allowed posting period.';
+      DateCompressError@1009 : TextConst 'ENU=The transaction cannot be reversed, because the %1 has been compressed or a %2 has been deleted.';
+      UnApplyAndVoidCheckErr@1011 : TextConst 'ENU=Cannot find an applied entry within the specified filter.';
+      GLEntryVATEntryLinkErr@1012 : TextConst 'ENU=Wrong G/L Entry - VAT Entry Link reversal.';
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,MessageHandler)]
+    PROCEDURE ReverseGLEntryVATEntryLink@32();
+    VAR
+      GenJournalLine@1001 : Record 81;
+      ReversalEntry@1002 : Record 179;
+    BEGIN
+      Initialize;
+      // [GIVEN] Posted Gen. Jnl. Line with VAT. G/L Entry - VAT Entry Link entry exists.
+      CreateGenJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      // [WHEN] Reverse posted transaction.
+      ReversalEntry.SetHideDialog(TRUE);
+      ReversalEntry.ReverseTransaction(GetGLEntryTransactionNo(GenJournalLine."Document No.",GenJournalLine."Account No."));
+      // [THEN] G/L Entry - VAT Entry Link entry exists for reversed entries.
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReverseForceDocBalanceNo@30();
+    VAR
+      GenJournalBatch@1003 : Record 232;
+      GenJournalLine@1000 : Record 81;
+      ReversalEntry@1002 : Record 179;
+      ForceDocBalance@1010 : Boolean;
+      GLAccountNo@1001 : Code[20];
+    BEGIN
+      // Update "Force Doc. Balance" in Geneal Journal Template and Post General Journal Line for G/L Account.
+      // Check Reversal Error for out of Balance Account.
+
+      // Setup: Set "Force Doc. Balance" value FALSE in Geneal Journal Template, Create and Post General Journal Line with
+      // blank Balancing Account.
+      Initialize;
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      ForceDocBalance := UpdateGenJournalTemplate(GenJournalBatch."Journal Template Name",FALSE);
+      GLAccountNo := LibraryERM.CreateGLAccountNo;
+      CreateGenJournalLineDocNo(
+        GenJournalLine,GenJournalBatch,GLAccountNo,GenJournalLine."Document No.",LibraryRandom.RandInt(100));
+      CreateGenJournalLineDocNo(
+        GenJournalLine,GenJournalBatch,GLAccountNo,INCSTR(GenJournalLine."Document No."),-GenJournalLine.Amount);
+      UpdateBalanceAccount(GenJournalLine."Journal Template Name",GenJournalLine."Journal Batch Name");
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // Exercise: Reverse Posted Entry from G/L Entry.
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseTransaction(GetGLEntryTransactionNo(GenJournalLine."Document No.",GLAccountNo));
+
+      // Verify: Verify Out of Balance Error Message.
+      Assert.AreEqual(STRSUBSTNO(OutOfBalanceError),GETLASTERRORTEXT,ErrorsMustMatch);
+
+      // Tear Down: Rollback setup Data.
+      UpdateGenJournalTemplate(GenJournalBatch."Journal Template Name",ForceDocBalance);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReverseBlockedGLAccount@2();
+    VAR
+      GenJournalLine@1000 : Record 81;
+    BEGIN
+      // Check Reversal Error after posting Payment from General Journal Line for G/L Account and Blocking G/L Account.
+
+      // Setup: Find a GL Account. Post Payment entry from General Journal Line. Block Account after Posting.
+      Initialize;
+      CreateGenJnlLine(GenJournalLine,GenJournalLine."Document Type"::Payment);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      BlockGLAccount(GenJournalLine."Account No.",TRUE);
+
+      // Reverse Posted Transaction from G/L Entry and Verify Error message.
+      ReverseAccountAndVerifyMsg(GenJournalLine."Account No.",GenJournalLine."Document No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReverseBlockedBalAccount@4();
+    VAR
+      GenJournalLine@1000 : Record 81;
+    BEGIN
+      // Make and Post General Journal entry for G/L Account also use G/L Account in Balancing Account field.
+      // Block G/L Account that is use as Balancing Account and Verify Reversal Error.
+
+      // Setup: Make Payment entry for G/L Account and added G/L Account in Balancing Account. Post General Journal and
+      // Blocked the Account that is used as Balancing Account.
+      Initialize;
+      CreateGenJnlLine(GenJournalLine,GenJournalLine."Document Type"::Payment);
+      GenJournalLine.VALIDATE("Bal. Account Type",GenJournalLine."Bal. Account Type"::"G/L Account");
+      GenJournalLine.VALIDATE("Bal. Account No.",LibraryERM.CreateGLAccountNo);
+      GenJournalLine.MODIFY(TRUE);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      BlockGLAccount(GenJournalLine."Bal. Account No.",TRUE);
+
+      // Reverse Posted Transaction from G/L Entry and Verify Error message.
+      ReverseAccountAndVerifyMsg(GenJournalLine."Bal. Account No.",GenJournalLine."Document No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReverseSalesInvoiceTransaction@6();
+    VAR
+      ReversalEntry@1007 : Record 179;
+      DocumentNo@1004 : Code[20];
+      GLAccountNo@1000 : Code[20];
+    BEGIN
+      // Create and Post Sales Invoice and and Blocked Sales Account. Verify Reversal Error Message from G/L Entry.
+
+      // Setup: Create a Sales Invoice and Post. Find Sales Account from General Posting Setup and set Block the account.
+      Initialize;
+      DocumentNo := ReverseSalesEntrySetup(GLAccountNo);
+
+      // Exercise: Reverse Posted Entry from G/L Entry.
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseTransaction(GetGLEntryTransactionNo(DocumentNo,GLAccountNo));
+
+      // Verify: Verify Blocked Error Message.
+      Assert.AreEqual(STRSUBSTNO(ReversalErrorForInvoice),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Test]
+    PROCEDURE ReverseSalesEntryFromRegister@10();
+    VAR
+      GLRegister@1006 : Record 45;
+      ReversalEntry@1007 : Record 179;
+      GLAccountNo@1000 : Code[20];
+    BEGIN
+      // Create and Post Sales Invoice and and Blocked Sales Account. Verify Reversal Error Message from G/L Register.
+
+      // Setup: Create a Sales Invoice and Post. Find Sales Account from General Posting Setup and set Block the account.
+      Initialize;
+      ReverseSalesEntrySetup(GLAccountNo);
+
+      // Exercise: Reverse Posted Entry from G/L Register.
+      GLRegister.FINDLAST;
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseRegister(GLRegister."No.");
+
+      // Verify: Verify Blocked Error Message.
+      Assert.AreEqual(STRSUBSTNO(ReversalErrorForInvoice),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReversePurchInvoiceTransaction@28();
+    VAR
+      ReversalEntry@1007 : Record 179;
+      DocumentNo@1004 : Code[20];
+      GLAccountNo@1000 : Code[20];
+    BEGIN
+      // Setup: Create a Purchase Invoice and Post. Find Purchase Account from General Posting Setup and set Block the account.
+      Initialize;
+      DocumentNo := ReversePurchEntrySetup(GLAccountNo);
+
+      // Exercise: Reverse Posted Entry from G/L Entry.
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseTransaction(GetGLEntryTransactionNo(DocumentNo,GLAccountNo));
+
+      // Verify: Verify Blocked Error Message.
+      Assert.AreEqual(STRSUBSTNO(ReversalErrorForInvoice),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Test]
+    PROCEDURE ReversePurchEntryFromRegister@12();
+    VAR
+      GLRegister@1004 : Record 45;
+      ReversalEntry@1007 : Record 179;
+      GLAccountNo@1000 : Code[20];
+    BEGIN
+      // Setup: Create a Purchase Invoice and Post. Find Purchase Account from General Posting Setup and set Block the account.
+      Initialize;
+      ReversePurchEntrySetup(GLAccountNo);
+
+      // Exercise: Reverse Posted Entry from G/L Register.
+      GLRegister.FINDLAST;
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseRegister(GLRegister."No.");
+
+      // Verify: Verify Blocked Error Message.
+      Assert.AreEqual(STRSUBSTNO(ReversalErrorForInvoice),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE BeforeAllowPeriodTransaction@23();
+    BEGIN
+      // Create and Post Payment Entry form General Journal Line before Allow Period Date Range, update General Ledger Setup
+      // Allow Period. Reverse and Verify Error for before allow Period Date transaction from GL Entry.
+      Initialize;
+      AllowPeriodTransaction(CALCDATE('<-1D>',WORKDATE));
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE AfterAllowPeriodTransaction@27();
+    BEGIN
+      // Create and Post Payment Entry form General Journal Line after Allow Period Date Range, update General Ledger Setup
+      // Allow Period. Reverse and Verify Error for before allow Period Date transaction from GL Entry.
+      Initialize;
+      AllowPeriodTransaction(CALCDATE('<1D>',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE AllowPeriodTransaction@44(PostingDate@1009 : Date);
+    VAR
+      ReversalEntry@1005 : Record 179;
+      AllowPostingFrom@1001 : Date;
+      AllowPostingTo@1000 : Date;
+      DocumentNo@1007 : Code[20];
+      GLAccountNo@1008 : Code[20];
+    BEGIN
+      // Setup: Create Genenral Journal Line and Post. Update Allow Period field in General Ledger Setup.
+      Initialize;
+      DocumentNo := ReverseAllowPeriodSetup(GLAccountNo,AllowPostingFrom,AllowPostingTo,PostingDate);
+
+      // Exercise: Reverse Posted Entry from G/L Entry.
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseTransaction(GetGLEntryTransactionNo(DocumentNo,GLAccountNo));
+
+      // Verify Period Error Message and Tear Down.
+      VerifyAllowedPeriodAndCleanup(DocumentNo,GLAccountNo,AllowPostingFrom,AllowPostingTo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE BeforeAllowPeriodFromRegister@22();
+    BEGIN
+      // Create and Post Payment Entry form General Journal Line before Allow Period Date Range, update General Ledger Setup
+      // Allow Period. Reverse and Verify Error for before allow Period Date transaction from GL Register.
+      Initialize;
+      AllowPeriodFromRegister(CALCDATE('<-1D>',WORKDATE));
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE AfterAllowPeriodFromRegister@18();
+    BEGIN
+      // Create and Post Payment Entry form General Journal Line after Allow Period Date Range, update General Ledger Setup
+      // Allow Period. Reverse and Verify Error for before allow Period Date transaction from GL Register.
+      Initialize;
+      AllowPeriodFromRegister(CALCDATE('<1D>',WORKDATE));
+    END;
+
+    LOCAL PROCEDURE AllowPeriodFromRegister@52(PostingDate@1010 : Date);
+    VAR
+      GLRegister@1006 : Record 45;
+      ReversalEntry@1005 : Record 179;
+      AllowPostingFrom@1001 : Date;
+      AllowPostingTo@1000 : Date;
+      DocumentNo@1009 : Code[20];
+      GLAccountNo@1008 : Code[20];
+    BEGIN
+      // Setup: Create Genenral Journal Line and Post. Update Allow Period field in General Ledger Setup.
+      Initialize;
+      DocumentNo := ReverseAllowPeriodSetup(GLAccountNo,AllowPostingFrom,AllowPostingTo,PostingDate);
+
+      // Exercise: Reverse Posted Entry from G/L Register.
+      GLRegister.FINDLAST;
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseRegister(GLRegister."No.");
+
+      // Verify Period Error Message and Tear Down.
+      VerifyAllowedPeriodAndCleanup(DocumentNo,GLAccountNo,AllowPostingFrom,AllowPostingTo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReverseCompressGLEntries@38();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      GLRegister@1006 : Record 45;
+      GLAccount@1007 : Record 15;
+      GLEntry@1002 : Record 17;
+      ReversalEntry@1005 : Record 179;
+    BEGIN
+      // Test Date Compress G/L Entries
+      // Setup: Create and Post Line for Customer, Vendor, Bank and Fixed Asset from General Journal Line, Run Date Compress batch job.
+      Initialize;
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::" ",GenJournalLine."Account Type"::Customer,
+        LibrarySales.CreateCustomerNo,-LibraryRandom.RandInt(100));
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::" ",GenJournalLine."Account Type"::Vendor,
+        LibraryPurchase.CreateVendorNo,LibraryRandom.RandInt(100));
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::" ",GenJournalLine."Account Type"::"Bank Account",
+        FindBankAccount,LibraryRandom.RandInt(100));
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::" ",GenJournalLine."Account Type"::"Fixed Asset",
+        FindFixedAsset,LibraryRandom.RandInt(100));
+      GenJournalLine.VALIDATE("FA Posting Type",GenJournalLine."FA Posting Type"::Maintenance);
+      GenJournalLine.MODIFY(TRUE);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      DateCompressForGLEntries(GenJournalLine."Document No.");
+
+      // Exercise: Reverse Posted Entry from G/L Register.
+      GLRegister.FINDLAST;
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseRegister(GLRegister."No." - 1);
+
+      // Verify: Verify Blocked Error Message for Date Compress Entries.
+      Assert.AreEqual(STRSUBSTNO(DateCompressError,GLEntry.TABLECAPTION,GLAccount.TABLECAPTION),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReverseCompressCustomerEntries@36();
+    VAR
+      CustLedgerEntry@1008 : Record 21;
+      GenJournalLine@1000 : Record 81;
+      GLAccount@1007 : Record 15;
+      GLEntry@1002 : Record 17;
+      ReversalEntry@1005 : Record 179;
+    BEGIN
+      // Setup: Create and Post Line for Customer from General Journal Line, Run Date Compress batch job.
+      Initialize;
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::" ",GenJournalLine."Account Type"::Customer,
+        LibrarySales.CreateCustomerNo,-LibraryRandom.RandInt(100));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      DateCompressForGLEntries(GenJournalLine."Document No.");
+
+      // Exercise: Reverse Posted Entry from Customer Ledger Entry.
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,CustLedgerEntry."Document Type"::" ",GenJournalLine."Document No.");
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseTransaction(CustLedgerEntry."Transaction No.");
+
+      // Verify: Verify Blocked Error Message for Date Compress Entry.
+      Assert.AreEqual(STRSUBSTNO(DateCompressError,GLEntry.TABLECAPTION,GLAccount.TABLECAPTION),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReverseCompressVendorEntries@37();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      GLAccount@1007 : Record 15;
+      GLEntry@1002 : Record 17;
+      ReversalEntry@1005 : Record 179;
+      VendorLedgerEntry@1008 : Record 25;
+    BEGIN
+      // Setup: Create and Post Line for Vendor from General Journal Line, Run Date Compress batch job.
+      Initialize;
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::" ",GenJournalLine."Account Type"::Vendor,
+        LibraryPurchase.CreateVendorNo,LibraryRandom.RandInt(100));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      DateCompressForGLEntries(GenJournalLine."Document No.");
+
+      // Exercise: Reverse Posted Entry from Vendor Ledger Entry.
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,VendorLedgerEntry."Document Type"::" ",GenJournalLine."Document No.");
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseTransaction(VendorLedgerEntry."Transaction No.");
+
+      // Verify: Verify Blocked Error Message for Date Compress Entry.
+      Assert.AreEqual(STRSUBSTNO(DateCompressError,GLEntry.TABLECAPTION,GLAccount.TABLECAPTION),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReverseCompressBankEntries@39();
+    VAR
+      BankAccountLedgerEntry@1008 : Record 271;
+      GenJournalLine@1000 : Record 81;
+      GLAccount@1007 : Record 15;
+      GLEntry@1002 : Record 17;
+      ReversalEntry@1005 : Record 179;
+    BEGIN
+      // Setup: Create and Post Line for Bank Account from General Journal Line, Run Date Compress batch job.
+      Initialize;
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::" ",GenJournalLine."Account Type"::"Bank Account",
+        FindBankAccount,LibraryRandom.RandInt(100));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      DateCompressForGLEntries(GenJournalLine."Document No.");
+
+      // Exercise: Reverse Posted Entry from Bank Ledger Entry.
+      BankAccountLedgerEntry.SETRANGE("Bank Account No.",GenJournalLine."Account No.");
+      BankAccountLedgerEntry.SETRANGE("Document No.",GenJournalLine."Document No.");
+      BankAccountLedgerEntry.FINDFIRST;
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseTransaction(BankAccountLedgerEntry."Transaction No.");
+
+      // Verify: Verify Blocked Error Message for Date Compress Entry.
+      Assert.AreEqual(STRSUBSTNO(DateCompressError,GLEntry.TABLECAPTION,GLAccount.TABLECAPTION),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler)]
+    PROCEDURE ReverseCompressFAEntries@40();
+    VAR
+      MaintenanceLedgerEntry@1008 : Record 5625;
+      GenJournalLine@1000 : Record 81;
+      GLAccount@1007 : Record 15;
+      GLEntry@1002 : Record 17;
+      ReversalEntry@1005 : Record 179;
+    BEGIN
+      // Setup: Create and Post Line for Fixed Asset from General Journal Line, Run Date Compress batch job.
+      Initialize;
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::" ",GenJournalLine."Account Type"::"Fixed Asset",
+        FindFixedAsset,LibraryRandom.RandInt(100));
+      GenJournalLine.VALIDATE("FA Posting Type",GenJournalLine."FA Posting Type"::Maintenance);
+      GenJournalLine.MODIFY(TRUE);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      DateCompressForGLEntries(GenJournalLine."Document No.");
+
+      // Exercise: Reverse Posted Entry from Maintenance Ledger Entry.
+      MaintenanceLedgerEntry.SETRANGE("FA No.",GenJournalLine."Account No.");
+      MaintenanceLedgerEntry.SETRANGE("Document No.",GenJournalLine."Document No.");
+      MaintenanceLedgerEntry.FINDFIRST;
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseTransaction(MaintenanceLedgerEntry."Transaction No.");
+
+      // Verify: Verify Blocked Error Message for Date Compress Entry.
+      Assert.AreEqual(STRSUBSTNO(DateCompressError,GLEntry.TABLECAPTION,GLAccount.TABLECAPTION),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Test]
+    [HandlerFunctions(VoidCheckPageHandler)]
+    PROCEDURE UnApplyAndVoidCheckForAppliedVendorEntries@67();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      DocumentNo@1001 : Code[20];
+      VoidType@1005 : 'Unapply and void check,Void check only';
+    BEGIN
+      // Verify the check ledger entry when we unapply and apply the vendor ledger entries with Unapply and void check value.
+
+      // Setup: Create and post invoice and payment for vendor and then unapply and apply vendor ledger entries.
+      Initialize;
+      CreateAndPostGenJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::Invoice,
+        GenJournalLine."Account Type"::Vendor,LibraryPurchase.CreateVendorNo,
+        GenJournalLine."Bank Payment Type"::" ",'',CreateBankAccount,-LibraryRandom.RandDecInRange(100,200,2),'');
+      DocumentNo := GenJournalLine."Document No.";
+      CreateAndPostGenJournalLineWithAppliesToDoc(GenJournalLine,GenJournalLine."Document Type"::Payment,
+        GenJournalLine."Applies-to Doc. Type"::Invoice,GenJournalLine."Account Type"::Vendor,DocumentNo);
+      UnApplyVendorLedgerEntries(GenJournalLine."Document Type",GenJournalLine."Document No.");
+      ApplyingAndPostApplicationForVendorLedgerEntry(GenJournalLine,DocumentNo);
+      LibraryVariableStorage.Enqueue(VoidType::"Unapply and void check");
+
+      // Exercise: Unapply and void check the check ledger entry.
+      VoidCheck(GenJournalLine."Document No.");
+
+      // Verify: Verifying the Entry Status Financially Voided on Check Ledger Entry.
+      VerifyCheckLedgerEntry(GenJournalLine."Document No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(VoidCheckPageHandler)]
+    PROCEDURE UnApplyAndVoidCheckForAppliedCustomerEntries@63();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      VoidType@1002 : 'Unapply and void check,Void check only';
+      DocumentNo@1001 : Code[20];
+    BEGIN
+      // Verify the check ledger entry when we unapply and apply the customer ledger entries with Unapply and void check value.
+
+      // Setup: Create and post credit memo and refund for customer and then Unapply and apply customer ledger entries
+      Initialize;
+      CreateAndPostGenJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::"Credit Memo",
+        GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+        GenJournalLine."Bank Payment Type"::" ",'',CreateBankAccount,-LibraryRandom.RandDecInRange(100,200,2),'');
+      DocumentNo := GenJournalLine."Document No.";
+      CreateAndPostGenJournalLineWithAppliesToDoc(GenJournalLine,GenJournalLine."Document Type"::" ",
+        GenJournalLine."Account Type"::Customer,GenJournalLine."Applies-to Doc. Type"::"Credit Memo",DocumentNo);
+      UnApplyCustomerLedgerEntries(GenJournalLine."Document Type",GenJournalLine."Document No.");
+      ApplyingAndPostApplicationForCustomerLedgerEntry(GenJournalLine,DocumentNo);
+      LibraryVariableStorage.Enqueue(VoidType::"Unapply and void check");
+
+      // Exercise: Unapply and void check the check ledger entry.
+      VoidCheck(GenJournalLine."Document No.");
+
+      // Verify: Verifying the Entry Status Financially Voided on Check Ledger Entry.
+      VerifyCheckLedgerEntry(GenJournalLine."Document No.");
+    END;
+
+    [Test]
+    [HandlerFunctions(VoidCheckPageHandler)]
+    PROCEDURE UnApplyAndVoidCheckForUnAppliedVendorEntries@62();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      VoidType@1002 : 'Unapply and void check,Void check only';
+    BEGIN
+      // Verify the error message when we void check with option Unapply and void check value in case of vendor
+
+      // Setup: Create and post invoice and payment for vendor and then unapply ledger entries.
+      Initialize;
+      CreateAndPostGenJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::Invoice,
+        GenJournalLine."Account Type"::Vendor,LibraryPurchase.CreateVendorNo,
+        GenJournalLine."Bank Payment Type"::" ",'',CreateBankAccount,-LibraryRandom.RandDecInRange(100,200,2),'');
+      CreateAndPostGenJournalLineWithAppliesToDoc(GenJournalLine,GenJournalLine."Document Type"::Payment,
+        GenJournalLine."Applies-to Doc. Type"::Invoice,GenJournalLine."Account Type"::Vendor,GenJournalLine."Document No.");
+      UnApplyVendorLedgerEntries(GenJournalLine."Document Type",GenJournalLine."Document No.");
+      LibraryVariableStorage.Enqueue(VoidType::"Unapply and void check");
+
+      // Exercise: Unapply and void check the check ledger entry.
+      ASSERTERROR VoidCheck(GenJournalLine."Document No.");
+
+      // Verify: Verifying error message.
+      Assert.ExpectedError(UnApplyAndVoidCheckErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(VoidCheckPageHandler)]
+    PROCEDURE UnApplyAndVoidCheckForUnAppliedCustomerEntries@65();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      VoidType@1001 : 'Unapply and void check,Void check only';
+    BEGIN
+      // Verify the error message when we void check with option Unapply and void check value in case of customer.
+
+      // Setup: Create and post credit memo and refund for customer and then Unapply customer ledger entries.
+      Initialize;
+      CreateAndPostGenJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::"Credit Memo",
+        GenJournalLine."Account Type"::Customer,LibrarySales.CreateCustomerNo,
+        GenJournalLine."Bank Payment Type"::" ",'',CreateBankAccount,-LibraryRandom.RandDecInRange(100,200,2),'');
+      CreateAndPostGenJournalLineWithAppliesToDoc(GenJournalLine,GenJournalLine."Document Type"::Refund,
+        GenJournalLine."Account Type"::Customer,GenJournalLine."Applies-to Doc. Type"::"Credit Memo",GenJournalLine."Document No.");
+      UnApplyCustomerLedgerEntries(GenJournalLine."Document Type",GenJournalLine."Document No.");
+      LibraryVariableStorage.Enqueue(VoidType::"Unapply and void check");
+
+      // Exercise: Unapply and void check the check ledger entry.
+      ASSERTERROR VoidCheck(GenJournalLine."Document No.");
+
+      // Verify: Verifying error message.
+      Assert.ExpectedError(UnApplyAndVoidCheckErr);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      // Lazy Setup.
+      LibraryVariableStorage.Clear;
+      IF IsInitialized THEN
+        EXIT;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdatePurchasesPayablesSetup;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateLocalData;
+      IsInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE ApplyingAndPostApplicationForCustomerLedgerEntry@70(GenJournalLine@1001 : Record 81;DocumentNo@1002 : Code[20]);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+    BEGIN
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,GenJournalLine."Document Type"::" ",GenJournalLine."Document No.");
+      CustLedgerEntry.CALCFIELDS("Remaining Amount");
+      LibraryERM.SetApplyCustomerEntry(CustLedgerEntry,CustLedgerEntry."Remaining Amount");
+
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,GenJournalLine."Document Type"::"Credit Memo",DocumentNo);
+      CustLedgerEntry.CALCFIELDS("Remaining Amount");
+      CustLedgerEntry.VALIDATE("Amount to Apply",CustLedgerEntry."Remaining Amount");
+      CustLedgerEntry.MODIFY(TRUE);
+
+      LibraryERM.SetAppliestoIdCustomer(CustLedgerEntry);
+      LibraryERM.PostCustLedgerApplication(CustLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE ApplyingAndPostApplicationForVendorLedgerEntry@66(GenJournalLine@1000 : Record 81;DocumentNo@1001 : Code[20]);
+    VAR
+      VendorLedgerEntry@1002 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,GenJournalLine."Document Type"::Payment,GenJournalLine."Document No.");
+      VendorLedgerEntry.CALCFIELDS("Remaining Amount");
+      LibraryERM.SetApplyVendorEntry(VendorLedgerEntry,VendorLedgerEntry."Remaining Amount");
+
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,GenJournalLine."Document Type"::Invoice,DocumentNo);
+      VendorLedgerEntry.CALCFIELDS("Remaining Amount");
+      VendorLedgerEntry.VALIDATE("Amount to Apply",VendorLedgerEntry."Remaining Amount");
+      VendorLedgerEntry.MODIFY(TRUE);
+
+      LibraryERM.SetAppliestoIdVendor(VendorLedgerEntry);
+      LibraryERM.PostVendLedgerApplication(VendorLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE ReverseAccountAndVerifyMsg@17(GLAccountNo@1004 : Code[20];DocumentNo@1003 : Code[20]);
+    VAR
+      ReversalEntry@1002 : Record 179;
+    BEGIN
+      // Exercise: Reverse Posted Entry from G/L Entry.
+      ReversalEntry.SetHideDialog(TRUE);
+      ASSERTERROR ReversalEntry.ReverseTransaction(GetGLEntryTransactionNo(DocumentNo,GLAccountNo));
+
+      // Verify: Verify Blocked Error Message.
+      Assert.AreEqual(STRSUBSTNO(ReversalErrorFromLedger,GLAccountNo),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ReversePurchEntrySetup@1(VAR PurchAccount@1001 : Code[20]) DocumentNo : Code[20];
+    BEGIN
+      DocumentNo := CreateAndPostPurchInvoice(PurchAccount);
+      BlockGLAccount(PurchAccount,TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ReverseSalesEntrySetup@5(VAR SalesAccount@1000 : Code[20]) DocumentNo : Code[20];
+    BEGIN
+      DocumentNo := CreateAndPostSalesInvoice(SalesAccount);
+      BlockGLAccount(SalesAccount,TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ReverseAllowPeriodSetup@21(VAR GLAccountNo@1007 : Code[20];VAR AllowPostingFrom@1001 : Date;VAR AllowPostingTo@1000 : Date;PostingDate@1008 : Date) : Code[20];
+    VAR
+      GeneralLedgerSetup@1006 : Record 98;
+      GenJournalLine@1003 : Record 81;
+    BEGIN
+      GeneralLedgerSetup.GET;
+      AllowPostingFrom := GeneralLedgerSetup."Allow Posting From";
+      AllowPostingTo := GeneralLedgerSetup."Allow Posting To";
+      UpdateGeneralLedgerSetup(0D,0D); // Update General Ledger Setup Date Range fields with OD value.
+      GLAccountNo := LibraryERM.CreateGLAccountWithSalesSetup;
+      CreateGeneralJournalLine(
+        GenJournalLine,GenJournalLine."Document Type"::Payment,GenJournalLine."Account Type"::"G/L Account",
+        GLAccountNo,LibraryRandom.RandInt(100)); // Using RANDOM for Amount field.
+      UpdateGeneralJournalLine(GenJournalLine,PostingDate);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      UpdateGeneralLedgerSetup(WORKDATE,WORKDATE);
+      EXIT(GenJournalLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE CreateGenJnlLine@20(VAR GenJournalLine@1005 : Record 81;DocumentType@1004 : Option);
+    BEGIN
+      CreateGeneralJournalLine(
+        GenJournalLine,DocumentType,GenJournalLine."Account Type"::"G/L Account",
+        LibraryERM.CreateGLAccountWithSalesSetup,LibraryRandom.RandInt(100));
+    END;
+
+    LOCAL PROCEDURE CreateGenJournalLine@24(VAR GenJournalLine@1002 : Record 81;DocumentType@1005 : Option;AccountType@1001 : Option;AccountNo@1007 : Code[20];BankPaymentType@1003 : Option;CurrencyCode@1004 : Code[10];BalAccountNo@1008 : Code[20];Amount@1009 : Decimal;AppliesToDocNo@1010 : Code[20]);
+    VAR
+      GenJournalBatch@1000 : Record 232;
+      LibraryFiscalYear@1006 : Codeunit 131302;
+    BEGIN
+      // Take Random Amount for General Journal Line.
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,DocumentType,AccountType,AccountNo,Amount);
+      GenJournalLine.VALIDATE("Bal. Account Type",GenJournalLine."Bal. Account Type"::"Bank Account");
+      GenJournalLine.VALIDATE("Posting Date",LibraryFiscalYear.GetFirstPostingDate(TRUE));
+      // Get Posting Date for Closed Financial Year.
+      GenJournalLine.VALIDATE("Bal. Account No.",BalAccountNo);
+      GenJournalLine.VALIDATE("Bank Payment Type",BankPaymentType);
+      GenJournalLine.VALIDATE("Currency Code",CurrencyCode);
+      GenJournalLine.VALIDATE("Applies-to Doc. No.",AppliesToDocNo);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostGenJournalLine@7(VAR GenJournalLine@1002 : Record 81;DocumentType@1005 : Option;AccountType@1001 : Option;AccountNo@1007 : Code[20];BankPaymentType@1003 : Option;CurrencyCode@1004 : Code[10];BalAccountNo@1008 : Code[20];Amount@1009 : Decimal;AppliesToDocNo@1010 : Code[20]);
+    BEGIN
+      CreateGenJournalLine(
+        GenJournalLine,DocumentType,AccountType,AccountNo,BankPaymentType,CurrencyCode,BalAccountNo,Amount,AppliesToDocNo);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostGenJournalLineWithAppliesToDoc@75(VAR GenJournalLine@1000 : Record 81;DocumentType@1002 : Option;AccountType@1004 : Option;AppliesToDocType@1003 : Option;DocumentNo@1001 : Code[20]);
+    BEGIN
+      CreateGenJournalLine(
+        GenJournalLine,DocumentType,AccountType,GenJournalLine."Account No.",
+        GenJournalLine."Bank Payment Type"::"Manual Check",'',GenJournalLine."Bal. Account No.",-GenJournalLine.Amount,DocumentNo);
+      GenJournalLine.VALIDATE("Applies-to Doc. Type",AppliesToDocType);
+      GenJournalLine.VALIDATE("Applies-to Doc. No.",DocumentNo);
+      GenJournalLine.MODIFY(TRUE);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE CreateBankAccount@69() : Code[20];
+    VAR
+      BankAccount@1000 : Record 270;
+      BankAccountPostingGroup@1001 : Record 277;
+    BEGIN
+      BankAccountPostingGroup.FINDFIRST;
+      LibraryERM.CreateBankAccount(BankAccount);
+      BankAccount.VALIDATE("Bank Acc. Posting Group",BankAccountPostingGroup.Code);
+      BankAccount.VALIDATE("Last Statement No.",FORMAT(LibraryRandom.RandInt(10)));  // Take Random Value.
+      BankAccount.MODIFY(TRUE);
+      EXIT(BankAccount."No.");
+    END;
+
+    LOCAL PROCEDURE CreateGenJournalLineDocNo@46(VAR GenJournalLine@1005 : Record 81;GenJournalBatch@1000 : Record 232;AccountNo@1002 : Code[20];DocumentNo@1001 : Code[20];Amount@1003 : Decimal);
+    BEGIN
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,GenJournalLine."Document Type"::" ",
+        GenJournalLine."Account Type"::"G/L Account",AccountNo,Amount);
+      IF DocumentNo <> '' THEN
+        GenJournalLine.VALIDATE("Document No.",DocumentNo);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalLine@19(VAR GenJournalLine@1005 : Record 81;DocumentType@1004 : Option;AccountType@1002 : Option;AccountNo@1001 : Code[20];Amount@1003 : Decimal);
+    VAR
+      GenJournalBatch@1000 : Record 232;
+    BEGIN
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,DocumentType,AccountType,AccountNo,Amount);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesInvoice@16(VAR SalesAccount@1006 : Code[20]) DocumentNo : Code[20];
+    VAR
+      SalesHeader@1005 : Record 36;
+      SalesLine@1004 : Record 37;
+      GeneralPostingSetup@1003 : Record 252;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,'');
+      LibrarySales.CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::Item,LibraryInventory.CreateItemNo,LibraryRandom.RandInt(10));
+      SalesLine.VALIDATE("Unit Price",SalesLine.Quantity);  // Value is not important, Unit Price updating with Quantity.
+      SalesLine.MODIFY(TRUE);
+      GeneralPostingSetup.GET(SalesLine."Gen. Bus. Posting Group",SalesLine."Gen. Prod. Posting Group");
+      DocumentNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+      SalesAccount := GeneralPostingSetup."Sales Account";
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchInvoice@34(VAR PurchAccount@1000 : Code[20]) DocumentNo : Code[20];
+    VAR
+      PurchaseHeader@1008 : Record 38;
+      PurchaseLine@1007 : Record 39;
+      GeneralPostingSetup@1006 : Record 252;
+      LibraryPurchase@1001 : Codeunit 130512;
+    BEGIN
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Invoice,'');
+      PurchaseHeader.VALIDATE("Vendor Invoice No.",PurchaseHeader."No.");
+      PurchaseHeader.MODIFY(TRUE);
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,LibraryInventory.CreateItemNo,LibraryRandom.RandInt(10));
+      PurchaseLine.VALIDATE("Direct Unit Cost",PurchaseLine.Quantity);
+      PurchaseLine.MODIFY(TRUE);
+      GeneralPostingSetup.GET(PurchaseLine."Gen. Bus. Posting Group",PurchaseLine."Gen. Prod. Posting Group");
+      DocumentNo := LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE);
+      PurchAccount := GeneralPostingSetup."Purch. Account";
+    END;
+
+    LOCAL PROCEDURE DateCompressForGLEntries@45(DocumentNo@1000 : Code[20]);
+    VAR
+      GLEntry@1002 : Record 17;
+      DateComprRegister@1003 : Record 87;
+      DateCompressGeneralLedger@1001 : Report 98;
+      LibraryFiscalYear@1004 : Codeunit 131302;
+    BEGIN
+      LibraryFiscalYear.CloseFiscalYear;
+      GLEntry.SETRANGE("Document No.",DocumentNo);
+      DateCompressGeneralLedger.SETTABLEVIEW(GLEntry);
+      DateCompressGeneralLedger.InitializeRequest(
+        WORKDATE,WORKDATE,DateComprRegister."Period Length"::Day,'',FALSE,TRUE,FALSE,FALSE,FALSE,InsertDimSelectionBuffer);
+      DateCompressGeneralLedger.USEREQUESTPAGE(FALSE);
+      DateCompressGeneralLedger.RUN;
+    END;
+
+    LOCAL PROCEDURE FindBankAccount@33() : Code[20];
+    VAR
+      BankAccount@1000 : Record 270;
+    BEGIN
+      BankAccount.SETRANGE(Blocked,FALSE);
+      BankAccount.SETFILTER("Bank Acc. Posting Group",'<>''''');
+      BankAccount.FINDFIRST;
+      EXIT(BankAccount."No.");
+    END;
+
+    LOCAL PROCEDURE BlockGLAccount@14(GLAccountNo@1000 : Code[20];Blocked@1001 : Boolean);
+    VAR
+      GLAccount@1002 : Record 15;
+    BEGIN
+      GLAccount.GET(GLAccountNo);
+      GLAccount.VALIDATE(Blocked,Blocked);
+      GLAccount.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE FindFixedAsset@35() : Code[20];
+    VAR
+      FixedAsset@1000 : Record 5600;
+    BEGIN
+      FixedAsset.SETRANGE(Blocked,FALSE);
+      FixedAsset.SETFILTER("FA Subclass Code",'<>''''');
+      FixedAsset.FINDFIRST;
+      EXIT(FixedAsset."No.");
+    END;
+
+    LOCAL PROCEDURE GetGLEntryTransactionNo@3(DocumentNo@1001 : Code[20];AccountNo@1002 : Code[20]) : Integer;
+    VAR
+      GLEntry@1000 : Record 17;
+    BEGIN
+      GLEntry.SETRANGE("Document No.",DocumentNo);
+      GLEntry.SETRANGE("G/L Account No.",AccountNo);
+      GLEntry.FINDFIRST;
+      EXIT(GLEntry."Transaction No.");
+    END;
+
+    LOCAL PROCEDURE InsertDimSelectionBuffer@25() RetainDimText : Text[250];
+    VAR
+      DimensionTranslation@1000 : Record 388;
+      DimensionSelectionBuffer@1001 : Record 368;
+    BEGIN
+      DimensionSelectionBuffer.DELETEALL;
+      DimensionTranslation.FINDSET;
+      IF DimensionSelectionBuffer.ISEMPTY THEN
+        REPEAT
+          IF NOT DimensionSelectionBuffer.GET(DimensionTranslation.Code) THEN BEGIN
+            DimensionSelectionBuffer.VALIDATE(Code,DimensionTranslation.Code);
+            DimensionSelectionBuffer.VALIDATE(Selected,TRUE);
+            DimensionSelectionBuffer.INSERT;
+          END;
+        UNTIL DimensionTranslation.NEXT = 0;
+      DimensionSelectionBuffer.SetDimSelection(3,98,'',RetainDimText,DimensionSelectionBuffer);
+    END;
+
+    LOCAL PROCEDURE UnApplyCustomerLedgerEntries@56(DocumentType@1000 : Option;DocumentNo@1001 : Code[20]);
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+    BEGIN
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,DocumentType,DocumentNo);
+      LibraryERM.UnapplyCustomerLedgerEntry(CustLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE UnApplyVendorLedgerEntries@57(DocumentType@1001 : Option;DocumentNo@1002 : Code[20]);
+    VAR
+      VendorLedgerEntry@1000 : Record 25;
+    BEGIN
+      LibraryERM.FindVendorLedgerEntry(VendorLedgerEntry,DocumentType,DocumentNo);
+      LibraryERM.UnapplyVendorLedgerEntry(VendorLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE UpdateGeneralJournalLine@29(VAR GenJournalLine@1000 : Record 81;PostingDate@1001 : Date);
+    BEGIN
+      GenJournalLine.VALIDATE("Posting Date",PostingDate);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateGeneralLedgerSetup@13(AllowPostingFrom@1000 : Date;AllowPostingTo@1001 : Date);
+    VAR
+      GeneralLedgerSetup@1002 : Record 98;
+    BEGIN
+      // Using assignment to avoid validation errors.
+      GeneralLedgerSetup.GET;
+      GeneralLedgerSetup."Allow Posting From" := AllowPostingFrom;
+      GeneralLedgerSetup."Allow Posting To" := AllowPostingTo;
+      GeneralLedgerSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateBalanceAccount@41(JournalTemplateName@1000 : Code[10];JournalBatchName@1002 : Code[10]);
+    VAR
+      GenJournalLine@1001 : Record 81;
+    BEGIN
+      GenJournalLine.SETRANGE("Journal Template Name",JournalTemplateName);
+      GenJournalLine.SETRANGE("Journal Batch Name",JournalBatchName);
+      GenJournalLine.MODIFYALL("Bal. Account No.",'',TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateGenJournalTemplate@31(Name@1002 : Code[10];ForceDocBalance@1000 : Boolean) OriginalForceDocBal : Boolean;
+    VAR
+      GenJournalTemplate@1001 : Record 80;
+    BEGIN
+      GenJournalTemplate.GET(Name);
+      OriginalForceDocBal := GenJournalTemplate."Force Doc. Balance";
+      GenJournalTemplate.VALIDATE("Force Doc. Balance",ForceDocBalance);
+      GenJournalTemplate.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VoidCheck@54(DocumentNo@1001 : Code[20]);
+    VAR
+      CheckLedgerEntry@1000 : Record 272;
+      CheckManagement@1002 : Codeunit 367;
+      ConfirmFinancialVoid@1003 : Page 695;
+    BEGIN
+      CheckLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CheckLedgerEntry.FINDFIRST;
+      CheckManagement.FinancialVoidCheck(CheckLedgerEntry);
+      ConfirmFinancialVoid.SetCheckLedgerEntry(CheckLedgerEntry);
+    END;
+
+    LOCAL PROCEDURE VerifyCheckLedgerEntry@55(DocumentNo@1001 : Code[20]);
+    VAR
+      CheckLedgerEntry@1000 : Record 272;
+    BEGIN
+      CheckLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      CheckLedgerEntry.FINDFIRST;
+      CheckLedgerEntry.TESTFIELD("Entry Status",CheckLedgerEntry."Entry Status"::"Financially Voided");
+      CheckLedgerEntry.TESTFIELD("Original Entry Status",CheckLedgerEntry."Original Entry Status"::Posted);
+    END;
+
+    LOCAL PROCEDURE VerifyAllowedPeriodAndCleanup@26(DocumentNo@1000 : Code[20];GLAccountNo@1001 : Code[20];AllowPostingFrom@1002 : Date;AllowPostingTo@1003 : Date);
+    BEGIN
+      // Verify: Verify Error Message.
+      VerifyMsgForAllowedPeriod(DocumentNo,GLAccountNo);
+
+      // Tear Down.
+      UpdateGeneralLedgerSetup(AllowPostingFrom,AllowPostingTo);
+    END;
+
+    LOCAL PROCEDURE VerifyMsgForAllowedPeriod@43(DocumentNo@1000 : Code[20];GLAccountNo@1001 : Code[20]);
+    VAR
+      GLEntry@1002 : Record 17;
+    BEGIN
+      GLEntry.SETRANGE("Transaction No.",GetGLEntryTransactionNo(DocumentNo,GLAccountNo));
+      GLEntry.FINDFIRST;
+      Assert.AreEqual(STRSUBSTNO(ReversalErrorForPeriod,GLEntry.TABLECAPTION,GLEntry."Entry No."),GETLASTERRORTEXT,ErrorsMustMatch);
+    END;
+
+    LOCAL PROCEDURE VerifyGLEntryVATEntryLinkReversed@58(DocumentNo@1000 : Code[20];GLAccountNo@1001 : Code[20]);
+    VAR
+      GLEntry@1002 : Record 17;
+      VATEntry@1003 : Record 254;
+      GLEntryVATEntryLink@1004 : Record 253;
+    BEGIN
+       WITH GLEntry DO BEGIN
+        SETRANGE("Document No.",DocumentNo);
+        SETRANGE("G/L Account No.",GLAccountNo);
+        SETRANGE(Reversed,TRUE);
+        FINDFIRST;
+       END;
+       WITH VATEntry DO BEGIN
+        SETRANGE("Document No.",DocumentNo);
+        SETRANGE(Reversed,TRUE);
+        FINDFIRST;
+       END;
+       Assert.IsTrue(
+        GLEntryVATEntryLink.GET(GLEntry."Entry No.",VATEntry."Entry No."),GLEntryVATEntryLinkErr);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE VoidCheckPageHandler@53(VAR ConfirmFinancialVoid@1000 : Page 695;VAR Response@1001 : Action);
+    VAR
+      VoidTypeVariant@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(VoidTypeVariant);
+      ConfirmFinancialVoid.InitializeRequest(WORKDATE,VoidTypeVariant);
+      Response := ACTION::Yes
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@78(Question@1000 : Text[1024];VAR Reply@1001 : Boolean);
+    BEGIN
+      // Handler for confirmation messages, always send positive reply.
+      Reply := TRUE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@82(Message@1000 : Text[1024]);
+    BEGIN
+      // Message Handler.
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Reverse]
+      Unsupported version tags:
+      NA: Unable to Execute
+      ES: Unable to Execute
+
+      Test to verify Entries for Blocked Documents, Sales and Purchase Transactions.
+        1. Reverse Transaction entries for Out of Balance G/L Account .
+        2. Reverse Transaction entries of Blocked G/L Account.
+        3. Reverse Transaction entries of Blocked Balancing G/L Account.
+        4. Reverse Sales Invoice Document from Transaction.
+        5. Reverse Sales Invoice Document from G/L Register.
+        6. Reverse Purchase Invoice Document from Transaction.
+        7. Reverse Purchase Invoice Document from Register.
+        8. Reverse and Verify Error for after allow Period Date transaction from GL Entry.
+        9. Reverse and Verify Error for after allow Period Date from Register.
+       10. Reverse and Verify Error for before allow Period Date transaction from GL Entry.
+       11. Reverse and Verify Error for before allow Period Date from Register.
+       12. Reverse and Verify Error for Compress GL Entries.
+       13. Reverse and Verify Error for Compress Customer Ledger Entries.
+       14. Reverse and Verify Error for Compress Vendor Ledger Entries.
+       15. Reverse and Verify Error for Compress Bank Ledger Entries.
+       16. Reverse and Verify Error for Compress Fixed Entries.
+       17. Verify the check ledger entry when we unapply and apply the vendor ledger entries with Unapply and void check value.
+       18. Verify the error message when we void check with option Unapply and void check value in case of vendor.
+       19. Verify the check ledger entry when we unapply and apply the customer ledger entries with Unapply and void check value.
+       20. Verify the error message when we void check with option Unapply and void check value in case of customer.
+
+      Covers Test Cases:
+        ------------------------------------------------------
+          Test Function Name                      TFS ID
+        ------------------------------------------------------
+          ReverseForceDocBalanceNo            124938, 124939
+          ReverseBlockedGLAccount             124938, 124940
+          ReverseBlockedBalAccount            124938, 124941
+          ReverseSalesInvoiceTransaction      124938, 124942
+          ReverseSalesEntryFromRegister       124938, 124943
+          ReversePurchInvoiceTransaction      124938, 124944
+          ReversePurchEntryFromRegister       124938, 124945
+          AfterAllowPeriodTransaction         124938, 126154
+          AfterAllowPeriodFromRegister        124938, 126155
+          BeforeAllowPeriodTransaction        124938, 126156
+          BeforeAllowPeriodFromRegister       124938, 126155
+          ReverseCompressGLEntries            124938, 126157
+          ReverseCompressCustomerEntries      124938, 126158
+          ReverseCompressVendorEntries        124938, 126159
+          ReverseCompressBankEntries          124938, 126160
+          ReverseCompressFAEntries            124938, 126161
+
+        BUG ID 46162
+       -------------------------------------------------------------------------------------------
+       Test Function Name
+       -------------------------------------------------------------------------------------------
+       UnApplyAndVoidCheckForAppliedVendorEntries,UnApplyAndVoidCheckForAppliedCustomerEntries
+       UnApplyAndVoidCheckForUnAppliedVendorEntries,UnApplyAndVoidCheckForUnAppliedCustomerEntries
+    }
+    END.
+  }
+}
+

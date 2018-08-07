@@ -1,0 +1,918 @@
+OBJECT Codeunit 137406 SCM Item Reservation
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1005 : Codeunit 130000;
+      LibraryCosting@1010 : Codeunit 132200;
+      LibraryInventory@1001 : Codeunit 132201;
+      LibraryItemTracking@1002 : Codeunit 130502;
+      LibraryManufacturing@1006 : Codeunit 132202;
+      LibrarySales@1009 : Codeunit 130509;
+      LibraryService@1011 : Codeunit 131902;
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryWarehouse@1013 : Codeunit 132204;
+      LibraryRandom@1003 : Codeunit 130440;
+      LibraryPurchase@1014 : Codeunit 130512;
+      LibraryPlanning@1015 : Codeunit 132203;
+      isInitialized@1000 : Boolean;
+      AppliesToEntryMustBlank@1007 : TextConst 'ENU="Applies-to Entry must not be filled out when reservations exist in Item Ledger Entry Entry No.=''%1''."';
+      UnknownError@1008 : TextConst 'ENU=Unknown Error.';
+      Quantity@1012 : Decimal;
+      ReservationDoesNotExistErr@1017 : TextConst 'ENU=Reservation does not exist for Item %1.';
+
+    [Test]
+    [HandlerFunctions(ReservationHandler,AvailableItemLedgEntriesHandler)]
+    PROCEDURE SalesOrderItemReservationWithApplyToItemEntry@3();
+    VAR
+      Item@1002 : Record 27;
+      ItemJournalLine@1000 : Record 83;
+      EntryNo@1001 : Integer;
+    BEGIN
+      // Test Item Reservation functionality for Sales Order with Apply To Item Entry.
+
+      // Setup: Create and post Item Journal Line.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      CreateAndPostItemJournalLine(ItemJournalLine,Item."No.",LibraryRandom.RandDec(100,2));  // Use Random Quantity because value is not important.
+
+      // Exercise: Create and post Sales Order with Apply To Item Entry.
+      EntryNo := FindItemLedgerEntryNo(ItemJournalLine."Item No.",ItemJournalLine."Document No.");
+      ASSERTERROR CreateAndPostSalesOrderWithItemReservation(ItemJournalLine,EntryNo);
+
+      // Verify: Verify Applies-to Entry must not filled error message.
+      Assert.AreEqual(STRSUBSTNO(AppliesToEntryMustBlank,EntryNo + 1),GETLASTERRORTEXT,UnknownError);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationHandler,AvailableItemLedgEntriesHandler)]
+    PROCEDURE SalesOrderItemReservationWithoutApplyToItemEntry@23();
+    VAR
+      Item@1002 : Record 27;
+      ItemJournalLine@1000 : Record 83;
+      DocumentNo@1001 : Code[20];
+    BEGIN
+      // Test Item Reservation functionality for Sales Order without Apply To Item Entry.
+
+      // Setup: Create and post Item Journal Line.
+      Initialize;
+      LibraryInventory.CreateItem(Item);
+      CreateAndPostItemJournalLine(ItemJournalLine,Item."No.",LibraryRandom.RandDec(100,2));  // Use Random Quantity because value is not important.
+
+      // Exercise: Create and post Sales Order without Apply To Item Entry.
+      DocumentNo := CreateAndPostSalesOrderWithItemReservation(ItemJournalLine,0);  // Use 0 for blank Entry No.
+
+      // Verify: Verify Item Ledger Entry after posting Sales Order.
+      VerifyItemLedgerEntry(DocumentNo,ItemJournalLine."Item No.",-ItemJournalLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationHandler,AvailableItemLedgEntriesHandler)]
+    PROCEDURE ProductionOrderWithItemReservation@53();
+    VAR
+      ItemJournalLine@1000 : Record 83;
+      ProductionBOMLine@1001 : Record 99000772;
+      ProductionOrderNo@1003 : Code[20];
+      ItemNo@1004 : Code[20];
+      Quantity@1002 : Decimal;
+    BEGIN
+      // Test Item Reservation functionality for Production Order.
+
+      // Setup: Create Manufacturing Item. Create and post Item Journal Line. Create and refresh Production Order. Calculate and post Consumption.
+      Initialize;
+      Quantity := LibraryRandom.RandInt(100);  // Use Random Quantity because value is not important.
+      ItemNo := CreateManufacturingItem(ProductionBOMLine);
+      CreateAndPostItemJournalLine(ItemJournalLine,ProductionBOMLine."No.",Quantity * ProductionBOMLine."Quantity per");
+      ProductionOrderNo := CreateAndRefreshProductionOrder(ItemNo,Quantity);
+      ShowReservation(ProductionBOMLine."No.");
+      CalculateAndPostConsumption(ProductionOrderNo);
+
+      // Exercise: Run Adjust Cost Item Entries and Post Inventory Cost to General Ledger.
+      LibraryCosting.AdjustCostItemEntries(ItemNo,'');
+      LibraryCosting.PostInvtCostToGL(FALSE,WORKDATE,'');
+
+      // Verify: Verify G/L Entry.
+      VerifyGLEntry(ProductionOrderNo,-Quantity * ProductionBOMLine."Quantity per" * ItemJournalLine."Unit Amount");
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationFromCurrentLineHandler)]
+    PROCEDURE ServiceOrderWithItemReservation@1();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+    BEGIN
+      // Test Item Reservation functionality for Service Order.
+
+      // Setup: Create and post Purchase Order for new Item. Create a Service Order for the same Item.
+      Initialize;
+      CreateAndPostPurchaseOrder(PurchaseLine);
+      CreateServiceOrder(ServiceHeader,ServiceLine,PurchaseLine."No.",PurchaseLine.Quantity);
+      Quantity := ServiceLine.Quantity;  // Quantity is made Global as it is used in Handler.
+
+      // Exercise: Open Reservation page and Reserve from Current Line using ReservationFromCurrentLine Handler.
+      ServiceLine.ShowReservation;
+
+      // Verify: Total Reserved Quantity is equal to the Quantity in the Service Line.
+      // Verification is done in Handler.
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationFromCurrentLineHandler)]
+    PROCEDURE ServiceOrderPostWithItemReservation@17();
+    VAR
+      PurchaseLine@1002 : Record 39;
+      ServiceHeader@1001 : Record 5900;
+      ServiceLine@1003 : Record 5902;
+    BEGIN
+      // Test posting of Service Order with Item Reservation functionality.
+
+      // Setup: Create and post Purchase Order for new Item. Create a Service Order for the same Item. Open Reservation page and Reserve from Current Line.
+      Initialize;
+      CreateAndPostPurchaseOrder(PurchaseLine);
+      CreateServiceOrder(ServiceHeader,ServiceLine,PurchaseLine."No.",PurchaseLine.Quantity);
+      Quantity := ServiceLine.Quantity;  // Quantity is made Global as it is used in Handler.
+      ServiceLine.ShowReservation;
+
+      // Exercise: Post the Service Order as Ship and Invoice.
+      LibraryService.PostServiceOrder(ServiceHeader,TRUE,FALSE,TRUE);
+
+      // Verify: Service Order gets posted successfully with Item Reservation.
+      VerifyPostedServiceOrder(ServiceHeader,ServiceLine);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationInSalesOrderFromCurrentLineHandler)]
+    PROCEDURE SalesOrderWithItemReservation@2();
+    VAR
+      WarehouseJournalLine@1000 : Record 7311;
+      SalesLine@1009 : Record 37;
+      PurchaseLine@1001 : Record 39;
+      Location@1002 : Record 14;
+    BEGIN
+      // Test to validate Warehouse Activity Line with Item reservation functionality in Sales Order.
+
+      // Setup: Create and Register Warehouse Journal Line and Create and Release Purchase Order and Sales Order. Reserve Sales Order.
+      Initialize;
+      CreateAndUpdateLocation(Location);
+      CreateAndRegisterWarehouseJournalLine(WarehouseJournalLine,Location.Code);
+      CalculateAndPostWarehouseAdjustment(WarehouseJournalLine."Item No.");
+      CreateAndReleasePurchaseOrder(PurchaseLine,WarehouseJournalLine."Item No.",WarehouseJournalLine."Location Code");
+      CreateAndReleaseSalesOrderWithReservation(
+        SalesLine,WarehouseJournalLine."Item No.",WarehouseJournalLine."Location Code",
+        WarehouseJournalLine.Quantity + PurchaseLine.Quantity,PurchaseLine."Expected Receipt Date");
+
+      // Exercise: Create Pick.
+      CreatePick(WarehouseJournalLine."Location Code",SalesLine."Document No.");
+
+      // Verify: Verify Warehouse Activity Line.
+      VerifyWarehouseActivityLine(SalesLine."Document No.",WarehouseJournalLine."Item No.",WarehouseJournalLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ReservationInSalesOrderFromCurrentLineHandler)]
+    PROCEDURE WareHouseShipmentLineAfterRegisterPick@50();
+    VAR
+      WarehouseJournalLine@1000 : Record 7311;
+      PurchaseLine@1007 : Record 39;
+      SalesLine@1009 : Record 37;
+      Location@1001 : Record 14;
+    BEGIN
+      // Test to validate Warehouse Shipment Line after register Pick.
+
+      // Setup: Create and Register Warehouse Journal Line and Create and Release Purchase Order and Sales Order. Reserve Sales Order.
+      Initialize;
+      CreateAndUpdateLocation(Location);
+      CreateAndRegisterWarehouseJournalLine(WarehouseJournalLine,Location.Code);
+      CalculateAndPostWarehouseAdjustment(WarehouseJournalLine."Item No.");
+      CreateAndReleasePurchaseOrder(PurchaseLine,WarehouseJournalLine."Item No.",WarehouseJournalLine."Location Code");
+      CreateAndReleaseSalesOrderWithReservation(
+        SalesLine,WarehouseJournalLine."Item No.",WarehouseJournalLine."Location Code",
+        WarehouseJournalLine.Quantity + PurchaseLine.Quantity,PurchaseLine."Expected Receipt Date");
+      CreatePick(WarehouseJournalLine."Location Code",SalesLine."Document No.");
+
+      // Exercise: Register Pick.
+      RegisterPick(WarehouseJournalLine."Location Code");
+
+      // Verify: Verify Warehouse Shipment Line.
+      VerifyWareHouseShipmentLine(
+        WarehouseJournalLine."Item No.",SalesLine."Document No.",WarehouseJournalLine.Quantity,PurchaseLine.Quantity);
+    END;
+
+    [Test]
+    [HandlerFunctions(ItemTrackingPageHandlerForLot,NegativeAdjustmentConfirmHandler,ReservationPageHandler)]
+    PROCEDURE CalculatePlanningForLotItemWithReservation@111();
+    BEGIN
+      // Check calculate plan for lot item on Requisition Worksheet is working fine with reservation.
+      PlanningForItemWithReservation(LibraryUtility.GetGlobalNoSeriesCode);
+    END;
+
+    [Test]
+    [HandlerFunctions(NegativeAdjustmentConfirmHandler,ReservationPageHandler)]
+    PROCEDURE CalculatePlanningWithoutLotItemWithReservation@112();
+    BEGIN
+      // Check calculate plan for item withOut lot on Requisition Worksheet is working fine with reservation.
+      PlanningForItemWithReservation(''); // Without Lot No.
+    END;
+
+    [Test]
+    [HandlerFunctions(MessageHandler)]
+    PROCEDURE SalesQuoteToOrderAssemblyOrderWithReservation@24();
+    VAR
+      SalesHeader@1003 : Record 36;
+      ComponentItem@1000 : Record 27;
+    BEGIN
+      // [SCENARIO 109055] Reservation entries are created for component items with Reservation = Always when Sales Order is created from Sales Quote with Assembly Order
+
+      // [GIVEN] Sales Quote with assembled item, component "?" has "Reserved" = "Always"
+      Initialize;
+      CreateItemAutoReserved(ComponentItem);
+      CreateSalesQuoteWithItem(SalesHeader,CreateAssembledItem(ComponentItem));
+
+      // [WHEN] Creating Sales Order from Sales Quote
+      CODEUNIT.RUN(CODEUNIT::"Sales-Quote to Order",SalesHeader);
+
+      // [THEN] Child Assembly Order has reservations for component "C"
+      VerifyReservationExists(ComponentItem."No.");
+    END;
+
+    LOCAL PROCEDURE PlanningForItemWithReservation@6(LotNo@1011 : Code[10]);
+    VAR
+      Item@1000 : Record 27;
+      PurchaseLine@1002 : Record 39;
+      ItemJournalLine@1003 : Record 83;
+      PurchInvHeader@1005 : Record 122;
+      DocumentNo@1004 : Code[20];
+    BEGIN
+      // Setup: Create Item with "Safety Stock Quantity" & "ReOrdering Policy" .Creating Purchase Order , Post Postive adjustment &
+      // Creation of Sales Order and reserve the Quantity
+      Initialize;
+      CreateItemWithLotAndTracking(Item,LotNo);
+      CreatePurchaseOrderWithItemTracking(Item."No.",LotNo,PurchaseLine);
+      PostItemPositiveAdjmt(Item."No.",LotNo,ItemJournalLine);
+      CreateSalesOrderAndReserve(Item."No.",PurchaseLine.Quantity + ItemJournalLine.Quantity - LibraryRandom.RandDec(10,2));
+      CalculatePlanningFromReqWorkSheet(Item);
+
+      // Exercise: Create and post Purchase order from requisition line.
+      SelectAndCarryOutActionMsg(Item."No.",PurchaseLine."Buy-from Vendor No.");
+      DocumentNo := PostPurchaseOrder(PurchaseLine."Buy-from Vendor No.");
+
+      // Verify: Verifying that Purchase order has been posted successfully.
+      PurchInvHeader.GET(DocumentNo);
+    END;
+
+    LOCAL PROCEDURE Initialize@4();
+    VAR
+      LibraryERMCountryData@1059 : Codeunit 131305;
+    BEGIN
+      // Clear global variables.
+      CLEAR(Quantity);
+
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CalculateAndPostConsumption@85(ProductionOrderNo@1002 : Code[20]);
+    VAR
+      ItemJournalTemplate@1001 : Record 82;
+      ItemJournalBatch@1000 : Record 233;
+    BEGIN
+      SelectItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Consumption);
+      LibraryManufacturing.CalculateConsumption(ProductionOrderNo,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CalculateAndPostWarehouseAdjustment@92(ItemNo@1002 : Code[20]) : Code[10];
+    VAR
+      ItemJournalTemplate@1003 : Record 82;
+      ItemJournalBatch@1000 : Record 233;
+      Item@1001 : Record 27;
+    BEGIN
+      SelectItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Item);
+      Item.GET(ItemNo);
+      LibraryWarehouse.CalculateWhseAdjustment(Item,ItemJournalBatch);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+      EXIT(ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CalculatePlanningFromReqWorkSheet@44(Item@1000 : Record 27);
+    VAR
+      ReqWkshTemplate@1003 : Record 244;
+      RequisitionWkshName@1004 : Record 245;
+    BEGIN
+      SelectRequisitionTemplate(ReqWkshTemplate);
+      LibraryPlanning.CreateRequisitionWkshName(RequisitionWkshName,ReqWkshTemplate.Name);
+      LibraryPlanning.CalculatePlanForReqWksh(
+        Item,ReqWkshTemplate.Name,RequisitionWkshName.Name,WORKDATE,
+        CALCDATE(STRSUBSTNO('<%1M>',LibraryRandom.RandInt(3)),WORKDATE));
+    END;
+
+    LOCAL PROCEDURE CreateAndPostItemJournalLine@27(VAR ItemJournalLine@1000 : Record 83;ItemNo@1001 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ItemJournalBatch@1002 : Record 233;
+    BEGIN
+      CreateItemJournalLine(ItemJournalBatch,ItemJournalLine,ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Unit Amount",LibraryRandom.RandInt(5));  // Use Random Unit Amount because value is not important.
+      ItemJournalLine.MODIFY(TRUE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesOrderWithItemReservation@72(ItemJournalLine@1001 : Record 83;ApplyToItemEntry@1003 : Integer) : Code[20];
+    VAR
+      SalesHeader@1000 : Record 36;
+      SalesLine@1002 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CreateCustomer);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemJournalLine."Item No.",ItemJournalLine.Quantity);
+      SalesLine.VALIDATE("Appl.-to Item Entry",ApplyToItemEntry);
+      SalesLine.MODIFY(TRUE);
+      SalesLine.ShowReservation;
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE));
+    END;
+
+    LOCAL PROCEDURE CreateAndPostPurchaseOrder@57(VAR PurchaseLine@1001 : Record 39) : Code[20];
+    VAR
+      PurchaseHeader@1000 : Record 38;
+      Item@1003 : Record 27;
+      Vendor@1004 : Record 23;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,Item."No.",LibraryRandom.RandDec(10,2));  // Use random Quantity.
+      EXIT(LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,FALSE));  // Post Purchase Order as Receive.
+    END;
+
+    LOCAL PROCEDURE CreateAndRefreshProductionOrder@71(ItemNo@1001 : Code[20];Quantity@1002 : Decimal) : Code[20];
+    VAR
+      ProductionOrder@1000 : Record 5405;
+    BEGIN
+      LibraryManufacturing.CreateProductionOrder(
+        ProductionOrder,ProductionOrder.Status::Released,ProductionOrder."Source Type"::Item,ItemNo,Quantity);
+      LibraryManufacturing.RefreshProdOrder(ProductionOrder,FALSE,TRUE,TRUE,TRUE,FALSE);
+      EXIT(ProductionOrder."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAndRegisterWarehouseJournalLine@21(VAR WarehouseJournalLine@1007 : Record 7311;LocationCode@1000 : Code[10]);
+    VAR
+      Item@1005 : Record 27;
+      WarehouseJournalBatch@1003 : Record 7310;
+      Bin@1002 : Record 7354;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      FindBin(Bin,LocationCode);
+      CreateWarehouseJournalBatch(WarehouseJournalBatch,LocationCode);
+      LibraryWarehouse.CreateWhseJournalLine(
+        WarehouseJournalLine,WarehouseJournalBatch."Journal Template Name",
+        WarehouseJournalBatch.Name,LocationCode,Bin."Zone Code",Bin.Code,WarehouseJournalLine."Entry Type"::"Positive Adjmt.",
+        Item."No.",LibraryRandom.RandInt(100));
+      LibraryWarehouse.RegisterWhseJournalLine(
+        WarehouseJournalBatch."Journal Template Name",WarehouseJournalBatch.Name,LocationCode,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleasePurchaseOrder@256(VAR PurchaseLine@1004 : Record 39;ItemNo@1001 : Code[20];LocationCode@1003 : Code[10]);
+    VAR
+      PurchaseHeader@1005 : Record 38;
+    BEGIN
+      CreatePurchaseOrder(PurchaseHeader,PurchaseLine,LocationCode,ItemNo);
+      LibraryPurchase.ReleasePurchaseDocument(PurchaseHeader);
+    END;
+
+    LOCAL PROCEDURE CreateAndReleaseSalesOrderWithReservation@96(VAR SalesLine@1002 : Record 37;ItemNo@1003 : Code[20];LocationCode@1005 : Code[10];Quantity@1007 : Decimal;ShipmentDate@1004 : Date);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,'');
+      CreateSalesLine(SalesLine,SalesHeader,ItemNo,LocationCode,'',Quantity);
+      SalesLine.VALIDATE("Shipment Date",CALCDATE('<' + FORMAT(LibraryRandom.RandInt(10)) + 'D>',ShipmentDate));
+      SalesLine.MODIFY(TRUE);
+      LibrarySales.ReleaseSalesDocument(SalesHeader);
+      SalesLine.ShowReservation;
+    END;
+
+    LOCAL PROCEDURE CreateAndUpdateLocation@19(VAR Location@1000 : Record 14);
+    BEGIN
+      CreateFullWarehouseSetup(Location);
+      Location.VALIDATE("Require Receive",TRUE);
+      Location.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItemJournalLine@32(VAR ItemJournalBatch@1005 : Record 233;VAR ItemJournalLine@1000 : Record 83;ItemNo@1001 : Code[20];Quantity@1002 : Decimal);
+    VAR
+      ItemJournalTemplate@1004 : Record 82;
+    BEGIN
+      SelectItemJournalBatch(ItemJournalBatch,ItemJournalTemplate.Type::Item);
+      LibraryInventory.CreateItemJournalLine(
+        ItemJournalLine,ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name,
+        ItemJournalLine."Entry Type"::"Positive Adjmt.",ItemNo,Quantity);
+      ItemJournalLine.VALIDATE("Unit Amount",LibraryRandom.RandInt(5));  // Use Random Unit Amount because value is not important.
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@12() : Code[20];
+    VAR
+      Customer@1000 : Record 18;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateFullWarehouseSetup@48(VAR Location@1000 : Record 14);
+    VAR
+      WarehouseEmployee@1001 : Record 7301;
+    BEGIN
+      WarehouseEmployee.DELETEALL(TRUE);
+      LibraryWarehouse.CreateFullWMSLocation(Location,2);  // Value used for number of bin per zone.
+      LibraryWarehouse.CreateWarehouseEmployee(WarehouseEmployee,Location.Code,TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateManufacturingItem@5(VAR ProductionBOMLine@1001 : Record 99000772) : Code[20];
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Production BOM No.",CreateAndCertifyProductionBOM(ProductionBOMLine,Item."Base Unit of Measure"));
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreateAssembledItem@47(ComponentItem@1002 : Record 27) : Code[20];
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      WITH Item DO BEGIN
+        VALIDATE("Replenishment System","Replenishment System"::Assembly);
+        VALIDATE("Assembly Policy","Assembly Policy"::"Assemble-to-Order");
+        MODIFY(TRUE);
+        AddComponentToAssemblyList(ComponentItem."No.","No.",ComponentItem."Base Unit of Measure",1);
+        EXIT("No.");
+      END;
+    END;
+
+    LOCAL PROCEDURE CreateItemAutoReserved@100(VAR Item@1000 : Record 27);
+    VAR
+      ItemJournalLine@1003 : Record 83;
+    BEGIN
+      WITH Item DO BEGIN
+        CLEAR(Item);
+        LibraryInventory.CreateItem(Item);
+        VALIDATE(Reserve,Reserve::Always);
+        MODIFY(TRUE);
+        PostItemPositiveAdjmt("No.",'',ItemJournalLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE AddComponentToAssemblyList@101(ComponentNo@1001 : Code[20];ParentItemNo@1005 : Code[20];UOM@1003 : Code[10];QuantityPer@1002 : Decimal);
+    VAR
+      BOMComponent@1000 : Record 90;
+    BEGIN
+      LibraryManufacturing.CreateBOMComponent(BOMComponent,ParentItemNo,BOMComponent.Type::Item,ComponentNo,QuantityPer,UOM);
+    END;
+
+    LOCAL PROCEDURE CreatePick@35(LocationCode@1001 : Code[10];DocumentNo@1002 : Code[20]);
+    VAR
+      SalesHeader@1000 : Record 36;
+      WarehouseShipmentHeader@1003 : Record 7320;
+    BEGIN
+      SalesHeader.GET(SalesHeader."Document Type"::Order,DocumentNo);
+      LibraryWarehouse.CreateWhseShipmentFromSO(SalesHeader);
+      WarehouseShipmentHeader.SETRANGE("Location Code",LocationCode);
+      WarehouseShipmentHeader.FINDFIRST;
+      LibraryWarehouse.CreatePick(WarehouseShipmentHeader);
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrder@91(VAR PurchaseHeader@1006 : Record 38;VAR PurchaseLine@1001 : Record 39;LocationCode@1003 : Code[10];ItemNo@1004 : Code[20]);
+    BEGIN
+      // Create Purchase Order with One Item Line. Random values used are not important for test.
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,'');
+      LibraryPurchase.CreatePurchaseLine(PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,LibraryRandom.RandInt(10));
+      UpdateLocationOnPurchaseLine(PurchaseLine,LocationCode);
+    END;
+
+    LOCAL PROCEDURE CreateAndCertifyProductionBOM@34(VAR ProductionBOMLine@1002 : Record 99000772;UnitOfMeasureCode@1001 : Code[10]) : Code[20];
+    VAR
+      ProductionBOMHeader@1000 : Record 99000771;
+      Item@1003 : Record 27;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryManufacturing.CreateProductionBOMHeader(ProductionBOMHeader,UnitOfMeasureCode);
+      LibraryManufacturing.CreateProductionBOMLine(
+        ProductionBOMHeader,ProductionBOMLine,'',ProductionBOMLine.Type::Item,Item."No.",LibraryRandom.RandInt(5));
+      ProductionBOMHeader.VALIDATE(Status,ProductionBOMHeader.Status::Certified);
+      ProductionBOMHeader.MODIFY(TRUE);
+      EXIT(ProductionBOMHeader."No.");
+    END;
+
+    LOCAL PROCEDURE CreateSalesLine@93(VAR SalesLine@1001 : Record 37;SalesHeader@1000 : Record 36;ItemNo@1002 : Code[20];LocationCode@1004 : Code[10];BinCode@1005 : Code[20];Quantity@1003 : Decimal);
+    BEGIN
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.VALIDATE("Bin Code",BinCode);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesQuoteWithItem@46(VAR SalesHeader@1002 : Record 36;ItemNo@1001 : Code[20]);
+    VAR
+      SalesLine@1003 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Quote,CreateCustomer);
+      LibrarySales.CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,LibraryRandom.RandDecInRange(1,5,2));
+    END;
+
+    LOCAL PROCEDURE CreateServiceOrder@30(VAR ServiceHeader@1001 : Record 5900;VAR ServiceLine@1000 : Record 5902;ItemNo@1006 : Code[20];Quantity@1005 : Decimal);
+    VAR
+      ServiceItem@1003 : Record 5940;
+      ServiceItemLine@1004 : Record 5901;
+    BEGIN
+      LibraryService.CreateServiceHeader(ServiceHeader,ServiceHeader."Document Type"::Order,CreateCustomer);
+      LibraryService.CreateServiceLine(ServiceLine,ServiceHeader,ServiceLine.Type::Item,ItemNo);
+      LibraryService.CreateServiceItem(ServiceItem,ServiceHeader."Customer No.");
+      LibraryService.CreateServiceItemLine(ServiceItemLine,ServiceHeader,ServiceItem."No.");
+      ServiceLine.VALIDATE("Service Item Line No.",ServiceItemLine."Line No.");
+      ServiceLine.VALIDATE(Quantity,Quantity);
+      ServiceLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateWarehouseJournalBatch@51(VAR WarehouseJournalBatch@1000 : Record 7310;LocationCode@1001 : Code[10]);
+    VAR
+      WarehouseJournalTemplate@1002 : Record 7309;
+    BEGIN
+      LibraryWarehouse.SelectWhseJournalTemplateName(WarehouseJournalTemplate,WarehouseJournalTemplate.Type::Item);
+      LibraryWarehouse.CreateWhseJournalBatch(WarehouseJournalBatch,WarehouseJournalTemplate.Name,LocationCode);
+    END;
+
+    LOCAL PROCEDURE CreateItemWithLotAndTracking@7(VAR Item@1000 : Record 27;LotNo@1001 : Code[10]);
+    VAR
+      ItemCategory@1002 : Record 5722;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      LibraryInventory.CreateItemCategory(ItemCategory);
+      WITH Item DO BEGIN
+        VALIDATE("Item Category Code",ItemCategory.Code);
+        VALIDATE("Reordering Policy","Reordering Policy"::"Lot-for-Lot");
+        VALIDATE("Include Inventory",TRUE);
+        VALIDATE("Safety Stock Quantity",LibraryRandom.RandDecInRange(25,30,2));
+        VALIDATE("Item Tracking Code",CreateItemTrackingCodeWithLot);
+        VALIDATE("Lot Nos.",LotNo);
+        MODIFY(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CreatePurchaseOrderWithItemTracking@31(ItemNo@1000 : Code[20];LotNo@1005 : Code[10];VAR PurchaseLine@1001 : Record 39);
+    VAR
+      PurchaseHeader@1002 : Record 38;
+      Vendor@1003 : Record 23;
+    BEGIN
+      LibraryPurchase.CreateVendor(Vendor);
+      LibraryPurchase.CreatePurchHeader(PurchaseHeader,PurchaseHeader."Document Type"::Order,Vendor."No.");
+      LibraryPurchase.CreatePurchaseLine(
+        PurchaseLine,PurchaseHeader,PurchaseLine.Type::Item,ItemNo,LibraryRandom.RandDecInRange(90,100,2));
+      IF LotNo <> '' THEN
+        PurchaseLine.OpenItemTrackingLines;
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrderAndReserve@36(ItemNo@1000 : Code[20];Quantity@1001 : Decimal);
+    VAR
+      SalesHeader@1002 : Record 36;
+      SalesLine@1003 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Order,CreateCustomer);
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,Quantity);
+      SalesHeader.VALIDATE("Shipment Date",CALCDATE(STRSUBSTNO('<%1D>',LibraryRandom.RandInt(10)),WORKDATE));
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.AutoReserveSalesLine(SalesLine);
+    END;
+
+    LOCAL PROCEDURE PostItemPositiveAdjmt@25(ItemNo@1000 : Code[20];LotNo@1002 : Code[10];VAR ItemJournalLine@1001 : Record 83);
+    VAR
+      ItemJournalBatch@1004 : Record 233;
+    BEGIN
+      CreateItemJournalLine(ItemJournalBatch,ItemJournalLine,ItemNo,LibraryRandom.RandDecInRange(10,15,2));
+      IF LotNo <> '' THEN
+        ItemJournalLine.OpenItemTrackingLines(FALSE);
+      LibraryInventory.PostItemJournalLine(ItemJournalBatch."Journal Template Name",ItemJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE PostPurchaseOrder@77(VendorNo@1000 : Code[20]) : Code[20];
+    VAR
+      PurchaseHeader@1001 : Record 38;
+    BEGIN
+      WITH PurchaseHeader DO BEGIN
+        SETRANGE("Buy-from Vendor No.",VendorNo);
+        FINDFIRST;
+        VALIDATE("Vendor Invoice No.",LibraryUtility.GenerateRandomCode(FIELDNO("Vendor Invoice No."),DATABASE::"Purchase Header"));
+        MODIFY(TRUE);
+        EXIT(LibraryPurchase.PostPurchaseDocument(PurchaseHeader,TRUE,TRUE));
+      END;
+    END;
+
+    LOCAL PROCEDURE SelectAndCarryOutActionMsg@66(ItemNo@1000 : Code[20];VendorNo@1001 : Code[20]);
+    VAR
+      RequisitionLine@1002 : Record 246;
+    BEGIN
+      WITH RequisitionLine DO BEGIN
+        SETRANGE(Type,Type::Item);
+        SETRANGE("No.",ItemNo);
+        FINDFIRST;
+        MODIFYALL("Vendor No.",VendorNo,TRUE);
+        LibraryPlanning.CarryOutActionMsgPlanWksh(RequisitionLine);
+      END;
+    END;
+
+    LOCAL PROCEDURE SelectRequisitionTemplate@49(VAR ReqWkshTemplate@1000 : Record 244);
+    BEGIN
+      WITH ReqWkshTemplate DO BEGIN
+        SETRANGE(Type,Type::"Req.");
+        SETRANGE(Recurring,FALSE);
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE FindBin@60(VAR Bin@1000 : Record 7354;LocationCode@1001 : Code[10]);
+    VAR
+      BinType@1004 : Record 7303;
+      Zone@1002 : Record 7300;
+    BEGIN
+      FindBinType(BinType);
+      FindZone(Zone,LocationCode,BinType.Code);
+      Bin.SETRANGE("Location Code",LocationCode);
+      Bin.SETRANGE("Zone Code",Zone.Code);
+      Bin.SETRANGE("Adjustment Bin",FALSE);
+      Bin.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindBinType@45(VAR BinType@1000 : Record 7303);
+    BEGIN
+      BinType.SETRANGE("Put Away",TRUE);
+      BinType.SETRANGE(Pick,TRUE);
+      BinType.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE FindItemLedgerEntryNo@28(ItemNo@1001 : Code[20];DocumentNo@1002 : Code[20]) : Integer;
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Item No.",ItemNo);
+      ItemLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      ItemLedgerEntry.FINDFIRST;
+      EXIT(ItemLedgerEntry."Entry No.");
+    END;
+
+    LOCAL PROCEDURE FindZone@59(VAR Zone@1000 : Record 7300;LocationCode@1140 : Code[10];BinTypeCode@1001 : Code[20]);
+    BEGIN
+      Zone.SETRANGE("Location Code",LocationCode);
+      Zone.SETRANGE("Bin Type Code",BinTypeCode);
+      Zone.SETRANGE("Cross-Dock Bin Zone",FALSE);
+      Zone.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE CreateItemTrackingCodeWithLot@20() : Code[10];
+    VAR
+      ItemTrackingCode@1002 : Record 6502;
+    BEGIN
+      LibraryItemTracking.CreateItemTrackingCode(ItemTrackingCode,FALSE,FALSE);
+      ItemTrackingCode.VALIDATE("Lot Sales Inbound Tracking",TRUE);
+      ItemTrackingCode.VALIDATE("Lot Sales Outbound Tracking",TRUE);
+      ItemTrackingCode.MODIFY(TRUE);
+      EXIT(ItemTrackingCode.Code);
+    END;
+
+    LOCAL PROCEDURE RegisterPick@29(LocationCode@1000 : Code[10]);
+    VAR
+      WarehouseActivityHeader@1001 : Record 5766;
+    BEGIN
+      WarehouseActivityHeader.SETRANGE("Location Code",LocationCode);
+      WarehouseActivityHeader.FINDFIRST;
+      LibraryWarehouse.RegisterWhseActivity(WarehouseActivityHeader);
+    END;
+
+    LOCAL PROCEDURE SelectItemJournalBatch@37(VAR ItemJournalBatch@1000 : Record 233;ItemJournalTemplateType@1002 : Option);
+    VAR
+      ItemJournalTemplate@1001 : Record 82;
+    BEGIN
+      LibraryInventory.SelectItemJournalTemplateName(ItemJournalTemplate,ItemJournalTemplateType);
+      LibraryInventory.SelectItemJournalBatchName(ItemJournalBatch,ItemJournalTemplateType,ItemJournalTemplate.Name);
+      LibraryInventory.ClearItemJournal(ItemJournalTemplate,ItemJournalBatch);
+    END;
+
+    LOCAL PROCEDURE ShowReservation@80(ItemNo@1001 : Code[20]);
+    VAR
+      ProdOrderComponent@1000 : Record 5407;
+    BEGIN
+      ProdOrderComponent.SETRANGE("Item No.",ItemNo);
+      ProdOrderComponent.FINDFIRST;
+      ProdOrderComponent.ShowReservation;
+    END;
+
+    LOCAL PROCEDURE UpdateLocationOnPurchaseLine@147(VAR PurchaseLine@1000 : Record 39;LocationCode@1001 : Code[10]);
+    BEGIN
+      PurchaseLine.VALIDATE("Location Code",LocationCode);
+      PurchaseLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE VerifyGLEntry@11(DocumentNo@1000 : Code[20];Amount@1002 : Decimal);
+    VAR
+      GLEntry@1001 : Record 17;
+    BEGIN
+      GLEntry.SETRANGE("Document No.",DocumentNo);
+      GLEntry.FINDFIRST;
+      GLEntry.TESTFIELD(Amount,Amount);
+    END;
+
+    LOCAL PROCEDURE VerifyItemLedgerEntry@39(DocumentNo@1001 : Code[20];ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      ItemLedgerEntry@1000 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Document No.",DocumentNo);
+      ItemLedgerEntry.FINDFIRST;
+      ItemLedgerEntry.TESTFIELD("Item No.",ItemNo);
+      ItemLedgerEntry.TESTFIELD(Quantity,Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyPostedServiceOrder@22(ServiceHeader@1003 : Record 5900;ServiceLine@1000 : Record 5902);
+    VAR
+      ServiceInvoiceHeader@1001 : Record 5992;
+      ServiceInvoiceLine@1002 : Record 5993;
+    BEGIN
+      ServiceInvoiceHeader.SETRANGE("Order No.",ServiceHeader."No.");
+      ServiceInvoiceHeader.FINDFIRST;
+      ServiceInvoiceHeader.TESTFIELD("Customer No.",ServiceHeader."Customer No.");
+      ServiceInvoiceLine.SETRANGE("Document No.",ServiceInvoiceHeader."No.");
+      ServiceInvoiceLine.FINDFIRST;
+      ServiceInvoiceLine.TESTFIELD("No.",ServiceLine."No.");
+      ServiceInvoiceLine.TESTFIELD(Quantity,ServiceLine.Quantity);
+    END;
+
+    LOCAL PROCEDURE VerifyWarehouseActivityLine@8(SourceNo@1001 : Code[20];ItemNo@1002 : Code[20];Quantity@1003 : Decimal);
+    VAR
+      WarehouseActivityLine@1000 : Record 5767;
+    BEGIN
+      WarehouseActivityLine.SETRANGE("Source No.",SourceNo);
+      WarehouseActivityLine.FINDSET;
+      REPEAT
+        WarehouseActivityLine.TESTFIELD("Item No.",ItemNo);
+        WarehouseActivityLine.TESTFIELD(Quantity,Quantity);
+      UNTIL WarehouseActivityLine.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE VerifyWareHouseShipmentLine@14(ItemNo@1000 : Code[20];SourceNo@1001 : Code[20];Quantity@1002 : Decimal;PurchaseQuantity@1003 : Decimal);
+    VAR
+      WarehouseShipmentLine@1004 : Record 7321;
+    BEGIN
+      WarehouseShipmentLine.SETRANGE("Source No.",SourceNo);
+      WarehouseShipmentLine.SETRANGE("Item No.",ItemNo);
+      WarehouseShipmentLine.FINDFIRST;
+      WarehouseShipmentLine.TESTFIELD(Quantity,Quantity + PurchaseQuantity);
+      WarehouseShipmentLine.TESTFIELD("Qty. to Ship",Quantity);
+      WarehouseShipmentLine.TESTFIELD("Qty. Outstanding (Base)",Quantity + PurchaseQuantity);
+    END;
+
+    LOCAL PROCEDURE VerifyReservationExists@56(ItemNo@1000 : Code[20]);
+    VAR
+      ReservationEntry@1001 : Record 337;
+    BEGIN
+      ReservationEntry.SETRANGE("Item No.",ItemNo);
+      Assert.IsFalse(ReservationEntry.ISEMPTY,STRSUBSTNO(ReservationDoesNotExistErr,ItemNo));
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationHandler@41(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      Reservation.AvailableToReserve.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationFromCurrentLineHandler@9(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      Reservation."Reserve from Current Line".INVOKE;
+      Reservation.TotalReservedQuantity.ASSERTEQUALS(Quantity);
+      Reservation.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationInSalesOrderFromCurrentLineHandler@16(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      Reservation.FIRST;
+      Reservation."Reserve from Current Line".INVOKE;
+      Reservation.LAST;
+      Reservation."Reserve from Current Line".INVOKE;
+      Reservation.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE AvailableItemLedgEntriesHandler@42(VAR AvailableItemLedgEntries@1000 : TestPage 504);
+    BEGIN
+      AvailableItemLedgEntries.Reserve.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ItemTrackingPageHandlerForLot@75(VAR ItemTrackingLines@1000 : TestPage 6510);
+    BEGIN
+      ItemTrackingLines."Assign Lot No.".INVOKE;
+      ItemTrackingLines.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ReservationPageHandler@26(VAR Reservation@1000 : TestPage 498);
+    BEGIN
+      Reservation.FIRST;
+      Reservation."Auto Reserve".INVOKE;
+      Reservation.FIRST;
+      Reservation.CancelReservationCurrentLine.INVOKE;
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@15(Message@1000 : Text[1024]);
+    BEGIN
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE NegativeAdjustmentConfirmHandler@220(ConfirmMessage@1000 : Text[1024];VAR Reply@1003 : Boolean);
+    BEGIN
+      Reply := TRUE;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Reservation] [SCM]
+       Unsupported version tags:
+       US: Unable to Execute
+       CA: Unable to Execute
+
+       1. Test Item Reservation functionality for Sales Order with Apply To Item Entry.
+       2. Test Item Reservation functionality for Sales Order without Apply To Item Entry.
+       3. Test Item Reservation functionality for Production Order.
+       4. Test Item Reservation functionality for Service Order.
+       5. Test posting of Service Order with Item Reservation functionality.
+       6. Test to validate Warehouse Activity Line with Item reservation functionality in Sales Order.
+       7. Test to validate Warehouse Shipment Line after register Pick.
+       8. Check calculate plan for lot item on Requisition Worksheet is working fine with reservation.
+       9. Check calculate plan for item withOut lot on Requisition Worksheet is working fine with reservation.
+      10. Reservation entries are created for component items with Reservation = Always when Sales Order is created from Sales Quote with Assembly Order
+
+      TFS_TS_ID = 273970
+      Cover Test cases:
+      ----------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                       TFS ID
+      ----------------------------------------------------------------------------------------------------------------
+      SalesOrderItemReservationWithApplyToItemEntry                                                            124123
+      SalesOrderItemReservationWithoutApplyToItemEntry                                                         124123
+      ProductionOrderWithItemReservation                                                                       124121
+
+      TFS_TS_ID = 273141
+      Cover Test cases:
+      ----------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                       TFS ID
+      ----------------------------------------------------------------------------------------------------------------
+      ServiceOrderWithItemReservation                                                                          141557
+      ServiceOrderPostWithItemReservation                                                                      141557
+
+      TFS_TS_ID = 278130
+      Cover Test cases:
+      ----------------------------------------------------------------------------------------------------------------
+      Test Function Name                                                                                       TFS ID
+      ----------------------------------------------------------------------------------------------------------------
+      SalesOrderWithItemReservation                                                                            144533
+      WarehouseShipmentLineAfterRegisterPick                                                                   144533
+
+      BUG ID = 54445
+      ----------------------------------------------------------------------------------------------------------------
+      Test Function Name
+      --------------------------------------------------------------------------------------------------------------
+      CalculatePlanningForLotItemWithReservation
+      CalculatePlanningWithoutLotItemWithReservation
+
+      ----------------------------------------------------------------------------------------------------------------
+      Test Function Name
+      ----------------------------------------------------------------------------------------------------------------
+      SalesQuoteToOrderAssemblyOrderWithReservation
+    }
+    END.
+  }
+}
+

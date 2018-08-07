@@ -1,0 +1,1940 @@
+OBJECT Codeunit 134710 Manual Payment Registration
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1005 : Codeunit 130000;
+      LibraryERM@1004 : Codeunit 131300;
+      LibraryInventory@1023 : Codeunit 132201;
+      LibrarySales@1003 : Codeunit 130509;
+      LibraryVariableStorage@1020 : Codeunit 131004;
+      NoSeriesManagement@1002 : Codeunit 396;
+      LibraryRandom@1000 : Codeunit 130440;
+      isInitialized@1001 : Boolean;
+      OpenCustomerDocErr@1006 : TextConst 'ENU="Document with No = %1 for Customer No = %2 should not be open."';
+      CreatedPaymentErr@1007 : TextConst 'ENU=Payment journal line was created.';
+      NothingToPostErr@1009 : TextConst 'ENU=There is nothing to post.';
+      FilterNotPreservedErr@1008 : TextConst 'ENU=Filter was not preserved after posting';
+      RecordChangedErr@1010 : TextConst 'ENU=None of the fields from %1 should have changed.';
+      OpenCustomerCardErr@1011 : TextConst 'ENU=Open customer card did not succeed';
+      NavigateErr@1012 : TextConst 'ENU=Navigate did not succeed';
+      DummyUserNameTxt@1013 : TextConst 'ENU=User2';
+      WrongBalAccountErr@1014 : TextConst 'ENU=Wrong Balancing account for user %1.';
+      WrongFieldValueErr@1015 : TextConst 'ENU=Field %1 has a wrong value.';
+      WrongCustomerErr@1016 : TextConst 'ENU=Finance Charge Memo page is opened for an different customer.';
+      DueDateMsg@1017 : TextConst 'ENU=The payment is overdue. You can calculate interest for late payments from customers by choosing the Finance Charge Memo button.';
+      WrongWarningErr@1019 : TextConst 'ENU=Warning text shown is not correct.';
+      DistinctDateReceivedErr@1021 : TextConst 'ENU=To post as a lump payment, the %1 field must have the same value in all lines where the %2 check box is selected.';
+      DistinctCustomerErr@1018 : TextConst 'ENU=To post as lump payment, the customer must be same value on all lines where the %1 check box is selected.';
+      ForeignCurrNotSuportedErr@1022 : TextConst '@@@="%1 = Document Type; %2 = Description";ENU=The document with type %1 and description %2 must have the same currency code as the payment you are registering.';
+      UnexpectedPreviewErr@1024 : TextConst 'ENU=Unexpected preview entry.';
+
+    [Test]
+    [HandlerFunctions(HandlerSetupPageForEmptySetupTest)]
+    PROCEDURE EmptySetup@63();
+    VAR
+      PaymentRegistrationSetup@1000 : Record 980;
+      PaymentRegistrationPage@1001 : TestPage 981;
+    BEGIN
+      Initialize;
+
+      MoveDefaultSetupToDummyUserSetup; // to keep Default setup, so we could restore it after.
+      DeleteCurrentUserSetup;
+
+      // HandlerFunctions has a verification.
+      PaymentRegistrationPage.OPENEDIT;
+      PaymentRegistrationPage.CLOSE;
+
+      PaymentRegistrationSetup.GET(USERID);
+
+      RestoreDefaultSetupFromDummyUser;
+    END;
+
+    [Test]
+    [HandlerFunctions(HandlerSetupPageForDefaultSetupTest)]
+    PROCEDURE DefaultSetup@78();
+    VAR
+      PaymentRegistrationSetupDefault@1006 : Record 980;
+      PaymentRegistrationSetupMyUser@1000 : Record 980;
+      PaymentRegistrationPage@1001 : TestPage 981;
+    BEGIN
+      Initialize;
+
+      DeleteCurrentUserSetup;
+
+      PaymentRegistrationSetupDefault.GET;
+      // HandlerFunctions has a verification.
+      PaymentRegistrationPage.OPENEDIT;
+      PaymentRegistrationPage.CLOSE;
+      PaymentRegistrationSetupMyUser.GET(USERID);
+
+      ValidateExpectedAndActualSetupTables(PaymentRegistrationSetupDefault,PaymentRegistrationSetupMyUser);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentForFinanceChargeMemoBalAccountGL@15();
+    VAR
+      FinanceChargeMemoHeader@1002 : Record 302;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1001 : Code[20];
+      PaymentDocNo@1003 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := IssueFinanceChargeMemoAndMarkItAsPaid(FinanceChargeMemoHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(FinanceChargeMemoHeader."Customer No.",PostedDocNo,PaymentDocNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentForFinanceChargeMemoBalAccountBank@9();
+    VAR
+      FinanceChargeMemoHeader@1002 : Record 302;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+
+      PostedDocNo := IssueFinanceChargeMemoAndMarkItAsPaid(FinanceChargeMemoHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(FinanceChargeMemoHeader."Customer No.",PostedDocNo,PaymentDocNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentForSalesInvoiceBalAccountGL@8();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoice(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentForSalesInvoiceBalAccountBank@12();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoice(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentForSalesOrderBalAccountGL@6();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesOrder(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentForSalesOrderBalAccountBank@2();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesOrder(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo);
+    END;
+
+    [Test]
+    PROCEDURE PreviewPaymentForSalesOrderBalAccountBank@86();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PaymentRegistrationMgt@1001 : Codeunit 980;
+      GLPostingPreview@1005 : TestPage 115;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+      CreatePostAndMarkAsPaidSalesOrder(SalesHeader,TempPaymentRegistrationBuffer);
+
+      // Exercise:
+      GLPostingPreview.TRAP;
+      TempPaymentRegistrationBuffer.SETRANGE("Payment Made",TRUE);
+      ASSERTERROR PaymentRegistrationMgt.Preview(TempPaymentRegistrationBuffer,FALSE);
+      Assert.AreEqual('',GETLASTERRORTEXT,'Expected empty error from Preview function');
+
+      // Verify:
+      GLPostingPreview.FIRST;
+      REPEAT
+        CASE GLPostingPreview."Table Name".VALUE OF
+          'G/L Entry':
+            Assert.AreEqual(GLPostingPreview."No. of Records".ASINTEGER,2,'Incorrect number of G/L preview records.');
+          'Cust. Ledger Entry':
+            Assert.AreEqual(GLPostingPreview."No. of Records".ASINTEGER,1,'Incorrect number of cust preview records.');
+          'Detailed Cust. Ledg. Entry':
+            Assert.AreEqual(GLPostingPreview."No. of Records".ASINTEGER,3,'Incorrect number of detailed cust preview records.');
+          'Bank Account Ledger Entry':
+            Assert.AreEqual(GLPostingPreview."No. of Records".ASINTEGER,1,'Incorrect number of bank account preview records.');
+          ELSE
+            ERROR(UnexpectedPreviewErr);
+        END;
+      UNTIL NOT GLPostingPreview.NEXT;
+      GLPostingPreview.CLOSE;
+    END;
+
+    [Test]
+    PROCEDURE PreviewLumpPaymentForSalesOrderBalAccountBank@89();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PaymentRegistrationMgt@1005 : Codeunit 980;
+      GLPostingPreview@1001 : TestPage 115;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+      CreatePostAndMarkAsPaidSalesOrder(SalesHeader,TempPaymentRegistrationBuffer);
+
+      // Exercise:
+      GLPostingPreview.TRAP;
+      TempPaymentRegistrationBuffer.SETRANGE("Payment Made",TRUE);
+      ASSERTERROR PaymentRegistrationMgt.Preview(TempPaymentRegistrationBuffer,TRUE);
+      Assert.AreEqual('',GETLASTERRORTEXT,'Expected empty error from Preview function');
+
+      // Verify:
+      GLPostingPreview.FIRST;
+      REPEAT
+        CASE GLPostingPreview."Table Name".VALUE OF
+          'G/L Entry':
+            Assert.AreEqual(GLPostingPreview."No. of Records".ASINTEGER,2,'Incorrect number of G/L preview records.');
+          'Cust. Ledger Entry':
+            Assert.AreEqual(GLPostingPreview."No. of Records".ASINTEGER,1,'Incorrect number of cust preview records.');
+          'Detailed Cust. Ledg. Entry':
+            Assert.AreEqual(GLPostingPreview."No. of Records".ASINTEGER,3,'Incorrect number of detailed cust preview records.');
+          'Bank Account Ledger Entry':
+            Assert.AreEqual(GLPostingPreview."No. of Records".ASINTEGER,1,'Incorrect number of bank account preview records.');
+          ELSE
+            ERROR(UnexpectedPreviewErr);
+        END;
+      UNTIL NOT GLPostingPreview.NEXT;
+
+      GLPostingPreview.CLOSE;
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPartialPaymentForFinanceChargeMemoBalAccountGL@35();
+    VAR
+      FinanceChargeMemoHeader@1002 : Record 302;
+      TempPaymentRegistrationBuffer@1005 : TEMPORARY Record 981;
+      PostedDocNo@1004 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+      ExpectedAmount@1003 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := IssueFinanceChargeMemoAndMarkItAsPaid(FinanceChargeMemoHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      ExpectedAmount :=
+        UpdateAmountReceived(TempPaymentRegistrationBuffer,FinanceChargeMemoHeader."Customer No.",PostedDocNo,
+          LibraryRandom.RandDec(FinanceChargeMemoHeader."Remaining Amount" - 1,2));
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyPartialPaymentRegistration(FinanceChargeMemoHeader."Customer No.",PostedDocNo,PaymentDocNo,ExpectedAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPartialPaymentForFinanceChargeMemoBalAccountBank@34();
+    VAR
+      FinanceChargeMemoHeader@1002 : Record 302;
+      TempPaymentRegistrationBuffer@1005 : TEMPORARY Record 981;
+      PostedDocNo@1004 : Code[20];
+      PaymentDocNo@1001 : Code[20];
+      ExpectedAmount@1000 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+
+      PostedDocNo := IssueFinanceChargeMemoAndMarkItAsPaid(FinanceChargeMemoHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      ExpectedAmount :=
+        UpdateAmountReceived(TempPaymentRegistrationBuffer,FinanceChargeMemoHeader."Customer No.",PostedDocNo,
+          LibraryRandom.RandDec(FinanceChargeMemoHeader."Remaining Amount" - 1,2));
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyPartialPaymentRegistration(FinanceChargeMemoHeader."Customer No.",PostedDocNo,PaymentDocNo,ExpectedAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPartiaPaymentForSalesInvoiceBalAccountGL@23();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1005 : TEMPORARY Record 981;
+      PostedDocNo@1004 : Code[20];
+      PaymentDocNo@1001 : Code[20];
+      ExpectedAmount@1000 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoice(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      ExpectedAmount :=
+        UpdateAmountReceived(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo,
+          LibraryRandom.RandDecInDecimalRange(0,GetInvoiceAmount(PostedDocNo) - 1,2));
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyPartialPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo,ExpectedAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPartialPaymentForSalesInvoiceBalAccountBank@20();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1005 : TEMPORARY Record 981;
+      PostedDocNo@1004 : Code[20];
+      PaymentDocNo@1001 : Code[20];
+      ExpectedAmount@1000 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoice(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      ExpectedAmount :=
+        UpdateAmountReceived(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo,
+          LibraryRandom.RandDecInDecimalRange(0,GetInvoiceAmount(PostedDocNo) - 1,2));
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyPartialPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo,ExpectedAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPartialPaymentForSalesOrderBalAccountGL@24();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1005 : TEMPORARY Record 981;
+      PostedDocNo@1004 : Code[20];
+      PaymentDocNo@1001 : Code[20];
+      ExpectedAmount@1000 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesOrder(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      ExpectedAmount :=
+        UpdateAmountReceived(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo,
+          LibraryRandom.RandDecInDecimalRange(0,GetInvoiceAmount(PostedDocNo) - 1,2));
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyPartialPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo,ExpectedAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPartialPaymentForSalesOrderBalAccountBank@21();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1005 : TEMPORARY Record 981;
+      PostedDocNo@1004 : Code[20];
+      PaymentDocNo@1001 : Code[20];
+      ExpectedAmount@1000 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesOrder(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      ExpectedAmount :=
+        UpdateAmountReceived(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",
+          PostedDocNo,LibraryRandom.RandDec(1,2));
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyPartialPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo,ExpectedAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentForSalesInvoiceWithDiscountBalAccountGL@41();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoiceWithPaymentDiscount(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      UpdatePaymentDetailsForPaymentDiscount(TempPaymentRegistrationBuffer,SalesHeader,PostedDocNo);
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentForSalesInvoiceWithDiscountBalAccountBank@500();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoiceWithPaymentDiscount(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      UpdatePaymentDetailsForPaymentDiscount(TempPaymentRegistrationBuffer,SalesHeader,PostedDocNo);
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostOverduePaymentForSalesInvoiceWithDiscountBalAccountGL@19();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+      ExpectedAmount@1001 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoiceWithPaymentDiscount(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      ExpectedAmount := UpdatePaymentDetailsForOverduePaymentDiscount(TempPaymentRegistrationBuffer,SalesHeader,PostedDocNo);
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyPartialPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo,ExpectedAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostWithFilterPreserved@200();
+    VAR
+      TempPaymentRegistrationBuffer@1000 : TEMPORARY Record 981;
+      SalesHeader1@1002 : Record 36;
+      SalesHeader2@1003 : Record 36;
+      PaymentRegistrationMgt@1005 : Codeunit 980;
+      PostedDocNo1@1001 : Code[20];
+      PostedDocNo2@1004 : Code[20];
+      PaymentDocNo2@1006 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo1 := CreateAndPostSalesInvoice(SalesHeader1);
+      PostedDocNo2 := CreateAndPostSalesInvoice(SalesHeader2);
+      PaymentDocNo2 := GetNextPaymentDocNo;
+
+      TempPaymentRegistrationBuffer.PopulateTable;
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader2."Sell-to Customer No.",PostedDocNo2);
+
+      TempPaymentRegistrationBuffer.SETFILTER("Document No.",'%1|%2',PostedDocNo1,PostedDocNo2);
+
+      // Exercise:
+      PaymentRegistrationMgt.ConfirmPost(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      Assert.AreEqual(1,TempPaymentRegistrationBuffer.COUNT,FilterNotPreservedErr);
+      VerifyFullPaymentRegistration(SalesHeader2."Sell-to Customer No.",PostedDocNo2,PaymentDocNo2);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostOverduePaymentForSalesInvoiceWithDiscountBalAccountBank@501();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+      ExpectedAmount@1001 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoiceWithPaymentDiscount(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      // Exercise:
+      ExpectedAmount := UpdatePaymentDetailsForOverduePaymentDiscount(TempPaymentRegistrationBuffer,SalesHeader,PostedDocNo);
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyPartialPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo,ExpectedAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentAmountGreaterThenSalesInvoiceWithDiscountBalAccountGL@55();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+      ExtraPaymentAmount@1005 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoiceWithPaymentDiscount(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      UpdatePaymentDetailsForPaymentDiscount(TempPaymentRegistrationBuffer,SalesHeader,PostedDocNo);
+
+      ExtraPaymentAmount := LibraryRandom.RandDec(100,2);
+      UpdateAmountReceivedGreaterThanDiscountedAmount(
+        TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo,ExtraPaymentAmount);
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyMorePaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo,-ExtraPaymentAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentAmountGreaterThenSalesInvoiceWithDiscountBalAccountBank@54();
+    VAR
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+      PaymentDocNo@1000 : Code[20];
+      ExtraPaymentAmount@1005 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsBankAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoiceWithPaymentDiscount(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      UpdatePaymentDetailsForPaymentDiscount(TempPaymentRegistrationBuffer,SalesHeader,PostedDocNo);
+      ExtraPaymentAmount := LibraryRandom.RandDec(100,2);
+      UpdateAmountReceivedGreaterThanDiscountedAmount(
+        TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo,ExtraPaymentAmount);
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyMorePaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo,-ExtraPaymentAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaymentForSalesInvoiceWithUpdatedPaymentDiscountDate@40();
+    VAR
+      SalesHeader@1004 : Record 36;
+      TempPaymentRegistrationBuffer@1003 : TEMPORARY Record 981;
+      PostedDocNo@1002 : Code[20];
+      PaymentDocNo@1001 : Code[20];
+      ExpectedPaymentDiscountDate@1000 : Date;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo := CreatePostAndMarkAsPaidSalesInvoiceWithPaymentDiscount(SalesHeader,TempPaymentRegistrationBuffer);
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      UpdatePaymentDetailsForOverduePaymentDiscount(TempPaymentRegistrationBuffer,SalesHeader,PostedDocNo);
+
+      // Exercise:
+      ExpectedPaymentDiscountDate :=
+        UpdatePaymentDiscountDateToDateReceived(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo);
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(SalesHeader."Sell-to Customer No.",PostedDocNo,PaymentDocNo);
+      VerifyPaymentDiscountDateOnCustLedgerEntry(SalesHeader."Sell-to Customer No.",PostedDocNo,ExpectedPaymentDiscountDate);
+    END;
+
+    [Test]
+    PROCEDURE PostWithZeroReceivedAmount@31();
+    VAR
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      FinanceChargeMemoHeader@1003 : Record 302;
+      PostedDocNo@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      PostedDocNo := IssueFinanceChargeMemoAndMarkItAsPaid(FinanceChargeMemoHeader,TempPaymentRegistrationBuffer);
+
+      // Exercise:
+      UpdateAmountReceived(TempPaymentRegistrationBuffer,FinanceChargeMemoHeader."Customer No.",PostedDocNo,0);
+
+      // Verify:
+      ASSERTERROR PostPayments(TempPaymentRegistrationBuffer);
+      Assert.ExpectedError(NothingToPostErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaidMultipleDocuments@16();
+    VAR
+      TempPaymentRegistrationBuffer@1003 : TEMPORARY Record 981;
+      SalesHeader1@1002 : Record 36;
+      SalesHeader2@1000 : Record 36;
+      PostedDocNo1@1001 : Code[20];
+      PostedDocNo2@1004 : Code[20];
+      PaymentDocNo1@1006 : Code[20];
+      PaymentDocNo2@1007 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo1 := CreateAndPostSalesInvoice(SalesHeader1);
+      PostedDocNo2 := CreateAndPostSalesOrder(SalesHeader2);
+      PaymentDocNo1 := GetNextPaymentDocNo;
+      PaymentDocNo2 := GetNextPaymentDocNo;
+
+      TempPaymentRegistrationBuffer.PopulateTable; // TO DO: encapsulate in test library function
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader1."Sell-to Customer No.",PostedDocNo1);
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader2."Sell-to Customer No.",PostedDocNo2);
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(SalesHeader1."Sell-to Customer No.",PostedDocNo1,PaymentDocNo1);
+      VerifyFullPaymentRegistration(SalesHeader2."Sell-to Customer No.",PostedDocNo2,PaymentDocNo2);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostPaidMultipleDocumentsWithFilterApplied@43();
+    VAR
+      TempPaymentRegistrationBuffer@1006 : TEMPORARY Record 981;
+      SalesHeader1@1005 : Record 36;
+      SalesHeader2@1004 : Record 36;
+      SalesHeader3@1008 : Record 36;
+      PostedDocNo1@1003 : Code[20];
+      PostedDocNo2@1002 : Code[20];
+      PaymentDocNo1@1001 : Code[20];
+      PaymentDocNo2@1000 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo1 := CreateAndPostSalesInvoice(SalesHeader1);
+      PostedDocNo2 := CreateAndPostSalesOrder(SalesHeader2);
+      PaymentDocNo1 := GetNextPaymentDocNo;
+      PaymentDocNo2 := GetNextPaymentDocNo;
+
+      CreateAndPostSalesOrder(SalesHeader3);
+
+      TempPaymentRegistrationBuffer.PopulateTable; // TO DO: encapsulate in test library function
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader1."Sell-to Customer No.",PostedDocNo1);
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader2."Sell-to Customer No.",PostedDocNo2);
+
+      TempPaymentRegistrationBuffer.SETFILTER("Document No.",PostedDocNo1);
+
+      // Exercise:
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(SalesHeader1."Sell-to Customer No.",PostedDocNo1,PaymentDocNo1);
+      VerifyFullPaymentRegistration(SalesHeader2."Sell-to Customer No.",PostedDocNo2,PaymentDocNo2);
+      Assert.IsTrue(TempPaymentRegistrationBuffer.ISEMPTY,FilterNotPreservedErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerNo)]
+    PROCEDURE PostPaidDocumentConfirmNo@14();
+    VAR
+      GLRegister@1001 : Record 45;
+      TempPaymentRegistrationBuffer@1003 : TEMPORARY Record 981;
+      SalesHeader@1002 : Record 36;
+      GLRegisterCount@1000 : Integer;
+      ExpectedRecordFormat@1004 : Text;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      CreatePostAndMarkAsPaidSalesOrder(SalesHeader,TempPaymentRegistrationBuffer);
+      GLRegisterCount := GLRegister.COUNT;
+
+      // Exercise:
+      ExpectedRecordFormat := FORMAT(TempPaymentRegistrationBuffer);
+      PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      Assert.AreEqual(GLRegisterCount,GLRegister.COUNT,CreatedPaymentErr);
+      Assert.AreEqual(ExpectedRecordFormat,FORMAT(TempPaymentRegistrationBuffer),
+        STRSUBSTNO(RecordChangedErr,TempPaymentRegistrationBuffer.TABLENAME))
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE BankAccountDiffCurrencyError@84();
+    VAR
+      Currency@1006 : Record 4;
+      PaymentRegistrationSetup@1005 : Record 980;
+      BankAccount@1001 : Record 270;
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      LibraryERM.CreateBankAccount(BankAccount);
+      CreateCurrency(Currency);
+      BankAccount.VALIDATE("Currency Code",Currency.Code);
+      BankAccount.MODIFY(TRUE);
+      SetupBalAccount(PaymentRegistrationSetup."Bal. Account Type"::"Bank Account",BankAccount."No.",USERID);
+      PaymentRegistrationSetup.GET(USERID);
+      CreatePostAndMarkAsPaidSalesInvoice(SalesHeader,TempPaymentRegistrationBuffer);
+
+      // Exercise:
+      ASSERTERROR PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      Assert.ExpectedError(
+        STRSUBSTNO(ForeignCurrNotSuportedErr,TempPaymentRegistrationBuffer."Document Type",TempPaymentRegistrationBuffer.Description));
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE CustomerDiffCurrencyError@85();
+    VAR
+      Customer@1000 : Record 18;
+      Currency@1006 : Record 4;
+      PaymentRegistrationSetup@1005 : Record 980;
+      BankAccount@1001 : Record 270;
+      SalesHeader@1002 : Record 36;
+      TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981;
+      PostedDocNo@1003 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      LibraryERM.CreateBankAccount(BankAccount);
+      CreateCurrency(Currency);
+      SetupBalAccount(PaymentRegistrationSetup."Bal. Account Type"::"Bank Account",BankAccount."No.",USERID);
+      PaymentRegistrationSetup.GET(USERID);
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("Currency Code",Currency.Code);
+      Customer.MODIFY(TRUE);
+      CreateSalesDocumentWithCustomer(SalesHeader,SalesHeader."Document Type"::Invoice,Customer."No.");
+      PostedDocNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      TempPaymentRegistrationBuffer.PopulateTable;
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo);
+
+      // Exercise:
+      ASSERTERROR PostPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      Assert.ExpectedError(
+        STRSUBSTNO(ForeignCurrNotSuportedErr,TempPaymentRegistrationBuffer."Document Type",TempPaymentRegistrationBuffer.Description));
+    END;
+
+    [Test]
+    PROCEDURE ValidateOnDrillDownName@32();
+    VAR
+      PaymentRegistration@1007 : TestPage 981;
+      CustomerCard@1006 : TestPage 21;
+      Name@1001 : Text;
+      CustCardName@1000 : Text;
+    BEGIN
+      Initialize;
+
+      PaymentRegistration.OPENEDIT;
+      PaymentRegistration.LAST;
+      Name := PaymentRegistration.Name.VALUE;
+      // Exercise:
+      CustomerCard.TRAP;
+      PaymentRegistration.Name.DRILLDOWN;
+      CustCardName := CustomerCard.Name.VALUE;
+      CustomerCard.CLOSE;
+
+      // Verify:
+      Assert.AreEqual(Name,CustCardName,OpenCustomerCardErr);
+    END;
+
+    [Test]
+    PROCEDURE ValidateNavigateAction@29();
+    VAR
+      PaymentRegistration@1000 : TestPage 981;
+      Navigate@1005 : TestPage 344;
+      SourceName@1007 : Text;
+      Name@1001 : Text;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      PaymentRegistration.OPENEDIT;
+      PaymentRegistration.LAST;
+      Name := PaymentRegistration.Name.VALUE;
+
+      // Exercise:
+      Navigate.TRAP;
+      PaymentRegistration.Navigate.INVOKE;
+      SourceName := Navigate.SourceName.VALUE;
+      Navigate.CLOSE;
+
+      // Verify:
+      Assert.AreEqual(Name,SourceName,NavigateErr);
+    END;
+
+    [Test]
+    PROCEDURE ValidateFinChargeMemoAction@94();
+    VAR
+      Customer@1003 : Record 18;
+      PaymentRegistration@1000 : TestPage 981;
+      FinanceChargeMemo@1005 : TestPage 446;
+      CustomerNo@1002 : Text;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      PaymentRegistration.OPENEDIT;
+      PaymentRegistration.FIRST;
+
+      // Exercise:
+      FinanceChargeMemo.TRAP;
+      PaymentRegistration.FinanceChargeMemo.INVOKE;
+      CustomerNo := FinanceChargeMemo.FILTER.GETFILTER("Customer No.");
+      FinanceChargeMemo.CLOSE;
+      Customer.GET(CustomerNo);
+
+      // Verify:
+      Assert.AreEqual(PaymentRegistration.Name.VALUE,Customer.Name,WrongCustomerErr);
+    END;
+
+    [Test]
+    [HandlerFunctions(HandlerPaymentRegistrationDetails)]
+    PROCEDURE ValidateDetailsAction@67();
+    VAR
+      PaymentRegistration@1000 : TestPage 981;
+    BEGIN
+      Initialize;
+
+      // Setup:
+
+      PaymentRegistration.OPENEDIT;
+      PaymentRegistration.LAST;
+      LibraryVariableStorage.Enqueue(PaymentRegistration.Name.VALUE);
+
+      // Exercise:
+      PaymentRegistration.Details.INVOKE;
+    END;
+
+    [Test]
+    PROCEDURE WarningMessageDueDate@95();
+    VAR
+      PaymentRegistration@1003 : TestPage 981;
+      DueDate@1000 : Date;
+    BEGIN
+      Initialize;
+
+      PaymentRegistration.OPENEDIT;
+      PaymentRegistration.FIRST;
+      EVALUATE(DueDate,PaymentRegistration."Due Date".VALUE);
+      PaymentRegistration."Date Received".SETVALUE(DueDate + LibraryRandom.RandInt(5));
+      Assert.AreEqual(PaymentRegistration.Warning.VALUE,FORMAT(DueDateMsg),WrongWarningErr);
+    END;
+
+    [Test]
+    PROCEDURE PostLumpPaymentDifferentCustomerNo@69();
+    VAR
+      TempPaymentRegistrationBuffer@1006 : TEMPORARY Record 981;
+      SalesHeader1@1005 : Record 36;
+      SalesHeader2@1004 : Record 36;
+      PostedDocNo1@1003 : Code[20];
+      PostedDocNo2@1002 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PostedDocNo1 := CreateAndPostSalesInvoice(SalesHeader1);
+      PostedDocNo2 := CreateAndPostSalesInvoice(SalesHeader2);
+
+      TempPaymentRegistrationBuffer.PopulateTable;
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader1."Sell-to Customer No.",PostedDocNo1);
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader2."Sell-to Customer No.",PostedDocNo2);
+
+      // Exercise:
+      ASSERTERROR PostLumpPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      Assert.ExpectedError(
+        STRSUBSTNO(
+          DistinctCustomerErr,
+          TempPaymentRegistrationBuffer.FIELDCAPTION("Payment Made")));
+    END;
+
+    [Test]
+    PROCEDURE PostLumpPaymentDifferentDateReceived@72();
+    VAR
+      TempPaymentRegistrationBuffer@1006 : TEMPORARY Record 981;
+      Customer@1000 : Record 18;
+      SalesHeader1@1005 : Record 36;
+      SalesHeader2@1004 : Record 36;
+      PostedDocNo1@1003 : Code[20];
+      PostedDocNo2@1002 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      LibrarySales.CreateCustomer(Customer);
+      CreateSalesDocumentWithCustomer(SalesHeader1,SalesHeader1."Document Type"::Invoice,Customer."No.");
+      CreateSalesDocumentWithCustomer(SalesHeader2,SalesHeader2."Document Type"::Invoice,Customer."No.");
+      PostedDocNo1 := LibrarySales.PostSalesDocument(SalesHeader1,TRUE,TRUE);
+      PostedDocNo2 := LibrarySales.PostSalesDocument(SalesHeader2,TRUE,TRUE);
+
+      TempPaymentRegistrationBuffer.PopulateTable;
+
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,Customer."No.",PostedDocNo1);
+      TempPaymentRegistrationBuffer."Date Received" := TempPaymentRegistrationBuffer."Date Received" + 1;
+      TempPaymentRegistrationBuffer.MODIFY;
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,Customer."No.",PostedDocNo2);
+      TempPaymentRegistrationBuffer."Date Received" := TempPaymentRegistrationBuffer."Date Received" + 2;
+      TempPaymentRegistrationBuffer.MODIFY;
+
+      // Exercise:
+      ASSERTERROR PostLumpPayments(TempPaymentRegistrationBuffer);
+
+      // Verify
+      Assert.ExpectedError(
+        STRSUBSTNO(
+          DistinctDateReceivedErr,
+          TempPaymentRegistrationBuffer.FIELDCAPTION("Date Received"),
+          TempPaymentRegistrationBuffer.FIELDCAPTION("Payment Made")));
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostLumpPayment@73();
+    VAR
+      TempPaymentRegistrationBuffer@1006 : TEMPORARY Record 981;
+      Customer@1000 : Record 18;
+      SalesHeader1@1005 : Record 36;
+      SalesHeader2@1004 : Record 36;
+      PostedDocNo1@1003 : Code[20];
+      PostedDocNo2@1002 : Code[20];
+      PaymentDocNo@1001 : Code[20];
+      LumpAmount@1007 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+
+      SetupBalAccountAsGLAccount;
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      LibrarySales.CreateCustomer(Customer);
+      CreateSalesDocumentWithCustomer(SalesHeader1,SalesHeader1."Document Type"::Invoice,Customer."No.");
+      CreateSalesDocumentWithCustomer(SalesHeader2,SalesHeader2."Document Type"::Invoice,Customer."No.");
+      PostedDocNo1 := LibrarySales.PostSalesDocument(SalesHeader1,TRUE,TRUE);
+      PostedDocNo2 := LibrarySales.PostSalesDocument(SalesHeader2,TRUE,TRUE);
+
+      TempPaymentRegistrationBuffer.PopulateTable;
+
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,Customer."No.",PostedDocNo1);
+      LumpAmount += TempPaymentRegistrationBuffer."Amount Received";
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,Customer."No.",PostedDocNo2);
+      LumpAmount += TempPaymentRegistrationBuffer."Amount Received";
+
+      // Exercise
+      PostLumpPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyFullPaymentRegistration(Customer."No.",PostedDocNo1,PaymentDocNo);
+      VerifyFullPaymentRegistration(Customer."No.",PostedDocNo2,PaymentDocNo);
+      VerifyCustLedgerEntryLumpPayment(Customer."No.",PaymentDocNo,LumpAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerYes)]
+    PROCEDURE PostLumpPaymentPartial@74();
+    VAR
+      TempPaymentRegistrationBuffer@1006 : TEMPORARY Record 981;
+      Customer@1000 : Record 18;
+      SalesHeader1@1005 : Record 36;
+      SalesHeader2@1004 : Record 36;
+      PostedDocNo1@1003 : Code[20];
+      PostedDocNo2@1002 : Code[20];
+      PaymentDocNo@1007 : Code[20];
+      LumpAmount@1001 : Decimal;
+      ExpectedAmount1@1008 : Decimal;
+      ExpectedAmount2@1009 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup:
+      SetupBalAccountAsGLAccount;
+
+      PaymentDocNo := GetNextPaymentDocNo;
+
+      LibrarySales.CreateCustomer(Customer);
+      CreateSalesDocumentWithCustomer(SalesHeader1,SalesHeader1."Document Type"::Invoice,Customer."No.");
+      CreateSalesDocumentWithCustomer(SalesHeader2,SalesHeader2."Document Type"::Invoice,Customer."No.");
+      PostedDocNo1 := LibrarySales.PostSalesDocument(SalesHeader1,TRUE,TRUE);
+      PostedDocNo2 := LibrarySales.PostSalesDocument(SalesHeader2,TRUE,TRUE);
+
+      TempPaymentRegistrationBuffer.PopulateTable;
+
+      ExpectedAmount1 :=
+        UpdateAmountReceived(TempPaymentRegistrationBuffer,Customer."No.",PostedDocNo1,
+          LibraryRandom.RandDecInDecimalRange(0,GetInvoiceAmount(PostedDocNo1) - 1,2));
+      LumpAmount += TempPaymentRegistrationBuffer."Amount Received";
+
+      ExpectedAmount2 :=
+        UpdateAmountReceived(TempPaymentRegistrationBuffer,Customer."No.",PostedDocNo2,
+          LibraryRandom.RandDecInDecimalRange(0,GetInvoiceAmount(PostedDocNo2) - 1,2));
+      LumpAmount += TempPaymentRegistrationBuffer."Amount Received";
+
+      // Exercise
+      PostLumpPayments(TempPaymentRegistrationBuffer);
+
+      // Verify:
+      VerifyPartialPaymentRegistration(Customer."No.",PostedDocNo1,PaymentDocNo,ExpectedAmount1);
+      VerifyPartialPaymentRegistration(Customer."No.",PostedDocNo2,PaymentDocNo,ExpectedAmount2);
+      VerifyCustLedgerEntryLumpPayment(Customer."No.",PaymentDocNo,LumpAmount);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandlerNo)]
+    PROCEDURE PostLumpPaymentFiltersPreserved@82();
+    VAR
+      TempPaymentRegistrationBuffer@1006 : TEMPORARY Record 981;
+      Customer@1000 : Record 18;
+      SalesHeader1@1005 : Record 36;
+      SalesHeader2@1004 : Record 36;
+      ExpectedRecordFormat@1007 : Text;
+      PostedDocNo1@1003 : Code[20];
+      PostedDocNo2@1002 : Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup:
+
+      SetupBalAccountAsGLAccount;
+
+      LibrarySales.CreateCustomer(Customer);
+      CreateSalesDocumentWithCustomer(SalesHeader1,SalesHeader1."Document Type"::Invoice,Customer."No.");
+      CreateSalesDocumentWithCustomer(SalesHeader2,SalesHeader2."Document Type"::Invoice,Customer."No.");
+      PostedDocNo1 := LibrarySales.PostSalesDocument(SalesHeader1,TRUE,TRUE);
+      PostedDocNo2 := LibrarySales.PostSalesDocument(SalesHeader2,TRUE,TRUE);
+
+      TempPaymentRegistrationBuffer.PopulateTable;
+
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,Customer."No.",PostedDocNo1);
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,Customer."No.",PostedDocNo2);
+
+      TempPaymentRegistrationBuffer.SETFILTER("Source No.",Customer."No.");
+      ExpectedRecordFormat := FORMAT(TempPaymentRegistrationBuffer);
+
+      // Exercise
+      PostLumpPayments(TempPaymentRegistrationBuffer);
+
+      // Verify
+      Assert.AreEqual(Customer."No.",TempPaymentRegistrationBuffer.GETFILTER("Source No."),FilterNotPreservedErr);
+      Assert.AreEqual(2,TempPaymentRegistrationBuffer.COUNT,FilterNotPreservedErr);
+      Assert.AreEqual(ExpectedRecordFormat,FORMAT(TempPaymentRegistrationBuffer),
+        STRSUBSTNO(RecordChangedErr,TempPaymentRegistrationBuffer.TABLENAME))
+    END;
+
+    [Test]
+    PROCEDURE TotalBalanceOnPage@83();
+    VAR
+      PaymentRegistrationSetup@1000 : Record 980;
+      GenJnlLine@1001 : Record 81;
+      PaymentRegistration@1004 : TestPage 981;
+      PostedAmount@1002 : Decimal;
+      UnpostedAmount@1003 : Decimal;
+    BEGIN
+      Initialize;
+
+      SetupBalAccountAsGLAccount;
+      PaymentRegistrationSetup.GET(USERID);
+
+      CreateGenJnlLine(GenJnlLine,PaymentRegistrationSetup);
+      PostedAmount := GenJnlLine.Amount;
+      LibraryERM.PostGeneralJnlLine(GenJnlLine);
+
+      CreateGenJnlLine(GenJnlLine,PaymentRegistrationSetup);
+      UnpostedAmount := GenJnlLine.Amount;
+
+      // Verify
+      PaymentRegistration.OPENEDIT;
+      PaymentRegistration.PostedBalance.ASSERTEQUALS(-PostedAmount);
+      PaymentRegistration.UnpostedBalance.ASSERTEQUALS(UnpostedAmount);
+      PaymentRegistration.TotalBalance.ASSERTEQUALS(-PostedAmount + UnpostedAmount);
+    END;
+
+    [Test]
+    PROCEDURE AmountReceivedAfterReloadingPaymentRegistration@91();
+    VAR
+      TempPaymentRegistrationBuffer@1007 : TEMPORARY Record 981;
+      AmountReceived@1000 : Decimal;
+    BEGIN
+      // [FEATURE] [UT] [Reload]
+      // [SCENARIO 376319] Amount Received should be reloaded for Payment Registration if it was changed
+      Initialize;
+
+      // [GIVEN] Paid Payment Registration with "Amount Received" = "X"
+      CreatePaidPaymentRegistration(TempPaymentRegistrationBuffer);
+      AmountReceived := TempPaymentRegistrationBuffer."Amount Received";
+
+      // [GIVEN] Change "Amount Received" to different value
+      TempPaymentRegistrationBuffer.VALIDATE("Amount Received",LibraryRandom.RandDec(100,2));
+      TempPaymentRegistrationBuffer.MODIFY(TRUE);
+
+      // [WHEN] Reload Payment Registration
+      TempPaymentRegistrationBuffer.Reload;
+
+      // [THEN] Payment Registration has "Amount Received" = "X"
+      TempPaymentRegistrationBuffer.TESTFIELD("Amount Received",AmountReceived);
+    END;
+
+    LOCAL PROCEDURE Initialize@3();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      LibraryVariableStorage.Clear;
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateAccountInCustomerPostingGroup;
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    LOCAL PROCEDURE CreateGLAccount@17() : Code[20];
+    VAR
+      GLAccount@1000 : Record 15;
+      GeneralPostingSetup@1001 : Record 252;
+      VATPostingSetup@1002 : Record 325;
+      GenProductPostingGroup@1003 : Record 251;
+    BEGIN
+      GenProductPostingGroup.SETFILTER("Def. VAT Prod. Posting Group",'<>%1','');
+      GenProductPostingGroup.FINDFIRST;
+      LibraryERM.FindGeneralPostingSetup(GeneralPostingSetup);
+      LibraryERM.FindVATPostingSetup(VATPostingSetup,VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+      LibraryERM.CreateGLAccount(GLAccount);
+      GLAccount.VALIDATE("Gen. Posting Type",GLAccount."Gen. Posting Type"::Sale);
+      GLAccount.VALIDATE("Gen. Bus. Posting Group",GeneralPostingSetup."Gen. Bus. Posting Group");
+      GLAccount.VALIDATE("Gen. Prod. Posting Group",GenProductPostingGroup.Code);
+      GLAccount.VALIDATE("VAT Bus. Posting Group",VATPostingSetup."VAT Bus. Posting Group");
+      GLAccount.MODIFY(TRUE);
+      EXIT(GLAccount."No.");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateSalesDocument@33(VAR SalesHeader@1005 : Record 36;DocumentType@1004 : Option);
+    VAR
+      SalesLine@1003 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,'');
+      LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,'',LibraryRandom.RandDec(10,2));
+      SalesLine.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2));
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateSalesDocumentWithCustomer@76(VAR SalesHeader@1005 : Record 36;DocumentType@1004 : Option;CustomerNo@1002 : Code[20]);
+    VAR
+      SalesLine@1003 : Record 37;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,CustomerNo);
+      LibrarySales.CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::Item,LibraryInventory.CreateItemNo,LibraryRandom.RandDec(10,2));
+      SalesLine.VALIDATE("Unit Price",LibraryRandom.RandDec(100,2));
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateGenJnlBatch@87(JournalTemplateName@1001 : Code[10]) : Code[10];
+    VAR
+      GenJournalBatch@1000 : Record 232;
+    BEGIN
+      LibraryERM.CreateGenJournalBatch(GenJournalBatch,JournalTemplateName);
+      GenJournalBatch."No. Series" := LibraryERM.CreateNoSeriesCode;
+      GenJournalBatch.MODIFY;
+      EXIT(GenJournalBatch.Name);
+    END;
+
+    LOCAL PROCEDURE CreateGenJnlLine@90(VAR GenJnlLine@1000 : Record 81;PaymentRegistrationSetup@1003 : Record 980);
+    VAR
+      Customer@1001 : Record 18;
+      GenJnlTemplate@1002 : Record 80;
+    BEGIN
+      LibraryERM.CreateGenJournalTemplate(GenJnlTemplate);
+      LibrarySales.CreateCustomer(Customer);
+
+      LibraryERM.CreateGeneralJnlLine(GenJnlLine,GenJnlTemplate.Name,CreateGenJnlBatch(GenJnlTemplate.Name),
+        GenJnlLine."Document Type"::Payment,GenJnlLine."Account Type"::Customer,Customer."No.",-LibraryRandom.RandDec(100,2));
+      CASE PaymentRegistrationSetup."Bal. Account Type" OF
+        PaymentRegistrationSetup."Bal. Account Type"::"Bank Account":
+          GenJnlLine."Bal. Account Type" := GenJnlLine."Bal. Account Type"::"Bank Account";
+        PaymentRegistrationSetup."Bal. Account Type"::"G/L Account":
+          GenJnlLine."Bal. Account Type" := GenJnlLine."Bal. Account Type"::"G/L Account";
+      END;
+
+      GenJnlLine."Bal. Account No." := PaymentRegistrationSetup."Bal. Account No.";
+      GenJnlLine.MODIFY;
+    END;
+
+    LOCAL PROCEDURE CreateCurrency@88(VAR Currency@1000 : Record 4);
+    VAR
+      CurrencyExchangeRate@1001 : Record 330;
+    BEGIN
+      LibraryERM.CreateCurrency(Currency);
+      LibraryERM.CreateExchRate(CurrencyExchangeRate,Currency.Code,0D);
+      CurrencyExchangeRate."Exchange Rate Amount" := LibraryRandom.RandDec(100,2);
+      CurrencyExchangeRate."Relational Exch. Rate Amount" := LibraryRandom.RandDec(100,2);
+      CurrencyExchangeRate.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE DeleteCurrentUserSetup@66();
+    VAR
+      PaymentRegistrationSetupMyUser@1000 : Record 980;
+    BEGIN
+      IF PaymentRegistrationSetupMyUser.GET(USERID) THEN
+        PaymentRegistrationSetupMyUser.DELETE;
+    END;
+
+    LOCAL PROCEDURE FindCustLedgerEntry@10(VAR CustLedgerEntry@1002 : Record 21;CustomerNo@1001 : Code[20];DocNo@1000 : Code[20]) : Integer;
+    BEGIN
+      CustLedgerEntry.SETRANGE("Customer No.",CustomerNo);
+      CustLedgerEntry.SETRANGE("Document No.",DocNo);
+      CustLedgerEntry.FINDLAST;
+      EXIT(CustLedgerEntry."Entry No.")
+    END;
+
+    LOCAL PROCEDURE FindPaymentRegistrationBuffer@60(VAR TempPaymentRegistrationBuffer@1002 : TEMPORARY Record 981;CustomerNo@1001 : Code[20];DocNo@1000 : Code[20]);
+    BEGIN
+      TempPaymentRegistrationBuffer.SETRANGE("Source No.",CustomerNo);
+      TempPaymentRegistrationBuffer.SETRANGE("Document No.",DocNo);
+      TempPaymentRegistrationBuffer.FINDFIRST;
+    END;
+
+    LOCAL PROCEDURE GetNextPaymentDocNo@30() : Code[20];
+    VAR
+      GenJournalBatch@1002 : Record 232;
+      PaymentRegistrationSetup@1001 : Record 980;
+    BEGIN
+      PaymentRegistrationSetup.GET(USERID);
+      GenJournalBatch.GET(PaymentRegistrationSetup."Journal Template Name",PaymentRegistrationSetup."Journal Batch Name");
+      EXIT(NoSeriesManagement.GetNextNo(GenJournalBatch."No. Series",WORKDATE,FALSE))
+    END;
+
+    LOCAL PROCEDURE IssueFinanceChargeMemoAndMarkItAsPaid@38(VAR FinanceChargeMemoHeader@1000 : Record 302;VAR TempPaymentRegistrationBuffer@1001 : TEMPORARY Record 981) : Code[20];
+    VAR
+      PostedDocNo@1002 : Code[20];
+    BEGIN
+      PostedDocNo := IssueFinanceChargeMemo(FinanceChargeMemoHeader);
+
+      TempPaymentRegistrationBuffer.PopulateTable; // TO DO: encapsulate in test library function
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,FinanceChargeMemoHeader."Customer No.",PostedDocNo);
+
+      EXIT(PostedDocNo);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE IssueFinanceChargeMemo@26(VAR FinanceChargeMemoHeader@1000 : Record 302) : Code[20];
+    VAR
+      FinanceChargeMemoLine@1001 : Record 303;
+      FinanceChargeTerms@1004 : Record 5;
+      Customer@1002 : Record 18;
+      IssuedFinChargeMemoHeader@1005 : Record 304;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibraryERM.CreateFinanceChargeTerms(FinanceChargeTerms);
+
+      LibraryERM.CreateFinanceChargeMemoHeader(FinanceChargeMemoHeader,Customer."No.");
+      FinanceChargeMemoHeader.VALIDATE("Fin. Charge Terms Code",FinanceChargeTerms.Code);
+      FinanceChargeMemoHeader.MODIFY(TRUE);
+      LibraryERM.CreateFinanceChargeMemoLine(FinanceChargeMemoLine,
+        FinanceChargeMemoHeader."No.",FinanceChargeMemoLine.Type::"G/L Account");
+      FinanceChargeMemoLine.VALIDATE("No.",CreateGLAccount);
+      FinanceChargeMemoLine.VALIDATE(Amount,LibraryRandom.RandInt(1000));
+      FinanceChargeMemoLine.MODIFY(TRUE);
+
+      LibraryERM.IssueFinanceChargeMemo(FinanceChargeMemoHeader);
+
+      IssuedFinChargeMemoHeader.SETRANGE("Pre-Assigned No.",FinanceChargeMemoHeader."No.");
+      IssuedFinChargeMemoHeader.SETRANGE("Customer No.",FinanceChargeMemoHeader."Customer No.");
+      IssuedFinChargeMemoHeader.FINDLAST;
+      EXIT(IssuedFinChargeMemoHeader."No.")
+    END;
+
+    LOCAL PROCEDURE MarkDocumentAsPaid@13(VAR TempPaymentRegistrationBuffer@1000 : TEMPORARY Record 981;CustomerNo@1005 : Code[20];DocNo@1001 : Code[20]);
+    VAR
+      CustLedgerEntry@1004 : Record 21;
+    BEGIN
+      FindCustLedgerEntry(CustLedgerEntry,CustomerNo,DocNo);
+      TempPaymentRegistrationBuffer.GET(CustLedgerEntry."Entry No.");
+      TempPaymentRegistrationBuffer.VALIDATE("Payment Made",TRUE);
+      TempPaymentRegistrationBuffer.VALIDATE("Date Received",WORKDATE);
+      TempPaymentRegistrationBuffer.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE MoveDefaultSetupToDummyUserSetup@75();
+    VAR
+      PaymentRegistrationSetupDummy@1000 : Record 980;
+    BEGIN
+      WITH PaymentRegistrationSetupDummy DO BEGIN
+        GET;
+        "User ID" := DummyUserNameTxt;
+        INSERT;
+        GET;
+        DELETE;
+      END;
+    END;
+
+    LOCAL PROCEDURE PostPayments@4(VAR TempPaymentRegistrationBuffer@1000 : TEMPORARY Record 981);
+    VAR
+      PaymentRegistrationMgt@1001 : Codeunit 980;
+    BEGIN
+      TempPaymentRegistrationBuffer.SETRANGE("Payment Made",TRUE);
+      PaymentRegistrationMgt.ConfirmPost(TempPaymentRegistrationBuffer)
+    END;
+
+    LOCAL PROCEDURE PostLumpPayments@81(VAR TempPaymentRegistrationBuffer@1000 : TEMPORARY Record 981);
+    VAR
+      PaymentRegistrationMgt@1001 : Codeunit 980;
+    BEGIN
+      TempPaymentRegistrationBuffer.SETRANGE("Payment Made",TRUE);
+      PaymentRegistrationMgt.ConfirmPostLumpPayment(TempPaymentRegistrationBuffer)
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateAndPostSalesDocument@5(VAR SalesHeader@1005 : Record 36;DocumentType@1004 : Option) : Code[20];
+    BEGIN
+      CreateSalesDocument(SalesHeader,DocumentType);
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE))
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesInvoice@47(VAR SalesHeader@1000 : Record 36) : Code[20];
+    BEGIN
+      EXIT(CreateAndPostSalesDocument(SalesHeader,SalesHeader."Document Type"::Invoice))
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesOrder@46(VAR SalesHeader@1000 : Record 36) : Code[20];
+    BEGIN
+      EXIT(CreateAndPostSalesDocument(SalesHeader,SalesHeader."Document Type"::Order))
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE CreateAndPostSalesDocumentWithPaymentDiscount@42(VAR SalesHeader@1005 : Record 36;DocumentType@1004 : Option) : Code[20];
+    BEGIN
+      CreateSalesDocument(SalesHeader,DocumentType);
+      UpdatePaymentDiscount(SalesHeader);
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE))
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesInvoiceWithPaymentDiscount@49(VAR SalesHeader@1000 : Record 36) : Code[20];
+    BEGIN
+      EXIT(CreateAndPostSalesDocumentWithPaymentDiscount(SalesHeader,SalesHeader."Document Type"::Invoice))
+    END;
+
+    LOCAL PROCEDURE CreatePostAndMarkAsPaidSalesInvoice@36(VAR SalesHeader@1000 : Record 36;VAR TempPaymentRegistrationBuffer@1001 : TEMPORARY Record 981) : Code[20];
+    VAR
+      PostedDocNo@1002 : Code[20];
+    BEGIN
+      PostedDocNo := CreateAndPostSalesInvoice(SalesHeader);
+
+      TempPaymentRegistrationBuffer.PopulateTable; // TO DO: encapsulate in test library function
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo);
+
+      EXIT(PostedDocNo);
+    END;
+
+    LOCAL PROCEDURE CreatePostAndMarkAsPaidSalesOrder@39(VAR SalesHeader@1000 : Record 36;VAR TempPaymentRegistrationBuffer@1001 : TEMPORARY Record 981) : Code[20];
+    VAR
+      PostedDocNo@1002 : Code[20];
+    BEGIN
+      PostedDocNo := CreateAndPostSalesOrder(SalesHeader);
+
+      TempPaymentRegistrationBuffer.PopulateTable; // TO DO: encapsulate in test library function
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo);
+
+      EXIT(PostedDocNo);
+    END;
+
+    LOCAL PROCEDURE CreatePostAndMarkAsPaidSalesInvoiceWithPaymentDiscount@52(VAR SalesHeader@1000 : Record 36;VAR TempPaymentRegistrationBuffer@1001 : TEMPORARY Record 981) : Code[20];
+    VAR
+      PostedDocNo@1002 : Code[20];
+    BEGIN
+      PostedDocNo := CreateAndPostSalesInvoiceWithPaymentDiscount(SalesHeader);
+
+      TempPaymentRegistrationBuffer.PopulateTable; // TO DO: encapsulate in test library function
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",PostedDocNo);
+
+      EXIT(PostedDocNo);
+    END;
+
+    LOCAL PROCEDURE CreatePaidPaymentRegistration@97(VAR TempPaymentRegistrationBuffer@1004 : TEMPORARY Record 981);
+    VAR
+      Customer@1003 : Record 18;
+      SalesHeader@1002 : Record 36;
+      PostedDocNo@1001 : Code[20];
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      CreateSalesDocumentWithCustomer(SalesHeader,SalesHeader."Document Type"::Invoice,Customer."No.");
+      PostedDocNo := LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      TempPaymentRegistrationBuffer.PopulateTable;
+      MarkDocumentAsPaid(TempPaymentRegistrationBuffer,Customer."No.",PostedDocNo);
+    END;
+
+    LOCAL PROCEDURE RestoreDefaultSetupFromDummyUser@71();
+    VAR
+      PaymentRegistrationSetup@1000 : Record 980;
+    BEGIN
+      PaymentRegistrationSetup.GET(DummyUserNameTxt);
+      PaymentRegistrationSetup."User ID" := '';
+      PaymentRegistrationSetup.INSERT;
+    END;
+
+    LOCAL PROCEDURE SetupBalAccountAsGLAccount@27();
+    VAR
+      PaymentRegistrationSetup@1002 : Record 980;
+      GLAccount@1000 : Record 15;
+    BEGIN
+      LibraryERM.CreateGLAccount(GLAccount);
+      SetupBalAccount(PaymentRegistrationSetup."Bal. Account Type"::"G/L Account",GLAccount."No.",USERID);
+    END;
+
+    LOCAL PROCEDURE SetupBalAccountAsBankAccount@28();
+    VAR
+      PaymentRegistrationSetup@1002 : Record 980;
+      BankAccount@1003 : Record 270;
+    BEGIN
+      LibraryERM.CreateBankAccount(BankAccount);
+      SetupBalAccount(PaymentRegistrationSetup."Bal. Account Type"::"Bank Account",BankAccount."No.",USERID);
+    END;
+
+    LOCAL PROCEDURE SetupBalAccount@64(AccountType@1000 : Integer;AccountNo@1001 : Code[20];SetUserID@1004 : Code[50]);
+    VAR
+      PaymentRegistrationSetup@1002 : Record 980;
+    BEGIN
+      WITH PaymentRegistrationSetup DO BEGIN
+        SETRANGE("User ID",SetUserID);
+        DELETEALL;
+        SETRANGE("User ID");
+
+        GET;
+        "User ID" := SetUserID;
+        VALIDATE("Bal. Account Type",AccountType);
+        VALIDATE("Bal. Account No.",AccountNo);
+        "Use this Account as Def." := TRUE;
+        "Auto Fill Date Received" := TRUE;
+
+        INSERT(TRUE);
+      END
+    END;
+
+    LOCAL PROCEDURE UpdateAmountReceived@37(VAR TempPaymentRegistrationBuffer@1000 : TEMPORARY Record 981;CustomerNo@1005 : Code[20];DocNo@1001 : Code[20];AmountReceived@1002 : Decimal) : Decimal;
+    BEGIN
+      FindPaymentRegistrationBuffer(TempPaymentRegistrationBuffer,CustomerNo,DocNo);
+      TempPaymentRegistrationBuffer.VALIDATE("Amount Received",AmountReceived);
+      TempPaymentRegistrationBuffer.MODIFY(TRUE);
+      EXIT(TempPaymentRegistrationBuffer."Remaining Amount")
+    END;
+
+    LOCAL PROCEDURE UpdateAmountReceivedGreaterThanDiscountedAmount@58(VAR TempPaymentRegistrationBuffer@1000 : TEMPORARY Record 981;CustomerNo@1005 : Code[20];DocNo@1001 : Code[20];ExtraPaymentAmount@1002 : Decimal);
+    BEGIN
+      FindPaymentRegistrationBuffer(TempPaymentRegistrationBuffer,CustomerNo,DocNo);
+      TempPaymentRegistrationBuffer.VALIDATE("Amount Received",
+        TempPaymentRegistrationBuffer."Rem. Amt. after Discount" + ExtraPaymentAmount);
+      TempPaymentRegistrationBuffer.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateAmountReceivedAsDiscountedAmount@59(VAR TempPaymentRegistrationBuffer@1000 : TEMPORARY Record 981;CustomerNo@1005 : Code[20];DocNo@1001 : Code[20]) : Decimal;
+    BEGIN
+      FindPaymentRegistrationBuffer(TempPaymentRegistrationBuffer,CustomerNo,DocNo);
+      TempPaymentRegistrationBuffer.VALIDATE("Amount Received",TempPaymentRegistrationBuffer."Rem. Amt. after Discount");
+      TempPaymentRegistrationBuffer.MODIFY(TRUE);
+      EXIT(TempPaymentRegistrationBuffer."Remaining Amount")
+    END;
+
+    LOCAL PROCEDURE UpdateDateReceived@57(VAR TempPaymentRegistrationBuffer@1003 : TEMPORARY Record 981;CustomerNo@1002 : Code[20];DocNo@1001 : Code[20];DateReceived@1000 : Date);
+    BEGIN
+      FindPaymentRegistrationBuffer(TempPaymentRegistrationBuffer,CustomerNo,DocNo);
+      TempPaymentRegistrationBuffer.VALIDATE("Date Received",DateReceived);
+      TempPaymentRegistrationBuffer.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateDateReceivedAfterPaymentDiscountDate@62(VAR TempPaymentRegistrationBuffer@1002 : TEMPORARY Record 981;SalesHeader@1001 : Record 36;DocNo@1000 : Code[20]);
+    BEGIN
+      UpdateDateReceived(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",DocNo,
+        CALCDATE(STRSUBSTNO('<%1D>',1),SalesHeader."Pmt. Discount Date"));
+    END;
+
+    LOCAL PROCEDURE UpdateDateReceivedWithinPaymentDiscountDate@44(VAR TempPaymentRegistrationBuffer@1002 : TEMPORARY Record 981;SalesHeader@1001 : Record 36;DocNo@1000 : Code[20]);
+    BEGIN
+      UpdateDateReceived(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",DocNo,
+        CALCDATE(STRSUBSTNO('<%1D>',-1),SalesHeader."Pmt. Discount Date"));
+    END;
+
+    LOCAL PROCEDURE UpdatePaymentDiscountDateToDateReceived@53(VAR TempPaymentRegistrationBuffer@1003 : TEMPORARY Record 981;CustomerNo@1002 : Code[20];DocNo@1001 : Code[20]) : Date;
+    BEGIN
+      FindPaymentRegistrationBuffer(TempPaymentRegistrationBuffer,CustomerNo,DocNo);
+      TempPaymentRegistrationBuffer.VALIDATE("Pmt. Discount Date",TempPaymentRegistrationBuffer."Date Received");
+      TempPaymentRegistrationBuffer.MODIFY(TRUE);
+      EXIT(TempPaymentRegistrationBuffer."Pmt. Discount Date")
+    END;
+
+    LOCAL PROCEDURE UpdatePaymentDetailsForPaymentDiscount@45(VAR TempPaymentRegistrationBuffer@1002 : TEMPORARY Record 981;SalesHeader@1001 : Record 36;DocNo@1000 : Code[20]) : Decimal;
+    BEGIN
+      UpdateDateReceivedWithinPaymentDiscountDate(TempPaymentRegistrationBuffer,SalesHeader,DocNo);
+      EXIT(UpdateAmountReceivedAsDiscountedAmount(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",DocNo));
+    END;
+
+    LOCAL PROCEDURE UpdatePaymentDetailsForOverduePaymentDiscount@50(VAR TempPaymentRegistrationBuffer@1002 : TEMPORARY Record 981;SalesHeader@1001 : Record 36;DocNo@1000 : Code[20]) : Decimal;
+    BEGIN
+      UpdateDateReceivedAfterPaymentDiscountDate(TempPaymentRegistrationBuffer,SalesHeader,DocNo);
+      EXIT(UpdateAmountReceivedAsDiscountedAmount(TempPaymentRegistrationBuffer,SalesHeader."Sell-to Customer No.",DocNo));
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE UpdatePaymentDiscount@201(VAR SalesHeader@1000 : Record 36);
+    BEGIN
+      SalesHeader.VALIDATE("Payment Discount %",LibraryRandom.RandInt(99));
+      SalesHeader.VALIDATE("Pmt. Discount Date",
+        CALCDATE(STRSUBSTNO('<%1D>',LibraryRandom.RandInt(10)),SalesHeader."Posting Date"));
+      SalesHeader.VALIDATE("Due Date",
+        CALCDATE(STRSUBSTNO('<%1D>',LibraryRandom.RandInt(10)),SalesHeader."Pmt. Discount Date"));
+      SalesHeader.MODIFY(TRUE)
+    END;
+
+    LOCAL PROCEDURE ValidateExpectedAndActualSetupTables@70(PaymentRegistrationSetupExpected@1000 : Record 980;PaymentRegistrationSetupActual@1001 : Record 980);
+    BEGIN
+      Assert.AreEqual(
+        PaymentRegistrationSetupExpected."Journal Template Name",
+        PaymentRegistrationSetupActual."Journal Template Name",
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupExpected.FIELDCAPTION("Journal Template Name")));
+
+      Assert.AreEqual(
+        PaymentRegistrationSetupExpected."Journal Batch Name",
+        PaymentRegistrationSetupActual."Journal Batch Name",
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupExpected.FIELDCAPTION("Journal Batch Name")));
+
+      Assert.AreEqual(
+        PaymentRegistrationSetupExpected."Bal. Account Type",
+        PaymentRegistrationSetupActual."Bal. Account Type",
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupExpected.FIELDCAPTION("Bal. Account Type")));
+
+      Assert.AreEqual(
+        PaymentRegistrationSetupExpected."Bal. Account No.",
+        PaymentRegistrationSetupActual."Bal. Account No.",
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupExpected.FIELDCAPTION("Bal. Account No.")));
+
+      Assert.AreEqual(
+        PaymentRegistrationSetupExpected."Use this Account as Def.",
+        PaymentRegistrationSetupActual."Use this Account as Def.",
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupExpected.FIELDCAPTION("Use this Account as Def.")));
+
+      Assert.AreEqual(
+        PaymentRegistrationSetupExpected."Auto Fill Date Received",
+        PaymentRegistrationSetupActual."Auto Fill Date Received",
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupExpected.FIELDCAPTION("Auto Fill Date Received")));
+    END;
+
+    [Test]
+    PROCEDURE ValidateSetupPageWith2Users@51();
+    VAR
+      GLAccount@1000 : Record 15;
+      BankAccount@1004 : Record 270;
+      PaymentRegistrationSetup@1002 : Record 980;
+      TempPaymentRegistrationSetup@1001 : TEMPORARY Record 980;
+      PaymentRegistrationSetupPage@1003 : TestPage 982;
+    BEGIN
+      Initialize;
+
+      SetupBalAccountAsBankAccount;
+
+      LibraryERM.CreateGLAccount(GLAccount);
+      SetupBalAccount(PaymentRegistrationSetup."Bal. Account Type"::"G/L Account",GLAccount."No.",DummyUserNameTxt);
+
+      PaymentRegistrationSetup.FINDSET;
+      REPEAT
+        TempPaymentRegistrationSetup.COPY(PaymentRegistrationSetup);
+        TempPaymentRegistrationSetup.INSERT;
+      UNTIL PaymentRegistrationSetup.NEXT = 0;
+
+      LibraryERM.CreateBankAccount(BankAccount);
+
+      PaymentRegistrationSetupPage.OPENEDIT;
+      PaymentRegistrationSetupPage."Bal. Account No.".VALUE := BankAccount."No.";
+      PaymentRegistrationSetupPage.OK.INVOKE;
+
+      PaymentRegistrationSetup.GET;
+      TempPaymentRegistrationSetup.GET;
+      Assert.AreEqual(
+        TempPaymentRegistrationSetup."Bal. Account No.",
+        PaymentRegistrationSetup."Bal. Account No.",
+        STRSUBSTNO(WrongBalAccountErr,'Default'));
+
+      PaymentRegistrationSetup.GET(USERID);
+      Assert.AreEqual(
+        BankAccount."No.",
+        PaymentRegistrationSetup."Bal. Account No.",
+        STRSUBSTNO(WrongBalAccountErr,PaymentRegistrationSetup."User ID"));
+
+      PaymentRegistrationSetup.GET(DummyUserNameTxt);
+      TempPaymentRegistrationSetup.GET(DummyUserNameTxt);
+      Assert.AreEqual(
+        TempPaymentRegistrationSetup."Bal. Account No.",
+        PaymentRegistrationSetup."Bal. Account No.",
+        STRSUBSTNO(WrongBalAccountErr,TempPaymentRegistrationSetup."User ID"));
+
+      PaymentRegistrationSetupPage.OPENEDIT;
+      Assert.AreEqual(
+        BankAccount."No.",
+        PaymentRegistrationSetupPage."Bal. Account No.".VALUE,
+        STRSUBSTNO(WrongBalAccountErr,USERID));
+
+      PaymentRegistrationSetupPage.CLOSE;
+    END;
+
+    LOCAL PROCEDURE VerifyCustLedgerEntry@22(CustomerNo@1001 : Code[20];DocNo@1000 : Code[20];RemainingAmount@1003 : Decimal);
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+    BEGIN
+      FindCustLedgerEntry(CustLedgerEntry,CustomerNo,DocNo);
+      CustLedgerEntry.CALCFIELDS("Remaining Amount");
+      CustLedgerEntry.TESTFIELD("Remaining Amount",RemainingAmount);
+      CustLedgerEntry.TESTFIELD(Open,RemainingAmount <> 0);
+    END;
+
+    LOCAL PROCEDURE VerifyCustLedgerEntryLumpPayment@77(CustomerNo@1001 : Code[20];DocNo@1000 : Code[20];LumpAmount@1004 : Decimal);
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+    BEGIN
+      FindCustLedgerEntry(CustLedgerEntry,CustomerNo,DocNo);
+      CustLedgerEntry.CALCFIELDS(Amount);
+      CustLedgerEntry.TESTFIELD(Amount,-LumpAmount);
+    END;
+
+    LOCAL PROCEDURE VerifyMorePaymentRegistration@61(CustomerNo@1002 : Code[20];DocNo@1000 : Code[20];PaymentDocNo@1004 : Code[20];RemainingPaymentAmount@1001 : Decimal);
+    BEGIN
+      VerifyCustLedgerEntry(CustomerNo,DocNo,0);
+      VerifyCustLedgerEntry(CustomerNo,PaymentDocNo,RemainingPaymentAmount);
+      VerifyPaymentRegistrationBuffer(CustomerNo,DocNo,TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyPaymentRegistrationBuffer@7(CustomerNo@1001 : Code[20];DocNo@1000 : Code[20];ShouldBeEmpty@1002 : Boolean);
+    VAR
+      TempPaymentRegistrationBuffer@1003 : TEMPORARY Record 981;
+    BEGIN
+      TempPaymentRegistrationBuffer.PopulateTable;
+
+      TempPaymentRegistrationBuffer.SETRANGE("Source No.",CustomerNo);
+      TempPaymentRegistrationBuffer.SETRANGE("Document No.",DocNo);
+      Assert.IsTrue(TempPaymentRegistrationBuffer.ISEMPTY = ShouldBeEmpty,STRSUBSTNO(OpenCustomerDocErr,DocNo,CustomerNo));
+    END;
+
+    LOCAL PROCEDURE VerifyFullPaymentRegistration@18(CustomerNo@1002 : Code[20];DocNo@1000 : Code[20];PaymentDocNo@1004 : Code[20]);
+    BEGIN
+      VerifyCustLedgerEntry(CustomerNo,DocNo,0);
+      VerifyCustLedgerEntry(CustomerNo,PaymentDocNo,0);
+      VerifyPaymentRegistrationBuffer(CustomerNo,DocNo,TRUE);
+      VerifyBatchAndBalAccountInformation(CustomerNo,PaymentDocNo);
+    END;
+
+    LOCAL PROCEDURE VerifyPartialPaymentRegistration@25(CustomerNo@1002 : Code[20];DocNo@1000 : Code[20];PaymentDocNo@1004 : Code[20];RemainingAmount@1003 : Decimal);
+    BEGIN
+      VerifyCustLedgerEntry(CustomerNo,DocNo,RemainingAmount);
+      VerifyCustLedgerEntry(CustomerNo,PaymentDocNo,0);
+      VerifyPaymentRegistrationBuffer(CustomerNo,DocNo,FALSE);
+      VerifyBatchAndBalAccountInformation(CustomerNo,PaymentDocNo);
+    END;
+
+    LOCAL PROCEDURE VerifyPaymentDiscountDateOnCustLedgerEntry@56(CustomerNo@1001 : Code[20];DocNo@1000 : Code[20];PaymentDiscountDate@1003 : Date);
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+    BEGIN
+      FindCustLedgerEntry(CustLedgerEntry,CustomerNo,DocNo);
+      CustLedgerEntry.TESTFIELD("Pmt. Discount Date",PaymentDiscountDate)
+    END;
+
+    LOCAL PROCEDURE VerifyBatchAndBalAccountInformation@48(CustomerNo@1003 : Code[20];DocNo@1002 : Code[20]);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+      PaymentRegistrationSetup@1001 : Record 980;
+    BEGIN
+      FindCustLedgerEntry(CustLedgerEntry,CustomerNo,DocNo);
+      PaymentRegistrationSetup.GET(USERID);
+
+      CustLedgerEntry.TESTFIELD("Bal. Account No.",PaymentRegistrationSetup."Bal. Account No.");
+      CustLedgerEntry.TESTFIELD("Bal. Account Type",PaymentRegistrationSetup.GetGLBalAccountType);
+      CustLedgerEntry.TESTFIELD("Journal Batch Name",PaymentRegistrationSetup."Journal Batch Name");
+    END;
+
+    LOCAL PROCEDURE GetInvoiceAmount@79(DocNo@1000 : Code[20]) : Decimal;
+    VAR
+      SalesInvoiceHeader@1001 : Record 112;
+    BEGIN
+      SalesInvoiceHeader.GET(DocNo);
+      SalesInvoiceHeader.CALCFIELDS(Amount);
+      EXIT(SalesInvoiceHeader.Amount);
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerYes@1(Question@1001 : Text;VAR Reply@1000 : Boolean);
+    BEGIN
+      Reply := TRUE
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandlerNo@11(Question@1001 : Text;VAR Reply@1000 : Boolean);
+    BEGIN
+      Reply := FALSE
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE HandlerSetupPageForEmptySetupTest@65(VAR PaymentRegistrationSetupPage@1000 : TestPage 982);
+    VAR
+      PaymentRegistrationSetup@1001 : Record 980;
+    BEGIN
+      Assert.AreEqual(
+        '',
+        PaymentRegistrationSetupPage."Journal Template Name".VALUE,
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupPage."Journal Template Name".CAPTION));
+
+      Assert.AreEqual(
+        '',
+        PaymentRegistrationSetupPage."Journal Batch Name".VALUE,
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupPage."Journal Batch Name".CAPTION));
+
+      Assert.AreEqual(
+        ' ',
+        PaymentRegistrationSetupPage."Bal. Account Type".VALUE,
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupPage."Bal. Account Type".CAPTION));
+
+      Assert.AreEqual(
+        '',
+        PaymentRegistrationSetupPage."Bal. Account No.".VALUE,
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupPage."Bal. Account No.".CAPTION));
+
+      PaymentRegistrationSetup.GET(DummyUserNameTxt);
+      PaymentRegistrationSetupPage."Journal Template Name".VALUE := PaymentRegistrationSetup."Journal Template Name";
+      PaymentRegistrationSetupPage."Journal Batch Name".VALUE := PaymentRegistrationSetup."Journal Batch Name";
+      PaymentRegistrationSetupPage."Bal. Account Type".VALUE := FORMAT(PaymentRegistrationSetup."Bal. Account Type"::"Bank Account");
+      PaymentRegistrationSetupPage."Bal. Account No.".VALUE := PaymentRegistrationSetup."Bal. Account No.";
+      PaymentRegistrationSetupPage.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE HandlerSetupPageForDefaultSetupTest@80(VAR PaymentRegistrationSetupPage@1000 : TestPage 982);
+    VAR
+      PaymentRegistrationSetup@1001 : Record 980;
+    BEGIN
+      PaymentRegistrationSetup.GET;
+
+      Assert.AreEqual(
+        PaymentRegistrationSetup."Journal Template Name",
+        PaymentRegistrationSetupPage."Journal Template Name".VALUE,
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupPage."Journal Template Name".CAPTION));
+
+      Assert.AreEqual(
+        PaymentRegistrationSetup."Journal Batch Name",
+        PaymentRegistrationSetupPage."Journal Batch Name".VALUE,
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupPage."Journal Batch Name".CAPTION));
+
+      Assert.AreEqual(
+        FORMAT(PaymentRegistrationSetup."Bal. Account Type"),
+        PaymentRegistrationSetupPage."Bal. Account Type".VALUE,
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupPage."Bal. Account Type".CAPTION));
+
+      Assert.AreEqual(
+        PaymentRegistrationSetup."Bal. Account No.",
+        PaymentRegistrationSetupPage."Bal. Account No.".VALUE,
+        STRSUBSTNO(WrongFieldValueErr,PaymentRegistrationSetupPage."Bal. Account No.".CAPTION));
+
+      PaymentRegistrationSetupPage.OK.INVOKE;
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE HandlerPaymentRegistrationDetails@68(VAR PaymentRegistrationDetails@1000 : TestPage 983);
+    VAR
+      ExpectedName@1001 : Variant;
+      Name@1002 : Text[50];
+    BEGIN
+      LibraryVariableStorage.Dequeue(ExpectedName);
+      Name := PaymentRegistrationDetails.Name.VALUE;
+      Assert.AreEqual(Name,ExpectedName,WrongCustomerErr);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Payment Registration]
+    }
+    END.
+  }
+}
+

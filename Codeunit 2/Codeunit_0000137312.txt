@@ -1,0 +1,1204 @@
+OBJECT Codeunit 137312 SCM Kitting - Item profit
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryUtility@1004 : Codeunit 131000;
+      LibraryInventory@1003 : Codeunit 132201;
+      LibraryCosting@1005 : Codeunit 132200;
+      LibraryAssembly@1013 : Codeunit 132207;
+      LibraryManufacturing@1022 : Codeunit 132202;
+      LibraryERM@1011 : Codeunit 131300;
+      LibrarySales@1032 : Codeunit 130509;
+      LibraryVariableStorage@1010 : Codeunit 131004;
+      LibraryReportDataset@1000 : Codeunit 131007;
+      Assert@1002 : Codeunit 130000;
+      LibraryRandom@1007 : Codeunit 130440;
+      isInitialized@1006 : Boolean;
+      GenProdPostingGr@1001 : Code[10];
+      AsmInvtPostingGr@1021 : Code[10];
+      CompInvtPostingGr@1008 : Code[10];
+      UndoShipmMsg@1009 : TextConst 'ENU=Do you really want to undo the selected Shipment lines?';
+      TotalSaleTxt@1012 : TextConst 'ENU=Directly';
+      TotalAssemblyTxt@1014 : TextConst 'ENU=In Assembly';
+      AssemblyTxt@1015 : TextConst 'ENU=Assembly';
+
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      // Initialize setup.
+      CLEARLASTERROR;
+      LibraryVariableStorage.Clear;
+
+      IF isInitialized THEN
+        EXIT;
+
+      // Setup Demonstration data.
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      LibraryERMCountryData.UpdateInventoryPostingSetup;
+      SetupAssembly;
+      LibraryAssembly.SetupPostingToGL(GenProdPostingGr,AsmInvtPostingGr,CompInvtPostingGr,'');
+      LibraryCosting.AdjustCostItemEntries('','');
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE SetupAssembly@127();
+    VAR
+      AssemblySetup@1002 : Record 905;
+      SalesSetup@1005 : Record 311;
+    BEGIN
+      AssemblySetup.GET;
+      AssemblySetup.VALIDATE("Assembly Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      AssemblySetup.VALIDATE("Posted Assembly Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      AssemblySetup.VALIDATE("Default Location for Orders",'');
+      AssemblySetup.VALIDATE("Stockout Warning",FALSE);
+      AssemblySetup.MODIFY(TRUE);
+
+      SalesSetup.GET;
+      SalesSetup.VALIDATE("Order Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesSetup.VALIDATE("Invoice Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesSetup.VALIDATE("Posted Invoice Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesSetup.VALIDATE("Posted Shipment Nos.",LibraryUtility.GetGlobalNoSeriesCode);
+      SalesSetup.VALIDATE("Stockout Warning",FALSE);
+      SalesSetup.VALIDATE("Credit Warnings",SalesSetup."Credit Warnings"::"No Warning");
+      SalesSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE FindATO@19(ItemLedgEntry@1003 : Record 32) : Code[20];
+    VAR
+      PostedATOLink@1000 : Record 914;
+      ItemApplnEntry@1001 : Record 339;
+    BEGIN
+      IF NOT ItemLedgEntry."Assemble to Order" THEN
+        EXIT('');
+
+      IF ItemLedgEntry."Document Type" <> ItemLedgEntry."Document Type"::"Sales Shipment" THEN
+        EXIT('');
+
+      PostedATOLink.SETCURRENTKEY("Document Type","Document No.","Document Line No.");
+      PostedATOLink.SETRANGE("Document Type",PostedATOLink."Document Type"::"Sales Shipment");
+      PostedATOLink.SETRANGE("Document No.",ItemLedgEntry."Document No.");
+      PostedATOLink.SETRANGE("Document Line No.",ItemLedgEntry."Document Line No.");
+      IF PostedATOLink.FINDFIRST THEN
+        EXIT(PostedATOLink."Assembly Order No.");
+
+      IF ItemLedgEntry.Correction THEN
+        IF ItemApplnEntry.AppliedFromEntryExists(ItemLedgEntry."Entry No.") THEN BEGIN
+          ItemLedgEntry.GET(ItemApplnEntry."Outbound Item Entry No.");
+          EXIT(FindATO(ItemLedgEntry));
+        END;
+    END;
+
+    LOCAL PROCEDURE ProcessILEsToTemp@1(VAR TempATOSalesBuffer@1000 : TEMPORARY Record 915;VAR Item@1001 : Record 27);
+    VAR
+      ItemLedgerEntry@1003 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::Sale);
+      ItemLedgerEntry.SETFILTER("Location Code",Item.GETFILTER("Location Filter"));
+      ItemLedgerEntry.SETFILTER("Variant Code",Item.GETFILTER("Variant Filter"));
+      ItemLedgerEntry.SETFILTER("Posting Date",Item.GETFILTER("Date Filter"));
+      IF ItemLedgerEntry.FINDSET THEN
+        REPEAT
+          ItemLedgerEntry.CALCFIELDS(
+            "Cost Amount (Expected)","Cost Amount (Actual)","Sales Amount (Expected)","Sales Amount (Actual)");
+          // IF ATO entry then process the components, otherwise add the ledger entry itself
+          IF ItemLedgerEntry."Assemble to Order" THEN
+            ProcessComponentsToList(TempATOSalesBuffer,ItemLedgerEntry."Item No.",FindATO(ItemLedgerEntry),
+              CalculateProfit(ItemLedgerEntry."Sales Amount (Expected)" + ItemLedgerEntry."Sales Amount (Actual)",
+                -(ItemLedgerEntry."Cost Amount (Expected)" + ItemLedgerEntry."Cost Amount (Actual)")))
+          ELSE
+            AddSaleToList(TempATOSalesBuffer,ItemLedgerEntry);
+        UNTIL ItemLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE ProcessComponentsToList@13(VAR TempATOSalesBuffer@1000 : TEMPORARY Record 915;ParentItemNo@1002 : Code[20];OrderNo@1004 : Code[20];ParentProfit@1003 : Decimal);
+    VAR
+      ItemLedgerEntry@1001 : Record 32;
+    BEGIN
+      ItemLedgerEntry.SETRANGE("Entry Type",ItemLedgerEntry."Entry Type"::"Assembly Consumption");
+      ItemLedgerEntry.SETRANGE("Order No.",OrderNo);
+      ItemLedgerEntry.SETRANGE("Order Type",ItemLedgerEntry."Order Type"::Assembly);
+      ItemLedgerEntry.SETRANGE("Source No.",ParentItemNo);
+      IF ItemLedgerEntry.FINDSET THEN
+        REPEAT
+          ItemLedgerEntry.CALCFIELDS(
+            "Cost Amount (Expected)","Cost Amount (Actual)","Sales Amount (Expected)","Sales Amount (Actual)");
+          AddATOConsumptionToList(TempATOSalesBuffer,ParentProfit,ItemLedgerEntry,TempATOSalesBuffer.Type::Assembly);
+          AddATOConsumptionToList(TempATOSalesBuffer,ParentProfit,ItemLedgerEntry,TempATOSalesBuffer.Type::"Total Assembly");
+        UNTIL ItemLedgerEntry.NEXT = 0;
+    END;
+
+    LOCAL PROCEDURE AddSaleToList@21(VAR TempATOSalesBuffer@1001 : TEMPORARY Record 915;ItemLedgerEntry@1000 : Record 32);
+    BEGIN
+      CLEAR(TempATOSalesBuffer);
+      TempATOSalesBuffer.SETRANGE(Type,TempATOSalesBuffer.Type::"Total Sale");
+      TempATOSalesBuffer.SETRANGE("Item No.",ItemLedgerEntry."Item No.");
+      IF TempATOSalesBuffer.FINDFIRST THEN BEGIN
+        TempATOSalesBuffer.Quantity += -ItemLedgerEntry.Quantity;
+        TempATOSalesBuffer."Sales Cost" += -(ItemLedgerEntry."Cost Amount (Expected)" + ItemLedgerEntry."Cost Amount (Actual)");
+        TempATOSalesBuffer."Sales Amount" += ItemLedgerEntry."Sales Amount (Expected)" + ItemLedgerEntry."Sales Amount (Actual)";
+        TempATOSalesBuffer."Profit %" := CalculateProfit(TempATOSalesBuffer."Sales Amount",TempATOSalesBuffer."Sales Cost");
+        TempATOSalesBuffer.MODIFY(TRUE);
+      END ELSE BEGIN
+        TempATOSalesBuffer.RESET;
+        TempATOSalesBuffer.Type := TempATOSalesBuffer.Type::"Total Sale";
+        TempATOSalesBuffer."Order No." := '';
+        TempATOSalesBuffer."Item No." := ItemLedgerEntry."Item No.";
+        TempATOSalesBuffer."Parent Item No." := '';
+        TempATOSalesBuffer."Parent Description" := '';
+        TempATOSalesBuffer.Quantity := -ItemLedgerEntry.Quantity;
+        TempATOSalesBuffer."Sales Cost" := -(ItemLedgerEntry."Cost Amount (Expected)" + ItemLedgerEntry."Cost Amount (Actual)");
+        TempATOSalesBuffer."Sales Amount" := ItemLedgerEntry."Sales Amount (Expected)" + ItemLedgerEntry."Sales Amount (Actual)";
+        TempATOSalesBuffer."Profit %" := CalculateProfit(TempATOSalesBuffer."Sales Amount",TempATOSalesBuffer."Sales Cost");
+        TempATOSalesBuffer.INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE AddATOConsumptionToList@24(VAR TempATOSalesBuffer@1001 : TEMPORARY Record 915;ParentProfit@1003 : Decimal;ItemLedgerEntry@1000 : Record 32;EntryType@1002 : ',Sale,Total Sale,Assembly,Total Assembly');
+    BEGIN
+      CLEAR(TempATOSalesBuffer);
+      TempATOSalesBuffer.SETRANGE(Type,EntryType);
+      TempATOSalesBuffer.SETRANGE("Item No.",ItemLedgerEntry."Item No.");
+      IF EntryType <> TempATOSalesBuffer.Type::"Total Assembly" THEN
+        TempATOSalesBuffer.SETRANGE("Parent Item No.",ItemLedgerEntry."Source No.");
+
+      IF TempATOSalesBuffer.FINDFIRST THEN BEGIN
+        TempATOSalesBuffer.Quantity += -ItemLedgerEntry.Quantity;
+        TempATOSalesBuffer."Sales Cost" += -(ItemLedgerEntry."Cost Amount (Expected)" + ItemLedgerEntry."Cost Amount (Actual)");
+        TempATOSalesBuffer."Sales Amount" +=
+          CalculateSalesAmount(-(ItemLedgerEntry."Cost Amount (Expected)" + ItemLedgerEntry."Cost Amount (Actual)"),ParentProfit);
+        TempATOSalesBuffer."Profit %" := CalculateProfit(TempATOSalesBuffer."Sales Amount",TempATOSalesBuffer."Sales Cost");
+        TempATOSalesBuffer.MODIFY(TRUE);
+      END ELSE BEGIN
+        TempATOSalesBuffer.RESET;
+        TempATOSalesBuffer.Type := EntryType;
+        IF EntryType <> TempATOSalesBuffer.Type::"Total Assembly" THEN BEGIN
+          TempATOSalesBuffer."Order No." := '';
+          TempATOSalesBuffer."Parent Item No." := ItemLedgerEntry."Source No.";
+          TempATOSalesBuffer."Parent Description" := GetItemDescription(TempATOSalesBuffer."Parent Item No.");
+        END ELSE BEGIN
+          TempATOSalesBuffer."Order No." := '';
+          TempATOSalesBuffer."Parent Item No." := ItemLedgerEntry."Item No.";
+          TempATOSalesBuffer."Parent Description" := '';
+        END;
+        TempATOSalesBuffer."Item No." := ItemLedgerEntry."Item No.";
+        TempATOSalesBuffer.Quantity := -ItemLedgerEntry.Quantity;
+        TempATOSalesBuffer."Sales Cost" := -(ItemLedgerEntry."Cost Amount (Expected)" + ItemLedgerEntry."Cost Amount (Actual)");
+        TempATOSalesBuffer."Sales Amount" := CalculateSalesAmount(TempATOSalesBuffer."Sales Cost",ParentProfit);
+        TempATOSalesBuffer."Profit %" := ParentProfit;
+        TempATOSalesBuffer.INSERT(TRUE);
+      END;
+    END;
+
+    LOCAL PROCEDURE CalculateProfit@33(SalesAmount@1001 : Decimal;SalesCost@1002 : Decimal) : Decimal;
+    BEGIN
+      IF SalesAmount <> 0 THEN
+        EXIT(ROUND((SalesAmount - SalesCost) / SalesAmount * 100));
+
+      EXIT(0)
+    END;
+
+    LOCAL PROCEDURE CalculateSalesAmount@28(SalesCost@1002 : Decimal;Profit@1000 : Decimal) : Decimal;
+    BEGIN
+      IF Profit <> 100 THEN
+        EXIT(ROUND(100 * SalesCost / (100 - Profit)));
+
+      EXIT(0)
+    END;
+
+    LOCAL PROCEDURE GetItemDescription@4(ItemNo@1000 : Code[20]) : Text[50];
+    VAR
+      Item@1001 : Record 27;
+    BEGIN
+      Item.GET(ItemNo); // let it fail if doesn't exist
+
+      EXIT(Item.Description);
+    END;
+
+    LOCAL PROCEDURE GetNoOfRowsForItemAndType@100(VAR TempATOSalesBuffer@1000 : TEMPORARY Record 915;ItemNo@1003 : Code[20];Type@1001 : Option;ShowAsmInfo@1005 : Boolean) : Integer;
+    VAR
+      ATOSalesBuffer@1002 : Record 915;
+      NoOfRows@1004 : Integer;
+    BEGIN
+      NoOfRows := 0;
+
+      ATOSalesBuffer.COPY(TempATOSalesBuffer);
+      TempATOSalesBuffer.RESET;
+      TempATOSalesBuffer.SETRANGE("Item No.",ItemNo);
+      TempATOSalesBuffer.SETRANGE(Type,TempATOSalesBuffer.Type::Assembly);
+      TempATOSalesBuffer.SETFILTER(Quantity,'<>%1',0);
+
+      CASE Type OF
+        ATOSalesBuffer.Type::"Total Assembly":
+          NoOfRows := 1;
+        ATOSalesBuffer.Type::"Total Sale":
+          BEGIN
+            TempATOSalesBuffer.SETRANGE(Type,TempATOSalesBuffer.Type::Assembly);
+            IF IsATOComp(ItemNo) OR (NOT TempATOSalesBuffer.ISEMPTY) THEN
+              NoOfRows := 1;
+          END;
+        ATOSalesBuffer.Type::Assembly:
+          BEGIN
+            TempATOSalesBuffer.SETRANGE(Type,TempATOSalesBuffer.Type::Assembly);
+            IF ShowAsmInfo AND (NOT TempATOSalesBuffer.ISEMPTY) THEN
+              NoOfRows := TempATOSalesBuffer.COUNT;
+            TempATOSalesBuffer.COPY(ATOSalesBuffer);
+          END;
+      END;
+
+      EXIT(NoOfRows);
+    END;
+
+    LOCAL PROCEDURE IsATOComp@17(ItemNo@1000 : Code[20]) : Boolean;
+    VAR
+      BOMComponent@1001 : Record 90;
+      ParentItem@1002 : Record 27;
+    BEGIN
+      // Search all the asm BOM lists and find at least one parent having Assembly-policy = Assemble-to-Order
+      BOMComponent.SETRANGE("No.",ItemNo);
+      BOMComponent.SETRANGE(Type,BOMComponent.Type::Item);
+      IF BOMComponent.FINDSET THEN
+        REPEAT
+          ParentItem.GET(BOMComponent."Parent Item No.");
+          IF ParentItem."Assembly Policy" = ParentItem."Assembly Policy"::"Assemble-to-Order" THEN
+            EXIT(TRUE);
+        UNTIL BOMComponent.NEXT = 0;
+
+      EXIT(FALSE);
+    END;
+
+    LOCAL PROCEDURE RunReportAndProcessEntries@69(VAR TempATOSalesBuffer@1002 : TEMPORARY Record 915;VAR Item@1000 : Record 27;ShowAsmInfo@1001 : Boolean);
+    VAR
+      ShowGraphAs@1003 : 'Quantity,Sales,ProfitPct';
+    BEGIN
+      LibraryCosting.AdjustCostItemEntries(Item.GETFILTER("No."),'');
+      COMMIT;
+      RunReportAndOpenFile(Item,ShowGraphAs::Quantity,ShowAsmInfo);
+      ProcessILEsToTemp(TempATOSalesBuffer,Item);
+    END;
+
+    LOCAL PROCEDURE RunReportAndOpenFile@66(VAR Item@1000 : Record 27;ShowGraphAs@1003 : 'Quantity,Sales,ProfitPct';ShowAsmInfo@1002 : Boolean);
+    BEGIN
+      LibraryVariableStorage.Enqueue(ShowGraphAs);
+      LibraryVariableStorage.Enqueue(ShowAsmInfo);
+      REPORT.RUN(REPORT::"Assemble to Order - Sales",TRUE,FALSE,Item);
+    END;
+
+    LOCAL PROCEDURE GetItemsFromAsmListAsFilter@59(Item@1000 : Record 27) : Text;
+    VAR
+      BOMComponent@1001 : Record 90;
+      Filters@1002 : Text;
+    BEGIN
+      Filters := FORMAT(Item."No.");
+      BOMComponent.SETRANGE("Parent Item No.",Item."No.");
+      BOMComponent.SETRANGE(Type,BOMComponent.Type::Item);
+      IF BOMComponent.FINDSET THEN
+        REPEAT
+          Filters += FORMAT('|' + BOMComponent."No.");
+        UNTIL BOMComponent.NEXT = 0;
+
+      EXIT(Filters);
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyList@20(ParentItem@1000 : Record 27;CostingMethod@1011 : 'FIFO,LIFO,Specific,Average,Standard';UnitCost@1010 : Decimal;NoOfComponents@1001 : Integer;NoOfResources@1002 : Integer;NoOfTexts@1003 : Integer;QtyPer@1004 : Decimal);
+    VAR
+      Item@1008 : Record 27;
+      Resource@1009 : Record 156;
+      BOMComponent@1006 : Record 90;
+      CompCount@1007 : Integer;
+    BEGIN
+      // Add components - qty per is increasing same as no of components
+      FOR CompCount := 1 TO NoOfComponents DO BEGIN
+        CLEAR(Item);
+        LibraryInventory.CreateItem(Item);
+        Item.VALIDATE("Costing Method",CostingMethod);
+        Item.VALIDATE("Unit Cost",UnitCost);
+        Item.MODIFY(TRUE);
+        AddComponentToAssemblyList(
+          BOMComponent,BOMComponent.Type::Item,Item."No.",ParentItem."No.",'',
+          BOMComponent."Resource Usage Type"::Direct,Item."Base Unit of Measure",QtyPer);
+      END;
+
+      // Add resources - qty per is increasing same as no of components
+      FOR CompCount := 1 TO NoOfResources DO BEGIN
+        LibraryAssembly.CreateResource(Resource,TRUE,GenProdPostingGr);
+        AddComponentToAssemblyList(
+          BOMComponent,BOMComponent.Type::Resource,Resource."No.",ParentItem."No.",'',
+          BOMComponent."Resource Usage Type"::Direct,Resource."Base Unit of Measure",QtyPer);
+      END;
+
+      // Add simple text
+      FOR CompCount := 1 TO NoOfTexts DO
+        AddComponentToAssemblyList(BOMComponent,BOMComponent.Type::" ",'',ParentItem."No.",'',
+          BOMComponent."Resource Usage Type"::Direct,'',QtyPer);
+    END;
+
+    LOCAL PROCEDURE AddComponentToAssemblyList@12(VAR BOMComponent@1008 : Record 90;ComponentType@1000 : Option;ComponentNo@1001 : Code[20];ParentItemNo@1005 : Code[20];VariantCode@1007 : Code[10];ResourceUsage@1006 : Option;UOM@1003 : Code[10];QuantityPer@1002 : Decimal);
+    BEGIN
+      LibraryManufacturing.CreateBOMComponent(BOMComponent,ParentItemNo,ComponentType,ComponentNo,QuantityPer,UOM);
+      IF ComponentType = BOMComponent.Type::Resource THEN
+        BOMComponent.VALIDATE("Resource Usage Type",ResourceUsage);
+      BOMComponent.VALIDATE("Variant Code",VariantCode);
+      IF ComponentNo = '' THEN
+        BOMComponent.VALIDATE(Description,
+          LibraryUtility.GenerateRandomCode(BOMComponent.FIELDNO(Description),DATABASE::"BOM Component"));
+      BOMComponent.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAssemblyOrder@9(VAR AssemblyHeader@1001 : Record 900;ParentItem@1000 : Record 27;LocationCode@1002 : Code[10];BinCode@1006 : Code[20];VariantCode@1005 : Code[10];DueDate@1004 : Date;Quantity@1003 : Decimal);
+    BEGIN
+      LibraryAssembly.CreateAssemblyHeader(AssemblyHeader,DueDate,ParentItem."No.",LocationCode,Quantity,VariantCode);
+      AssemblyHeader.VALIDATE("Bin Code",BinCode);
+      AssemblyHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateAssembledItem@10(VAR Item@1000 : Record 27;AssemblyPolicy@1001 : Option;CostingMethod@1006 : 'FIFO,LIFO,Specific,Average,Standard';UnitCost@1007 : Decimal;NoOfComponents@1005 : Integer;NoOfResources@1004 : Integer;NoOfTexts@1003 : Integer;QtyPer@1002 : Decimal);
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("Replenishment System",Item."Replenishment System"::Assembly);
+      Item.VALIDATE("Assembly Policy",AssemblyPolicy);
+      Item.VALIDATE("Costing Method",CostingMethod);
+      Item.VALIDATE("Unit Cost",UnitCost);
+      Item.MODIFY(TRUE);
+      CreateAssemblyList(Item,CostingMethod,UnitCost,NoOfComponents,NoOfResources,NoOfTexts,QtyPer);
+    END;
+
+    LOCAL PROCEDURE CreateSaleDocType@65(VAR SalesHeader@1000 : Record 36;DocumentType@1005 : Option;ItemNo@1006 : Code[20];VariantCode@1003 : Code[10];UnitPrice@1008 : Decimal;SalesQty@1002 : Decimal;ShipmentDate@1001 : Date;LocationCode@1007 : Code[10]);
+    VAR
+      SalesLine@1004 : Record 37;
+    BEGIN
+      CLEAR(SalesHeader);
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,'');
+      SalesHeader.VALIDATE("Location Code",LocationCode);
+      SalesHeader.VALIDATE("Shipment Date",ShipmentDate);
+      SalesHeader.VALIDATE("Posting Date",ShipmentDate);
+      SalesHeader.MODIFY(TRUE);
+      LibrarySales.CreateSalesLineWithShipmentDate(SalesLine,SalesHeader,SalesLine.Type::Item,ItemNo,ShipmentDate,SalesQty);
+      SalesLine.VALIDATE("Variant Code",VariantCode);
+      SalesLine.VALIDATE("Location Code",LocationCode);
+      SalesLine.VALIDATE("Unit Price",UnitPrice);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateSalesOrder@77(VAR SalesHeader@1000 : Record 36;ItemNo@1001 : Code[20];VariantCode@1004 : Code[10];UnitPrice@1005 : Decimal;SalesQty@1003 : Decimal;ShipmentDate@1002 : Date;LocationCode@1006 : Code[10]);
+    BEGIN
+      CreateSaleDocType(
+        SalesHeader,SalesHeader."Document Type"::Order,ItemNo,VariantCode,UnitPrice,SalesQty,ShipmentDate,LocationCode);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostATO@43(Item@1000 : Record 27;OrderQty@1003 : Decimal;DueDate@1002 : Date;ATOPercentage@1006 : Decimal) : Code[20];
+    VAR
+      SalesHeader@1001 : Record 36;
+      AssemblyHeader@1004 : Record 900;
+      SalesLine@1005 : Record 37;
+    BEGIN
+      CreateSalesOrder(SalesHeader,Item."No.",'',LibraryRandom.RandDec(100,2),OrderQty,DueDate,'');
+      FindSOL(SalesHeader,SalesLine,1);
+      IF Item."Assembly Policy" <> Item."Assembly Policy"::"Assemble-to-Order" THEN BEGIN
+        SalesLine.VALIDATE("Qty. to Assemble to Order",ATOPercentage / 100 * SalesLine.Quantity);
+        SalesLine.MODIFY(TRUE);
+      END;
+
+      SalesLine.AsmToOrderExists(AssemblyHeader);
+      LibraryAssembly.AddCompInventoryToBin(AssemblyHeader,WORKDATE,0,'','');
+      EXIT(LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE));
+    END;
+
+    LOCAL PROCEDURE CreateAndPostATS@45(Item@1000 : Record 27;OrderQty@1009 : Decimal;DueDate@1008 : Date;ATSPercentage@1007 : Decimal) : Code[20];
+    VAR
+      AssemblyHeader@1004 : Record 900;
+    BEGIN
+      CreateAssemblyOrder(AssemblyHeader,Item,'','','',DueDate,OrderQty);
+      LibraryAssembly.AddCompInventoryToBin(AssemblyHeader,WORKDATE,0,'','');
+      PostAssemblyOrderQty(AssemblyHeader,ATSPercentage / 100 * OrderQty);
+
+      EXIT(AssemblyHeader."No.");
+    END;
+
+    LOCAL PROCEDURE FindSOL@15(SalesHeader@1004 : Record 36;VAR SalesLine@1005 : Record 37;SOLIndex@1003 : Integer);
+    BEGIN
+      CLEAR(SalesLine);
+      SalesLine.SETRANGE("Document Type",SalesHeader."Document Type");
+      SalesLine.SETRANGE("Document No.",SalesHeader."No.");
+      SalesLine.FINDSET(TRUE);
+
+      IF SOLIndex > 1 THEN
+        SalesLine.NEXT(SOLIndex - 1);
+    END;
+
+    LOCAL PROCEDURE FindSalesLine@61(SalesHeader@1000 : Record 36;VAR SalesLine@1001 : Record 37);
+    BEGIN
+      WITH SalesLine DO BEGIN
+        SETRANGE("Document Type",SalesHeader."Document Type");
+        SETRANGE("Document No.",SalesHeader."No.");
+        SETRANGE(Type,Type::Item);
+        FINDFIRST;
+      END;
+    END;
+
+    LOCAL PROCEDURE FindComponent@37(Item@1001 : Record 27;VAR BOMComponent@1000 : Record 90;ComponentIndex@1003 : Integer);
+    BEGIN
+      BOMComponent.SETRANGE("Parent Item No.",Item."No.");
+      BOMComponent.VALIDATE(Type,BOMComponent.Type::Item);
+      BOMComponent.FINDSET(TRUE);
+
+      IF ComponentIndex > 1 THEN
+        BOMComponent.NEXT(ComponentIndex - 1);
+    END;
+
+    LOCAL PROCEDURE PostAssemblyOrderQty@3(VAR AssemblyHeader@1001 : Record 900;Qty@1002 : Decimal);
+    VAR
+      AssemblyPost@1000 : Codeunit 900;
+    BEGIN
+      CLEAR(AssemblyPost);
+      AssemblyHeader.VALIDATE("Quantity to Assemble",Qty);
+      AssemblyHeader.MODIFY(TRUE);
+
+      AssemblyPost.RUN(AssemblyHeader);
+    END;
+
+    LOCAL PROCEDURE ValidateReportLines@14(VAR TempATOSalesBuffer@1010 : TEMPORARY Record 915;VAR Item@1011 : Record 27;ShowAsmInfo@1001 : Boolean);
+    VAR
+      ActualNoOfRows@1008 : Integer;
+      NoOfRows@1000 : Integer;
+    BEGIN
+      LibraryReportDataset.LoadDataSetFile;
+      TempATOSalesBuffer.RESET;
+      TempATOSalesBuffer.SETFILTER("Item No.",Item.GETFILTER("No."));
+      TempATOSalesBuffer.SETFILTER(Quantity,'<>%1',0);
+
+      IF TempATOSalesBuffer.FINDSET THEN
+        REPEAT
+          LibraryReportDataset.SetRange('Item_No',TempATOSalesBuffer."Item No.");
+          NoOfRows :=
+            GetNoOfRowsForItemAndType(TempATOSalesBuffer,TempATOSalesBuffer."Item No.",TempATOSalesBuffer.Type,ShowAsmInfo);
+          ActualNoOfRows := 0;
+          CASE TempATOSalesBuffer.Type OF
+            TempATOSalesBuffer.Type::"Total Sale":
+              ValidateReportLine(ActualNoOfRows,TempATOSalesBuffer,TotalSaleTxt,ShowAsmInfo);
+            TempATOSalesBuffer.Type::"Total Assembly":
+              ValidateReportLine(ActualNoOfRows,TempATOSalesBuffer,TotalAssemblyTxt,ShowAsmInfo);
+            TempATOSalesBuffer.Type::Assembly:
+              ValidateReportLine(ActualNoOfRows,TempATOSalesBuffer,AssemblyTxt,ShowAsmInfo);
+          END;
+
+          Assert.AreEqual(NoOfRows,ActualNoOfRows,
+            'Wrong no. of rows for item ' + TempATOSalesBuffer."Item No." + ' and type ' + FORMAT(TempATOSalesBuffer.Type));
+        UNTIL TempATOSalesBuffer.NEXT = 0;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ValidateReportLine@89(VAR ActualNoOfRows@1004 : Integer;ATOSalesBuffer@1005 : Record 915;SalesBufferTypeFilter@1003 : Text;ShowAsmInfo@1009 : Boolean);
+    VAR
+      VarText@1000 : Variant;
+      VarDecimal@1001 : Variant;
+      SalesBufferType@1002 : Text;
+      ParentItemNo@1008 : Text;
+      SalesCost@1006 : Decimal;
+      SalesAmt@1007 : Decimal;
+    BEGIN
+      ActualNoOfRows := 0;
+
+      WHILE LibraryReportDataset.GetNextRow DO BEGIN
+        LibraryReportDataset.FindCurrentRowValue('Type',VarText);
+        EVALUATE(SalesBufferType,VarText);
+
+        IF SalesBufferType = SalesBufferTypeFilter THEN BEGIN
+          ActualNoOfRows += 1;
+
+          IF (SalesBufferTypeFilter = AssemblyTxt) AND ShowAsmInfo THEN BEGIN
+            LibraryReportDataset.FindCurrentRowValue('ParentItemNo',VarText);
+            EVALUATE(ParentItemNo,VarText);
+          END;
+
+          IF (ParentItemNo = ATOSalesBuffer."Parent Item No.") OR (ParentItemNo = '') THEN BEGIN
+            LibraryReportDataset.AssertCurrentRowValue('Quantity',ATOSalesBuffer.Quantity);
+            LibraryReportDataset.FindCurrentRowValue('SalesCost',VarDecimal);
+            SalesCost := VarDecimal;
+            Assert.AreNearlyEqual(
+              ATOSalesBuffer."Sales Cost",SalesCost,100 * LibraryERM.GetAmountRoundingPrecision,'Wrong sales cost.');
+
+            LibraryReportDataset.FindCurrentRowValue('SalesAmt',VarDecimal);
+            SalesAmt := VarDecimal;
+            Assert.AreNearlyEqual(
+              ATOSalesBuffer."Sales Amount",SalesAmt,100 * LibraryERM.GetAmountRoundingPrecision,'Wrong sales amt.');
+
+            LibraryReportDataset.AssertCurrentRowValue('ProfitPct',ATOSalesBuffer."Profit %");
+          END;
+        END;
+      END;
+    END;
+
+    LOCAL PROCEDURE ValidateNoFileCreated@42(VAR TempATOSalesBuffer@1001 : TEMPORARY Record 915;VAR Item@1000 : Record 27);
+    BEGIN
+      COMMIT;
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item,TRUE);
+      LibraryReportDataset.LoadDataSetFile;
+      Assert.IsFalse(LibraryReportDataset.GetNextRow,'Report should be empty.');
+    END;
+
+    LOCAL PROCEDURE WithAndWithoutATO@7(FullPosting@1010 : Boolean;IsATO@1012 : Boolean;ShouldInvoice@1011 : Boolean);
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      Item@1000 : Record 27;
+      AssemblyHeader@1005 : Record 900;
+      SalesHeader@1013 : Record 36;
+      SalesLine@1014 : Record 37;
+      OrderQty@1006 : Decimal;
+      DueDate@1007 : Date;
+    BEGIN
+      Initialize;
+
+      // Create AO
+      CreateAssembledItem(
+        Item,Item."Assembly Policy"::"Assemble-to-Order",Item."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      OrderQty := LibraryRandom.RandDec(100,2) + 1;
+      DueDate := CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE);
+
+      IF IsATO THEN BEGIN
+        CreateSalesOrder(SalesHeader,Item."No.",'',LibraryRandom.RandDec(100,2),OrderQty,DueDate,'');
+        FindSOL(SalesHeader,SalesLine,1);
+        SalesLine.AsmToOrderExists(AssemblyHeader);
+      END ELSE
+        CreateAssemblyOrder(AssemblyHeader,Item,'','','',DueDate,OrderQty);
+
+      // Add enough inventory for comp and post
+      LibraryAssembly.AddCompInventoryToBin(AssemblyHeader,WORKDATE,0,'','');
+
+      IF FullPosting THEN BEGIN
+        IF IsATO THEN
+          LibrarySales.PostSalesDocument(SalesHeader,TRUE,ShouldInvoice)
+        ELSE
+          PostAssemblyOrderQty(AssemblyHeader,OrderQty)
+      END ELSE BEGIN
+        IF IsATO THEN BEGIN
+          SalesLine.FIND;
+          SalesLine.VALIDATE("Qty. to Ship",ROUND(SalesLine."Qty. to Ship" / 2,0.00001));
+          SalesLine.MODIFY(TRUE);
+          LibrarySales.PostSalesDocument(SalesHeader,TRUE,ShouldInvoice);
+          AssemblyHeader.FIND;
+        END ELSE
+          PostAssemblyOrderQty(AssemblyHeader,OrderQty / 2);
+      END;
+
+      // Exercise
+      Item.SETFILTER("No.",GetItemsFromAsmListAsFilter(Item));
+      IF IsATO THEN BEGIN
+        RunReportAndProcessEntries(TempATOSalesBuffer,Item,TRUE);
+        // Validate
+        ValidateReportLines(TempATOSalesBuffer,Item,TRUE);
+      END ELSE
+        ValidateNoFileCreated(TempATOSalesBuffer,Item);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATOFullInvoice@6();
+    BEGIN
+      WithAndWithoutATO(TRUE,TRUE,TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesLine@62(SalesHeader@1000 : Record 36;VATIdentifier@1001 : Code[10]);
+    VAR
+      SalesLine@1002 : Record 37;
+    BEGIN
+      FindSalesLine(SalesHeader,SalesLine);
+      SalesLine.VALIDATE("VAT Identifier",VATIdentifier);
+      SalesLine.MODIFY(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATOPartialInvoice@22();
+    BEGIN
+      WithAndWithoutATO(FALSE,TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATOFullNotInvoiced@26();
+    BEGIN
+      WithAndWithoutATO(TRUE,TRUE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATOPartialNotInvoiced@25();
+    BEGIN
+      WithAndWithoutATO(FALSE,TRUE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE NoATOFullPosting@23();
+    BEGIN
+      WithAndWithoutATO(TRUE,FALSE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE NoATOPartialPosting@27();
+    BEGIN
+      WithAndWithoutATO(FALSE,FALSE,FALSE);
+    END;
+
+    LOCAL PROCEDURE SaleAndATOOrATS@11(AssemblyPolicy@1003 : 'Assemble-to-Stock,Assemble-to-Order';ATO@1004 : Boolean;ShowDetails@1005 : Boolean);
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      BOMComponent@1001 : Record 90;
+      Item@1000 : Record 27;
+      SalesHeader@1013 : Record 36;
+    BEGIN
+      Initialize;
+
+      // Create ATO item
+      CreateAssembledItem(Item,AssemblyPolicy,Item."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      IF ATO THEN
+        CreateAndPostATO(
+          Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),
+          100);
+
+      // Find a component and sell it
+      FindComponent(Item,BOMComponent,1);
+      CreateSalesOrder(
+        SalesHeader,BOMComponent."No.",'',LibraryRandom.RandDec(100,2),LibraryRandom.RandDec(100,2),
+        CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),'');
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // Exercise - for the component only
+      Item.SETFILTER("No.",BOMComponent."No.");
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item,ShowDetails);
+
+      // Validate
+      ValidateReportLines(TempATOSalesBuffer,Item,ShowDetails);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE SaleAndATO@30();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      SaleAndATOOrATS(Item."Assembly Policy"::"Assemble-to-Order",TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE SaleAndATSasATO@31();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      SaleAndATOOrATS(Item."Assembly Policy"::"Assemble-to-Stock",TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE SaleAndATONoDetails@80();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      SaleAndATOOrATS(Item."Assembly Policy"::"Assemble-to-Order",TRUE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE SaleAndATSasATONoDetails@81();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      SaleAndATOOrATS(Item."Assembly Policy"::"Assemble-to-Stock",TRUE,FALSE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE OnlySaleATS@54();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      SaleAndATOOrATS(Item."Assembly Policy"::"Assemble-to-Order",FALSE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE OnlySaleATO@16();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      SaleAndATOOrATS(Item."Assembly Policy"::"Assemble-to-Order",TRUE,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATSAndATOFIFO@50();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      ATSAndATO(Item."Costing Method"::FIFO);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATSAndATOLIFO@53();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      ATSAndATO(Item."Costing Method"::LIFO);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATSAndATOStandard@52();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      ATSAndATO(Item."Costing Method"::Standard);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATSAndATOAverage@51();
+    VAR
+      Item@1000 : Record 27;
+    BEGIN
+      ATSAndATO(Item."Costing Method"::Average);
+    END;
+
+    LOCAL PROCEDURE ATSAndATO@38(CostingMethod@1001 : 'FIFO,LIFO,Specific,Average,Standard');
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      Item@1000 : Record 27;
+    BEGIN
+      Initialize;
+
+      // Create item
+      CreateAssembledItem(Item,Item."Assembly Policy"::"Assemble-to-Stock",CostingMethod,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      CreateAndPostATO(
+        Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+      CreateAndPostATS(
+        Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Exercise - all items from asm list
+      Item.SETFILTER("No.",GetItemsFromAsmListAsFilter(Item));
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item,TRUE);
+
+      // Validate
+      ValidateReportLines(TempATOSalesBuffer,Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE TwoATOSameParent@57();
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      Item@1000 : Record 27;
+    BEGIN
+      Initialize;
+
+      // Create item
+      CreateAssembledItem(
+        Item,Item."Assembly Policy"::"Assemble-to-Order",Item."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      CreateAndPostATO(
+        Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+      CreateAndPostATO(
+        Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Exercise - all items from asm list
+      Item.SETFILTER("No.",GetItemsFromAsmListAsFilter(Item));
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item,TRUE);
+
+      // Validate
+      ValidateReportLines(TempATOSalesBuffer,Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE TwoATODifferentParentDetail@32();
+    BEGIN
+      TwoATODifferentParent(TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE TwoATODifferentParentNoDetail@29();
+    BEGIN
+      TwoATODifferentParent(FALSE);
+    END;
+
+    LOCAL PROCEDURE TwoATODifferentParent@2(ShowDetails@1003 : Boolean);
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      BOMComponent@1002 : Record 90;
+      Item1@1000 : Record 27;
+      Item2@1001 : Record 27;
+    BEGIN
+      Initialize;
+
+      // Create item
+      CreateAssembledItem(
+        Item1,Item1."Assembly Policy"::"Assemble-to-Order",Item1."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      FindComponent(Item1,BOMComponent,1);
+      CreateAssembledItem(
+        Item2,Item2."Assembly Policy"::"Assemble-to-Order",Item2."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      AddComponentToAssemblyList(
+        BOMComponent,BOMComponent.Type::Item,BOMComponent."No.",Item2."No.",'',
+        BOMComponent."Resource Usage Type"::Direct,BOMComponent."Unit of Measure Code",LibraryRandom.RandDec(100,2));
+      // Create ATOs
+      CreateAndPostATO(
+        Item1,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+      CreateAndPostATO(
+        Item2,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Exercise - all items from asm list
+      Item1.SETFILTER("No.",BOMComponent."No.");
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item1,ShowDetails);
+
+      // Validate
+      ValidateReportLines(TempATOSalesBuffer,Item1,ShowDetails);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATOOutsideDateFilter@35();
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      BOMComponent@1002 : Record 90;
+      Item1@1000 : Record 27;
+    BEGIN
+      Initialize;
+
+      // Create item
+      CreateAssembledItem(
+        Item1,Item1."Assembly Policy"::"Assemble-to-Order",Item1."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      FindComponent(Item1,BOMComponent,1);
+
+      // Create ATOs
+      CreateAndPostATO(
+        Item1,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Exercise - only BOM component and outside the date range
+      Item1.SETFILTER("No.",BOMComponent."No.");
+      Item1.SETFILTER("Date Filter",'%1..',CALCDATE('<+1Y>',WORKDATE));
+      ValidateNoFileCreated(TempATOSalesBuffer,Item1);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATOOneEntryOutsideDateFilter@41();
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      BOMComponent@1002 : Record 90;
+      Item1@1000 : Record 27;
+      DueDate@1001 : Date;
+    BEGIN
+      Initialize;
+
+      // Create item
+      CreateAssembledItem(
+        Item1,Item1."Assembly Policy"::"Assemble-to-Order",Item1."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      FindComponent(Item1,BOMComponent,1);
+      DueDate := CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE);
+
+      // Create ATOs
+      CreateAndPostATO(Item1,LibraryRandom.RandDec(100,2) + 1,DueDate,100);
+      CreateAndPostATO(
+        Item1,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',DueDate),100);
+
+      // Exercise - only BOM component and one entry outside the date range
+      Item1.SETFILTER("No.",BOMComponent."No.");
+      Item1.SETFILTER("Date Filter",'%1..%2',DueDate,DueDate);
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item1,TRUE);
+
+      // Validate
+      ValidateReportLines(TempATOSalesBuffer,Item1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATONoComponents@34();
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      Item@1000 : Record 27;
+    BEGIN
+      Initialize;
+
+      // Create item
+      CreateAssembledItem(
+        Item,Item."Assembly Policy"::"Assemble-to-Order",Item."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        0,LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandDec(100,2));
+
+      // Create ATOs
+      CreateAndPostATO(
+        Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Exercise - all items from asm list
+      Item.SETFILTER("No.",GetItemsFromAsmListAsFilter(Item));
+      ValidateNoFileCreated(TempATOSalesBuffer,Item);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE CostZero@40();
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      Item1@1000 : Record 27;
+    BEGIN
+      Initialize;
+
+      // Create item - Cost of components is 0
+      CreateAssembledItem(Item1,Item1."Assembly Policy"::"Assemble-to-Order",Item1."Costing Method"::FIFO,0,
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+
+      // Create ATOs
+      CreateAndPostATO(
+        Item1,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Exercise - only BOM component and one entry outside the date range
+      Item1.SETFILTER("No.",GetItemsFromAsmListAsFilter(Item1));
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item1,TRUE);
+
+      // Validate
+      ValidateReportLines(TempATOSalesBuffer,Item1,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(ConfirmHandler,AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE Undo@36();
+    VAR
+      Item@1000 : Record 27;
+      SalesShipmentLine@1004 : Record 111;
+      TempATOSalesBuffer@1001 : TEMPORARY Record 915;
+    BEGIN
+      Initialize;
+
+      // Create ATO and post ATS
+      CreateAssembledItem(
+        Item,Item."Assembly Policy"::"Assemble-to-Order",Item."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      CreateAndPostATO(
+        Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Undo shipment
+      SalesShipmentLine.SETRANGE("No.",Item."No.");
+      SalesShipmentLine.FINDFIRST;
+      LibraryVariableStorage.Enqueue(UndoShipmMsg); // Msg to the confirm handler
+      LibrarySales.UndoSalesShipmentLine(SalesShipmentLine); // Calls the confirm handler
+
+      // Exercise - verify no printout
+      Item.SETFILTER("No.",GetItemsFromAsmListAsFilter(Item));
+      ValidateNoFileCreated(TempATOSalesBuffer,Item);
+    END;
+
+    [Test]
+    [HandlerFunctions(PostedSalesDocumentLinesHandler,AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATOAndSalesReturn@47();
+    VAR
+      Item@1003 : Record 27;
+      BOMComponent@1002 : Record 90;
+      TempATOSalesBuffer@1011 : TEMPORARY Record 915;
+      SalesHeader@1001 : Record 36;
+      SalesLine@1005 : Record 37;
+    BEGIN
+      Initialize;
+
+      // Create ATO item
+      CreateAssembledItem(
+        Item,Item."Assembly Policy"::"Assemble-to-Order",Item."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      FindComponent(Item,BOMComponent,1);
+
+      // Sell component
+      CreateSalesOrder(SalesHeader,BOMComponent."No.",'',LibraryRandom.RandDec(100,2),LibraryRandom.RandDec(100,2) + 1,
+        CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),'');
+      FindSalesLine(SalesHeader,SalesLine);
+      LibraryVariableStorage.Enqueue(LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE)); // Posted Document No. is used in page handler.
+
+      // Create Sales Return for the sale
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Return Order",SalesHeader."Sell-to Customer No.");
+      GetPostedDocumentLines(SalesHeader."No."); // Calls PostedSalesDocumentLinesHandler
+      UpdateSalesLine(SalesHeader,SalesLine."VAT Identifier");
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,FALSE);
+
+      // Exercise - component only - verify no printout
+      Item.SETFILTER("No.",BOMComponent."No.");
+      ValidateNoFileCreated(TempATOSalesBuffer,Item);
+
+      // Create ATO
+      CreateAndPostATO(
+        Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Exercise - all asm "tree"
+      Item.SETFILTER("No.",GetItemsFromAsmListAsFilter(Item));
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item,TRUE);
+
+      // Validate
+      ValidateReportLines(TempATOSalesBuffer,Item,TRUE);
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE PostedSalesDocumentLinesHandler@46(VAR PostedSalesDocumentLines@1000 : TestPage 5850);
+    VAR
+      DocumentNo@1002 : Variant;
+      DocumentType@1001 : 'Posted Shipments,Posted Invoices,Posted Return Receipts,Posted Cr. Memos';
+    BEGIN
+      LibraryVariableStorage.Dequeue(DocumentNo);
+      PostedSalesDocumentLines.PostedShipmentsBtn.SETVALUE(FORMAT(DocumentType::"Posted Shipments"));
+      PostedSalesDocumentLines.PostedShpts.FILTER.SETFILTER("Document No.",DocumentNo);
+      PostedSalesDocumentLines.OK.INVOKE;
+    END;
+
+    LOCAL PROCEDURE GetPostedDocumentLines@49(No@1000 : Code[20]);
+    VAR
+      SalesReturnOrder@1001 : TestPage 6630;
+    BEGIN
+      SalesReturnOrder.OPENEDIT;
+      SalesReturnOrder.FILTER.SETFILTER("No.",No);
+      SalesReturnOrder.GetPostedDocumentLinesToReverse.INVOKE;
+    END;
+
+    [ConfirmHandler]
+    PROCEDURE ConfirmHandler@55(Question@1000 : Text[1024];VAR reply@1001 : Boolean);
+    VAR
+      ExpectedMessage@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ExpectedMessage);  // Dequeue variable.
+      Assert.IsTrue(STRPOS(Question,ExpectedMessage) > 0,Question);
+      reply := TRUE;
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE ATOSalesInvoice@56();
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      Item@1000 : Record 27;
+      SalesHeader@1013 : Record 36;
+      SalesShptLine@1003 : Record 111;
+      SalesGetShipment@1004 : Codeunit 64;
+    BEGIN
+      Initialize;
+
+      // Create ATO item
+      CreateAssembledItem(
+        Item,Item."Assembly Policy"::"Assemble-to-Order",Item."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+
+      // ATO order
+      CreateAndPostATO(
+        Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Create Sales invoice and post it
+      SalesShptLine.SETRANGE("No.",Item."No.");
+      SalesShptLine.FINDFIRST;
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,SalesShptLine."Sell-to Customer No.");
+      SalesHeader.VALIDATE("No. Series",SalesHeader."Posting No. Series"); // Required for IT
+      SalesHeader.MODIFY(TRUE);
+      SalesGetShipment.SetSalesHeader(SalesHeader);
+
+      SalesGetShipment.CreateInvLines(SalesShptLine);
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,TRUE);
+
+      // Exercise
+      Item.SETFILTER("No.",GetItemsFromAsmListAsFilter(Item));
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item,TRUE);
+
+      // Validate
+      ValidateReportLines(TempATOSalesBuffer,Item,TRUE);
+    END;
+
+    [Test]
+    [HandlerFunctions(AssembleToOrderSalesRequestPageHandler)]
+    PROCEDURE LevelATO@44();
+    VAR
+      TempATOSalesBuffer@1018 : TEMPORARY Record 915;
+      Item1@1000 : Record 27;
+      Item@1002 : Record 27;
+      BOMComponent@1001 : Record 90;
+    BEGIN
+      Initialize;
+
+      // Create item - Cost of components is 0
+      CreateAssembledItem(Item1,Item1."Assembly Policy"::"Assemble-to-Order",Item1."Costing Method"::FIFO,0,
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+      FindComponent(Item1,BOMComponent,1);
+      Item.GET(BOMComponent."No.");
+      CreateAssemblyList(
+        Item,Item."Costing Method"::FIFO,LibraryRandom.RandDec(100,2),LibraryRandom.RandInt(3),
+        LibraryRandom.RandInt(3),LibraryRandom.RandInt(3),
+        LibraryRandom.RandDec(100,2));
+
+      // Create ATOs
+      CreateAndPostATO(
+        Item,LibraryRandom.RandDec(100,2) + 1,CALCDATE('<+' + FORMAT(LibraryRandom.RandInt(30)) + 'D>',WORKDATE),100);
+
+      // Exercise - all items in the asm "trees"
+      Item1.SETFILTER("No.",GetItemsFromAsmListAsFilter(Item1) + '|' + GetItemsFromAsmListAsFilter(Item));
+      RunReportAndProcessEntries(TempATOSalesBuffer,Item1,TRUE);
+
+      // Validate
+      ValidateReportLines(TempATOSalesBuffer,Item1,TRUE);
+    END;
+
+    [RequestPageHandler]
+    PROCEDURE AssembleToOrderSalesRequestPageHandler@79(VAR AssembleToOrderSales@1000 : TestRequestPage 915);
+    VAR
+      ShowGraphAs@1001 : Variant;
+      ShowAsmInfo@1002 : Variant;
+    BEGIN
+      LibraryVariableStorage.Dequeue(ShowGraphAs);
+      LibraryVariableStorage.Dequeue(ShowAsmInfo);
+
+      AssembleToOrderSales.Control2.SETVALUE(ShowGraphAs);
+      AssembleToOrderSales.Control3.SETVALUE(ShowAsmInfo);
+      AssembleToOrderSales.SAVEASXML(LibraryReportDataset.GetParametersFileName,LibraryReportDataset.GetFileName);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Assembly] [SCM]
+      This CU is test CU for report 915
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,810 @@
+OBJECT Codeunit 134916 ERM Discount On Credit Memo
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      LibraryUtility@1003 : Codeunit 131000;
+      LibraryERM@1000 : Codeunit 131300;
+      LibrarySales@1001 : Codeunit 130509;
+      LibraryRandom@1004 : Codeunit 130440;
+      LibraryPmtDiscSetup@1008 : Codeunit 131303;
+      LibrarySetupStorage@1009 : Codeunit 131009;
+      Assert@1005 : Codeunit 130000;
+      isInitialized@1002 : Boolean;
+      AmountError@1006 : TextConst 'ENU=%1 must be %2 in %3.';
+      DocumentNo@1007 : Code[20];
+
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1001 : Codeunit 131305;
+    BEGIN
+      LibrarySetupStorage.Restore;
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateAccountInCustomerPostingGroup;
+      LibraryERMCountryData.UpdateSalesReceivablesSetup;
+      LibraryERMCountryData.UpdateGeneralLedgerSetup;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+      isInitialized := TRUE;
+      COMMIT;
+      LibrarySetupStorage.Save(DATABASE::"General Ledger Setup");
+    END;
+
+    [Test]
+    [HandlerFunctions(ApplyCustomerEntriesHandler)]
+    PROCEDURE PaymentDiscountOnCreditMemo@1();
+    VAR
+      GLAccount@1011 : Record 15;
+      SalesLine@1003 : Record 37;
+      SalesLine2@1005 : Record 37;
+      SalesInvoiceHeader@1004 : Record 112;
+      VATPostingSetup@1000 : Record 325;
+      GenJournalLine@1006 : Record 81;
+      PaymentTerms@1008 : Record 3;
+      GenJnlApply@1002 : Codeunit 225;
+      AdjustForPaymentDiscount@1001 : Boolean;
+      Amount@1014 : Decimal;
+      VATAmount@1016 : Decimal;
+    BEGIN
+      // Test G/L Entry after applying Payment on Invoice with Adjust for Payment Discount True on Payment Terms.
+
+      // 1. Setup: Update Adjust for Payment Discount as True on General Ledger Setup and VAT Posting Setup, Create Payment Terms with
+      // Discount, Create and Post Sales Invoice, Update General Posting Setup for Sales Discount Account, create and Post Sales Credit
+      // Memo with Applies to doc. no.
+      Initialize;
+      LibraryERM.FindVATPostingSetup(VATPostingSetup,VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+      LibraryPmtDiscSetup.SetAdjustForPaymentDisc(TRUE);
+      AdjustForPaymentDiscount := UpdateAdjustForPaymentDiscount(VATPostingSetup,TRUE);
+      CreateAndPostSalesInvoice(SalesLine,VATPostingSetup);
+      GetPaymentTermDiscount(PaymentTerms,SalesLine."Sell-to Customer No.");
+      LibraryERM.CreateGLAccount(GLAccount);
+      UpdateGeneralPostingSetup(SalesLine."Gen. Bus. Posting Group",SalesLine."Gen. Prod. Posting Group",GLAccount."No.");
+
+      SalesInvoiceHeader.SETRANGE("Pre-Assigned No.",SalesLine."Document No.");
+      SalesInvoiceHeader.FINDFIRST;
+      DocumentNo := SalesInvoiceHeader."No.";  // Assign Global Variable for Page Handler.
+      CreateAndPostCreditMemo(SalesLine2,SalesLine,SalesInvoiceHeader."No.");
+      Amount :=
+        SalesLine."Unit Price" * (SalesLine.Quantity - SalesLine2.Quantity) * (1 + VATPostingSetup."VAT %" / 100) *
+        PaymentTerms."Discount %" / 100;
+      VATAmount := Amount * VATPostingSetup."VAT %" / (100 + VATPostingSetup."VAT %");
+
+      // 2. Exercise: Create and Post General Journal Line for Payment after applying it on Invoice.
+      // 0 is required for test case for applying entry.
+      CreateGeneralJournalLine(GenJournalLine,GenJournalLine."Document Type"::Payment,SalesLine."Sell-to Customer No.",'',0);
+      GenJnlApply.RUN(GenJournalLine);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // 3. Verify: Verify G/L Entry for different values.
+      VerifyGLEntry(GenJournalLine."Document No.",GenJournalLine."Bal. Account No.",-GenJournalLine.Amount);
+
+      // 4. Teardown: Rollback Adjust for Payment Discount to default value on VAT Posting Setup and General Ledger Setup.
+      UpdateAdjustForPaymentDiscount(VATPostingSetup,AdjustForPaymentDiscount);
+    END;
+
+    [Test]
+    PROCEDURE ApplyInvToCrMemoEqualAmt@13();
+    VAR
+      GenJournalLine@1003 : Record 81;
+      Amount@1000 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Invoice on Credit Memo Equal to Invoice Amount.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2);  // Random value used is not important for test.
+
+      // Using Zero where Invoice applied Fully to Credit Memo and 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount,GenJournalLine."Document Type"::Invoice,GenJournalLine."Document Type"::"Credit Memo",'','',0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyInvToCrMemoLessAmt@10();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1003 : Code[10];
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Invoice on Credit Memo Less Than Invoice Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2);  // Random value used is not important for test.
+
+      // Using 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount / 2,GenJournalLine."Document Type"::Invoice,GenJournalLine."Document Type"::"Credit Memo",
+        CurrencyCode,CurrencyCode,Amount,-Amount / 2,1); // Value used for Sign Factor.
+    END;
+
+    [Test]
+    PROCEDURE ApplyInvToCrMemoGreaterAmt@6();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1002 : Code[10];
+      Amount@1000 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Invoice on Credit Memo Greater Than Invoice Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2);  // Random value used is not important for test.
+
+      // Using Zero where Invoice applied Fully to Credit Memo and 1 for Sign Factor..
+      ApplySalesDocuments(
+        Amount,-Amount * 2,GenJournalLine."Document Type"::Invoice,GenJournalLine."Document Type"::"Credit Memo",
+        CurrencyCode,CurrencyCode,0,-Amount,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyInvToCrMemoMultiCurr@25();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Invoice in foreign currency on
+      // Credit Memo in another foreign currency.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2);  // Random value used is not important for test.
+
+      // Using Zero where Invoice applied Fully to Credit Memo and 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount * 2,GenJournalLine."Document Type"::Invoice,GenJournalLine."Document Type"::"Credit Memo",
+        CreateCurrency,CreateCurrency,0,-Amount,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyRefundToCrMemoEqualAmt@40();
+    VAR
+      GenJournalLine@1003 : Record 81;
+      Amount@1000 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Refund on Credit Memo Equal to Refund Amount.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Refund is applied to Credit Memo and 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount,GenJournalLine."Document Type"::Refund,GenJournalLine."Document Type"::"Credit Memo",'','',0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyRefundToCrMemoLessAmt@39();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1003 : Code[10];
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Refund on Credit Memo Less Than Refund Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Refund is applied to Credit Memo and 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount / 2,GenJournalLine."Document Type"::Refund,GenJournalLine."Document Type"::"Credit Memo",
+        CurrencyCode,CurrencyCode,0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyRefundToCrMemoGreaterAmt@38();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1003 : Code[10];
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Refund on Credit Memo Greater Than Refund Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using -1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount * 2,GenJournalLine."Document Type"::Refund,GenJournalLine."Document Type"::"Credit Memo",
+        CurrencyCode,CurrencyCode,Amount,Amount,-1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyRefundToCrMemoMultiCurr@37();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Refund in foreign currency on
+      // Credit Memo in another foreign currency.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using -1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount * 2,GenJournalLine."Document Type"::Refund,GenJournalLine."Document Type"::"Credit Memo",
+        CreateCurrency,CreateCurrency,Amount,Amount,-1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToInvEqualAmt@16();
+    VAR
+      GenJournalLine@1003 : Record 81;
+      Amount@1000 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Credit Memo on Invoice Equal to Credit Memo Amount.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2);  // Random value used is not important for test.
+
+      // Using Zero where Credit Memo applied Fully to Invoice and 1 for Sign Factor.
+      ApplySalesDocuments(
+        -Amount,Amount,GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Document Type"::Invoice,'','',0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToInvLessAmt@14();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1003 : Code[10];
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Credit Memo on Invoice Less Than Credit
+      // Memo Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2);  // Random value used is not important for test.
+
+      // Using 1 for Sign Factor.
+      ApplySalesDocuments(
+        -Amount,Amount / 2,GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Document Type"::Invoice,
+        CurrencyCode,CurrencyCode,-Amount,Amount / 2,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToInvGreaterAmt@9();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1002 : Code[10];
+      Amount@1000 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Credit Memo on Invoice Greater Than Credit
+      // Memo Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2);  // Random value used is not important for test.
+
+      // Using Zero where Credit Memo applied Fully to Invoice and 1 for Sign Factor.
+      ApplySalesDocuments(
+        -Amount,Amount * 2,GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Document Type"::Invoice,
+        CurrencyCode,CurrencyCode,0,Amount,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToInvMultiCurr@7();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Credit Memo on foreign currency on
+      // Invoice on  in another foreign currency.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2);  // Random value used is not important for test.
+
+      // Using Zero where Credit Memo applied Fully to Invoice and 1 for Sign Factor.
+      ApplySalesDocuments(
+        -Amount,Amount * 2,GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Document Type"::Invoice,
+        CreateCurrency,CreateCurrency,0,Amount,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyRefundToPmtEqualAmt@21();
+    VAR
+      GenJournalLine@1003 : Record 81;
+      Amount@1000 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Refund on Payment Equal to Refund Amount.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Refund is applied to Payment and 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount,GenJournalLine."Document Type"::Refund,GenJournalLine."Document Type"::Payment,'','',0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyRefundToPmtLessAmt@20();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1003 : Code[10];
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Refund on Payment Less Than Refund Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Refund is applied to Payment and 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount / 2,GenJournalLine."Document Type"::Refund,GenJournalLine."Document Type"::Payment,CurrencyCode,CurrencyCode,0,
+        0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyRefundToPmtGreaterAmt@19();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1003 : Code[10];
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Refund on Payment Greater Than Refund Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Refund is applied to Payment and 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount * 2,GenJournalLine."Document Type"::Refund,GenJournalLine."Document Type"::Payment,
+        CurrencyCode,CurrencyCode,0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyRefundToPmtMultiCurr@17();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Refund in foreign currency on
+      // Payment in another foreign currency.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Refund is applied to Payment and 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount * 2,GenJournalLine."Document Type"::Refund,GenJournalLine."Document Type"::Payment,
+        CreateCurrency,CreateCurrency,0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyRefundToPmtLessAmtMulCurr@44();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Refund in foreign currency on
+      // Payment Less Than Refund Amount and in another foreign currency.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Refund is applied to Payment and 1 for Sign Factor.
+      ApplySalesDocuments(
+        Amount,-Amount / 2,GenJournalLine."Document Type"::Refund,GenJournalLine."Document Type"::Payment,
+        CreateCurrency,CreateCurrency,0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToRefundEqualAmt@28();
+    VAR
+      GenJournalLine@1003 : Record 81;
+      Amount@1000 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Credit Memo on Refund Equal to Refund Amount.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Credit Memo is applied to Refund and 1 for Sign Factor.
+      ApplySalesDocuments(
+        -Amount,Amount,GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Document Type"::Refund,'','',0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToRefundLessAmt@27();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1003 : Code[10];
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Credit Memo on Refund Less Than Refund Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Credit Memo is applied to Refund and 1 for Sign Factor.
+      ApplySalesDocuments(
+        -Amount,Amount / 2,GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Document Type"::Refund,
+        CurrencyCode,CurrencyCode,0,-Amount,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToRefundGreaterAmt@26();
+    VAR
+      GenJournalLine@1004 : Record 81;
+      CurrencyCode@1003 : Code[10];
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Credit Memo on Refund Greater Than Refund Amount.
+      Initialize;
+      CurrencyCode := CreateCurrency;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Credit Memo is applied to Refund and 1 for Sign Factor.
+      ApplySalesDocuments(
+        -Amount,Amount * 2,GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Document Type"::Refund,
+        CurrencyCode,CurrencyCode,0,0,1);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToRefundMultiCurr@23();
+    VAR
+      GenJournalLine@1000 : Record 81;
+      Amount@1002 : Decimal;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying a Credit Memo in foreign currency on
+      // Refund in another foreign currency.
+      Initialize;
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Using Zero where Credit Memo is applied to Refund and 1 for Sign Factor.
+      ApplySalesDocuments(
+        -Amount,Amount * 2,GenJournalLine."Document Type"::"Credit Memo",GenJournalLine."Document Type"::Refund,
+        CreateCurrency,CreateCurrency,0,0,1);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE ApplySalesDocuments@18(Amount@1006 : Decimal;AmounttoApply@1007 : Decimal;DocumentType@1000 : Option;DocumentType2@1003 : Option;CurrencyCode@1008 : Code[10];CurrencyCode2@1009 : Code[10];PaymentAmont@1004 : Decimal;PaymentAmont2@1011 : Decimal;SignFactor@1010 : Integer);
+    VAR
+      SalesReceivablesSetup@1001 : Record 311;
+      VATPostingSetup@1005 : Record 325;
+      GenJournalLine@1002 : Record 81;
+      CustomerNo@1012 : Code[20];
+    BEGIN
+      // Setup:  Update Sales And Receivable Setup.Create Payment Terms with Discount,Create Customer and attach Payment Term to it.
+      SalesReceivablesSetup.GET;
+      FindAndUpdateSetup(SalesReceivablesSetup,VATPostingSetup);
+      CustomerNo := CreateCustomer(VATPostingSetup."VAT Bus. Posting Group");
+
+      // Exercise: Create and Post General Journal Line.
+      CreateGeneralJournalLine(GenJournalLine,DocumentType,CustomerNo,CurrencyCode,Amount);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      CreateGeneralJournalLine(GenJournalLine,DocumentType2,CustomerNo,CurrencyCode2,AmounttoApply);
+
+      UpdateGenJournalLine(GenJournalLine,CustomerNo,DocumentType,WORKDATE);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // Verify : Verify Customer Ledger Entry for Remaining Pmt. Disc. Possible.
+      VerifyCustomerLedgerEntry(CustomerNo,SignFactor * CalculateRemainingPmtDiscount(CustomerNo,PaymentAmont,PaymentAmont2));
+
+      // Tear Down: Roll back the Changes done in Sales And Receivable Setup.
+      UpdateSalesReceivablesSetup(SalesReceivablesSetup."Appln. between Currencies",SalesReceivablesSetup."Credit Warnings");
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToRefundAftDiscDate@29();
+    VAR
+      SalesReceivablesSetup@1002 : Record 311;
+      GenJournalLine@1003 : Record 81;
+      PaymentTerms@1004 : Record 3;
+      VATPostingSetup@1007 : Record 325;
+      CustomerNo@1001 : Code[20];
+      Amount@1000 : Decimal;
+      PaymentDiscountDate@1005 : Date;
+    BEGIN
+      // Test Customer Ledger Entry for Remaining Pmt. Disc. Possible after applying Credit Memo on Refund not within the Discount date
+      // Equal to Refund Amount.
+
+      // Setup:  Update Sales And Receivable Setup.Create Payment Terms with Discount,Create Customer and attach Payment Term to it.
+      Initialize;
+      SalesReceivablesSetup.GET;
+      FindAndUpdateSetup(SalesReceivablesSetup,VATPostingSetup);
+      CustomerNo := CreateCustomer(VATPostingSetup."VAT Bus. Posting Group");
+      GetPaymentTermDiscount(PaymentTerms,CustomerNo);
+      PaymentDiscountDate := CALCDATE(PaymentTerms."Discount Date Calculation",WORKDATE);
+      Amount := LibraryRandom.RandDec(100,2); // Random value used is not important for test.
+
+      // Exercise: Create Update and Post General Journal Line.
+      CreateGeneralJournalLine(GenJournalLine,GenJournalLine."Document Type"::"Credit Memo",CustomerNo,CreateCurrency,-Amount);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      CreateGeneralJournalLine(GenJournalLine,GenJournalLine."Document Type"::Refund,CustomerNo,GenJournalLine."Currency Code",Amount);
+      UpdateGenJournalLine(
+        GenJournalLine,CustomerNo,GenJournalLine."Document Type"::"Credit Memo",
+        CALCDATE('<' + FORMAT(LibraryRandom.RandInt(5)) + 'D>',PaymentDiscountDate));
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // Verify : Verify Customer Ledger Entry for Remaining Pmt. Disc. Possible.
+      VerifyCustomerLedgerEntry(CustomerNo,0);
+
+      // Tear Down: Roll back the Changes done in Sales And Receivable Setup.
+      UpdateSalesReceivablesSetup(SalesReceivablesSetup."Appln. between Currencies",SalesReceivablesSetup."Credit Warnings");
+    END;
+
+    LOCAL PROCEDURE CalculateRemainingPmtDiscount@4(CustomerNo@1000 : Code[20];Amount@1004 : Decimal;Amount2@1002 : Decimal) RemainingPmtDiscPossible : Decimal;
+    VAR
+      PaymentTerms@1001 : Record 3;
+    BEGIN
+      GetPaymentTermDiscount(PaymentTerms,CustomerNo);
+      RemainingPmtDiscPossible := ROUND(Amount * PaymentTerms."Discount %" / 100) + ROUND(Amount2 * PaymentTerms."Discount %" / 100);
+    END;
+
+    LOCAL PROCEDURE CreateCurrency@2() : Code[10];
+    VAR
+      Currency@1000 : Record 4;
+    BEGIN
+      LibraryERM.CreateCurrency(Currency);
+      LibraryERM.SetCurrencyGainLossAccounts(Currency);
+      Currency.VALIDATE("Residual Gains Account",Currency."Realized Gains Acc.");
+      Currency.VALIDATE("Residual Losses Account",Currency."Realized Losses Acc.");
+      Currency.MODIFY(TRUE);
+      LibraryERM.CreateRandomExchangeRate(Currency.Code);
+      EXIT(Currency.Code);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostCreditMemo@173(VAR SalesLine2@1000 : Record 37;SalesLine@1001 : Record 37;AppliesToDocNo@1003 : Code[20]);
+    VAR
+      SalesHeader@1002 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::"Credit Memo",SalesLine."Sell-to Customer No.");
+      UpdateAppliesToDocNoSales(SalesHeader,AppliesToDocNo);
+      LibrarySales.CreateSalesLine(
+        SalesLine2,SalesHeader,SalesLine2.Type::Item,SalesLine."No.",SalesLine.Quantity * LibraryUtility.GenerateRandomFraction);
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateAndPostSalesInvoice@100(VAR SalesLine@1000 : Record 37;VATPostingSetup@1002 : Record 325);
+    VAR
+      SalesHeader@1001 : Record 36;
+    BEGIN
+      LibrarySales.CreateSalesHeader(SalesHeader,SalesHeader."Document Type"::Invoice,
+        CreateCustomer(VATPostingSetup."VAT Bus. Posting Group"));
+      LibrarySales.CreateSalesLine(
+        SalesLine,SalesHeader,SalesLine.Type::Item,CreateItem(VATPostingSetup."VAT Prod. Posting Group"),
+        LibraryRandom.RandDec(10,2));  // Use random value for Quantity.
+      LibrarySales.PostSalesDocument(SalesHeader,FALSE,FALSE);
+    END;
+
+    LOCAL PROCEDURE CreateCustomer@31(VATBusPostingGroup@1000 : Code[10]) : Code[20];
+    VAR
+      Customer@1001 : Record 18;
+      PaymentTerms@1002 : Record 3;
+    BEGIN
+      CreatePaymentTermsWithDiscount(PaymentTerms);
+      LibrarySales.CreateCustomer(Customer);
+      Customer.VALIDATE("VAT Bus. Posting Group",VATBusPostingGroup);
+      Customer.VALIDATE("Payment Terms Code",PaymentTerms.Code);
+      Customer.MODIFY(TRUE);
+      EXIT(Customer."No.");
+    END;
+
+    LOCAL PROCEDURE CreateGeneralJournalLine@78(VAR GenJournalLine@1001 : Record 81;DocumentType@1004 : Option;AccountNo@1003 : Code[20];CurrencyCode@1007 : Code[10];Amount@1005 : Decimal);
+    VAR
+      GenJournalBatch@1000 : Record 232;
+    BEGIN
+      LibraryERM.SelectGenJnlBatch(GenJournalBatch);
+      LibraryERM.ClearGenJournalLines(GenJournalBatch);
+      LibraryERM.CreateGeneralJnlLine(
+        GenJournalLine,GenJournalBatch."Journal Template Name",GenJournalBatch.Name,DocumentType,
+        GenJournalLine."Account Type"::Customer,AccountNo,Amount);
+      GenJournalLine.VALIDATE("Currency Code",CurrencyCode);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE CreateItem@12(VATProdPostingGroup@1000 : Code[10]) : Code[20];
+    VAR
+      Item@1001 : Record 27;
+      LibraryInventory@1004 : Codeunit 132201;
+    BEGIN
+      LibraryInventory.CreateItem(Item);
+      Item.VALIDATE("VAT Prod. Posting Group",VATProdPostingGroup);
+      Item.VALIDATE("Unit Price",100 + LibraryRandom.RandDec(1000,2));  // Use 100 to insure higher Unit Price.
+      Item.MODIFY(TRUE);
+      EXIT(Item."No.");
+    END;
+
+    LOCAL PROCEDURE CreatePaymentTermsWithDiscount@86(VAR PaymentTerms@1000 : Record 3);
+    BEGIN
+      // Input any random Due Date, Discount Date Calculation and Discount %.
+      LibraryERM.CreatePaymentTermsDiscount(PaymentTerms,TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE GetPaymentTermDiscount@22(VAR PaymentTerms@1002 : Record 3;CustomerNo@1000 : Code[20]);
+    VAR
+      Customer@1001 : Record 18;
+    BEGIN
+      Customer.GET(CustomerNo);
+      PaymentTerms.GET(Customer."Payment Terms Code");
+    END;
+
+    LOCAL PROCEDURE UpdateAdjustForPaymentDiscount@5(VAR VATPostingSetup@1000 : Record 325;AdjustForPaymentDiscount@1001 : Boolean) : Boolean;
+    VAR
+      OldAdjustForPaymentDiscount@1002 : Boolean;
+    BEGIN
+      OldAdjustForPaymentDiscount := VATPostingSetup."Adjust for Payment Discount";
+      VATPostingSetup."Adjust for Payment Discount" := AdjustForPaymentDiscount;  // Using assignment to avoid error in ES.
+      VATPostingSetup.MODIFY(TRUE);
+      EXIT(OldAdjustForPaymentDiscount);
+    END;
+
+    LOCAL PROCEDURE UpdateAppliesToDocNoSales@11(VAR SalesHeader@1000 : Record 36;AppliesToDocNo@1001 : Code[20]);
+    BEGIN
+      SalesHeader.VALIDATE("Applies-to Doc. Type",SalesHeader."Applies-to Doc. Type"::Invoice);
+      SalesHeader.VALIDATE("Applies-to Doc. No.",AppliesToDocNo);
+      SalesHeader.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateGenJournalLine@15(VAR GenJournalLine@1000 : Record 81;CustomerNo@1001 : Code[20];AppliestoDocType@1002 : Option;PostingDate@1004 : Date);
+    VAR
+      CustLedgerEntry@1003 : Record 21;
+    BEGIN
+      CustLedgerEntry.SETRANGE("Customer No.",CustomerNo);
+      CustLedgerEntry.FINDFIRST;
+      GenJournalLine.VALIDATE("Applies-to Doc. Type",AppliestoDocType);
+      GenJournalLine.VALIDATE("Applies-to Doc. No.",CustLedgerEntry."Document No.");
+      GenJournalLine.VALIDATE("Posting Date",PostingDate);
+      GenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateGeneralPostingSetup@41(GenBusPostingGroup@1001 : Code[10];GenProdPostingGroup@1002 : Code[10];SalesPmtDiscDebitAcc@1003 : Code[20]);
+    VAR
+      GeneralPostingSetup@1000 : Record 252;
+      GLAccount@1004 : Record 15;
+    BEGIN
+      GeneralPostingSetup.GET(GenBusPostingGroup,GenProdPostingGroup);
+      LibraryERM.FindGLAccount(GLAccount);
+      // Using assignment to avoid error in ES.
+      GeneralPostingSetup."Sales Pmt. Disc. Debit Acc." := SalesPmtDiscDebitAcc;
+      GeneralPostingSetup."Sales Pmt. Disc. Credit Acc." := GLAccount."No.";
+      GeneralPostingSetup.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE UpdateSalesReceivablesSetup@53(ApplnbetweenCurrencies@1002 : Option;CreditWarnings@1001 : Option);
+    VAR
+      SalesReceivablesSetup@1000 : Record 311;
+    BEGIN
+      SalesReceivablesSetup.GET;
+      SalesReceivablesSetup.VALIDATE("Appln. between Currencies",ApplnbetweenCurrencies);
+      SalesReceivablesSetup.VALIDATE("Credit Warnings",CreditWarnings);
+      SalesReceivablesSetup.MODIFY(TRUE);
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE FindAndUpdateSetup@45(VAR SalesReceivablesSetup@1001 : Record 311;VAR VATPostingSetup@1000 : Record 325);
+    BEGIN
+      UpdateSalesReceivablesSetup(
+        SalesReceivablesSetup."Appln. between Currencies"::All,SalesReceivablesSetup."Credit Warnings"::"No Warning");
+      LibraryERM.FindVATPostingSetup(VATPostingSetup,VATPostingSetup."VAT Calculation Type"::"Normal VAT");
+    END;
+
+    LOCAL PROCEDURE VerifyGLEntry@286(DocumentNo@1002 : Code[20];GLAccountNo@1003 : Code[20];Amount@1004 : Decimal);
+    VAR
+      GLEntry@1000 : Record 17;
+    BEGIN
+      GLEntry.SETRANGE("Document Type",GLEntry."Document Type"::Payment);
+      GLEntry.SETRANGE("Document No.",DocumentNo);
+      GLEntry.SETRANGE("G/L Account No.",GLAccountNo);
+      GLEntry.FINDFIRST;
+      Assert.AreNearlyEqual(
+        Amount,GLEntry.Amount,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(AmountError,GLEntry.FIELDCAPTION(Amount),Amount,GLEntry.TABLECAPTION));
+    END;
+
+    LOCAL PROCEDURE VerifyCustomerLedgerEntry@3(CustomerNo@1001 : Code[20];RemainingPmtDiscPossible@1002 : Decimal);
+    VAR
+      CustLedgerEntry@1000 : Record 21;
+      ActualRemainingPmtDiscPossible@1003 : Decimal;
+    BEGIN
+      CustLedgerEntry.SETRANGE("Customer No.",CustomerNo);
+      CustLedgerEntry.FINDSET;
+      REPEAT
+        ActualRemainingPmtDiscPossible += CustLedgerEntry."Remaining Pmt. Disc. Possible";
+      UNTIL CustLedgerEntry.NEXT = 0;
+
+      Assert.AreNearlyEqual(
+        RemainingPmtDiscPossible,ActualRemainingPmtDiscPossible,LibraryERM.GetAmountRoundingPrecision,
+        STRSUBSTNO(AmountError,CustLedgerEntry.FIELDCAPTION("Remaining Pmt. Disc. Possible"),
+          RemainingPmtDiscPossible,CustLedgerEntry.TABLECAPTION));
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE ApplyCustomerEntriesHandler@30(VAR ApplyCustomerEntries@1000 : Page 232;VAR Response@1001 : Action);
+    VAR
+      CustLedgerEntry@1002 : Record 21;
+    BEGIN
+      LibraryERM.FindCustomerLedgerEntry(CustLedgerEntry,CustLedgerEntry."Document Type"::Invoice,DocumentNo);
+      ApplyCustomerEntries.SETRECORD(CustLedgerEntry);
+      ApplyCustomerEntries.SetCustApplId;
+      Response := ACTION::LookupOK;
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Payment Discount] [Sales]
+      Test for Payment Discount on credit Memo:
+        1. Test G/L Entry after applying Payment on Invoice with Adjust for Payment Discount True on Payment Terms.
+        2. Test Remaining Pmt. Disc. Possible after applying Invoice on Credit Memo Equal to Invoice Amount.
+        3. Test Remaining Pmt. Disc. Possible after applying Invoice on Credit Memo Less Than Invoice Amount.
+        4. Test Remaining Pmt. Disc. Possible after applying Invoice on Credit Memo Greater Than Invoice Amount.
+        5. Test Remaining Pmt. Disc. Possible after applying Invoice in foreign currency on Credit Memo in another foreign currency.
+        6. Test Remaining Pmt. Disc. Possible after applying Refund on Credit Memo Equal to Refund Amount.
+        7. Test Remaining Pmt. Disc. Possible after applying Refund on Credit Memo Less Than Refund Amount.
+        8. Test Remaining Pmt. Disc. Possible after applying Refund on Credit Memo Greater Than Refund Amount.
+        9. Test Remaining Pmt. Disc. Possible after applying Refund in foreign currency on Credit Memo in another foreign currency.
+       10. Test Remaining Pmt. Disc. Possible after applying Credit Memo on Invoice Equal to Invoice Amount.
+       11. Test Remaining Pmt. Disc. Possible after applying Credit Memo on Invoice Less Than Invoice Amount.
+       12. Test Remaining Pmt. Disc. Possible after applying Credit Memo on Invoice Greater Than Invoice Amount.
+       13. Test Remaining Pmt. Disc. Possible after applying Credit Memo in foreign currency on Invoice in another foreign currency.
+       14. Test Remaining Pmt. Disc. Possible after applying Refund on Payment Equal to Refund Amount.
+       15. Test Remaining Pmt. Disc. Possible after applying Refund on Payment Less Than Refund Amount.
+       16. Test Remaining Pmt. Disc. Possible after applying Refund on Payment Greater Than Refund Amount.
+       17. Test Remaining Pmt. Disc. Possible after applying Refund in foreign currency on Payment Less than
+           Refund Amount and in another foreign currency.
+       18. Test Remaining Pmt. Disc. Possible after applying Credit Memo on Refund Equal to Refund Amount.
+       19. Test Remaining Pmt. Disc. Possible after applying Credit Memo on Refund Less Than Refund Amount.
+       20. Test Remaining Pmt. Disc. Possible after applying Credit Memo on Refund Greater Than Refund Amount.
+       21. Test Remaining Pmt. Disc. Possible after applying Credit Memo in foreign currency on Refund in another foreign currency.
+       22. Test Remaining Pmt. Disc. Possible after applying Credit Memo on Refund not within the Discount date Equal to Refund Amount.
+
+      TFS_TS_ID = 243595
+      Covers Test cases:
+      --------------------------------------------------
+      Test Function Name                  TFS ID
+      --------------------------------------------------
+      PaymentDiscountOnCreditMemo         121518, 124535
+
+      Covers Test cases for WI: 245947
+      --------------------------------------------------
+      Test Function Name                  TFS ID
+      --------------------------------------------------
+      ApplyInvToCrMemoEqualAmt            126626,126627
+      ApplyInvToCrMemoLessAmt             126628
+      ApplyInvToCrMemoGreaterAmt          126629
+      ApplyInvToCrMemoMultiCurr           126630,126631
+
+      Covers Test cases for WI: 245948
+      --------------------------------------------------
+      Test Function Name                  TFS ID
+      --------------------------------------------------
+      ApplyRefundToCrMemoEqualAmt         126632,126633,126634
+      ApplyRefundToCrMemoLessAmt          126635
+      ApplyRefundToCrMemoGreaterAmt       126636
+      ApplyRefundToCrMemoMultiCurr        126637
+
+      Covers Test cases for WI: 245949
+      --------------------------------------------------
+      Test Function Name                   TFS ID
+      --------------------------------------------------
+      ApplyCrMemoToInvEqualAmt             126637,126638
+      ApplyCrMemoToInvLessAmt              126643
+      ApplyCrMemoToInvGreaterAmt           126641
+      ApplyCrMemoToInvMultiCurr            126639,126642
+
+      Covers Test cases for WI: 245950
+      --------------------------------------------------
+      Test Function Name                   TFS ID
+      --------------------------------------------------
+      ApplyRefundToPmtEqualAmt            126644,126645
+      ApplyRefundToPmtLessAmt             126649
+      ApplyRefundToPmtGreaterAmt          126647
+      ApplyRefundToPmtMultiCurr           126646,126648
+      ApplyRefundToPmtLessAmtMulCurr      126650
+
+      Covers Test cases for WI: 245951
+      --------------------------------------------------
+      Test Function Name                   TFS ID
+      --------------------------------------------------
+      ApplyCrMemoToRefundEqualAmt         126651,126652
+      ApplyCrMemoToRefundLessAmt          126653,126654
+      ApplyCrMemoToRefundGreaterAmt       126655
+      ApplyCrMemoToRefundMultiCurr        126656,126657
+      ApplyCrMemoToRefundAftDiscDate      126658
+    }
+    END.
+  }
+}
+

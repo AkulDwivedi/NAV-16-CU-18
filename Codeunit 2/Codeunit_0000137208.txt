@@ -1,0 +1,238 @@
+OBJECT Codeunit 137208 SCM Delete Sales Docs
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVW19.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE;
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      SalesHeader@1009 : Record 36;
+      SalesShipmentHeader@1015 : Record 110;
+      SalesInvoiceHeader@1014 : Record 112;
+      SalesCrMemoHeader@1013 : Record 114;
+      ReturnReceiptHeader@1012 : Record 6660;
+      Assert@1003 : Codeunit 130000;
+      LibrarySales@1002 : Codeunit 130509;
+      LibraryInventory@1010 : Codeunit 132201;
+      LibraryRandom@1001 : Codeunit 130440;
+      isInitialized@1000 : Boolean;
+      FilePath@1011 : Text[1024];
+
+    [Normal]
+    LOCAL PROCEDURE Initialize@8();
+    VAR
+      LibraryERMCountryData@1000 : Codeunit 131305;
+    BEGIN
+      // Lazy Setup.
+      IF isInitialized THEN
+        EXIT;
+
+      LibraryERMCountryData.CreateVATData;
+      LibraryERMCountryData.UpdateGeneralPostingSetup;
+
+      isInitialized := TRUE;
+      COMMIT;
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesShipReportHandler)]
+    PROCEDURE DeletePostedShipment@35();
+    BEGIN
+      DeletePostedDoc(SalesHeader."Document Type"::Order);
+    END;
+
+    [Test]
+    [HandlerFunctions(SalesInvReportHandler)]
+    PROCEDURE DeletePostedInvoice@36();
+    BEGIN
+      DeletePostedDoc(SalesHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    [HandlerFunctions(RetRcptReportHandler)]
+    PROCEDURE DeletePostedRetReceipt@37();
+    BEGIN
+      DeletePostedDoc(SalesHeader."Document Type"::"Return Order");
+    END;
+
+    [Test]
+    [HandlerFunctions(CrMemoReportHandler)]
+    PROCEDURE DeletePostedCrMemo@38();
+    BEGIN
+      DeletePostedDoc(SalesHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE DeletePostedDoc@34(DocumentType@1006 : Option);
+    BEGIN
+      // Setup: Create Sales Document and Post.
+      Initialize;
+      CreateSalesDocument(SalesHeader,DocumentType);
+      LibrarySales.PostSalesDocument(SalesHeader,TRUE,TRUE);
+
+      // Exercise: Re-print and delete the posted document.
+      FilePath := TEMPORARYPATH + SalesHeader."No." + '.pdf';
+      PrintDocument(SalesHeader);
+
+      // Verify: No document lines remain in the database.
+      VerifyLinesAreDeleted(SalesHeader,DocumentType);
+    END;
+
+    LOCAL PROCEDURE CreateSalesDocument@10(VAR SalesHeader@1000 : Record 36;DocumentType@1003 : Option);
+    VAR
+      SalesLine@1001 : Record 37;
+      Customer@1004 : Record 18;
+      Item@1005 : Record 27;
+      Counter@1002 : Integer;
+    BEGIN
+      LibrarySales.CreateCustomer(Customer);
+      LibrarySales.CreateSalesHeader(SalesHeader,DocumentType,Customer."No.");
+
+      // Create a sales document with 2 lines.
+      FOR Counter := 1 TO 2 DO BEGIN
+        LibraryInventory.CreateItem(Item);
+        LibrarySales.CreateSalesLine(SalesLine,SalesHeader,SalesLine.Type::Item,Item."No.",LibraryRandom.RandInt(10));
+      END;
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE PrintDocument@29(SalesHeader@1000 : Record 36);
+    VAR
+      NoPrinted@1001 : Integer;
+    BEGIN
+      CASE SalesHeader."Document Type" OF
+        SalesHeader."Document Type"::Order:
+          BEGIN
+            SalesShipmentHeader.SETRANGE("Order No.",SalesHeader."No.");
+            SalesShipmentHeader.FINDFIRST;
+            NoPrinted := SalesShipmentHeader."No. Printed";
+            SalesShipmentHeader.PrintRecords(FALSE);
+            SalesShipmentHeader.GET(SalesShipmentHeader."No.");
+            NoPrinted := SalesShipmentHeader."No. Printed" - NoPrinted;
+            SalesShipmentHeader.DELETE(TRUE);
+          END;
+        SalesHeader."Document Type"::Invoice:
+          BEGIN
+            SalesInvoiceHeader.SETRANGE("Pre-Assigned No.",SalesHeader."No.");
+            SalesInvoiceHeader.FINDFIRST;
+            NoPrinted := SalesInvoiceHeader."No. Printed";
+            SalesInvoiceHeader.PrintRecords(FALSE);
+            SalesInvoiceHeader.GET(SalesInvoiceHeader."No.");
+            NoPrinted := SalesInvoiceHeader."No. Printed" - NoPrinted;
+            SalesInvoiceHeader.DELETE(TRUE);
+          END;
+        SalesHeader."Document Type"::"Return Order":
+          BEGIN
+            ReturnReceiptHeader.SETRANGE("Return Order No.",SalesHeader."No.");
+            ReturnReceiptHeader.FINDFIRST;
+            NoPrinted := ReturnReceiptHeader."No. Printed";
+            ReturnReceiptHeader.PrintRecords(FALSE);
+            ReturnReceiptHeader.GET(ReturnReceiptHeader."No.");
+            NoPrinted := ReturnReceiptHeader."No. Printed" - NoPrinted;
+            ReturnReceiptHeader.DELETE(TRUE);
+          END;
+        SalesHeader."Document Type"::"Credit Memo":
+          BEGIN
+            SalesCrMemoHeader.SETRANGE("Pre-Assigned No.",SalesHeader."No.");
+            SalesCrMemoHeader.FINDFIRST;
+            NoPrinted := SalesCrMemoHeader."No. Printed";
+            SalesCrMemoHeader.PrintRecords(FALSE);
+            SalesCrMemoHeader.GET(SalesCrMemoHeader."No.");
+            NoPrinted := SalesCrMemoHeader."No. Printed" - NoPrinted;
+            SalesCrMemoHeader.DELETE(TRUE);
+          END;
+      END;
+      Assert.AreEqual(1,NoPrinted,'No. printed was not incremented for ' + SalesHeader."No.");
+    END;
+
+    [Normal]
+    LOCAL PROCEDURE VerifyLinesAreDeleted@32(SalesHeader@1000 : Record 36;DocumentType@1001 : Option);
+    VAR
+      SalesShipmentLine@1002 : Record 111;
+      SalesInvoiceLine@1003 : Record 113;
+      SalesCrMemoLine@1004 : Record 115;
+      ReturnReceiptLine@1005 : Record 6661;
+    BEGIN
+      // Verify there are no related document lines remaining in the database for the given doc. no.
+      CASE DocumentType OF
+        SalesHeader."Document Type"::Order:
+          BEGIN
+            SalesShipmentLine.SETRANGE("Order No.",SalesHeader."No.");
+            Assert.IsTrue(SalesShipmentLine.ISEMPTY,'Not all shipment lines were deleted.');
+          END;
+        SalesHeader."Document Type"::Invoice:
+          BEGIN
+            SalesInvoiceLine.SETRANGE("Document No.",SalesHeader."No.");
+            Assert.IsTrue(SalesInvoiceLine.ISEMPTY,'Not all invoice lines were deleted.');
+          END;
+        SalesHeader."Document Type"::"Return Order":
+          BEGIN
+            ReturnReceiptLine.SETRANGE("Return Order No.",SalesHeader."No.");
+            Assert.IsTrue(ReturnReceiptLine.ISEMPTY,'Not all receipt lines were deleted.');
+          END;
+        SalesHeader."Document Type"::"Credit Memo":
+          BEGIN
+            SalesCrMemoLine.SETRANGE("Document No.",SalesHeader."No.");
+            Assert.IsTrue(SalesCrMemoLine.ISEMPTY,'Not all cr. memo lines were deleted.');
+          END;
+      END;
+    END;
+
+    [ReportHandler]
+    PROCEDURE SalesShipReportHandler@2(VAR SalesShipment@1000 : Report 208);
+    BEGIN
+      SalesShipment.SETTABLEVIEW(SalesShipmentHeader);
+      SalesShipment.SAVEASPDF(FilePath);
+    END;
+
+    [ReportHandler]
+    PROCEDURE RetRcptReportHandler@3(VAR SalesReturnReceipt@1000 : Report 6646);
+    BEGIN
+      SalesReturnReceipt.SETTABLEVIEW(ReturnReceiptHeader);
+      SalesReturnReceipt.SAVEASPDF(FilePath);
+    END;
+
+    [ReportHandler]
+    PROCEDURE SalesInvReportHandler@6(VAR SalesInvoice@1000 : Report 206);
+    BEGIN
+      SalesInvoice.SETTABLEVIEW(SalesInvoiceHeader);
+      SalesInvoice.SAVEASPDF(FilePath);
+    END;
+
+    [ReportHandler]
+    PROCEDURE CrMemoReportHandler@39(VAR SalesCreditMemo@1000 : Report 207);
+    BEGIN
+      SalesCreditMemo.SETTABLEVIEW(SalesCrMemoHeader);
+      SalesCreditMemo.SAVEASPDF(FilePath);
+    END;
+
+    BEGIN
+    {
+      // [FEATURE] [Print Documents] [Sales]
+      Unsupported version tags:
+      GB: Unable to Execute
+      AU: Unable to Execute
+      IT: Unable to Execute
+      ES: Unable to Execute
+
+      The following features are tested:
+      - delete Posted Sales Shipment after printing
+      - delete Posted Sales Invoice after printing
+      - delete Posted Return Receipt after printing
+      - delete Posted Sales Credit Memo after printing
+    }
+    END.
+  }
+}
+

@@ -1,0 +1,1934 @@
+OBJECT Codeunit 144034 Reverse Service Tax Split
+{
+  OBJECT-PROPERTIES
+  {
+    Date=27-09-17;
+    Time=12:00:00 PM;
+    Version List=NAVIN9.00.00,Test;
+  }
+  PROPERTIES
+  {
+    Subtype=Test;
+    OnRun=BEGIN
+            isInitialized := FALSE
+          END;
+
+  }
+  CODE
+  {
+    VAR
+      Assert@1500007 : Codeunit 130000;
+      LibraryERM@1500006 : Codeunit 131300;
+      LibraryServiceTax@1500005 : Codeunit 143001;
+      LibraryRandom@1500003 : Codeunit 130440;
+      ReverseServiceTaxHelper@1500002 : Codeunit 143006;
+      ServiceTaxVerify@1500004 : Codeunit 143004;
+      InvoiceAmountIs@1500011 : 'Equal,Greater,Smaller';
+      ReverseChargeTypeOption@1500008 : ' ,Standard,GTA';
+      NegativeLiabilityErr@1500001 : TextConst 'ENU=Liability Amount is Negative so you cannot post this transaction.';
+      BlockedPostOfSplitDocInFCYErr@1500010 : TextConst 'ENU=ou cannot post the document because amounts are in foreign currency and one or more of the lines uses service group %1, which has a service tax reverse charge percentage.';
+      UnexpectedVendorLedgEntryValueErr@1500009 : TextConst 'ENU=The value for the field %1 in VendorLedger Entry table is incorrect.';
+      isInitialized@1500000 : Boolean;
+      MultipleAppErr@1500012 : TextConst 'ENU=You cannot apply multiple documents with service tax in one transaction.';
+
+    [Test]
+    PROCEDURE RevChrgPostPurchInvFCY@1500001();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchaseDocFCY(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE ApplyInvTo2PmtsOneTrans@1500109();
+    VAR
+      GenJournalLine@1500001 : Record 81;
+    BEGIN
+      ApplyInvTo2DocsOneTrans(GenJournalLine."Document Type"::Payment);
+    END;
+
+    [Test]
+    PROCEDURE ApplyInvToPmtAndCrMOneTrans@1500064();
+    VAR
+      GenJournalLine@1500001 : Record 81;
+    BEGIN
+      ApplyInvTo2DocsOneTrans(GenJournalLine."Document Type"::"Credit Memo");
+    END;
+
+    LOCAL PROCEDURE ApplyInvTo2DocsOneTrans@1500024(DocumentType@1500000 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      AppliedDocNo@1500002 : ARRAY [2] OF Code[20];
+      PartialFactor@1500006 : Decimal;
+      AppliedDocAmount@1500003 : Decimal;
+      InvoiceAmount@1500004 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup
+      ReverseServiceTaxHelper.CreateSplitDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      GenJournalLine."Applies-to ID" := GenJournalLine."Document No.";
+      GenJournalLine.MODIFY;
+
+      InvoiceAmount := CalculatePaymentAmount(GenJournalLine);
+
+      // 1st Payment
+      PartialFactor := GetPartialFactor;
+      AppliedDocAmount := ROUND(InvoiceAmount * PartialFactor);
+      AppliedDocNo[1] := PostPaymentWithAmount(GenJournalLine,AppliedDocAmount);
+
+      // 2nd Payment
+      AppliedDocAmount := InvoiceAmount - AppliedDocAmount;
+      IF DocumentType = GenJournalLine."Document Type"::Payment THEN
+        AppliedDocNo[2] := PostPaymentWithAmount(GenJournalLine,AppliedDocAmount)
+      ELSE
+        AppliedDocNo[2] := PostCrMemoForInvoice(GenJournalLine,AppliedDocAmount);
+
+      SetAppliesToID(AppliedDocNo,GenJournalLine);
+
+      // Exercise & Verify
+      ASSERTERROR LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      Assert.ExpectedError(MultipleAppErr);
+    END;
+
+    [Test]
+    PROCEDURE ApplyPmtTo2InvOneTrans@1500092();
+    VAR
+      PmtGenJournalLine@1500002 : Record 81;
+      GenJournalLine@1500001 : Record 81;
+      AppliedDocNo@1500005 : ARRAY [2] OF Code[20];
+      PaymentAmount@1500007 : Decimal;
+    BEGIN
+      Initialize;
+
+      // Setup
+
+      // 2 Invoices
+      ReverseServiceTaxHelper.CreateSplitDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      AppliedDocNo[1] := GenJournalLine."Document No.";
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      AppliedDocNo[2] := PostSameInvoice(GenJournalLine);
+
+      // Payment
+      PaymentAmount := 2 * CalculatePaymentAmount(GenJournalLine);
+      ReverseServiceTaxHelper.CreatePayment(PmtGenJournalLine,GenJournalLine."Account No.",PaymentAmount,GenJournalLine."Posting Date",
+        GenJournalLine."Document Type"::Payment);
+      PmtGenJournalLine."Applies-to ID" := GenJournalLine."Document No.";
+      PmtGenJournalLine.MODIFY;
+      SetAppliesToID(AppliedDocNo,PmtGenJournalLine);
+
+      // Exercise & Verify
+      ASSERTERROR LibraryERM.PostGeneralJnlLine(PmtGenJournalLine);
+      Assert.ExpectedError(MultipleAppErr);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgPostPurchInvWithBalAcc@1500037();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchaseDocWithBalAcc(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgPostPurchCMemWithBalAcc@1500065();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchaseDocWithBalAcc(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgPostPurchInv@1500016();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchaseDoc(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgPostPurchOrder@1500028();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchaseDoc(PurchaseHeader."Document Type"::Order);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgPostPurchCrMemo@1500029();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchaseDoc(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgPostPurchRetOrd@1500032();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchaseDoc(PurchaseHeader."Document Type"::"Return Order");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgOnlineApplyInvToPmt@1500053();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocOnlineApplyToPmt(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgOnlineApplyCrMemoToRef@1500023();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocOnlineApplyToPmt(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyPayToInv@1500015();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocApplyPayment(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyPayToOrd@1500014();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocApplyPayment(PurchaseHeader."Document Type"::Order);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyRefToCMemo@1500013();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocApplyPayment(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyRefToRetOrd@1500012();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocApplyPayment(PurchaseHeader."Document Type"::"Return Order");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgPostPurchInvGJnlFCY@1500062();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchDocGenJnlFCY(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgPostPurchInvGJnl@1500040();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchDocGenJnl(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgPostPurchCrMemoGJnl@1500038();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPostPurchDocGenJnl(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgOnlineApplyInvGJnlToPmt@1500050();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGenJnlOnlineApplyToPmt(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgOnlineApplyCrMGJnlToRef@1500030();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGenJnlOnlineApplyToPmt(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgOnlineApplyPmtToInvGJnl@1500046();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGenJnlOnlineApplyPmt(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgOnlineApplyRefToCrMGJnl@1500035();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGenJnlOnlineApplyPmt(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyPayToInvGJnl@1500031();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocGenJnlApplyPay(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyRefToCMemoGJnl@1500027();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocGenJnlApplyPay(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyInvGJnlPartPmt@1500055();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocGenJnlApplPartPmt(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyCrMemoGJnlPartPmt@1500054();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocGenJnlApplPartPmt(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyPartPmtToInvGJnl@1500066();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocGenJnlPartPmtAppl(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyPartPmtToCrMGJnl@1500060();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocGenJnlPartPmtAppl(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyInvGJnlRemaining@1500056();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocGJnlAppRemaining(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyCrMGJnlRemaining@1500051();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitPurchDocGJnlAppRemaining(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyInvToPartPmtOnline@1500097();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGJnlOnlApplyToPartPmt(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyCrMToPartRefOnline@1500101();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGJnlOnlApplyToPartPmt(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyPartPmtToInvOnline@1500078();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGJnlOnlineApplyPartPmt(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyPartRefToCrMOnline@1500077();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGJnlOnlineApplyPartPmt(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyRemPmtToInvOnline@1500085();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGJnlOnlineAppRemaining(PurchaseHeader."Document Type"::Invoice);
+    END;
+
+    [Test]
+    PROCEDURE RevChrgApplyRemRefToCrMOnline@1500084();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      SplitDocGJnlOnlineAppRemaining(PurchaseHeader."Document Type"::"Credit Memo");
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    PROCEDURE PayServTaxInvoiceRevChrgInward@1500095();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      PaySrvTax(PurchaseHeader."Document Type"::Invoice,PurchaseHeader."Service Type (Rev. Chrg.)"::Inward)
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler)]
+    PROCEDURE PayServTaxCrMemoRevChrgInward@1500093();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      ASSERTERROR PaySrvTax(PurchaseHeader."Document Type"::"Credit Memo",PurchaseHeader."Service Type (Rev. Chrg.)"::Inward);
+      Assert.ExpectedError(NegativeLiabilityErr)
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    PROCEDURE PayServTaxInvRevChrgOutward@1500091();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      PaySrvTax(PurchaseHeader."Document Type"::Invoice,PurchaseHeader."Service Type (Rev. Chrg.)"::Outward);
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler)]
+    PROCEDURE PayServTaxCrMemoRevChrgOutward@1500089();
+    VAR
+      PurchaseHeader@1500000 : Record 38;
+    BEGIN
+      ASSERTERROR PaySrvTax(PurchaseHeader."Document Type"::"Credit Memo",PurchaseHeader."Service Type (Rev. Chrg.)"::Outward);
+      Assert.ExpectedError(NegativeLiabilityErr)
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    PROCEDURE PayPartialRevChrgToGovInward@1500072();
+    VAR
+      GenJournalLine@1500000 : Record 81;
+    BEGIN
+      PayPartialRevChrgToGov(GenJournalLine."Service Type (Rev. Chrg.)"::Inward);
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    PROCEDURE PayPartialRevChrgToGovlOutward@1500088();
+    VAR
+      GenJournalLine@1500000 : Record 81;
+    BEGIN
+      PayPartialRevChrgToGov(GenJournalLine."Service Type (Rev. Chrg.)"::Outward);
+    END;
+
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    LOCAL PROCEDURE PayPartialRevChrgToGov@1500057(ServiceTypeRevChrg@1500004 : Option);
+    VAR
+      GenJournalLine@1500010 : Record 81;
+      ServiceTaxSetup@1500008 : Record 16472;
+      PostedDocNo@1500012 : Code[20];
+      PaymentDocNo@1500007 : Code[20];
+      PaymentToGovDocNo@1500005 : Code[20];
+      Percentage@1500003 : Integer;
+      PartialFactor@1500000 : Decimal;
+      BaseAmount@1500001 : Decimal;
+      PoTAmount@1500006 : Decimal;
+      RevChrgAmount@1500009 : Decimal;
+      PoTSBCandKKCAmount@1500002 : Decimal;
+    BEGIN
+      Initialize;
+      ReverseServiceTaxHelper.SetupCompanyInfo;
+
+      // Setup
+      Percentage := LibraryRandom.RandIntInRange(10,90);
+      ReverseServiceTaxHelper.CreatePurchaseDocFromGenJnl(GenJournalLine,GenJournalLine."Document Type"::Invoice,
+        ServiceTypeRevChrg,ReverseChargeTypeOption::Standard,TRUE,Percentage);
+      PostedDocNo := GenJournalLine."Document No.";
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      PartialFactor := GetPartialFactor;
+      PaymentDocNo := ReverseServiceTaxHelper.PostPayment(GenJournalLine."Account No.",
+          PartialFactor * ReverseServiceTaxHelper.CalculatePayment(GenJournalLine."Document Type"::Invoice,ABS(GenJournalLine.Amount),
+            ServiceTaxSetup,Percentage),GenJournalLine."Posting Date",GenJournalLine."Document Type"::Payment);
+
+      ReverseServiceTaxHelper.ApplyAndPostVendorEntry(GenJournalLine."Document Type"::Invoice,PostedDocNo,
+        GenJournalLine."Document Type"::Payment,PaymentDocNo);
+
+      // Exercise and Verify
+      PaymentToGovDocNo :=
+        ReverseServiceTaxHelper.PayServiceTax(
+          GenJournalLine."Service Tax Registration No.",GenJournalLine."Service Tax Group Code",TRUE);
+
+      // Verify
+      ReverseServiceTaxHelper.CalcSplitAmounts(GenJournalLine,BaseAmount,PoTAmount,RevChrgAmount,Percentage,ServiceTaxSetup);
+      PoTSBCandKKCAmount :=
+        ReverseServiceTaxHelper.CalculatePoTSBCandKKCAmount(BaseAmount,(100 - Percentage) / 100,ServiceTaxSetup);
+      ServiceTaxVerify.GLEntriesForSTPmtEntriesForAmt(
+        (RevChrgAmount + PoTSBCandKKCAmount) * PartialFactor,ServiceTaxSetup,PaymentToGovDocNo,ServiceTypeRevChrg);
+
+      // Real Service Tax Part - because the Real Service Tax Detail entry is created when posting the invoice for the whole amount
+      // so partial factor is 1.
+      ServiceTaxVerify.STDetailsAfterPayRCToGovSplit(GenJournalLine."Document No.",BaseAmount,Percentage,
+        FALSE,ServiceTaxSetup,1,ServiceTypeRevChrg);
+      // Rev charge Service Tax Part
+      ServiceTaxVerify.STDetailsAfterPayRCToGovSplit(PaymentDocNo,BaseAmount,Percentage,
+        TRUE,ServiceTaxSetup,PartialFactor,ServiceTypeRevChrg);
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    PROCEDURE PaySrvTax2PaymentsInward@1500106();
+    VAR
+      GenJournalLine@1500000 : Record 81;
+    BEGIN
+      PaySrvTax2Payments(GenJournalLine."Service Type (Rev. Chrg.)"::Inward);
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    PROCEDURE PaySrvTax2PaymentsOutward@1500107();
+    VAR
+      GenJournalLine@1500000 : Record 81;
+    BEGIN
+      PaySrvTax2Payments(GenJournalLine."Service Type (Rev. Chrg.)"::Outward);
+    END;
+
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    LOCAL PROCEDURE PaySrvTax2Payments@1500058(ServiceTypeRevChrg@1500004 : Option);
+    VAR
+      GenJournalLine@1500007 : Record 81;
+      ServiceTaxSetup@1500006 : Record 16472;
+      PaymentToGovDocNo@1500003 : Code[20];
+      Percentage@1500002 : Integer;
+      RevChrgBase@1500001 : Decimal;
+      PartialPaymentFactor@1500000 : Decimal;
+    BEGIN
+      Initialize;
+      ReverseServiceTaxHelper.SetupCompanyInfo;
+
+      // Setup
+      Percentage := LibraryRandom.RandIntInRange(10,90);
+      ReverseServiceTaxHelper.CreatePurchaseDocFromGenJnl(GenJournalLine,GenJournalLine."Document Type"::Invoice,
+        ServiceTypeRevChrg,ReverseChargeTypeOption::Standard,TRUE,Percentage);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      PartialPaymentFactor := GetPartialFactor;
+      PostAndApply2Payments(GenJournalLine,ServiceTaxSetup,PartialPaymentFactor,Percentage);
+
+      // Exercise
+      PaymentToGovDocNo := ReverseServiceTaxHelper.PayServiceTax(GenJournalLine."Service Tax Registration No.",
+          GenJournalLine."Service Tax Group Code",TRUE);
+
+      // Verify
+      RevChrgBase := ReverseServiceTaxHelper.RoundAmount(Percentage / 100 * ABS(GenJournalLine.Amount));
+      ServiceTaxVerify.ServTaxEntriesFor2Pmts(RevChrgBase,GenJournalLine."Document Type"::Invoice,
+        ServiceTaxSetup,PaymentToGovDocNo,ServiceTypeRevChrg,PartialPaymentFactor);
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    PROCEDURE PaySrvTaxToGovTakeSalesCredit@1500090();
+    VAR
+      PurchaseHeader@1500004 : Record 38;
+      GenJournalLine@1500003 : Record 81;
+      STEntryDetailsForInvoice@1500006 : Record 16474;
+      STEntryDetailsForPayment@1500011 : Record 16474;
+      STEntryDetailsTotal@1500012 : Record 16474;
+      ServiceTaxSetup@1500010 : Record 16472;
+      PostedPurchaseInvoiceDocNo@1500002 : Code[20];
+      PostedPaymentDocNo@1500001 : Code[20];
+      PostedSalesInvoiceDocNo@1500007 : Code[20];
+      LastTransactionNo@1500000 : Integer;
+      DocumentType@1500005 : Option;
+      RevChargeCreditClosed@1500009 : Boolean;
+      RealCreditClosed@1500008 : Boolean;
+    BEGIN
+      Initialize;
+
+      DocumentType := PurchaseHeader."Document Type"::Invoice;
+      PostPurchaseDocAndApplyPayment(GenJournalLine,PostedPurchaseInvoiceDocNo,PostedPaymentDocNo,LastTransactionNo,DocumentType);
+      ReverseServiceTaxHelper.PayServiceTax(
+        GenJournalLine."Service Tax Registration No.",GenJournalLine."Service Tax Group Code",TRUE);
+
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+
+      ReverseServiceTaxHelper.GetServiceTaxEntryDetail(STEntryDetailsForInvoice,PostedPurchaseInvoiceDocNo);
+      ReverseServiceTaxHelper.GetServiceTaxEntryDetail(STEntryDetailsForPayment,PostedPaymentDocNo);
+      STEntryDetailsTotal := STEntryDetailsForInvoice;
+      STEntryDetailsTotal."Base Amount" := STEntryDetailsForInvoice."Base Amount" + STEntryDetailsForPayment."Base Amount";
+
+      PostedSalesInvoiceDocNo := ReverseServiceTaxHelper.PostEqualAmountSalesDoc(STEntryDetailsTotal);
+      LibraryServiceTax.PayServiceTax(STEntryDetailsTotal."Service Tax Registration No.",
+        STEntryDetailsTotal."Service Tax Group Code",FALSE);
+
+      // Verify:
+      RevChargeCreditClosed := TRUE;
+      RealCreditClosed := TRUE;
+      ServiceTaxVerify.ServTaxEntryDetails(PostedPurchaseInvoiceDocNo,STEntryDetailsForInvoice."Base Amount",
+        ServiceTaxSetup,
+        RevChargeCreditClosed,RealCreditClosed);
+      ServiceTaxVerify.ServTaxEntryDetails(PostedPaymentDocNo,STEntryDetailsForPayment."Base Amount",ServiceTaxSetup,
+        RevChargeCreditClosed,RealCreditClosed);
+      ServiceTaxVerify.ServTaxEntryStatus(PostedSalesInvoiceDocNo,RevChargeCreditClosed,RealCreditClosed);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToGreaterInvoice@1500103();
+    BEGIN
+      ApplyCreditMemoToInvoiceHelper(InvoiceAmountIs::Greater);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToEqualInvoice@1500110();
+    BEGIN
+      ApplyCreditMemoToInvoiceHelper(InvoiceAmountIs::Equal);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToEqualInvDocOnline@1500114();
+    BEGIN
+      ApplCrMemoToInvDocOnlineHelper(InvoiceAmountIs::Equal);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToBigInvDocOnline@1500116();
+    BEGIN
+      ApplCrMemoToInvDocOnlineHelper(InvoiceAmountIs::Greater);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToPartiallyOpenInv@1500083();
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      ServiceTaxSetup@1500005 : Record 16472;
+      CreditMemoAmount@1500002 : Decimal;
+      CrMemoDocNo@1500003 : ARRAY [2] OF Code[20];
+    BEGIN
+      Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      CreditMemoAmount :=
+        -GenJournalLine.Amount / ReverseServiceTaxHelper.GetPurchInvAmountFactor(InvoiceAmountIs::Greater);
+      CreditMemoAmount := ROUND(CreditMemoAmount);
+
+      // Post 1st Credit Memo
+      CrMemoDocNo[1] := OffApplyPostCrMemoForInvoice(GenJournalLine,CreditMemoAmount);
+
+      // Post 2nd Credit Memo
+      CreditMemoAmount := ABS(GenJournalLine.Amount) - ABS(CreditMemoAmount);
+      CrMemoDocNo[2] := OffApplyPostCrMemoForInvoice(GenJournalLine,CreditMemoAmount);
+
+      // Verify
+      ServiceTaxVerify.DocHasClosedRemCredit(CrMemoDocNo[1]);
+      ServiceTaxVerify.DocHasClosedRemCredit(CrMemoDocNo[2]);
+      ServiceTaxVerify.DocHasClosedRemCredit(GenJournalLine."Document No.");
+
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      ServiceTaxVerify.ServTaxGLAccountsBalance(ServiceTaxSetup,0,0,0,0);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoToInvoiceGJnlOnline@1500075();
+    VAR
+      InvoiceGenJournalLine@1500000 : Record 81;
+      CrMemoGenJournalLine@1500001 : Record 81;
+      LastTransactionNo@1500002 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(InvoiceGenJournalLine,InvoiceGenJournalLine."Document Type"::Invoice);
+      CreateCrMemoForInvoice(CrMemoGenJournalLine,InvoiceGenJournalLine,-InvoiceGenJournalLine.Amount);
+
+      // Exercise
+      CrMemoGenJournalLine.VALIDATE("Applies-to Doc. Type",InvoiceGenJournalLine."Document Type");
+      CrMemoGenJournalLine.VALIDATE("Applies-to Doc. No.",InvoiceGenJournalLine."Document No.");
+      CrMemoGenJournalLine.MODIFY;
+
+      LibraryERM.PostGeneralJnlLine(CrMemoGenJournalLine);
+
+      // Verify
+      VerifyReverseByApplication(
+        InvoiceGenJournalLine,CrMemoGenJournalLine."Document No.",LastTransactionNo,-InvoiceGenJournalLine.Amount);
+    END;
+
+    [Test]
+    PROCEDURE ApplyPmtAndCMemoToInvoice@1500096();
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500004 : Code[20];
+      CrMemoDocNo@1500003 : Code[20];
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(GenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      PaymentDocNo := OffApplyPostPayment(GenJournalLine,RemainingPayment);
+
+      // Exercise
+      CrMemoDocNo := OffApplyPostCrMemoForInvoice(GenJournalLine,CrMemoBaseAmount);
+
+      // Verify
+      VerifyPartCanceledPaidAppln(GenJournalLine,PaymentDocNo,CrMemoDocNo,LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE UnapplyApplyPmtAndCMemoToInv@1500043();
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PmtGenJournalLine@1500002 : Record 81;
+      PaymentDocNo@1500004 : Code[20];
+      CrMemoDocNo@1500003 : Code[20];
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(GenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      PaymentDocNo := OffApplyPostPayment(GenJournalLine,RemainingPayment);
+
+      PmtGenJournalLine."Document Type" := PmtGenJournalLine."Document Type"::Payment;
+      PmtGenJournalLine."Document No." := PaymentDocNo;
+      ApplyAfterUnapply(GenJournalLine,PmtGenJournalLine);
+
+      // Exercise
+      CrMemoDocNo := OffApplyPostCrMemoForInvoice(GenJournalLine,CrMemoBaseAmount);
+
+      // Verify
+      VerifyPartCanceledPaidAppln(GenJournalLine,PaymentDocNo,CrMemoDocNo,LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE UnapplyApplyCMemoAndPmtToInv@1500070();
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      CrMemoGenJournalLine@1500002 : Record 81;
+      PaymentDocNo@1500004 : Code[20];
+      CrMemoDocNo@1500003 : Code[20];
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(GenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      PaymentDocNo := OffApplyPostPayment(GenJournalLine,RemainingPayment);
+
+      // Exercise
+      CrMemoDocNo := OffApplyPostCrMemoForInvoice(GenJournalLine,CrMemoBaseAmount);
+
+      CrMemoGenJournalLine."Document Type" := CrMemoGenJournalLine."Document Type"::"Credit Memo";
+      CrMemoGenJournalLine."Document No." := CrMemoDocNo;
+      ApplyAfterUnapply(GenJournalLine,CrMemoGenJournalLine);
+
+      // Verify
+      VerifyPartCanceledPaidAppln(GenJournalLine,PaymentDocNo,CrMemoDocNo,LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCMemoAndPmtToInvoice@1500044();
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500004 : Code[20];
+      CrMemoDocNo@1500003 : Code[20];
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(GenJournalLine,RemainingPayment,CrMemoBaseAmount);
+      CrMemoDocNo := OffApplyPostCrMemoForInvoice(GenJournalLine,CrMemoBaseAmount);
+
+      // Exercise
+      PaymentDocNo := OffApplyPostPayment(GenJournalLine,RemainingPayment);
+
+      // Verify
+      VerifyPartCanceledPaidAppln(GenJournalLine,PaymentDocNo,CrMemoDocNo,LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCMemoDocAndPmtToInvOnl@1500115();
+    VAR
+      InvoiceGenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500002 : Code[20];
+      CrMemoDocNo@1500003 : Code[20];
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(InvoiceGenJournalLine,InvoiceGenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(InvoiceGenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      // Exercise
+      CrMemoDocNo := CreateApplyCrMemoDocForInvOnl(InvoiceGenJournalLine,CrMemoBaseAmount);
+      PaymentDocNo := PostPaymentWithAppliesTo(InvoiceGenJournalLine,RemainingPayment);
+
+      // Verify
+      VerifyPartCanceledPaidAppln(InvoiceGenJournalLine,PaymentDocNo,CrMemoDocNo,LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE ApplyPmtAndCMemoDocToInvOnl@1500121();
+    VAR
+      InvoiceGenJournalLine@1500001 : Record 81;
+      CrMemoDocNo@1500003 : Code[20];
+      PaymentDocNo@1500002 : Code[20];
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(InvoiceGenJournalLine,InvoiceGenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(InvoiceGenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      // Exercise
+      PaymentDocNo := PostPaymentWithAppliesTo(InvoiceGenJournalLine,RemainingPayment);
+      CrMemoDocNo := CreateApplyCrMemoDocForInvOnl(InvoiceGenJournalLine,CrMemoBaseAmount);
+
+      // Verify
+      VerifyPartCanceledPaidAppln(InvoiceGenJournalLine,PaymentDocNo,CrMemoDocNo,LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCMemoGJnlAndPmtToInvOnl@1500124();
+    VAR
+      InvoiceGenJournalLine@1500001 : Record 81;
+      CrMemoDocNo@1500002 : Code[20];
+      PaymentDocNo@1500004 : Code[20];
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(InvoiceGenJournalLine,InvoiceGenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(InvoiceGenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      // Exercise
+      CrMemoDocNo := OnlApplyPostCrMemoForInvoice(InvoiceGenJournalLine,CrMemoBaseAmount);
+      PaymentDocNo := PostPaymentWithAppliesTo(InvoiceGenJournalLine,RemainingPayment);
+
+      // Verify
+      VerifyPartCanceledPaidAppln(InvoiceGenJournalLine,PaymentDocNo,CrMemoDocNo,LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE ApplyPmtAndCMemoGJnlToInvOnl@1500125();
+    VAR
+      InvoiceGenJournalLine@1500001 : Record 81;
+      CrMemoDocNo@1500003 : Code[20];
+      PaymentDocNo@1500002 : Code[20];
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(InvoiceGenJournalLine,InvoiceGenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(InvoiceGenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      // Exercise
+      PaymentDocNo := PostPaymentWithAppliesTo(InvoiceGenJournalLine,RemainingPayment);
+      CrMemoDocNo := OnlApplyPostCrMemoForInvoice(InvoiceGenJournalLine,CrMemoBaseAmount);
+
+      // Verify
+      VerifyPartCanceledPaidAppln(InvoiceGenJournalLine,PaymentDocNo,CrMemoDocNo,LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE Unapply2ApplyCMemoAndPmtToInv@1500036();
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(GenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      OffApplyPostPayment(GenJournalLine,RemainingPayment);
+
+      OffApplyPostCrMemoForInvoice(GenJournalLine,CrMemoBaseAmount);
+
+      // Excercise
+      ReverseServiceTaxHelper.UnapplyTwice(GenJournalLine."Document No.");
+
+      // Verify
+      VerifyUnapplyInvCrMemo(GenJournalLine,CrMemoBaseAmount,LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE Unapply2ApplyPmtAndCMemoToInv@1500132();
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      RemainingPayment@1500006 : Decimal;
+      CrMemoBaseAmount@1500010 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      CalculatePartialAmounts(GenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      OffApplyPostCrMemoForInvoice(GenJournalLine,CrMemoBaseAmount);
+
+      OffApplyPostPayment(GenJournalLine,RemainingPayment);
+
+      // Excercise
+      ReverseServiceTaxHelper.UnapplyTwice(GenJournalLine."Document No.");
+
+      // Verify
+      VerifyUnapplyInvCrMemo(GenJournalLine,CrMemoBaseAmount,LastTransactionNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    PROCEDURE ApplCrMAndPmtToInvPayToGovInw@1500128();
+    VAR
+      GenJournalLine@1500000 : Record 81;
+      LastTransactionNo@1500001 : Integer;
+      InvoiceDocNo@1500003 : Code[20];
+      CrMemoDocNo@1500002 : Code[20];
+    BEGIN
+      LastTransactionNo := Initialize;
+      ReverseServiceTaxHelper.SetupCompanyInfo;
+
+      ApplCrMemoAndPmtToInvPayToGov(GenJournalLine."Service Type (Rev. Chrg.)"::Inward,InvoiceDocNo,CrMemoDocNo);
+
+      ServiceTaxVerify.DocHasClosedRemCredit(CrMemoDocNo);
+      ServiceTaxVerify.STEntryDetailsRemRevChrgCredit(LastTransactionNo,0);
+      ServiceTaxVerify.STEntriesVsGLBalCrMPmt(LastTransactionNo);
+    END;
+
+    [Test]
+    [HandlerFunctions(PayServiceTaxHandler,MessageHandler)]
+    PROCEDURE ApplCrMAndPmtToInvPayToGovOutw@1500129();
+    VAR
+      GenJournalLine@1500000 : Record 81;
+      LastTransactionNo@1500001 : Integer;
+      InvoiceDocNo@1500003 : Code[20];
+      CrMemoDocNo@1500002 : Code[20];
+    BEGIN
+      LastTransactionNo := Initialize;
+      ReverseServiceTaxHelper.SetupCompanyInfo;
+
+      ApplCrMemoAndPmtToInvPayToGov(GenJournalLine."Service Type (Rev. Chrg.)"::Outward,InvoiceDocNo,CrMemoDocNo);
+
+      ServiceTaxVerify.DocHasClosedRemCredit(CrMemoDocNo);
+      ServiceTaxVerify.STEntryDetailsRemRevChrgCredit(LastTransactionNo,0);
+      ServiceTaxVerify.STEntriesVsGLBalCrMPmtOutward(LastTransactionNo);
+    END;
+
+    [Test]
+    PROCEDURE ApplyCrMemoGenJnlToInvoiceOnl@1500011();
+    VAR
+      InvoiceGenJournalLine@1500001 : Record 81;
+    BEGIN
+      Initialize;
+
+      // Setup
+      PostDocJnlLine(InvoiceGenJournalLine,InvoiceGenJournalLine."Document Type"::Invoice);
+
+      // Exercise
+      OnlApplyPostCrMemoForInvoice(InvoiceGenJournalLine,-InvoiceGenJournalLine.Amount);
+
+      // Verify
+      VerifyVendLedgClosedNoRemAmt(InvoiceGenJournalLine."Document No.",InvoiceGenJournalLine."Account No.")
+    END;
+
+    LOCAL PROCEDURE ApplyAfterUnapply@1500061(PmtGenJournalLine@1500001 : Record 81;InvGenJournalLine@1500000 : Record 81);
+    BEGIN
+      ReverseServiceTaxHelper.UnapplyVendorLedgerEntry(InvGenJournalLine."Document No.");
+      ApplyOffline(PmtGenJournalLine,InvGenJournalLine);
+    END;
+
+    LOCAL PROCEDURE ApplyOffline@1500111(GenJournalLine1@1500000 : Record 81;GenJournalLine2@1500001 : Record 81);
+    BEGIN
+      ReverseServiceTaxHelper.ApplyAndPostVendorEntry(GenJournalLine1."Document Type",GenJournalLine1."Document No.",
+        GenJournalLine2."Document Type",GenJournalLine2."Document No.");
+    END;
+
+    LOCAL PROCEDURE CalculatePartialAmounts@1500020(GenJournalLine@1500002 : Record 81;VAR RemainingPayment@1500001 : Decimal;VAR CrMemoBaseAmount@1500000 : Decimal);
+    VAR
+      ServiceTaxSetup@1500006 : Record 16472;
+      CrMemoTotalAmount@1500004 : Decimal;
+      InvoiceTotalAmount@1500003 : Decimal;
+      PartialFactor@1500005 : Decimal;
+      Percentage@1500007 : Integer;
+    BEGIN
+      Percentage := GetRevChrgPercent(GenJournalLine);
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      PartialFactor := GetPartialFactor;
+
+      CrMemoBaseAmount := ReverseServiceTaxHelper.RoundAmount(PartialFactor * ABS(GenJournalLine.Amount));
+      CrMemoTotalAmount :=
+        ReverseServiceTaxHelper.CalculatePayment(
+          GenJournalLine."Document Type"::"Credit Memo",CrMemoBaseAmount,ServiceTaxSetup,Percentage);
+
+      InvoiceTotalAmount :=
+        ReverseServiceTaxHelper.CalculatePayment(
+          GenJournalLine."Document Type"::Invoice,ABS(GenJournalLine.Amount),ServiceTaxSetup,Percentage);
+
+      RemainingPayment := InvoiceTotalAmount + CrMemoTotalAmount;
+    END;
+
+    LOCAL PROCEDURE CalculatePaymentAmount@1500108(GenJournalLine@1500000 : Record 81) : Decimal;
+    VAR
+      ServiceTaxSetup@1500002 : Record 16472;
+    BEGIN
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      EXIT(
+        ReverseServiceTaxHelper.CalculatePayment(
+          GenJournalLine."Document Type",ABS(GenJournalLine.Amount),ServiceTaxSetup,GetRevChrgPercent(GenJournalLine)));
+    END;
+
+    LOCAL PROCEDURE SplitPostPurchaseDoc@1500007(DocumentType@1500008 : Option);
+    VAR
+      PurchaseHeader@1500002 : Record 38;
+      PurchaseLine@1500003 : Record 39;
+      PostedDocNo@1500005 : Code[20];
+    BEGIN
+      Initialize;
+
+      CreateDocument(PurchaseHeader,PurchaseLine,DocumentType);
+
+      PostedDocNo := ReverseServiceTaxHelper.PostPurchaseDoc(PurchaseHeader);
+
+      VerifyPostedDocument(PurchaseHeader,PurchaseLine,PostedDocNo);
+    END;
+
+    LOCAL PROCEDURE SplitPostPurchaseDocWithBalAcc@1500042(DocumentType@1500008 : Option);
+    VAR
+      PurchaseHeader@1500002 : Record 38;
+      PurchaseLine@1500003 : Record 39;
+      GenJnlLine@1500001 : Record 81;
+      LastTransactionNo@1500000 : Integer;
+      PostedDocNo@1500004 : Code[20];
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      CreateDocument(PurchaseHeader,PurchaseLine,DocumentType);
+      PurchaseHeader.VALIDATE("Payment Method Code",ReverseServiceTaxHelper.FindPmtMethodWithBalAcc);
+      PurchaseHeader.MODIFY;
+
+      // Exercise
+      PostedDocNo := ReverseServiceTaxHelper.PostPurchaseDoc(PurchaseHeader);
+
+      // Verify
+      ReverseServiceTaxHelper.ConvertDocToJnlLine(PurchaseHeader,PurchaseLine,PostedDocNo,GenJnlLine);
+      ServiceTaxVerify.SplitApplication(GenJnlLine,PostedDocNo,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SplitPostPurchaseDocFCY@1500041(DocumentType@1500008 : Option);
+    VAR
+      PurchaseHeader@1500002 : Record 38;
+      PurchaseLine@1500003 : Record 39;
+    BEGIN
+      Initialize;
+
+      PurchaseHeader."Currency Code" := ReverseServiceTaxHelper.FindCurrencyCode;
+      CreateDocument(PurchaseHeader,PurchaseLine,DocumentType);
+
+      ASSERTERROR ReverseServiceTaxHelper.PostPurchaseDoc(PurchaseHeader);
+
+      Assert.ExpectedError(
+        STRSUBSTNO(BlockedPostOfSplitDocInFCYErr,PurchaseLine."Service Tax Group"));
+    END;
+
+    LOCAL PROCEDURE SplitPurchDocApplyPayment@1500005(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500000 : Record 81;
+      PostedPurchaseInvoiceDocNo@1500005 : Code[20];
+      PostedPaymentDocNo@1500014 : Code[20];
+      LastTransactionNo@1500001 : Integer;
+    BEGIN
+      PostPurchaseDocAndApplyPayment(GenJournalLine,PostedPurchaseInvoiceDocNo,PostedPaymentDocNo,LastTransactionNo,DocumentType);
+
+      // Verify
+      ServiceTaxVerify.SplitApplication(GenJournalLine,PostedPaymentDocNo,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE PostPurchaseDocAndApplyPayment@1500094(VAR GenJournalLine@1500003 : Record 81;VAR PostedPurchaseInvoiceDocNo@1500006 : Code[20];VAR PostedPaymentDocNo@1500001 : Code[20];VAR LastTransactionNo@1500000 : Integer;DocumentType@1500002 : Option);
+    VAR
+      PurchaseHeader@1500005 : Record 38;
+      PurchaseLine@1500004 : Record 39;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      CreateDocument(PurchaseHeader,PurchaseLine,DocumentType);
+      PostedPurchaseInvoiceDocNo := ReverseServiceTaxHelper.PostPurchaseDoc(PurchaseHeader);
+      ReverseServiceTaxHelper.ConvertDocToJnlLine(PurchaseHeader,PurchaseLine,PostedPurchaseInvoiceDocNo,GenJournalLine);
+      PostedPaymentDocNo := PostPayment(GenJournalLine);
+
+      // Exercise
+      ApplyPaymentToDocument(PostedPaymentDocNo,GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE SplitPurchDocOnlineApplyToPmt@1500052(DocumentType@1500008 : Option);
+    VAR
+      PurchaseHeader@1500002 : Record 38;
+      PurchaseLine@1500003 : Record 39;
+      GenJournalLine@1500000 : Record 81;
+      PaymentDocNo@1500014 : Code[20];
+      PostedInvoiceDocNo@1500004 : Code[20];
+      LastTransactionNo@1500001 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      CreateDocument(PurchaseHeader,PurchaseLine,DocumentType);
+
+      ReverseServiceTaxHelper.ConvertDocToJnlLine(PurchaseHeader,PurchaseLine,'',GenJournalLine);
+      PaymentDocNo := PostPayment(GenJournalLine);
+
+      PurchaseHeader.VALIDATE("Applies-to Doc. Type",ReverseServiceTaxHelper.GetApplyingDocType(DocumentType));
+      PurchaseHeader.VALIDATE("Applies-to Doc. No.",PaymentDocNo);
+      PurchaseHeader.MODIFY;
+
+      // Exercise
+      PostedInvoiceDocNo := ReverseServiceTaxHelper.PostPurchaseDoc(PurchaseHeader);
+
+      // Verify
+      GenJournalLine."Document No." := PostedInvoiceDocNo;
+      ServiceTaxVerify.SplitApplication(GenJournalLine,PaymentDocNo,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SplitPostPurchDocGenJnl@1500018(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500002 : Record 81;
+    BEGIN
+      Initialize;
+
+      ReverseServiceTaxHelper.CreateSplitDocJnlLine(GenJournalLine,DocumentType);
+
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      VerifyPostedDocJnlLine(GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE SplitPostPurchDocGenJnlFCY@1500059(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500002 : Record 81;
+    BEGIN
+      Initialize;
+
+      ReverseServiceTaxHelper.CreateSplitDocJnlLine(GenJournalLine,DocumentType);
+      GenJournalLine.VALIDATE("Currency Code",ReverseServiceTaxHelper.FindCurrencyCode);
+      GenJournalLine.MODIFY;
+
+      ASSERTERROR LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      Assert.ExpectedError(
+        STRSUBSTNO(BlockedPostOfSplitDocInFCYErr,GenJournalLine."Service Tax Group Code"));
+    END;
+
+    LOCAL PROCEDURE CreateDocument@1500008(VAR PurchaseHeader@1500000 : Record 38;VAR PurchaseLine@1500002 : Record 39;DocumentType@1500001 : Option);
+    VAR
+      Percentage@1500003 : Integer;
+    BEGIN
+      Percentage := LibraryRandom.RandIntInRange(10,90);
+      ReverseServiceTaxHelper.CreatePurchaseDoc(
+        PurchaseHeader,PurchaseLine,DocumentType,ReverseChargeTypeOption::Standard,Percentage,TRUE);
+    END;
+
+    LOCAL PROCEDURE PostDocJnlLine@1500079(VAR GenJournalLine@1500000 : Record 81;DocumentType@1500001 : Option) : Code[20];
+    BEGIN
+      ReverseServiceTaxHelper.CreateSplitDocJnlLine(GenJournalLine,DocumentType);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      EXIT(GenJournalLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE PostPaymentWithAppliesTo@1500045(GenJournalLine@1500000 : Record 81;PaymentAmount@1500001 : Decimal) : Code[20];
+    BEGIN
+      ReverseServiceTaxHelper.CreatePaymentWithOnlineAppl(
+        GenJournalLine,ReverseServiceTaxHelper.GetApplyingDocType(GenJournalLine."Document Type"),PaymentAmount);
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+      EXIT(GenJournalLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE PostPayment@1500080(GenJournalLine@1500000 : Record 81) : Code[20];
+    VAR
+      PaymentAmount@1500003 : Decimal;
+    BEGIN
+      PaymentAmount := CalculatePaymentAmount(GenJournalLine);
+      EXIT(
+        ReverseServiceTaxHelper.PostPayment(
+          GenJournalLine."Account No.",PaymentAmount,GenJournalLine."Posting Date",
+          ReverseServiceTaxHelper.GetApplyingDocType(GenJournalLine."Document Type")));
+    END;
+
+    LOCAL PROCEDURE PostRemainingPayment@1500034(GenJournalLine@1500000 : Record 81) : Code[20];
+    VAR
+      PaymentAmount@1500003 : Decimal;
+    BEGIN
+      PaymentAmount := -ReverseServiceTaxHelper.GetRemainingAmount(GenJournalLine."Document Type",GenJournalLine."Document No.");
+      EXIT(
+        ReverseServiceTaxHelper.PostPayment(
+          GenJournalLine."Account No.",PaymentAmount,GenJournalLine."Posting Date",
+          ReverseServiceTaxHelper.GetApplyingDocType(GenJournalLine."Document Type")));
+    END;
+
+    LOCAL PROCEDURE PostPartialPayment@1500010(GenJournalLine@1500000 : Record 81;VAR PartialFactor@1500001 : Decimal) : Code[20];
+    VAR
+      PaymentAmount@1500002 : Decimal;
+    BEGIN
+      PartialFactor := GetPartialFactor;
+      PaymentAmount := ROUND(PartialFactor * CalculatePaymentAmount(GenJournalLine));
+      EXIT(
+        ReverseServiceTaxHelper.PostPayment(
+          GenJournalLine."Account No.",PaymentAmount,GenJournalLine."Posting Date",
+          ReverseServiceTaxHelper.GetApplyingDocType(GenJournalLine."Document Type")));
+    END;
+
+    LOCAL PROCEDURE PostPaymentWithAmount@1500025(GenJournalLine@1500000 : Record 81;PaymentAmount@1500001 : Decimal) : Code[20];
+    BEGIN
+      EXIT(
+        ReverseServiceTaxHelper.PostPayment(
+          GenJournalLine."Account No.",PaymentAmount,GenJournalLine."Posting Date",
+          ReverseServiceTaxHelper.GetApplyingDocType(GenJournalLine."Document Type")));
+    END;
+
+    LOCAL PROCEDURE PostCrMemoForInvoice@1500033(GenJournalLine@1500001 : Record 81;CrMemoBaseAmount@1500000 : Decimal) : Code[20];
+    VAR
+      CrMemoGenJournalLine@1500003 : Record 81;
+    BEGIN
+      CreateCrMemoForInvoice(CrMemoGenJournalLine,GenJournalLine,CrMemoBaseAmount);
+
+      LibraryERM.PostGeneralJnlLine(CrMemoGenJournalLine);
+      EXIT(CrMemoGenJournalLine."Document No.")
+    END;
+
+    LOCAL PROCEDURE OffApplyPostCrMemoForInvoice@1500112(GenJournalLine@1500001 : Record 81;CrMemoBaseAmount@1500000 : Decimal) CrMemoDocNo : Code[20];
+    BEGIN
+      CrMemoDocNo := PostCrMemoForInvoice(GenJournalLine,CrMemoBaseAmount);
+      ApplyCrMemoToInvoice(CrMemoDocNo,GenJournalLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE OffApplyPostPayment@1500117(GenJournalLine@1500000 : Record 81;PaymentAmount@1500001 : Decimal) PaymentDocNo : Code[20];
+    BEGIN
+      PaymentDocNo := PostPaymentWithAmount(GenJournalLine,PaymentAmount);
+      ApplyPaymentToDocument(PaymentDocNo,GenJournalLine);
+    END;
+
+    LOCAL PROCEDURE OnlApplyPostCrMemoForInvoice@1500105(GenJournalLine@1500001 : Record 81;CrMemoBaseAmount@1500000 : Decimal) : Code[20];
+    VAR
+      CrMemoGenJournalLine@1500003 : Record 81;
+    BEGIN
+      CreateCrMemoForInvoice(CrMemoGenJournalLine,GenJournalLine,CrMemoBaseAmount);
+
+      CrMemoGenJournalLine.VALIDATE("Applies-to Doc. Type",GenJournalLine."Document Type");
+      CrMemoGenJournalLine.VALIDATE("Applies-to Doc. No.",GenJournalLine."Document No.");
+      CrMemoGenJournalLine.MODIFY;
+
+      LibraryERM.PostGeneralJnlLine(CrMemoGenJournalLine);
+      EXIT(CrMemoGenJournalLine."Document No.")
+    END;
+
+    LOCAL PROCEDURE CreateCrMemoForInvoice@1500149(VAR CrMemoGenJournalLine@1500000 : Record 81;GenJournalLine@1500001 : Record 81;CrMemoBaseAmount@1500002 : Decimal);
+    VAR
+      GenJournalBatch@1500003 : Record 232;
+    BEGIN
+      ReverseServiceTaxHelper.CreateGenJournalBatch(GenJournalBatch);
+      WITH GenJournalLine DO
+        ReverseServiceTaxHelper.CreateJnlLineWithSTNoSetup(
+          CrMemoGenJournalLine,GenJournalBatch,"Document Type"::"Credit Memo","Service Type (Rev. Chrg.)",
+          "Account No.",CrMemoBaseAmount,"Posting Date","Service Tax Registration No.","Service Tax Group Code");
+      CrMemoGenJournalLine.VALIDATE(PoT,TRUE);
+      CrMemoGenJournalLine.MODIFY(TRUE);
+    END;
+
+    LOCAL PROCEDURE ApplCrMemoAndPmtToInvPayToGov@1500120(ServiceTypeRevChrg@1500000 : Option;VAR InvoiceDocNo@1500007 : Code[20];VAR CrMemoDocNo@1500009 : Code[20]);
+    VAR
+      InvoiceGenJournalLine@1500002 : Record 81;
+      CrMemoGenJournalLine@1500004 : Record 81;
+      Percentage@1500001 : Integer;
+      RemainingPayment@1500005 : Decimal;
+      CrMemoBaseAmount@1500006 : Decimal;
+    BEGIN
+      Initialize;
+      Percentage := LibraryRandom.RandIntInRange(10,90);
+
+      // Post Invoice
+      ReverseServiceTaxHelper.CreatePurchaseDocFromGenJnl(InvoiceGenJournalLine,InvoiceGenJournalLine."Document Type"::Invoice,
+        ServiceTypeRevChrg,ReverseChargeTypeOption::Standard,TRUE,Percentage);
+      InvoiceDocNo := InvoiceGenJournalLine."Document No.";
+      LibraryERM.PostGeneralJnlLine(InvoiceGenJournalLine);
+
+      CalculatePartialAmounts(InvoiceGenJournalLine,RemainingPayment,CrMemoBaseAmount);
+
+      // Post and Apply Credit Memo
+      CreateCrMemoForInvoice(CrMemoGenJournalLine,InvoiceGenJournalLine,CrMemoBaseAmount);
+      CrMemoGenJournalLine.VALIDATE("Applies-to Doc. Type",InvoiceGenJournalLine."Document Type");
+      CrMemoGenJournalLine.VALIDATE("Applies-to Doc. No.",InvoiceGenJournalLine."Document No.");
+      CrMemoGenJournalLine.VALIDATE("Service Type (Rev. Chrg.)",ServiceTypeRevChrg);
+      CrMemoGenJournalLine.MODIFY;
+      LibraryERM.PostGeneralJnlLine(CrMemoGenJournalLine);
+      CrMemoDocNo := CrMemoGenJournalLine."Document No.";
+
+      // Post payment
+      OffApplyPostPayment(InvoiceGenJournalLine,RemainingPayment);
+
+      // Pay to Gov
+      ReverseServiceTaxHelper.PayServiceTax(
+        InvoiceGenJournalLine."Service Tax Registration No.",InvoiceGenJournalLine."Service Tax Group Code",TRUE);
+    END;
+
+    LOCAL PROCEDURE ApplCrMemoToInvDocOnlineHelper@1500082(InvAmountIs@1500000 : Option);
+    VAR
+      InvoiceGenJournalLine@1500002 : Record 81;
+      CrMemoDocNo@1500003 : Code[20];
+      LastTransactionNo@1500004 : Integer;
+      CreditMemoAmount@1500001 : Decimal;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(InvoiceGenJournalLine,InvoiceGenJournalLine."Document Type"::Invoice);
+
+      // Exercise
+      CreditMemoAmount :=
+        InvoiceGenJournalLine.Amount / ReverseServiceTaxHelper.GetPurchInvAmountFactor(InvAmountIs);
+      CrMemoDocNo := CreateApplyCrMemoDocForInvOnl(InvoiceGenJournalLine,CreditMemoAmount);
+
+      // Verify
+      VerifyReverseByApplication(InvoiceGenJournalLine,CrMemoDocNo,LastTransactionNo,-CreditMemoAmount);
+    END;
+
+    LOCAL PROCEDURE ApplyCreditMemoToInvoiceHelper@1500006(InvAmountIs@1500003 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      CrMemoDocNo@1500002 : Code[20];
+      LastTransactionNo@1500000 : Integer;
+      CreditMemoAmount@1500004 : Decimal;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      LibraryServiceTax.SetServiceTaxRounding;
+      PostDocJnlLine(GenJournalLine,GenJournalLine."Document Type"::Invoice);
+      CreditMemoAmount := -GenJournalLine.Amount / ReverseServiceTaxHelper.GetPurchInvAmountFactor(InvAmountIs);
+
+      CrMemoDocNo := PostCrMemoForInvoice(GenJournalLine,CreditMemoAmount);
+
+      // Exercise
+      ApplyCrMemoToInvoice(CrMemoDocNo,GenJournalLine."Document No.");
+
+      // Verify
+      VerifyReverseByApplication(GenJournalLine,CrMemoDocNo,LastTransactionNo,CreditMemoAmount);
+    END;
+
+    LOCAL PROCEDURE ApplyCrMemoToInvoice@1500009(CrMemoDocNo@1500000 : Code[20];InvoiceDocNo@1500001 : Code[20]);
+    VAR
+      GenJournalLine@1500002 : Record 81;
+    BEGIN
+      ReverseServiceTaxHelper.ApplyAndPostVendorEntry(
+        GenJournalLine."Document Type"::Invoice,InvoiceDocNo,
+        GenJournalLine."Document Type"::"Credit Memo",CrMemoDocNo);
+    END;
+
+    LOCAL PROCEDURE CreateApplyCrMemoDocForInvOnl@1500197(InvoiceGenJournalLine@1500000 : Record 81;Amount@1500003 : Decimal) : Code[20];
+    VAR
+      CrMemoPurchaseHeader@1500001 : Record 38;
+      CrMemoPurchaseLine@1500002 : Record 39;
+    BEGIN
+      ReverseServiceTaxHelper.CreatePurchaseHeaderByVendor(CrMemoPurchaseHeader,
+        CrMemoPurchaseHeader."Document Type"::"Credit Memo",
+        ReverseChargeTypeOption::Standard,TRUE,InvoiceGenJournalLine."Account No.");
+
+      ReverseServiceTaxHelper.CreatePurchaseLineWithAmount(CrMemoPurchaseLine,CrMemoPurchaseHeader,
+        InvoiceGenJournalLine."Service Tax Group Code",
+        InvoiceGenJournalLine."Service Tax Registration No.",
+        ReverseChargeTypeOption::Standard,
+        GetRevChrgPercent(InvoiceGenJournalLine),ABS(Amount));
+
+      CrMemoPurchaseHeader.VALIDATE("Applies-to Doc. Type",InvoiceGenJournalLine."Document Type");
+      CrMemoPurchaseHeader.VALIDATE("Applies-to Doc. No.",InvoiceGenJournalLine."Document No.");
+      CrMemoPurchaseHeader.MODIFY;
+
+      EXIT(ReverseServiceTaxHelper.PostPurchaseDoc(CrMemoPurchaseHeader));
+    END;
+
+    LOCAL PROCEDURE ApplyPaymentToDocument@1500081(PaymentDocNo@1500003 : Code[20];GenJournalLine@1500000 : Record 81);
+    BEGIN
+      ReverseServiceTaxHelper.ApplyAndPostVendorEntry(
+        ReverseServiceTaxHelper.GetApplyingDocType(GenJournalLine."Document Type"),PaymentDocNo,
+        GenJournalLine."Document Type",GenJournalLine."Document No.");
+    END;
+
+    LOCAL PROCEDURE ApplyDocumentToPayment@1500004(PaymentDocNo@1500003 : Code[20];GenJournalLine@1500000 : Record 81);
+    BEGIN
+      ReverseServiceTaxHelper.ApplyAndPostVendorEntry(
+        GenJournalLine."Document Type",GenJournalLine."Document No.",
+        ReverseServiceTaxHelper.GetApplyingDocType(GenJournalLine."Document Type"),PaymentDocNo);
+    END;
+
+    LOCAL PROCEDURE SplitPurchDocGenJnlApplPartPmt@1500048(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500014 : Code[20];
+      PartialFactor@1500002 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      PostDocJnlLine(GenJournalLine,DocumentType);
+      PaymentDocNo := PostPartialPayment(GenJournalLine,PartialFactor);
+
+      ApplyDocumentToPayment(PaymentDocNo,GenJournalLine);
+
+      VerifyPartialApplication(GenJournalLine,PaymentDocNo,PartialFactor,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SplitPurchDocGenJnlPartPmtAppl@1500067(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500014 : Code[20];
+      PartialFactor@1500002 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      PostDocJnlLine(GenJournalLine,DocumentType);
+      PaymentDocNo := PostPartialPayment(GenJournalLine,PartialFactor);
+
+      ApplyPaymentToDocument(PaymentDocNo,GenJournalLine);
+
+      VerifyPartialApplication(GenJournalLine,PaymentDocNo,PartialFactor,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SplitPurchDocGJnlAppRemaining@1500068(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500014 : Code[20];
+      PartialFactor@1500002 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      PostDocJnlLine(GenJournalLine,DocumentType);
+
+      PaymentDocNo := PostPartialPayment(GenJournalLine,PartialFactor);
+      ApplyDocumentToPayment(PaymentDocNo,GenJournalLine);
+
+      PaymentDocNo := PostRemainingPayment(GenJournalLine);
+      ApplyDocumentToPayment(PaymentDocNo,GenJournalLine);
+
+      VerifyRemainingApplication(GenJournalLine,PaymentDocNo,PartialFactor,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SplitPurchDocGenJnlApplyPay@1500017(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500014 : Code[20];
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,DocumentType);
+      PaymentDocNo := PostPayment(GenJournalLine);
+
+      // Exercise
+      ApplyPaymentToDocument(PaymentDocNo,GenJournalLine);
+
+      // Verify
+      ServiceTaxVerify.SplitApplication(GenJournalLine,PaymentDocNo,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SplitDocGenJnlOnlineApplyPmt@1500047(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500000 : Code[20];
+      LastTransactionNo@1500002 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,DocumentType);
+
+      // Exercise
+      PaymentDocNo := PostPaymentWithAppliesTo(GenJournalLine,CalculatePaymentAmount(GenJournalLine));
+
+      // Verify
+      ServiceTaxVerify.SplitApplication(GenJournalLine,PaymentDocNo,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SplitDocGenJnlOnlineApplyToPmt@1500102(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500002 : Code[20];
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      ReverseServiceTaxHelper.CreateSplitDocJnlLine(GenJournalLine,DocumentType);
+
+      // Payment
+      PaymentDocNo := PostPayment(GenJournalLine);
+
+      GenJournalLine.VALIDATE("Applies-to Doc. Type",ReverseServiceTaxHelper.GetApplyingDocType(DocumentType));
+      GenJournalLine.VALIDATE("Applies-to Doc. No.",PaymentDocNo);
+      GenJournalLine.MODIFY;
+
+      // Exercise
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // Verify
+      ServiceTaxVerify.SplitApplication(GenJournalLine,PaymentDocNo,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SplitDocGJnlOnlineApplyPartPmt@1500098(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500000 : Code[20];
+      PartialFactor@1500004 : Decimal;
+      LastTransactionNo@1500002 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,DocumentType);
+
+      // Exercise
+      PartialFactor := GetPartialFactor;
+      PaymentDocNo := PostPaymentWithAppliesTo(
+          GenJournalLine,ROUND(PartialFactor * CalculatePaymentAmount(GenJournalLine)));
+
+      // Verify
+      VerifyPartialApplication(GenJournalLine,PaymentDocNo,PartialFactor,LastTransactionNo)
+    END;
+
+    LOCAL PROCEDURE SplitDocGJnlOnlApplyToPartPmt@1500087(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500002 : Code[20];
+      PartialFactor@1500006 : Decimal;
+      LastTransactionNo@1500000 : Integer;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      ReverseServiceTaxHelper.CreateSplitDocJnlLine(GenJournalLine,DocumentType);
+
+      // Payment
+      PaymentDocNo := PostPartialPayment(GenJournalLine,PartialFactor);
+
+      GenJournalLine.VALIDATE("Applies-to Doc. Type",ReverseServiceTaxHelper.GetApplyingDocType(DocumentType));
+      GenJournalLine.VALIDATE("Applies-to Doc. No.",PaymentDocNo);
+      GenJournalLine.MODIFY;
+
+      // Exercise
+      LibraryERM.PostGeneralJnlLine(GenJournalLine);
+
+      // Verify
+      VerifyPartialApplication(GenJournalLine,PaymentDocNo,PartialFactor,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SplitDocGJnlOnlineAppRemaining@1500049(DocumentType@1500008 : Option);
+    VAR
+      GenJournalLine@1500001 : Record 81;
+      PaymentDocNo@1500000 : Code[20];
+      LastTransactionNo@1500002 : Integer;
+      PartialFactor@1500004 : Decimal;
+    BEGIN
+      LastTransactionNo := Initialize;
+
+      // Setup
+      PostDocJnlLine(GenJournalLine,DocumentType);
+
+      // Exercise
+      PartialFactor := GetPartialFactor;
+      PostPaymentWithAppliesTo(
+        GenJournalLine,ROUND(PartialFactor * CalculatePaymentAmount(GenJournalLine)));
+      PaymentDocNo :=
+        PostPaymentWithAppliesTo(
+          GenJournalLine,-ReverseServiceTaxHelper.GetRemainingAmount(GenJournalLine."Document Type",GenJournalLine."Document No."));
+
+      // Verify
+      VerifyRemainingApplication(GenJournalLine,PaymentDocNo,PartialFactor,LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE SetAppliesToID@1500104(DocumentNo@1500000 : ARRAY [2] OF Code[20];GenJnlLine@1500001 : Record 81);
+    VAR
+      VendLedgeEntry@1500002 : Record 25;
+    BEGIN
+      WITH VendLedgeEntry DO BEGIN
+        SETRANGE("Vendor No.",GenJnlLine."Account No.");
+        SETFILTER("Document No.",'%1|%2',DocumentNo[1],DocumentNo[2]);
+        FINDSET;
+        REPEAT
+          "Applies-to ID" := GenJnlLine."Applies-to ID";
+          CALCFIELDS("Remaining Amount");
+          "Amount to Apply" := "Remaining Amount";
+          MODIFY;
+        UNTIL NEXT = 0;
+      END;
+    END;
+
+    LOCAL PROCEDURE PaySrvTax@1170000003(DocumentType@1500000 : Option;SrvTypeRevChrg@1500002 : Option);
+    VAR
+      PurchaseHeader@1500011 : Record 38;
+      PurchaseLine@1500010 : Record 39;
+      ServiceTaxSetup@1500008 : Record 16472;
+      GenJournalLine@1500001 : Record 81;
+      PostedDocNo@1500012 : Code[20];
+      PaymentDocNo@1500007 : Code[20];
+      PaymentToGovDocNo@1500005 : Code[20];
+      RevChrgBase@1500004 : Decimal;
+    BEGIN
+      Initialize;
+      ReverseServiceTaxHelper.SetupCompanyInfo;
+
+      CreateDocument(PurchaseHeader,PurchaseLine,DocumentType);
+      PurchaseHeader."Service Type (Rev. Chrg.)" := SrvTypeRevChrg;
+      PurchaseHeader.MODIFY;
+      PostedDocNo := ReverseServiceTaxHelper.PostPurchaseDoc(PurchaseHeader);
+
+      ReverseServiceTaxHelper.ConvertDocToJnlLine(PurchaseHeader,PurchaseLine,PostedDocNo,GenJournalLine);
+      PaymentDocNo := PostPayment(GenJournalLine);
+
+      ApplyPaymentToDocument(PaymentDocNo,GenJournalLine);
+
+      // Exercise
+      PaymentToGovDocNo :=
+        ReverseServiceTaxHelper.PayServiceTax(PurchaseLine."Service Tax Registration No.",PurchaseLine."Service Tax Group",TRUE);
+
+      // Verify
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      RevChrgBase := ReverseServiceTaxHelper.RoundAmount(GetRevChrgPercent(GenJournalLine) / 100 * PurchaseLine."Line Amount");
+      ServiceTaxVerify.ServTaxPaymentEntries(
+        RevChrgBase,DocumentType,ServiceTaxSetup,PaymentToGovDocNo,SrvTypeRevChrg);
+    END;
+
+    LOCAL PROCEDURE GetPartialFactor@1500074() : Decimal;
+    BEGIN
+      EXIT(LibraryRandom.RandDec(1,1));
+    END;
+
+    LOCAL PROCEDURE GetRevChrgPercent@1500086(GenJournalLine@1500000 : Record 81) : Integer;
+    VAR
+      STReverseChargeSetup@1500001 : Record 16461;
+    BEGIN
+      IF GenJournalLine.TryGetSrvTaxReverseChargeSetup(STReverseChargeSetup) THEN
+        EXIT(STReverseChargeSetup."Reverse Charge %");
+      EXIT(0);
+    END;
+
+    LOCAL PROCEDURE Initialize@1500100() : Integer;
+    BEGIN
+      LibraryRandom.SetSeed(1);
+
+      IF isInitialized THEN
+        EXIT(ReverseServiceTaxHelper.GetLastTransactionNo);
+
+      LibraryServiceTax.CreateServiceTaxReturnPeriod;
+      ReverseServiceTaxHelper.SetupCompanyInfo;
+      COMMIT;
+
+      isInitialized := TRUE;
+
+      EXIT(ReverseServiceTaxHelper.GetLastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE VerifyReverseByApplication@1500026(GenJnlLine@1500000 : Record 81;CrMemoDocNo@1500010 : Code[20];LastTransactionNo@1500001 : Integer;CreditMemoAmount@1500003 : Decimal);
+    VAR
+      ServiceTaxSetup@1500008 : Record 16472;
+      ServiceTaxEntryDetails@1500009 : Record 16474;
+      Percentage@1500002 : Integer;
+      InvoiceBaseAmount@1500006 : Decimal;
+      CrMemoBaseAmount@1500007 : Decimal;
+      RevChrgAmount@1500005 : ARRAY [2] OF Decimal;
+      PoTAmount@1500004 : ARRAY [2] OF Decimal;
+      TotRemainCredit@1500013 : Decimal;
+    BEGIN
+      ServiceTaxVerify.VendorLedgerEntryOpen(GenJnlLine."Document No.",ABS(GenJnlLine.Amount) > ABS(CreditMemoAmount));
+      ServiceTaxVerify.VendorLedgerEntryOpen(CrMemoDocNo,ABS(GenJnlLine.Amount) < ABS(CreditMemoAmount));
+
+      ServiceTaxSetup.FindOnDate(GenJnlLine."Service Tax Group Code",GenJnlLine."Posting Date");
+      ReverseServiceTaxHelper.CalcSplitAmounts(GenJnlLine,InvoiceBaseAmount,PoTAmount[1],RevChrgAmount[1],Percentage,ServiceTaxSetup);
+      GenJnlLine.Amount := ABS(CreditMemoAmount);
+      ReverseServiceTaxHelper.CalcSplitAmounts(GenJnlLine,CrMemoBaseAmount,PoTAmount[2],RevChrgAmount[2],Percentage,ServiceTaxSetup);
+
+      ServiceTaxVerify.STEntriesVsGLBalInvCrM(LastTransactionNo);
+      ServiceTaxVerify.CountOfServiceTaxEntries(LastTransactionNo,4,6);
+      VerifySTEntriesBalance(LastTransactionNo,PoTAmount[1] - PoTAmount[2] + RevChrgAmount[1] - RevChrgAmount[2]);
+      ServiceTaxVerify.CalcSTEntryDetailsBalances(LastTransactionNo,ServiceTaxEntryDetails);
+      TotRemainCredit := ServiceTaxEntryDetails.FullRemainingSBCCredit + ServiceTaxEntryDetails.KKCessRemainingCredit;
+      ServiceTaxVerify.STEntryDetailsRemainingCredit(LastTransactionNo,(PoTAmount[1] - PoTAmount[2]) - TotRemainCredit);
+      ServiceTaxVerify.STEntryDetailsRemRevChrgCredit(LastTransactionNo,0);
+      ServiceTaxVerify.DocHasClosedRemCredit(CrMemoDocNo);
+    END;
+
+    LOCAL PROCEDURE VerifyUnapplyInvCrMemo@1500119(GenJnlLine@1500000 : Record 81;CancelledAmount@1500007 : Decimal;LastTransactionNo@1500001 : Integer);
+    VAR
+      ServiceTaxSetup@1500008 : Record 16472;
+      InvoiceBaseAmount@1500005 : Decimal;
+      CreditMemoBaseAmount@1500012 : Decimal;
+      RevChrgAmount@1500004 : ARRAY [2] OF Decimal;
+      PoTAmount@1500003 : ARRAY [2] OF Decimal;
+      Percentage@1500002 : Integer;
+      TotSBCandKKcAmount@1500006 : Decimal;
+      CrTotSBCandKKcAmount@1500010 : Decimal;
+    BEGIN
+      ServiceTaxSetup.FindOnDate(GenJnlLine."Service Tax Group Code",GenJnlLine."Posting Date");
+      ReverseServiceTaxHelper.CalcSplitAmounts(GenJnlLine,InvoiceBaseAmount,PoTAmount[1],RevChrgAmount[1],Percentage,ServiceTaxSetup);
+      TotSBCandKKcAmount :=
+        ReverseServiceTaxHelper.CalculatePoTSBCandKKCAmount(InvoiceBaseAmount,(100 - Percentage) / 100,ServiceTaxSetup);
+      GenJnlLine.Amount := CancelledAmount;
+      ReverseServiceTaxHelper.CalcSplitAmounts(
+        GenJnlLine,CreditMemoBaseAmount,PoTAmount[2],RevChrgAmount[2],Percentage,ServiceTaxSetup);
+      CrTotSBCandKKcAmount :=
+        ReverseServiceTaxHelper.CalculatePoTSBCandKKCAmount(CreditMemoBaseAmount,(100 - Percentage) / 100,ServiceTaxSetup);
+
+      ServiceTaxVerify.STPayInterimAccBalance(
+        ServiceTaxSetup,(RevChrgAmount[2] - RevChrgAmount[1]) - (TotSBCandKKcAmount - CrTotSBCandKKcAmount));
+      ServiceTaxVerify.STRecInterimAccBalance(
+        ServiceTaxSetup,RevChrgAmount[1] - RevChrgAmount[2] + (TotSBCandKKcAmount - CrTotSBCandKKcAmount));
+      ServiceTaxVerify.STPayAccBalance(ServiceTaxSetup,0);
+      ServiceTaxVerify.STRecAccBalance(
+        ServiceTaxSetup,(PoTAmount[1] - PoTAmount[2]) - (TotSBCandKKcAmount - CrTotSBCandKKcAmount));
+
+      ServiceTaxVerify.STEntryDetailsRemainingCredit(
+        LastTransactionNo,(PoTAmount[1] - PoTAmount[2]) - (TotSBCandKKcAmount - CrTotSBCandKKcAmount));
+      ServiceTaxVerify.STEntryDetailsRemRevChrgCredit(LastTransactionNo,0);
+    END;
+
+    LOCAL PROCEDURE VerifyPartCanceledPaidAppln@1500071(GenJnlLine@1500000 : Record 81;PaymentDocNo@1500010 : Code[20];CrMemoDocNo@1500006 : Code[20];LastTransactionNo@1500001 : Integer);
+    BEGIN
+      ServiceTaxVerify.VendorLedgerEntryOpen(GenJnlLine."Document No.",FALSE);
+      ServiceTaxVerify.VendorLedgerEntryOpen(PaymentDocNo,FALSE);
+      ServiceTaxVerify.VendorLedgerEntryOpen(CrMemoDocNo,FALSE);
+
+      ServiceTaxVerify.DocHasClosedRemCredit(CrMemoDocNo);
+      ServiceTaxVerify.STEntriesVsGLBalCrMPmt(LastTransactionNo);
+    END;
+
+    LOCAL PROCEDURE VerifySTEntriesBalance@1500099(LastTransactionNo@1500000 : Integer;ExpectedBalance@1500001 : Decimal);
+    VAR
+      ServiceTaxEntry@1500003 : Record 16473;
+      Balance@1500002 : Decimal;
+    BEGIN
+      WITH ServiceTaxEntry DO BEGIN
+        SETFILTER("Transaction No.",'>%1',LastTransactionNo);
+        FINDSET;
+        REPEAT
+          Balance += FullTaxAmount;
+        UNTIL NEXT = 0;
+        Assert.AreEqual(ExpectedBalance,Balance,'Wrong balance of service tax in Service Tax Entries.');
+      END;
+    END;
+
+    LOCAL PROCEDURE VerifyPartialApplication@1500022(GenJournalLine@1500000 : Record 81;PaymentDocNo@1500001 : Code[20];PartialFactor@1500002 : Decimal;LastTransactionNo@1500005 : Integer);
+    VAR
+      ServiceTaxSetup@1500004 : Record 16472;
+      Percentage@1500003 : Integer;
+      BaseAmount@1500009 : Decimal;
+      RevChrgAmount@1500010 : Decimal;
+      PoTAmount@1500006 : Decimal;
+      PoTSBCandKKCAmount@1500007 : Decimal;
+    BEGIN
+      ServiceTaxVerify.VendorLedgerEntryOpen(GenJournalLine."Document No.",TRUE);
+      ServiceTaxVerify.VendorLedgerEntryOpen(PaymentDocNo,FALSE);
+
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      ReverseServiceTaxHelper.CalcSplitAmounts(GenJournalLine,BaseAmount,PoTAmount,RevChrgAmount,Percentage,ServiceTaxSetup);
+      PoTSBCandKKCAmount :=
+        ReverseServiceTaxHelper.CalculatePoTSBCandKKCAmount(BaseAmount,(100 - Percentage) / 100,ServiceTaxSetup);
+      ServiceTaxVerify.SplitServTaxAccountsBalance(
+        ServiceTaxSetup,PoTAmount - PoTSBCandKKCAmount,RevChrgAmount + PoTSBCandKKCAmount,PartialFactor);
+
+      ServiceTaxVerify.CountOfServiceTaxEntries(LastTransactionNo,2,2);
+
+      // Real Service Tax Part - because the Real Service Tax Detail entry is created when posting the invoice for the whole amount
+      // so partial factor is 1.
+      ServiceTaxVerify.STEntryDetailsOnDocNoSplit(GenJournalLine."Document No.",BaseAmount,Percentage,FALSE,ServiceTaxSetup,1);
+      // Rev charge Service Tax Part
+      ServiceTaxVerify.STEntryDetailsOnDocNoSplit(PaymentDocNo,BaseAmount,Percentage,TRUE,ServiceTaxSetup,PartialFactor);
+    END;
+
+    LOCAL PROCEDURE VerifyRemainingApplication@1500069(GenJournalLine@1500000 : Record 81;PaymentDocNo@1500001 : Code[20];PartialFactor@1500002 : Decimal;LastTransactionNo@1500007 : Integer);
+    VAR
+      ServiceTaxSetup@1500004 : Record 16472;
+      Percentage@1500003 : Integer;
+      RevChrgAmount@1500006 : Decimal;
+      PoTAmount@1500005 : Decimal;
+      BaseAmount@1500008 : Decimal;
+      PoTSBCandKKCAmount@1500009 : Decimal;
+    BEGIN
+      ServiceTaxVerify.VendorLedgerEntryOpen(GenJournalLine."Document No.",FALSE);
+      ServiceTaxVerify.VendorLedgerEntryOpen(PaymentDocNo,FALSE);
+
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      ReverseServiceTaxHelper.CalcSplitAmounts(GenJournalLine,BaseAmount,PoTAmount,RevChrgAmount,Percentage,ServiceTaxSetup);
+      PoTSBCandKKCAmount :=
+        ReverseServiceTaxHelper.CalculatePoTSBCandKKCAmount(BaseAmount,(100 - Percentage) / 100,ServiceTaxSetup);
+      ServiceTaxVerify.SplitServTaxAccountsBalance(
+        ServiceTaxSetup,PoTAmount - PoTSBCandKKCAmount,RevChrgAmount + PoTSBCandKKCAmount,1);
+
+      ServiceTaxVerify.CountOfServiceTaxEntries(LastTransactionNo,2,3);
+
+      // Real Service Tax Part - because the Real Service Tax Detail entry is created when posting the invoice for the whole amount
+      // so partial factor is 1.
+      ServiceTaxVerify.STEntryDetailsOnDocNoSplit(GenJournalLine."Document No.",BaseAmount,Percentage,FALSE,ServiceTaxSetup,1);
+      // Rev charge Service Tax Part
+      ServiceTaxVerify.STEntryDetailsOnDocNoSplit(PaymentDocNo,BaseAmount,Percentage,TRUE,ServiceTaxSetup,1 - PartialFactor);
+    END;
+
+    LOCAL PROCEDURE VerifyPostedDocJnlLine@1500003(GenJournalLine@1500007 : Record 81);
+    VAR
+      ServiceTaxSetup@1500002 : Record 16472;
+      AccountNo@1500013 : Code[20];
+      BaseAmount@1500012 : Decimal;
+      RevChrgAmount@1500010 : Decimal;
+      PoTAmount@1500008 : Decimal;
+      Percentage@1500001 : Integer;
+      PoTSBCandKKCAmount@1500004 : Decimal;
+    BEGIN
+      ServiceTaxSetup.FindOnDate(GenJournalLine."Service Tax Group Code",GenJournalLine."Posting Date");
+      ReverseServiceTaxHelper.CalcSplitAmounts(GenJournalLine,BaseAmount,PoTAmount,RevChrgAmount,Percentage,ServiceTaxSetup);
+
+      PoTSBCandKKCAmount := ReverseServiceTaxHelper.CalculatePoTSBCandKKCAmount(BaseAmount,(100 - Percentage) / 100,ServiceTaxSetup);
+
+      AccountNo := ReverseServiceTaxHelper.GetServTaxRecAcc(ServiceTaxSetup);
+      ServiceTaxVerify.GLEntryWithRounding(GenJournalLine."Document No.",AccountNo,PoTAmount - PoTSBCandKKCAmount);
+      ServiceTaxVerify.STEntryDetailsOnDocNoSplit(GenJournalLine."Document No.",BaseAmount,Percentage,FALSE,ServiceTaxSetup,1);
+
+      AccountNo := ReverseServiceTaxHelper.GetServTaxInterimRecAcc(ServiceTaxSetup);
+      ServiceTaxVerify.GLEntryWithRounding(GenJournalLine."Document No.",AccountNo,RevChrgAmount + PoTSBCandKKCAmount);
+      AccountNo := ReverseServiceTaxHelper.GetServTaxInterimPayAcc(ServiceTaxSetup);
+      ServiceTaxVerify.GLEntryWithRounding(GenJournalLine."Document No.",AccountNo,-RevChrgAmount - PoTSBCandKKCAmount);
+
+      ServiceTaxVerify.PoTServTaxEntry(GenJournalLine."Document No.",BaseAmount,Percentage,FALSE,ServiceTaxSetup);
+      ServiceTaxVerify.RevChrgServTaxEntry(GenJournalLine."Document No.",BaseAmount,Percentage,TRUE,ServiceTaxSetup);
+
+      ServiceTaxVerify.GLEntry(GenJournalLine."Document No.",
+        ReverseServiceTaxHelper.GetVendorPostingAccount(GenJournalLine."Account No."),-(BaseAmount + PoTAmount));
+      ServiceTaxVerify.GLEntry(GenJournalLine."Document No.",GenJournalLine."Bal. Account No.",BaseAmount);
+
+      ServiceTaxVerify.GLEntriesCount(ReverseServiceTaxHelper.GetPostingDocType(GenJournalLine."Document Type"),GenJournalLine.
+        "Document No.",10);
+    END;
+
+    LOCAL PROCEDURE VerifyPostedDocument@1500019(PurchaseHeader@1500000 : Record 38;PurchaseLine@1500001 : Record 39;PostedDocNo@1500003 : Code[20]);
+    VAR
+      GenJnlLine@1500002 : Record 81;
+    BEGIN
+      ReverseServiceTaxHelper.ConvertDocToJnlLine(PurchaseHeader,PurchaseLine,PostedDocNo,GenJnlLine);
+      VerifyPostedDocJnlLine(GenJnlLine);
+    END;
+
+    LOCAL PROCEDURE VerifyVendLedgClosedNoRemAmt@1500076(DocumentNo@1500003 : Code[20];AccountNo@1500000 : Code[20]);
+    VAR
+      VendorLedgerEntry@1500002 : Record 25;
+    BEGIN
+      VendorLedgerEntry.SETFILTER("Document No.",DocumentNo);
+      VendorLedgerEntry.SETFILTER("Vendor No.",AccountNo);
+      VendorLedgerEntry.FINDLAST;
+
+      Assert.AreEqual(FALSE,
+        VendorLedgerEntry.Open,
+        STRSUBSTNO(UnexpectedVendorLedgEntryValueErr,VendorLedgerEntry.FIELDNAME(Open)));
+
+      VendorLedgerEntry.CALCFIELDS("Remaining Amount");
+      Assert.AreEqual(0,
+        VendorLedgerEntry."Remaining Amount",
+        STRSUBSTNO(UnexpectedVendorLedgEntryValueErr,VendorLedgerEntry.FIELDNAME("Remaining Amount")));
+    END;
+
+    LOCAL PROCEDURE PostAndApply2Payments@1500063(GenJournalLine@1500000 : Record 81;ServiceTaxSetup@1500003 : Record 16472;PartialFactor@1500001 : Decimal;Percentage@1500004 : Decimal) PaymentDocNo : Code[20];
+    VAR
+      DocumentType@1500002 : Option;
+      RemainingPayment@1500005 : Decimal;
+    BEGIN
+      DocumentType := GenJournalLine."Document Type";
+      PaymentDocNo := ReverseServiceTaxHelper.PostPayment(GenJournalLine."Account No.",
+          PartialFactor * ReverseServiceTaxHelper.CalculatePayment(DocumentType,ABS(GenJournalLine.Amount),ServiceTaxSetup,Percentage),
+          GenJournalLine."Posting Date",ReverseServiceTaxHelper.GetApplyingDocType(DocumentType));
+      ReverseServiceTaxHelper.ApplyAndPostVendorEntry(DocumentType,GenJournalLine."Document No.",
+        ReverseServiceTaxHelper.GetApplyingDocType(DocumentType),PaymentDocNo);
+
+      RemainingPayment := ReverseServiceTaxHelper.CalculatePayment(DocumentType,ABS(GenJournalLine.Amount),ServiceTaxSetup,Percentage);
+      RemainingPayment := RemainingPayment - ReverseServiceTaxHelper.RoundAmount(PartialFactor * RemainingPayment);
+      PaymentDocNo := ReverseServiceTaxHelper.PostPayment(GenJournalLine."Account No.",
+          RemainingPayment,GenJournalLine."Posting Date",ReverseServiceTaxHelper.GetApplyingDocType(DocumentType));
+      ReverseServiceTaxHelper.ApplyAndPostVendorEntry(DocumentType,GenJournalLine."Document No.",
+        ReverseServiceTaxHelper.GetApplyingDocType(DocumentType),PaymentDocNo);
+    END;
+
+    LOCAL PROCEDURE PostSameInvoice@1500021(GenJournalLine@1500000 : Record 81) : Code[20];
+    BEGIN
+      GenJournalLine."Document No." := GenJournalLine."Document No." + '2';
+      GenJournalLine."External Document No." := GenJournalLine."External Document No." + '2';
+      ReverseServiceTaxHelper.RunGenJnlPostLine(GenJournalLine);
+      EXIT(GenJournalLine."Document No.");
+    END;
+
+    [ModalPageHandler]
+    PROCEDURE PayServiceTaxHandler@1500073(VAR PayServiceTax@1500000 : TestPage 16477);
+    BEGIN
+      LibraryServiceTax.SetValuesForPaymentUseCreditAvailable(PayServiceTax);
+    END;
+
+    [MessageHandler]
+    PROCEDURE MessageHandler@1500000(Message@1500000 : Text[1024]);
+    BEGIN
+    END;
+
+    BEGIN
+    END.
+  }
+}
+
